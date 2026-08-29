@@ -1,7 +1,7 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.2.0
-**Status:** S1–S2 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
+**Version:** 1.3.0
+**Status:** S1–S3 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
 stage says otherwise.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
@@ -24,7 +24,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S0 | Repo scaffolding, discovery, this document | ✅ Complete 2026-08-29 |
 | S1 | Reclaim `spark-2`; restore the two-node split (Watch/Forge) | ✅ Complete 2026-08-29 |
 | S2 | `hermes-memory` — the shared memory service, dual-channel | ✅ Complete 2026-08-29 |
-| S3 | Buzz 2.0 — topics, claims, pointer envelopes | ⬜ Not started |
+| S3 | Buzz 2.0 — topics, claims, pointer envelopes | ✅ Complete 2026-08-29 |
 | S4 | Plane split — control on GigE, data on `bond-fabric0` | ⬜ Not started |
 | S5 | Screener before the dispatcher (L1 deploy + L2 build) | ⬜ Not started |
 | S6 | `hermes-dispatch` — stock-weight dispatcher as a Buzz subscriber | ⬜ Not started |
@@ -461,6 +461,60 @@ topics.
 
 **Hard ordering: S2 before S3.** Pointer envelopes need something to point at.
 
+#### S3 — executed 2026-08-29
+
+**`hermes-buzz.py` → 2.0.1** (2.0.0 shipped first; a real bug was found during this stage's own
+verification and fixed same-day, see below). `messages.to_agent` renamed to `messages.topic` in place;
+`task_id`/`memory_ref` columns added (nullable — nothing generates real values until S6's dispatcher
+exists); new `claims` table with the same lease-and-reap shape `hermes-broker.py`'s `jobs` table already
+established, applied to messages instead of jobs. `KNOWN_TOPICS` extended to target §4.4's internal set
+(`dispatch`/`retrieve`/`screen`/`logs`/`code`/`vision`/`media`/`train`) plus `results` — schema-ready, no
+subscribers yet, same ahead-of-the-consumer posture S2 set for `hermes-memory`'s `tasks` table.
+
+**Backward compatibility was the hard constraint, not an afterthought.** Sintra and Amy's hourly
+status-exchange traffic was live and unattended through this whole migration. Rather than update
+`hermes-buzz.sh`, `hermes-buzz-watch.sh`, and `hermes-buzz-lockup-check.sh` in lockstep with the server,
+the API kept both old and new shapes simultaneously: `POST /messages` accepts `to` as an alias for `topic`;
+every response row carries `to_agent` aliased to `topic`'s value; `GET /messages/poll` accepts `agent` as
+an alias for `topic`. All three existing scripts shipped across the migration with **zero code changes** —
+verified by running the real, unmodified `hermes-buzz.sh poll` against the new server, and by manually
+running `hermes-buzz-lockup-check.sh`, which correctly parsed the new schema and correctly flagged a real
+(pre-existing, unrelated) unanswered message from Amy to Sintra — confirming the tool still works right,
+not just that it didn't crash.
+
+**Migration executed against live data — 266 real messages, not a test fixture.** Caught a real near-miss
+of its own during dry-run prep: the first backup attempt used plain `cp` against the live WAL-mode
+database, which silently produced a stale 210-row snapshot (WAL contents not yet checkpointed into the main
+file). Caught only because the row count was checked against the live count before trusting the backup.
+Redone with `sqlite3 ... .backup`, which correctly captured all 266 rows — the safe way to snapshot a
+live SQLite database under concurrent write traffic, now documented in `infra/hermes-buzz/README.md` §4 so
+it isn't rediscovered the hard way twice. The actual migration then ran three times before touching
+production: once against a throwaway copy to find and fix a bug in the migration's column-detection logic
+(an earlier deploy-before-testing mistake — the first "dry run" was accidentally exercising the *old*,
+unmigrated code because the new file had only been written locally, not yet pushed/pulled to the node),
+once more to confirm idempotency (services re-run `init_db()` on every restart), and finally against the
+real database — verified immediately after by direct row count (266, unchanged) and a content spot-check,
+not by the service's own "database ready" log line.
+
+**Real bug found and fixed same day, before this shipped to any real caller beyond the smoke test:**
+`_claim_next()`'s exclusion query checked for an *unacked* claim only, so a message whose claim had already
+been acked (successfully handled) read as claimable again — a second `/claims/next` call on a done message
+returned a fresh claim instead of `{"claim": null}`. Root cause: `reap_expired_claims()` only deletes
+expired *unacked* rows, so an acked row's continued presence needed to itself block reclaiming, which the
+original `AND c.acked_at IS NULL` clause excluded from the check entirely. Fixed to exclude on "any claim
+row exists for this message" — correct given the reap already ran first. Verified with the exact failing
+sequence (publish → claim → ack → claim again) both before (reproduced the bug) and after (confirmed
+`null`) the fix, live on spark, then shipped as 2.0.1. All smoke-test messages and claims were deleted from
+the production database afterward — the real message count is exactly 266 again, unchanged from before this
+stage.
+
+**Everything specified as "keep unchanged" stayed unchanged and was verified, not assumed:** stdlib-only,
+SQLite, LUKS placement (`RequiresMountsFor=/mnt/hermes-data` untouched), Vaultwarden bearer auth, BuzzLog
+mirroring (now keyed on `topic` in the mirrored line instead of `to_agent`, cosmetic only), pull-based
+polling, graceful `BUZZLOG_ROOM`-unset degradation. `hermes-buzz-watch@sintra/@amy.service`,
+`hermes-buzz-lockup-check.timer`, and both check-in timers all confirmed `active`/correctly scheduled after
+the cutover, with zero errors in either gateway's logs across the whole restart window.
+
 ### S4 — Plane split, made deliberate
 
 Bind every control-plane service explicitly to the `10.129.1.x` interface rather than `0.0.0.0`. Reserve
@@ -687,3 +741,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.0.0 | 2026-08-29 | Initial plan: discovery against the live V4 fleet, gap analysis against `firmament-fleet-target-architecture.md`, four ratified deviations, twelve-stage migration, carry-forward audit. |
 | 1.1.0 | 2026-08-29 | S1 executed and closed out live on the fleet: muse/omni moved to spark-2 (46.6 GB weight transfer, fresh start scripts/units, `omni`'s missing `--reasoning off` fixed), `hermes-router.py` → 2.5.0, coder2 benchmark concluded (failed to load, incumbent `coder` confirmed), real headroom verified on both nodes, `bond-fabric0` measured (117 Gbit/s TCP; NCCL sockets ~2 GB/s; NCCL RDMA negotiates but fails mid-transfer). Corrected two stale V4 §9 risks (15, 16) found false during verification. |
 | 1.2.0 | 2026-08-29 | S2 executed and closed out live on the fleet: `hermes-memory.py` 1.0.0 built and deployed on Watch (turns/tasks/agent_state/vec_turns, sqlite-vec semantic recall over the resident `embed` backend), `memory-token` vault item provisioned, recall verified against V4 S11's bar (independent `sqlite3` query, not self-report) across a fresh-session round trip. `hermes-session-cap-guard.sh` deliberately untouched. |
+| 1.3.0 | 2026-08-29 | S3 executed and closed out live on the fleet: `hermes-buzz.py` 2.0.0→2.0.1 (topic-based pub/sub, claim-based handoff, pointer-envelope fields), migrated the live 266-message database in place with zero data loss and zero code changes required in any of the three existing caller scripts. A WAL-unsafe backup mistake and a real claim-reclaim-after-ack bug were both caught during verification and fixed before either reached production traffic. |
