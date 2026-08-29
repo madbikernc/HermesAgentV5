@@ -1,7 +1,7 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.5.0
-**Status:** S1–S5 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
+**Version:** 1.6.0
+**Status:** S1–S6 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
 stage says otherwise.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
@@ -27,7 +27,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S3 | Buzz 2.0 — topics, claims, pointer envelopes | ✅ Complete 2026-08-29 |
 | S4 | Plane split — control on GigE, data on `bond-fabric0` | ✅ Complete 2026-08-29 |
 | S5 | Screener before the dispatcher (L1 deploy + L2 build) | ✅ Complete 2026-08-29 |
-| S6 | `hermes-dispatch` — stock-weight dispatcher as a Buzz subscriber | ⬜ Not started |
+| S6 | `hermes-dispatch` — stock-weight dispatcher as a Buzz subscriber | ✅ Complete 2026-08-29 |
 | S7 | `hermes-presenter` — thin Matrix client, one fleet voice | ⬜ Not started |
 | S8 | Retire Sintra and Amy; internal agents get prompts, not souls | ⬜ Not started |
 | S9 | Node residency lock-in + model registry on Forge | ⬜ Not started |
@@ -635,6 +635,65 @@ watch `results`.
 Extend `hermes-fabrication-guard.sh` to cover `dispatch`. Its current exclusion of `nano` was correct
 reasoning for V4's architecture and is wrong for V5's.
 
+#### S6 — executed 2026-08-29
+
+**`hermes-router.py` doesn't split — it was already just a proxy.** The plan's "the router splits in two"
+describes the target's mental model, not literal V4 code: `hermes-router.py` has never contained a routing
+*decision*, only role-name → backend-URL resolution. The actual routing decision V5 needed to extract was
+never in the router at all — it lives inside Sintra's/Amy's own gateway turn, exactly as V4's S1 discovery
+found. So there was nothing to remove from `hermes-router.py`; the extraction is additive, a new service
+plus one new role, not a refactor of the existing proxy.
+
+**`dispatch` role deployed**: Qwen3.6-35B-A3B, **stock** (never abliterated), on Watch at `:8097` — not the
+target's `:8088`, which stays nano's until nano actually retires at S8. Q4_K_M, not the target's proposed
+Q8: already on disk from an earlier evaluation (found during S1), zero download cost, sufficient to build
+and verify the real pipeline. Upgrading to Q8 is a follow-up, not a blocker.
+
+**`hermes-dispatch.py` built and deployed**: a stdlib Buzz `dispatch`-topic subscriber. All three
+non-negotiables enforced in code, not aspirational:
+1. Stock weights — enforced one layer down, in the `dispatch` role's own model file.
+2. Reads raw, never presented — every text it reasons over is hydrated from `hermes-memory`'s `raw` column
+   via the claimed message's `task_id`, never trusted from inline Buzz payload content.
+3. Holds no state anywhere else — no in-memory record of in-flight work survives a loop iteration, let
+   alone a restart. Confirmed **not by design intent but by an actual crash mid-development** (below):
+   killing this process mid-task cost nothing but a lease-expiry delay, exactly as designed.
+
+Screens its own input (Layer 1 + Layer 2, same verdicts `hermes-router.py` enforces) before ever routing on
+it — target §8.2's reasoning applies with extra force here, since nothing upstream (no presenter yet)
+screens Buzz traffic before this stage.
+
+**Two real bugs found and fixed live during this stage's own end-to-end verification, before either
+reached anything resembling production use:**
+- `hermes-buzz.py`'s `POST /messages` required a non-empty `body` unconditionally — impossible to satisfy
+  for a pure pointer envelope, the entire mechanism target §7.3 and S3's `task_id`/`memory_ref` columns
+  exist to enable. Fixed (2.0.2): `body` required only when the envelope lacks both pointer fields.
+- `KNOWN_AGENTS` (who may publish) never got `dispatch` added — only `KNOWN_TOPICS` had, back in S3.
+  Every outbound publish from the dispatcher failed with `400`, which **crashed the whole daemon**: the
+  main loop had no per-cycle exception handling. Fixed both: `hermes-buzz.py` 2.0.3 adds `dispatch` to
+  `KNOWN_AGENTS`; `hermes-dispatch.py` 1.0.1 wraps the main loop so any single bad HTTP response from any
+  dependency logs and continues rather than taking the process down — the fix non-negotiable #3 was
+  supposed to make free, made real by the crash that exercised it.
+
+**End-to-end verification, live, not simulated:** wrote a raw turn to `hermes-memory`
+(`"Can you review this Python function for bugs?"`), published a pointer envelope to the `dispatch` topic,
+watched `hermes-dispatch` claim it, screen it clean, call the stock model, and correctly route it to
+`code` — confirmed by polling the `code` topic directly and finding a message with **empty body**, only
+`task_id`/`memory_ref` (the pointer invariant, verified in the actual bytes on the wire, not asserted).
+Task state in `hermes-memory` updated to `dispatched`/`topic: "code"`. **Unplanned bonus proof of
+non-negotiable #3:** the first (crashed) run's abandoned claim self-healed on its own once its lease
+expired, was reclaimed by the now-fixed process, and completed correctly with zero manual intervention —
+a real demonstration of "kill it anywhere, a fresh instance resumes correctly," not just a design claim.
+
+**Extended `hermes-fabrication-guard.sh`** (→ 2.1.0): `dispatch` added to the claim pattern and the
+FleetOps notice match, per the plan's explicit instruction. No observable effect yet — nothing claims to
+have used `dispatch` until S7/S8 exist — the check is simply in place before the first real claim needs it.
+
+**Deliberately not done:** no real specialist subscribes to `retrieve`/`screen`/`logs`/`code`/`vision`/
+`media`/`train` yet, so a dispatched pointer sits unclaimed in practice — expected, not a defect, same
+ahead-of-the-consumer posture every prior stage has used. Nothing about Sintra's/Amy's actual live
+conversational path changed; they still make their own routing decisions exactly as before. That
+integration is S7 (presenter) and S8 (cutover), not this stage.
+
 ### S7 — `hermes-presenter`
 
 Thin stdlib Matrix client (`/sync` long-poll + `/rooms/{id}/send` against Continuwuity on 6167), one bot
@@ -828,3 +887,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.3.0 | 2026-08-29 | S3 executed and closed out live on the fleet: `hermes-buzz.py` 2.0.0→2.0.1 (topic-based pub/sub, claim-based handoff, pointer-envelope fields), migrated the live 266-message database in place with zero data loss and zero code changes required in any of the three existing caller scripts. A WAL-unsafe backup mistake and a real claim-reclaim-after-ack bug were both caught during verification and fixed before either reached production traffic. |
 | 1.4.0 | 2026-08-29 | S4 executed and closed out live on the fleet: audited every control-plane bind, rejected rebinding model backends/Continuwuity to a LAN-only address (would have broken same-node loopback callers — traced actual callers first), fixed the real gap instead — narrowed both nodes' `10.129.9.0/30` ufw rule from blanket-allow to SSH-only, after confirming live that the fabric interface could reach spark's `nano` backend before the fix. Documented in `infra/network-planes.md`. |
 | 1.5.0 | 2026-08-29 | S5 executed and closed out live on the fleet: corrected the Layer 1 discovery (already live since S1's router restarts, not merely wired) and deliberately stopped chasing a false-positive on Amy's soon-to-retire status-exchange automation rather than protect it further. Built and deployed Layer 2 (`hermes-guard.py`, Prompt Guard 2, stock, CPU-only via `transformers`), wired into `hermes-router.py` 2.6.0 scoped to the newest message only, verified live against both a semantic bypass attempt and a benign passthrough, verdicts confirmed logged to `hermes-memory` independent of the router's own log. |
+| 1.6.0 | 2026-08-29 | S6 executed and closed out live on the fleet: `hermes-dispatch.py` built (stock `dispatch` role added to the router, all three non-negotiables enforced in code), verified end to end with a real pointer envelope routed correctly to `code` and confirmed as pure pointer bytes on the wire. Two real bugs (Buzz rejecting empty-body pointer envelopes; `dispatch` missing from Buzz's sender allowlist, which crashed the whole daemon) found and fixed live, the second also exposing and fixing a missing per-cycle exception handler — which then self-healed a crashed run's abandoned claim with zero intervention, an unplanned live proof of non-negotiable #3. |
