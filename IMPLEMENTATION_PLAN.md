@@ -1,7 +1,7 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.8.0
-**Status:** S1–S8 complete, live on the fleet. S8 was the point of no return — Sintra and Amy no longer
+**Version:** 1.9.0
+**Status:** S1–S9 complete, live on the fleet. S8 was the point of no return — Sintra and Amy no longer
 have live gateways. `HermesAgentV4` stays live and authoritative for everything else until a later stage
 says otherwise.
 
@@ -31,7 +31,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S6 | `hermes-dispatch` — stock-weight dispatcher as a Buzz subscriber | ✅ Complete 2026-08-29 |
 | S7 | `hermes-presenter` — thin Matrix client, one fleet voice | ✅ Complete 2026-08-29 |
 | S8 | Retire Sintra and Amy; internal agents get prompts, not souls | ✅ Complete 2026-08-29 |
-| S9 | Node residency lock-in + model registry on Forge | ⬜ Not started |
+| S9 | Node residency lock-in + model registry on Forge | ✅ Complete 2026-08-29 |
 | S10 | Kiln isolation + media agent ownership | ⬜ Not started |
 | S11 | Per-role eval sets, then scoped abliteration | ⬜ Not started |
 | S12 | Deferred: merged mode, dispatcher failover | ⬜ Not started |
@@ -861,6 +861,66 @@ them, not a new system. Note `spark-2`'s NAS2 mount is still missing (V4 §9 ris
 Also here: pin every community checkpoint to a **revision hash, never a floating branch**, and record
 checksums (target §12.4). `hermes-model-archive.py` already byte-verifies; the registry makes it auditable.
 
+#### S9 — executed 2026-08-29
+
+**Model registry built**: `hermes-memory.py` 1.2.0 adds `model_registry` (`GET`/`POST /models`), keyed on
+`(node, path)` — one row per physical file, multiple rows share a `role` for multi-file backends (omni's
+GGUF + mmproj). Populated with all 8 currently-active roles across both nodes (10 rows), each with a
+byte-verified `sha256` — 7 pulled from NAS2 manifests `hermes-model-archive.py` had already produced
+(real archives dating to 2026-08-24, contradicting that tool's own "designed, not yet deployed" docstring —
+another stale-doc correction, same pattern S1 found twice), the rest (`omni`, never archived at all until
+this stage, and `guard`) computed directly.
+
+**Revision pinning, with an honest caveat.** Queried the HuggingFace API for all 8 unique `hf_id`s' current
+default-branch commit hash and recorded it as each entry's `revision`. This is a **forward-looking pin, not
+a retroactive guarantee** — none of these models were pinned to a specific revision at original download
+time (target §12.4's own risk), so there is no way to confirm today's HEAD commit matches what was
+actually downloaded weeks ago without re-fetching and diffing. What this audit does establish: the exact
+`sha256` of the file actually running right now, on record, and a real commit reference to pin *future*
+re-downloads against, closing the gap going forward.
+
+**`hermes-forge-residency.py` built** — the residency controller for Forge. Watch stays static (no
+controller, per the plan's own framing — nano/super/coder/dispatch/guard/embed are fixed). Reads the
+registry for "what's current," reports resident vs. drained against a configured RAM budget, and can
+drain/restore Forge's swappable services (`muse`/`omni`) for a future fine-tuning or abliteration run.
+Deliberately a CLI tool a human runs, not a daemon — V4 S17 already established that spark-2 root-level
+work is human-attended, and there's no real fine-tuning pipeline yet to automate a trigger for.
+
+**Real bug found on the very first `status` run:** the initial implementation keyed the registry lookup by
+role in a plain dict comprehension, which silently keeps only the last row seen — `omni`'s two rows (GGUF +
+mmproj) collapsed to just the mmproj's 1.6GB instead of the correct ~25.5GB. Fixed to group and sum per
+role; re-verified correct.
+
+**`hermes-model-archive.py` actually deployed for the first time on spark-2** — it had only ever run on
+spark. Real gap closed: `omni` (24GB GGUF + mmproj) had never been archived anywhere. Config written,
+verified against the live HuggingFace repo page before trusting it (caught and corrected one wrong guess:
+`...Nano-Omni-30B-A3B-GGUF` doesn't exist; the real repo is `...Nano-Omni-30B-A3B-Reasoning-GGUF`), archive
+run kicked off. `muse` correctly skipped (already archived, byte-identical, from spark's own leftover copy
+of the same file — S1 never deleted the pre-migration original). A weekly systemd timer for this tool now
+runs on both nodes — the service and timer files already existed and were already correctly designed
+(`After=...automount`, `--verbose`, Monday 09:00), just never installed or enabled; this stage's only real
+gap was that it had never actually been scheduled.
+
+**A process mistake, corrected in the open:** while adding that timer, `hermes-model-archive.service`/
+`.timer` were overwritten via `Write` without reading them first — lost the NAS2-automount dependency, the
+`--verbose` flag, and the schedule, replacing correct pre-existing design with guessed values. Caught via
+`git diff` showing unexpected deletions in what should have been a pure addition, reverted to the exact
+original content in a follow-up commit, then made the intended (much smaller) change — updating the
+README — correctly with `Edit` against the real file. Documented here rather than folded away because
+`../HermesAgentV4/CLAUDE.md`'s own discipline (real mistakes get a changelog entry, not silence) applies to
+this migration's own work as much as to the codebase it's changing.
+
+**S1's own risk-15 correction reconfirmed, not re-litigated:** spark-2's NAS2 mount, already found working
+during S1, is what made this stage's spark-2 archive run possible at all — this stage's own archive README
+still had the stale "no NAS2 mount yet" claim from its 2026-08-24 origin, now corrected there too.
+
+**Deliberately not done:** no exhaustive catalog of every retired/candidate model file on disk (the failed
+`coder2` candidate, the unused `darkc0de` muse alternative, the retired 120B Super shards, etc. — real disk
+content, ~18 files total, most already archived under spark's own earlier config) — the registry's stated
+purpose is tracking what's *current* per role, which this stage delivers in full; a complete historical
+catalog is a reasonable follow-up, not manufactured now. `guard`'s tiny model file (283MB) also isn't
+archived to NAS2 yet — noted, not chased, given its low cost to just re-download if ever needed.
+
 ### S10 — Kiln isolation and media ownership
 
 Move HomeD13 to its own VLAN, reachable only from Forge, with no outbound internet except deliberate model
@@ -1019,3 +1079,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.6.0 | 2026-08-29 | S6 executed and closed out live on the fleet: `hermes-dispatch.py` built (stock `dispatch` role added to the router, all three non-negotiables enforced in code), verified end to end with a real pointer envelope routed correctly to `code` and confirmed as pure pointer bytes on the wire. Two real bugs (Buzz rejecting empty-body pointer envelopes; `dispatch` missing from Buzz's sender allowlist, which crashed the whole daemon) found and fixed live, the second also exposing and fixing a missing per-cycle exception handler — which then self-healed a crashed run's abandoned claim with zero intervention, an unplanned live proof of non-negotiable #3. |
 | 1.7.0 | 2026-08-29 | S7 executed and closed out live on the fleet: `hermes-presenter.py` built and deployed (`@hermes-presenter:spark` provisioned via Continuwuity's own documented recipe), passthrough-only per operator direction. A join-endpoint verb bug (PUT vs POST) was fixed immediately. A misleading hour-long investigation into an apparent Matrix connectivity failure — every reproduction of the Matrix call succeeded — traced to the real bug two layers away: `hermes-memory.py`'s `turns.id` reused ids after delete, collided with an orphaned `vec_turns` row, and the uncaught exception killed the request with zero response, indistinguishable from the caller's side from a dead connection. Fixed (`AUTOINCREMENT` migration + a general uncaught-exception safety net on every route) and verified: a real Matrix message flowed presenter → Buzz → `hermes-dispatch` (unmodified since S6, picked it up on its own) → routed to `code`, and a manually-completed task delivered its exact styled reply back into the room within one poll cycle. |
 | 1.8.0 | 2026-08-29 | S8 executed live on the fleet, with explicit operator confirmation given its irreversibility. 19 persona-owning/persona-automation units stopped and disabled across both nodes (not just the two gateways — every dependent watcher, guard, and timer). Matrix accounts left intact but dormant (not deactivated — operator decision, since deactivation is generally permanent and disconnecting already achieves retirement in practice). Found and fixed a real companion bug: `hermes-buzz-lockup-check.sh` would have false-alarmed forever on the now-intentionally-stopped watchers. `llama-nano.service` and `agents/*/PROMPT.md` creation both explicitly deferred to when they have a real purpose (S9, and whenever a real specialist agent exists, respectively) rather than manufactured now. All shared/fleet-wide services confirmed healthy throughout. |
+| 1.9.0 | 2026-08-29 | S9 executed and closed out live on the fleet: model registry built (`hermes-memory.py` 1.2.0's `model_registry`, 10 rows across all 8 active roles, byte-verified `sha256`, revision-pinned against HuggingFace's current HEAD with an honest forward-only caveat), `hermes-forge-residency.py` built and a real bug in it (role-keyed dict silently dropping multi-file rows) fixed on first use, `hermes-model-archive.py` actually deployed to spark-2 for the first time (closing a real gap — `omni` had never been archived anywhere) with a weekly timer now enabled on both nodes. Also: a real process mistake (overwriting pre-existing, correctly-designed service/timer files without reading them first) caught via `git diff` and reverted in the open rather than folded away. |
