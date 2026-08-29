@@ -1,9 +1,9 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.9.0
-**Status:** S1–S9 complete, live on the fleet. S8 was the point of no return — Sintra and Amy no longer
-have live gateways. `HermesAgentV4` stays live and authoritative for everything else until a later stage
-says otherwise.
+**Version:** 1.10.0
+**Status:** S1–S10 complete (S10's network isolation half is an operator checklist, not yet executed). S8
+was the point of no return — Sintra and Amy no longer have live gateways. `HermesAgentV4` stays live and
+authoritative for everything else until a later stage says otherwise.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** described in [`firmament-fleet-target-architecture.md`](firmament-fleet-target-architecture.md)
@@ -32,7 +32,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S7 | `hermes-presenter` — thin Matrix client, one fleet voice | ✅ Complete 2026-08-29 |
 | S8 | Retire Sintra and Amy; internal agents get prompts, not souls | ✅ Complete 2026-08-29 |
 | S9 | Node residency lock-in + model registry on Forge | ✅ Complete 2026-08-29 |
-| S10 | Kiln isolation + media agent ownership | ⬜ Not started |
+| S10 | Kiln isolation + media agent ownership | 🟡 Software complete; network isolation is an operator checklist (2026-08-29) |
 | S11 | Per-role eval sets, then scoped abliteration | ⬜ Not started |
 | S12 | Deferred: merged mode, dispatcher failover | ⬜ Not started |
 
@@ -937,6 +937,95 @@ inventing a second one.
 
 Close V4 §9 risk 12 here: `--engine flux2` has still never run through the real broker/render-worker path.
 
+#### S10 — executed 2026-08-29
+
+**Scope split, deliberately, before touching anything:** this stage has a software half (safe to build and
+verify directly) and a network half (pfSense VLAN/firewall reconfiguration) that this fleet has an
+existing, explicit, deliberate policy against automating. `hermes-pfsense.py`'s own docstring: **"this gets
+no gated actuation path either, even though `hermes-confirm-gate.sh` already exists: pfSense is the
+fleet's own network boundary, and a bad rule/alias change or a reboot here can cut off remote access to
+every other node."** That's not a gap this stage should work around — it's a decision already made, for
+exactly this kind of change. The software half was built and verified live end to end. The network half is
+a checklist below, for the operator to execute.
+
+**`hermes-media.py` built** — the media agent, on Forge per target §9.2. Bridges Buzz's `media` topic to
+the execution plane that already existed and already worked (`hermes-broker.py` + `hermes-render-worker.py`
+on HomeD13) rather than inventing a second job model, per this stage's own explicit instruction. Screens
+the prompt text (both layers) before ever submitting a broker job. Async contract (target §9.4) enforced in
+code: the Buzz claim is acked the instant a broker job is submitted, never held open across the render.
+
+**Image screening built into `hermes-render-worker.py`** (→ 1.4.0) — real magic-byte signature checks
+(PNG/JPEG/WEBP, MP4-`ftyp`/WebM-EBML) plus a size bound, placed immediately after generation and before the
+artifact is ever read into `report()` and uploaded to the broker. This is the earliest point in the whole
+pipeline it can happen — on HomeD13 itself, before the broker or Matrix ever see the file, which is exactly
+what target §9.3's "no exception for rendered images" requires. Verified against a real PNG (passes) and a
+disguised executable header (correctly rejected) before ever touching a live render.
+
+**Verified end to end, live, with two real renders, not simulated:**
+1. A pointer envelope published to the `media` topic → `hermes-media` claimed it, screened the prompt,
+   submitted a broker job, acked the claim immediately (confirmed in its own log — the ack happened before
+   the render even started) → a real image rendered on HomeD13 (~14s, default engine) → passed artifact
+   screening → delivered to FleetOps → `hermes-media` polled to completion → wrote an honest plain-text
+   result ("Image generated and delivered to FleetOps") to `hermes-memory` and published to Buzz's
+   `results` topic as a pure pointer (empty body, confirmed on the wire).
+2. **Closed V4 §9 risk 12 with real evidence**, not by assertion: submitted a broker job with
+   `"engine": "flux2"` directly. Completed in ~89s — matches S1's own measured ~78s FLUX.2 figure — passed
+   screening, delivered. `--engine flux2` has now actually run through the real broker/render-worker path.
+
+**A real, currently-live security exposure found, not fixed by me, deliberately.** `ss`/`ufw status` on
+HomeD13 show ComfyUI's port 8188 open to the **entire** `10.129.1.0/24` LAN, not scoped to Forge —
+target §9.3's named risk, confirmed live. Under the pipeline this stage actually built, nothing needs that
+breadth: `hermes-media.py` never calls ComfyUI directly (it goes through the broker, per this stage's own
+design instruction), and `hermes-render-worker.py` only ever calls it via `127.0.0.1`, locally. But this
+tool has no visibility into whether the operator relies on direct LAN access to ComfyUI's own web UI for
+manual workflow testing — narrowing it wrong would be a real, avoidable inconvenience, and the actual fix
+belongs in the same pfSense/VLAN conversation below regardless. Flagged as checklist item 1, not
+silently narrowed.
+
+**Deliberately not done:** the media agent doesn't loop with the co-resident `omni` evaluator yet
+(target §9.2's "generate → evaluate → regenerate" — no consumer for that loop exists yet, and building
+speculative evaluator-loop logic with nothing driving it would be exactly the kind of unnecessary machinery
+this migration has avoided at every other stage). No resync sweep for a media-agent restart mid-poll (noted
+in `infra/hermes-media/README.md`, same "no urgency yet" reasoning `hermes-forge-residency.py`'s drain/
+restore already used).
+
+##### Operator checklist — HomeD13 network isolation (not automated, by this fleet's own existing policy)
+
+**1. Scope down ComfyUI's LAN exposure.** Currently `10.129.1.0/24` → port 8188; the pipeline actually
+built in this stage only needs Forge (`10.129.1.17`) if anything beyond localhost at all — confirm whether
+you use ComfyUI's web UI directly from your own machine before deciding the right scope. This alone (a
+host-level `ufw` change on HomeD13, not a pfSense change) closes most of the practical exposure and can
+happen independently of the steps below.
+
+**2. Create the isolated VLAN in pfSense.** New VLAN, HomeD13's physical port moved onto it. Decide:
+does the operator's own workstation need a path to it (for ComfyUI's web UI, per item 1), or does all
+access route through Forge from here on.
+
+**3. Firewall rules on the new VLAN interface:** allow only what's actually used today — SSH (22/tcp) and,
+if item 1's answer keeps it, ComfyUI (8188/tcp) — sourced from Forge's IP and/or the operator's, never the
+old broad LAN rule. Default-deny everything else inbound.
+
+**4. Outbound internet: default-deny, with a deliberate manual-toggle process for model pulls.** "No
+outbound internet except deliberate model pulls" (target §9.3) is inherently a human-timed action, not a
+scriptable allowlist (HuggingFace's CDN doesn't publish a stable IP range) — the realistic version of this
+control is a firewall rule the operator flips on right before a `hermes-model-scan.py`-flagged pull and
+back off after, not an automated exception list.
+
+**5. Tailscale — a real decision, not an oversight.** HomeD13 currently has its own Tailscale interface
+(`100.69.3.100`) for remote access, independent of the LAN. Decide deliberately whether it stays (Tailscale's
+own control-plane traffic needs outbound internet, which item 4 otherwise denies) or whether remote admin
+access to HomeD13 routes through Forge instead once the VLAN is up. Either is defensible; not deciding
+explicitly is the failure mode.
+
+**6. SWE-bench Docker** moves behind the same isolation boundary automatically — it's on the same box, no
+separate network change needed once the VLAN itself is right.
+
+**7. Verify after, not just before:** confirm the broker on spark can still receive `hermes-render-worker.py`'s
+outbound result reports (it's pull-based/outbound-only from HomeD13's side, so this should be unaffected by
+an inbound-focused VLAN rule set, but confirm rather than assume), confirm SSH access still works from
+wherever you decided in step 2/5, and re-run this stage's own verification (§2 above, or
+`infra/hermes-media/README.md`'s) end to end once the network change is live.
+
 ### S11 — Eval sets, then scoped abliteration
 
 Build per-role eval sets of 50–100 real tasks with known-good outputs (target §12.2) **before promoting any
@@ -1080,3 +1169,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.7.0 | 2026-08-29 | S7 executed and closed out live on the fleet: `hermes-presenter.py` built and deployed (`@hermes-presenter:spark` provisioned via Continuwuity's own documented recipe), passthrough-only per operator direction. A join-endpoint verb bug (PUT vs POST) was fixed immediately. A misleading hour-long investigation into an apparent Matrix connectivity failure — every reproduction of the Matrix call succeeded — traced to the real bug two layers away: `hermes-memory.py`'s `turns.id` reused ids after delete, collided with an orphaned `vec_turns` row, and the uncaught exception killed the request with zero response, indistinguishable from the caller's side from a dead connection. Fixed (`AUTOINCREMENT` migration + a general uncaught-exception safety net on every route) and verified: a real Matrix message flowed presenter → Buzz → `hermes-dispatch` (unmodified since S6, picked it up on its own) → routed to `code`, and a manually-completed task delivered its exact styled reply back into the room within one poll cycle. |
 | 1.8.0 | 2026-08-29 | S8 executed live on the fleet, with explicit operator confirmation given its irreversibility. 19 persona-owning/persona-automation units stopped and disabled across both nodes (not just the two gateways — every dependent watcher, guard, and timer). Matrix accounts left intact but dormant (not deactivated — operator decision, since deactivation is generally permanent and disconnecting already achieves retirement in practice). Found and fixed a real companion bug: `hermes-buzz-lockup-check.sh` would have false-alarmed forever on the now-intentionally-stopped watchers. `llama-nano.service` and `agents/*/PROMPT.md` creation both explicitly deferred to when they have a real purpose (S9, and whenever a real specialist agent exists, respectively) rather than manufactured now. All shared/fleet-wide services confirmed healthy throughout. |
 | 1.9.0 | 2026-08-29 | S9 executed and closed out live on the fleet: model registry built (`hermes-memory.py` 1.2.0's `model_registry`, 10 rows across all 8 active roles, byte-verified `sha256`, revision-pinned against HuggingFace's current HEAD with an honest forward-only caveat), `hermes-forge-residency.py` built and a real bug in it (role-keyed dict silently dropping multi-file rows) fixed on first use, `hermes-model-archive.py` actually deployed to spark-2 for the first time (closing a real gap — `omni` had never been archived anywhere) with a weekly timer now enabled on both nodes. Also: a real process mistake (overwriting pre-existing, correctly-designed service/timer files without reading them first) caught via `git diff` and reverted in the open rather than folded away. |
+| 1.10.0 | 2026-08-29 | S10's software half executed and verified live with two real renders (default engine, ~14s; `--engine flux2` explicitly, ~89s — closing V4 §9 risk 12 with real evidence, not assertion): `hermes-media.py` (the media agent, bridging Buzz's `media` topic to the existing broker/render-worker pipeline) and image screening inside `hermes-render-worker.py` (real magic-byte checks before an artifact is ever uploaded or delivered). The network-isolation half was deliberately not automated — `hermes-pfsense.py`'s own pre-existing docstring already decided pfSense gets no scripted actuation path, for exactly this class of change — and is instead a 7-item operator checklist, including a real currently-live exposure found (ComfyUI's port 8188 open to the whole LAN, not just Forge) and flagged rather than silently narrowed. |
