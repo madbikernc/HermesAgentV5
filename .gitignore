@@ -1,0 +1,9 @@
+# Local-only credential/config files — never committed. Only the *.template
+# versions in infra/ are tracked.
+infra/**/.env
+infra/**/certs/
+infra/continuwuity/continuwuity.toml
+
+# Byte-cache from running/syntax-checking the Python tools on a node.
+__pycache__/
+*.pyc
