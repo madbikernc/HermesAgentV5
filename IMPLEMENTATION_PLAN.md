@@ -1,7 +1,7 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.1.0
-**Status:** S1 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
+**Version:** 1.2.0
+**Status:** S1–S2 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
 stage says otherwise.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
@@ -23,7 +23,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 |---|---|---|
 | S0 | Repo scaffolding, discovery, this document | ✅ Complete 2026-08-29 |
 | S1 | Reclaim `spark-2`; restore the two-node split (Watch/Forge) | ✅ Complete 2026-08-29 |
-| S2 | `hermes-memory` — the shared memory service, dual-channel | ⬜ Not started |
+| S2 | `hermes-memory` — the shared memory service, dual-channel | ✅ Complete 2026-08-29 |
 | S3 | Buzz 2.0 — topics, claims, pointer envelopes | ⬜ Not started |
 | S4 | Plane split — control on GigE, data on `bond-fabric0` | ⬜ Not started |
 | S5 | Screener before the dispatcher (L1 deploy + L2 build) | ⬜ Not started |
@@ -401,6 +401,53 @@ new session with zero shared context, confirmed by direct `sqlite3` query agains
 agent's self-report. `nano` fabricated exactly this claim twice. Inherited rule 6 (`LESSONS_LEARNED.md` §6)
 already covers it; it is restated here because this is the stage where it will be tempting to skip.
 
+#### S2 — executed 2026-08-29
+
+**`hermes-memory.py` 1.0.0**, built in `hermes-broker.py`'s shape (stdlib `http.server` + `sqlite3`, one
+file, one database) plus `sqlite-vec` loaded as an extension for the one thing stdlib can't do. Four tables:
+`turns` (dual-channel raw/presented, target §7.4), `tasks` (pointer-not-payload handoff records, target
+§7.3 — schema only for now; nothing generates real dispatcher task IDs until S3/S6 exist), `agent_state`
+(key/value, mirrors `hermes_rag_common.py`'s `get_state`/`set_state`), `vec_turns` (sqlite-vec over
+`turns.raw`, same `vec0` pattern as the RAG store's `vec_chunks`). Embeddings call the resident `embed`
+backend directly at `127.0.0.1:8092`, same as `hermes_rag_common.py` — not routed through
+`hermes-router.py`, deliberately: this is infrastructure calling a fixed local capability, not a persona's
+conversational turn.
+
+**Runs under `/opt/hermes/venvs/rag/bin/python3`**, not the bare system interpreter — `sqlite_vec` isn't
+importable from `/usr/bin/python3` directly even though that venv's own `bin/python3` is a symlink to the
+same binary; invoking via the venv path is what makes Python discover its `pyvenv.cfg`. Confirmed during
+S1 that this interpreter (and the venv generally) exists on **both** nodes.
+
+**Deployed on Watch (spark) only**, per target §7.1. `MEMORY_BIND` set explicitly to spark's LAN IP
+(`10.129.1.15`) in the unit rather than the code's `0.0.0.0` default — same plane-discipline precedent
+`hermes-broker.service` already set, ahead of S4 making it fleet-wide policy. Directory
+`/mnt/hermes-data/memory/` created root→pmoney (same LUKS-mount-is-root-owned gotcha `hermes-broker`'s own
+README documents), ufw opened LAN-wide on 8102 (same posture as the broker's own rule), unit installed and
+enabled.
+
+**Vault item created**, following `hermes-broker`'s own recreate-checklist recipe exactly: `memory-token`
+in the `Fleet-Service` collection, generated on-node inside an unlocked `bw` session via `openssl rand`,
+never transiting a file or chat session. Only spark holds it today — spark-2 and HomeD13 join the
+collection once S3/S6 give them a reason to call this service.
+
+**Verification — run and passed, all three legs independently:**
+1. Wrote a turn with a specific fact (`"the verification phrase is umbrella-quartz-19"`) via one curl
+   invocation.
+2. A **separate process**, zero shared context, recalled it via `/turns/search` semantic search alone
+   (cosine distance 0.50, top result) — no ID or session state carried over.
+3. **Bypassed the service entirely** — `sqlite3 /mnt/hermes-data/memory/memory.db "SELECT ... WHERE raw
+   LIKE '%umbrella-quartz%'"` — confirmed the same row directly from disk. This is the leg V4 S11's `nano`
+   incident makes non-negotiable: not "the service says it recalled," an independent read of the file.
+
+All three agreed. `/tasks` (upsert + get) and `/state` (set + get) smoke-tested separately and both work;
+unauthenticated requests correctly get `401`.
+
+**Not done, deliberately out of scope for S2:** `hermes-session-cap-guard.sh` is untouched and still runs
+— retiring its wipe-and-summarise behavior is explicitly a later step, gated on recall being verified in
+real use, not just this synthetic test. `vec_turns` isn't queryable from the bare `sqlite3` CLI (needs the
+extension loaded, which the CLI doesn't do automatically) — irrelevant to the verification bar, which
+checks the underlying `turns` row, not the vector index, but worth knowing if debugging directly on the box.
+
 ### S3 — Buzz 2.0
 
 `hermes-buzz.py` → 2.0.0. Replace `to: sintra|amy` with `topic: <name>`; add a `claims` table (claim, ack,
@@ -639,3 +686,4 @@ reference chain across two retired repos settles it in favour of forking.
 |---|---|---|
 | 1.0.0 | 2026-08-29 | Initial plan: discovery against the live V4 fleet, gap analysis against `firmament-fleet-target-architecture.md`, four ratified deviations, twelve-stage migration, carry-forward audit. |
 | 1.1.0 | 2026-08-29 | S1 executed and closed out live on the fleet: muse/omni moved to spark-2 (46.6 GB weight transfer, fresh start scripts/units, `omni`'s missing `--reasoning off` fixed), `hermes-router.py` → 2.5.0, coder2 benchmark concluded (failed to load, incumbent `coder` confirmed), real headroom verified on both nodes, `bond-fabric0` measured (117 Gbit/s TCP; NCCL sockets ~2 GB/s; NCCL RDMA negotiates but fails mid-transfer). Corrected two stale V4 §9 risks (15, 16) found false during verification. |
+| 1.2.0 | 2026-08-29 | S2 executed and closed out live on the fleet: `hermes-memory.py` 1.0.0 built and deployed on Watch (turns/tasks/agent_state/vec_turns, sqlite-vec semantic recall over the resident `embed` backend), `memory-token` vault item provisioned, recall verified against V4 S11's bar (independent `sqlite3` query, not self-report) across a fresh-session round trip. `hermes-session-cap-guard.sh` deliberately untouched. |
