@@ -1,7 +1,8 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.11.0
-**Status:** S1–S11 complete (S10's network isolation half is an operator checklist, not yet executed). S8
+**Version:** 1.12.0
+**Status:** S1–S12 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
+merged mode stays deliberately deferred, per S1's own numbers). S8
 was the point of no return — Sintra and Amy no longer have live gateways. `HermesAgentV4` stays live and
 authoritative for everything else until a later stage says otherwise.
 
@@ -34,7 +35,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S9 | Node residency lock-in + model registry on Forge | ✅ Complete 2026-08-29 |
 | S10 | Kiln isolation + media agent ownership | 🟡 Software complete; network isolation is an operator checklist (2026-08-29) |
 | S11 | Per-role eval sets, then scoped abliteration | ✅ Done (2026-08-29) |
-| S12 | Deferred: merged mode, dispatcher failover | ⬜ Not started |
+| S12 | Deferred: merged mode, dispatcher failover | ✅ Done (2026-08-29) — merged mode stays deferred (S1's own numbers); failover ladder built and live-verified |
 
 ---
 
@@ -1125,6 +1126,74 @@ Merged mode as a documented, scriptable procedure — **only if S1's `nccl-tests
 Dispatcher failover up target §11.2's escalation ladder: `systemd` auto-restart, then idle standby on Forge,
 then any-node respawn (which S6's third non-negotiable already buys).
 
+#### S12 — executed 2026-08-29
+
+**Merged mode stays deferred — S1's own numbers already answered the question.** NCCL over `bond-fabric0`
+plateaus at ~2.0 GB/s in socket mode, and RDMA negotiates the full topology but fails during real data
+movement (`IBV_WC_RETRY_EXC_ERR`) — S1's exact words were "treat every merged-mode plan as socket-bound until
+someone puts in the RoCE lossless-fabric work; that's new scope, not part of S1." Nothing in this stage
+changes that: no RoCE/PFC/ECN work was done, so the gate S1 set has not been cleared. Writing a "documented,
+scriptable procedure" for a mode that would run at a fabric speed nobody has decided is acceptable would be
+building against a number known to be a placeholder — left undone, on purpose, not overlooked.
+
+**Dispatcher failover, all three rungs of target §11.2, live-verified, not just built:**
+
+**Rung 1 (`systemd` auto-restart) already existed** — `hermes-dispatch.service`'s `Restart=always`/
+`RestartSec=10`/`StartLimitIntervalSec=0`, unchanged since S6. Confirmed still in place; no new work.
+
+**Rung 2 (idle standby on Forge, alerting on heartbeat loss).** `hermes-dispatch.py` 1.1.0 now writes a
+throttled heartbeat (`agent_state` key `dispatch`/`heartbeat`, every `HEARTBEAT_INTERVAL_SECONDS`, default
+30s) to `hermes-memory`. New `hermes-dispatch-standby-check.sh`, deployed on Forge via a 2-minute systemd
+timer, polls it and alerts FleetOps on staleness — real bug caught on the very first live run: its
+`MATRIX_URL` default was copied from `hermes-buzz-lockup-check.sh`/`hermes-fabrication-guard.sh`, both of
+which always run co-located with Continuwuity on Watch, so their loopback default silently pointed at
+nothing once this script ran on Forge instead. Fixed (1.0.1) to default to Watch's LAN IP — Continuwuity
+already binds `0.0.0.0:6167` and ufw already allows the whole `/24` through, so no firewall change was
+needed for that part.
+
+**A real architectural constraint surfaced while wiring this up:** `hermes-router`'s own `:8080` is
+deliberately loopback-only, and unlike every other service in this fleet, *it has no bearer-auth of its
+own* — the bind address is its entire security boundary (confirmed by reading `do_POST`: no
+`Authorization` check on the inbound path at all). Opening it cross-node for a standby to reach would have
+been a real security regression, not a convenience fix, and would have repeated the exact mistake this
+fleet has avoided everywhere else a bind-address boundary is deliberate (S4's own reasoning, reused here
+rather than re-derived). Resolved the same way S11 just resolved an unrelated router problem: `hermes-
+dispatch.py` 1.1.0 splits the routing-model call into its own `DISPATCH_CHAT_URL`, defaulting to the same
+place as before but overridable to point straight at the `dispatch` role's own `llama-server` port
+(`:8097`) — "talk to the backend, not the router," the same shape BFCL and S11's `mmlu_pro` bypass already
+established, for the same underlying reason. This needed exactly one new firewall rule, on Watch, narrowly
+scoped to Forge's IP — `sudo ufw allow from 10.129.1.17 to any port 8097 proto tcp` — the same shape as
+every existing cross-node role rule from S1, not a new precedent.
+
+**Promotion is a human-run command, not an automatic action.** Buzz's claim exclusivity makes two
+simultaneously-active dispatchers *safe* (only one can ever claim a given message), but this fleet has not
+used "safe" as the bar for "so automate it" anywhere else a live-topology change has real blast radius —
+pfSense stays read-only, `hermes-forge-residency.py`'s drain/restore stayed a CLI, S8's account
+deactivations stayed manual. Same call here: detection and alerting are automatic, the FleetOps notice
+carries the exact promotion command, a human decides whether to run it.
+
+**Live test, the real thing, not a simulation:** stopped `hermes-dispatch.service` on Watch. Confirmed the
+standby-check correctly detected staleness at 334s (threshold 120s) and posted a real, verified FleetOps
+notice (`event_id` confirmed) with the working promotion command. Published a real pointer envelope to the
+`dispatch` topic while the primary was still down. Ran the promotion command for real, from Forge, against
+the stopped primary — the promoted instance came up, screened the queued message, called the `dispatch`
+model directly via `DISPATCH_CHAT_URL` (bypassing the router entirely), and correctly routed it to `code`;
+`hermes-memory`'s `agent_state` heartbeat value flipped to `hermes-dispatch-standby`, confirmed by direct
+query, not inferred. Stood the standby back down, restarted the real primary on Watch, confirmed the
+heartbeat flipped back and `hermes-dispatch-standby-check.sh` returned to a clean `healthy` exit — the full
+cycle, both directions, no manual cleanup left dangling.
+
+**Rung 3 (any node can respawn, resyncing from `results`) needed no new code at all** — S6's non-negotiable
+#3 already guarantees it structurally, since the dispatcher holds no routing state anywhere but Buzz and
+`hermes-memory`. The rung-2 test above **is** rung 3's live proof: a fresh `hermes-dispatch.py` instance,
+started on a completely different node than it has ever run on before, resumed correctly with zero handoff
+logic — exactly the claim S6 made and never had reason to test until now.
+
+Files: `hermes-dispatch.py` 1.0.1→1.1.0, new `hermes-dispatch-standby-check.sh` (1.0.0→1.0.1 live), new
+`infra/hermes-dispatch/hermes-dispatch-standby-check.service`/`.timer`, `infra/hermes-dispatch/README.md`
+1.0.0→1.1.0 (new §4 runbook; also corrected a stale S6-era claim that no specialist topic has a real
+subscriber — `media` has since S10).
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -1246,3 +1315,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.9.0 | 2026-08-29 | S9 executed and closed out live on the fleet: model registry built (`hermes-memory.py` 1.2.0's `model_registry`, 10 rows across all 8 active roles, byte-verified `sha256`, revision-pinned against HuggingFace's current HEAD with an honest forward-only caveat), `hermes-forge-residency.py` built and a real bug in it (role-keyed dict silently dropping multi-file rows) fixed on first use, `hermes-model-archive.py` actually deployed to spark-2 for the first time (closing a real gap — `omni` had never been archived anywhere) with a weekly timer now enabled on both nodes. Also: a real process mistake (overwriting pre-existing, correctly-designed service/timer files without reading them first) caught via `git diff` and reverted in the open rather than folded away. |
 | 1.10.0 | 2026-08-29 | S10's software half executed and verified live with two real renders (default engine, ~14s; `--engine flux2` explicitly, ~89s — closing V4 §9 risk 12 with real evidence, not assertion): `hermes-media.py` (the media agent, bridging Buzz's `media` topic to the existing broker/render-worker pipeline) and image screening inside `hermes-render-worker.py` (real magic-byte checks before an artifact is ever uploaded or delivered). The network-isolation half was deliberately not automated — `hermes-pfsense.py`'s own pre-existing docstring already decided pfSense gets no scripted actuation path, for exactly this class of change — and is instead a 7-item operator checklist, including a real currently-live exposure found (ComfyUI's port 8188 open to the whole LAN, not just Forge) and flagged rather than silently narrowed. |
 | 1.11.0 | 2026-08-29 | S11 executed and closed out live on the fleet: V4's benchmark harness (MMLU-Pro/GPQA-Diamond/IFEval/BFCL) confirmed real and already in use, not just documented. Found and worked around a real bug live: `mmlu_pro` sent through `hermes-router` gets blocked by the L1 injection guard's `unicode_smuggling` check on real (non-adversarial) characters inside the dataset itself — fixed by hitting each role's own `llama-server` port directly, same bypass BFCL's own README already established. Real per-role numbers recorded for `super` (mmlu_pro=0.614, ifeval=0.72) and `muse` (mmlu_pro=0.749, ifeval=0.893, bfcl=0.008), plus a genuine zero-cost stock-vs-abliterated comparison for `muse` against `dispatch`'s stock same-base backend — flagged an unresolved quantization confound rather than reporting a clean effect. `model_registry` rows for `super`/`muse` now carry a real `eval_ref`. Scoped "the log analyst" to `super`'s own already-covered role (target §4.1) rather than inventing a duplicate eval for a Buzz `logs`-topic agent that still doesn't exist — consistent with S8's own finding. Documented, not remediated: every live abliterated checkpoint (`super`/`muse`/`coder`/`nano`) is a community (`huihui-ai`) checkpoint, not self-produced, despite target §12.4's preference and working `heretic` tooling being available — a real, currently-accepted risk, not silently dropped. |
+| 1.12.0 | 2026-08-29 | S12 executed and closed out live on the fleet. Merged mode stays deferred — S1's own NCCL numbers (socket-mode ~2.0 GB/s, RDMA negotiates but fails during real data movement) already answered the gating question; no RoCE-hardening work was done, so nothing changed. Dispatcher failover built and live-verified up all three rungs of target §11.2: rung 1 (systemd auto-restart) already existed; rung 2 (`hermes-dispatch.py` 1.1.0's new heartbeat + `hermes-dispatch-standby-check.sh` on Forge, alerting FleetOps on staleness) surfaced a real architectural constraint — `hermes-router`'s `:8080` is deliberately loopback-only *and has no bearer-auth of its own*, so a standby bypasses it entirely via a new `DISPATCH_CHAT_URL` pointed straight at the `dispatch` role's own `llama-server` port, needing one narrow ufw rule matching S1's existing cross-node pattern; a real bug (`MATRIX_URL`'s loopback default, copied from scripts that always run on Watch, silently wrong once run on Forge) was caught and fixed on the very first live test. Rung 3 (any-node respawn) needed no new code — S6's non-negotiable #3 already guaranteed it — and was proven for the first time here: primary stopped on Watch, a real pointer envelope queued, the promotion command run for real from Forge, correctly claimed and routed the work, heartbeat and task state confirmed by direct query; then stood back down and the primary restored, full cycle both directions. Promotion stays a human-run command, not automatic, matching every other live-topology decision this fleet keeps manual. |
