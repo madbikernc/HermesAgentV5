@@ -1,7 +1,7 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.3.0
-**Status:** S1–S3 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
+**Version:** 1.4.0
+**Status:** S1–S4 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
 stage says otherwise.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
@@ -25,7 +25,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S1 | Reclaim `spark-2`; restore the two-node split (Watch/Forge) | ✅ Complete 2026-08-29 |
 | S2 | `hermes-memory` — the shared memory service, dual-channel | ✅ Complete 2026-08-29 |
 | S3 | Buzz 2.0 — topics, claims, pointer envelopes | ✅ Complete 2026-08-29 |
-| S4 | Plane split — control on GigE, data on `bond-fabric0` | ⬜ Not started |
+| S4 | Plane split — control on GigE, data on `bond-fabric0` | ✅ Complete 2026-08-29 |
 | S5 | Screener before the dispatcher (L1 deploy + L2 build) | ⬜ Not started |
 | S6 | `hermes-dispatch` — stock-weight dispatcher as a Buzz subscriber | ⬜ Not started |
 | S7 | `hermes-presenter` — thin Matrix client, one fleet voice | ⬜ Not started |
@@ -522,6 +522,37 @@ Bind every control-plane service explicitly to the `10.129.1.x` interface rather
 NCCL if S12 ever happens. Document it in `infra/` so the first bulk transfer does not silently re-couple the
 planes. Cheap now, and it stops being cheap after the first weight sync goes over the wrong link.
 
+#### S4 — executed 2026-08-29
+
+**Rebinding was audited, then rejected in favor of a firewall fix** — a real course-correction mid-stage,
+not the originally planned approach. `nano`/`super`/`coder`/`muse`/`omni`/Continuwuity all bind `0.0.0.0`
+today, and that turns out to be structurally required, not sloppy: each is called both from its own node
+via `127.0.0.1` (the local `hermes-router.py`) *and* cross-node via the LAN IP (the peer's router,
+HomeD13's SWE-bench tooling) — confirmed for Continuwuity specifically by reading Amy's live gateway config
+(`MATRIX_HOMESERVER=http://10.129.1.15:6167`, spark's LAN IP, from spark-2). `llama-server` and Continuwuity
+can each only bind one address; the only address that serves both loopback and LAN callers from one process
+is `0.0.0.0`. Rebinding to the LAN IP specifically would have broken every same-node router call — caught
+by tracing actual callers before touching any start script, not by trial and error against a live service.
+
+**The real gap, confirmed live before fixing it:** `hermes-broker`/`hermes-buzz`/`hermes-memory` were
+already correctly plane-isolated (explicit LAN bind since S2/S3, nothing on their own node calls them via
+loopback) — bind address alone already excluded the fabric interface for those three. The `0.0.0.0`-bound
+services were not: `curl http://10.129.9.1:8088/v1/models` from spark-2 to spark returned `200` before any
+fix, over the fast link, past nothing but the network layer. Root cause: both nodes' `ufw` rule for
+`10.129.9.0/30` was a blanket allow-anything (`Anywhere ALLOW IN 10.129.9.0/30`), not scoped to what the
+fabric is actually for.
+
+**Fix: narrowed both nodes' `10.129.9.0/30` ufw rule to `22/tcp` only** — SSH, what the S1 node-to-node
+keys (`~/.ssh/spark2_access`/`~/.ssh/spark_access`) and any `rsync`/`scp`-based bulk transfer already ride
+on. Verified both directions after: `10.129.9.1:8088`/`10.129.9.2:8090` (fabric IPs) now refuse the same
+request that returned `200` before; `10.129.1.15:8088`/`10.129.1.17:8090` (LAN IPs, what every real caller
+already uses) unaffected; SSH over the fabric IP still connects; router end-to-end chat completion,
+broker/buzz/memory health, and both gateways' logs all confirmed clean immediately after.
+
+**Documented in `infra/network-planes.md`** — the plane table, why rebinding was rejected, the live
+before/after exposure test, and an explicit instruction for extending this later (S12's NCCL, if it
+happens): add a narrowly-scoped rule for the specific port needed, never revert to a blanket allow.
+
 ### S5 — Screening ahead of the dispatcher — **do this before S6**
 
 Deploy `hermes_injection_guard.py` Layer 1 for real (it has never been exercised against live traffic; its
@@ -742,3 +773,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.1.0 | 2026-08-29 | S1 executed and closed out live on the fleet: muse/omni moved to spark-2 (46.6 GB weight transfer, fresh start scripts/units, `omni`'s missing `--reasoning off` fixed), `hermes-router.py` → 2.5.0, coder2 benchmark concluded (failed to load, incumbent `coder` confirmed), real headroom verified on both nodes, `bond-fabric0` measured (117 Gbit/s TCP; NCCL sockets ~2 GB/s; NCCL RDMA negotiates but fails mid-transfer). Corrected two stale V4 §9 risks (15, 16) found false during verification. |
 | 1.2.0 | 2026-08-29 | S2 executed and closed out live on the fleet: `hermes-memory.py` 1.0.0 built and deployed on Watch (turns/tasks/agent_state/vec_turns, sqlite-vec semantic recall over the resident `embed` backend), `memory-token` vault item provisioned, recall verified against V4 S11's bar (independent `sqlite3` query, not self-report) across a fresh-session round trip. `hermes-session-cap-guard.sh` deliberately untouched. |
 | 1.3.0 | 2026-08-29 | S3 executed and closed out live on the fleet: `hermes-buzz.py` 2.0.0→2.0.1 (topic-based pub/sub, claim-based handoff, pointer-envelope fields), migrated the live 266-message database in place with zero data loss and zero code changes required in any of the three existing caller scripts. A WAL-unsafe backup mistake and a real claim-reclaim-after-ack bug were both caught during verification and fixed before either reached production traffic. |
+| 1.4.0 | 2026-08-29 | S4 executed and closed out live on the fleet: audited every control-plane bind, rejected rebinding model backends/Continuwuity to a LAN-only address (would have broken same-node loopback callers — traced actual callers first), fixed the real gap instead — narrowed both nodes' `10.129.9.0/30` ufw rule from blanket-allow to SSH-only, after confirming live that the fabric interface could reach spark's `nano` backend before the fix. Documented in `infra/network-planes.md`. |
