@@ -1,8 +1,9 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.7.0
-**Status:** S1–S7 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
-stage says otherwise.
+**Version:** 1.8.0
+**Status:** S1–S8 complete, live on the fleet. S8 was the point of no return — Sintra and Amy no longer
+have live gateways. `HermesAgentV4` stays live and authoritative for everything else until a later stage
+says otherwise.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** described in [`firmament-fleet-target-architecture.md`](firmament-fleet-target-architecture.md)
@@ -29,7 +30,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S5 | Screener before the dispatcher (L1 deploy + L2 build) | ✅ Complete 2026-08-29 |
 | S6 | `hermes-dispatch` — stock-weight dispatcher as a Buzz subscriber | ✅ Complete 2026-08-29 |
 | S7 | `hermes-presenter` — thin Matrix client, one fleet voice | ✅ Complete 2026-08-29 |
-| S8 | Retire Sintra and Amy; internal agents get prompts, not souls | ⬜ Not started |
+| S8 | Retire Sintra and Amy; internal agents get prompts, not souls | ✅ Complete 2026-08-29 |
 | S9 | Node residency lock-in + model registry on Forge | ⬜ Not started |
 | S10 | Kiln isolation + media agent ownership | ⬜ Not started |
 | S11 | Per-role eval sets, then scoped abliteration | ⬜ Not started |
@@ -789,6 +790,64 @@ Revision History table (see `CLAUDE.md`). Retire the `SintraAmy` room and both p
 
 **This is the point of no return.** Everything before it is additive and reversible.
 
+#### S8 — executed 2026-08-29, with operator confirmation given the irreversibility above
+
+**Scope decision, confirmed with the operator before touching anything:** stop and disable every
+persona-owning and persona-automation service (fully reversible — re-enabling the units restores
+everything) but **leave the two Matrix accounts (`@sintra:spark`, `@amy:spark`) intact, not deactivated**.
+Account deactivation is generally permanent on Matrix homeservers; simply having nothing left that
+authenticates as those accounts already achieves retirement in every practical sense, without foreclosing
+the option to reuse the identities later. `SOUL.md` files were already documented as staying in
+`../HermesAgentV4/DesignFiles/` for reference, not deleted — same posture.
+
+**Full inventory of what was stopped and disabled, both nodes** (not just the two gateways named in the
+plan's own text — every piece of automation that exists only to serve a persona that no longer has a live
+gateway):
+
+- `hermes-gateway.service` (Sintra) / `hermes-gateway-amy.service` (Amy)
+- `hermes-session-cap-guard-sintra/-amy.service`, `hermes-session-guardian-sintra/-amy.service`
+- `hermes-buzz-watch@sintra/@amy.service`, `hermes-buzz-checkin-sintra/-amy.timer`
+- `hermes-status-exchange-sintra/-amy.timer`, `hermes-wiki-checkin-sintra/-amy.timer`
+- `hermes-remediate-worker@sintra/@amy.service`
+- `hermes-fabrication-guard.service` (Sintra) / `hermes-fabrication-guard-amy.service` (Amy)
+- `hermes-repo-sync.service` + `.path` (propagated repo updates into the personas' own checkouts —
+  pointless with no gateway reading from them)
+
+19 units total across both nodes, all confirmed `disabled` (not just stopped) afterward — a reboot won't
+resurrect any of them. Both gateway processes exited with systemd's `failed` status rather than a clean
+`inactive` (they were mid-agent-turn when stopped, hit their own internal iteration-budget/guardrail exit
+path instead of a graceful shutdown) — expected given the interruption, not a new problem, and irrelevant
+since both are disabled and won't restart.
+
+**One real companion fix, found by tracing what would break, not by accident:** `hermes-buzz-lockup-check.sh`
+explicitly alerted if `hermes-buzz-watch@sintra/@amy` weren't active — which would now be true forever,
+producing a permanent false alarm every 5-minute cycle. Removed that check and the per-agent
+unanswered-message check (also sintra/amy-specific) in the same pass; kept the Buzz-reachability check,
+which matters *more* now that `hermes-dispatch`/`hermes-presenter` depend on it. Verified by running it
+manually post-fix: clean, no false alarm.
+
+**Deliberately not touched, and explicitly scoped out of this stage:** `llama-nano.service` keeps running.
+Target §4.1 retires `nano` as a role name eventually, but `hermes-model-scan.py` and
+`hermes-nfsensei-watch.py` still default their own `LLM_MODEL` to it (Category B) — stopping the backend
+now would break those tools' next scheduled run for no reason tied to this stage's actual goal. That
+default-swap plus the full role retirement belongs to S9's model registry work, not manufactured here.
+Likewise, no `agents/*/PROMPT.md` files were created: the plan's own language describes the convention for
+*when* internal specialist agents exist, and none do yet — S6/S7 built a pipeline with no real subscriber
+on any specialist topic. Writing placeholder prompt files with no agent behind them would be exactly the
+kind of unnecessary busywork this migration has been steering away from; real prompt files get written
+when a real agent is built to use them.
+
+**Verified after every stop:** shared/fleet-wide services (`hermes-broker`, `hermes-buzz`, `hermes-router`
+on both nodes, `hermes-memory`, `hermes-guard`, `hermes-dispatch`, `hermes-presenter`, Continuwuity, and
+every resident model backend including `nano`) all confirmed still `active`, zero errors logged by any of
+them across the whole cutover window.
+
+**What this stage does not yet mean:** there is no interactive voice on the fleet right now. S7 built the
+pipeline; nothing has decided what speaks through `hermes-presenter` yet — that remains a separate,
+deferred decision, per operator direction from earlier in this migration. `SintrasBoss`/`AmysBoss` and the
+already-dormant `SintraAmy` room are now fully inactive (no automation posts to them, no gateway reads
+them) but still exist on the server, matching the "stop and disconnect only" scope above.
+
 ### S9 — Residency and the model registry
 
 Watch: static residency, no controller. Forge: a residency controller that knows which checkpoint is current
@@ -959,3 +1018,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.5.0 | 2026-08-29 | S5 executed and closed out live on the fleet: corrected the Layer 1 discovery (already live since S1's router restarts, not merely wired) and deliberately stopped chasing a false-positive on Amy's soon-to-retire status-exchange automation rather than protect it further. Built and deployed Layer 2 (`hermes-guard.py`, Prompt Guard 2, stock, CPU-only via `transformers`), wired into `hermes-router.py` 2.6.0 scoped to the newest message only, verified live against both a semantic bypass attempt and a benign passthrough, verdicts confirmed logged to `hermes-memory` independent of the router's own log. |
 | 1.6.0 | 2026-08-29 | S6 executed and closed out live on the fleet: `hermes-dispatch.py` built (stock `dispatch` role added to the router, all three non-negotiables enforced in code), verified end to end with a real pointer envelope routed correctly to `code` and confirmed as pure pointer bytes on the wire. Two real bugs (Buzz rejecting empty-body pointer envelopes; `dispatch` missing from Buzz's sender allowlist, which crashed the whole daemon) found and fixed live, the second also exposing and fixing a missing per-cycle exception handler — which then self-healed a crashed run's abandoned claim with zero intervention, an unplanned live proof of non-negotiable #3. |
 | 1.7.0 | 2026-08-29 | S7 executed and closed out live on the fleet: `hermes-presenter.py` built and deployed (`@hermes-presenter:spark` provisioned via Continuwuity's own documented recipe), passthrough-only per operator direction. A join-endpoint verb bug (PUT vs POST) was fixed immediately. A misleading hour-long investigation into an apparent Matrix connectivity failure — every reproduction of the Matrix call succeeded — traced to the real bug two layers away: `hermes-memory.py`'s `turns.id` reused ids after delete, collided with an orphaned `vec_turns` row, and the uncaught exception killed the request with zero response, indistinguishable from the caller's side from a dead connection. Fixed (`AUTOINCREMENT` migration + a general uncaught-exception safety net on every route) and verified: a real Matrix message flowed presenter → Buzz → `hermes-dispatch` (unmodified since S6, picked it up on its own) → routed to `code`, and a manually-completed task delivered its exact styled reply back into the room within one poll cycle. |
+| 1.8.0 | 2026-08-29 | S8 executed live on the fleet, with explicit operator confirmation given its irreversibility. 19 persona-owning/persona-automation units stopped and disabled across both nodes (not just the two gateways — every dependent watcher, guard, and timer). Matrix accounts left intact but dormant (not deactivated — operator decision, since deactivation is generally permanent and disconnecting already achieves retirement in practice). Found and fixed a real companion bug: `hermes-buzz-lockup-check.sh` would have false-alarmed forever on the now-intentionally-stopped watchers. `llama-nano.service` and `agents/*/PROMPT.md` creation both explicitly deferred to when they have a real purpose (S9, and whenever a real specialist agent exists, respectively) rather than manufactured now. All shared/fleet-wide services confirmed healthy throughout. |
