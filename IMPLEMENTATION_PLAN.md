@@ -1,7 +1,7 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.6.0
-**Status:** S1–S6 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
+**Version:** 1.7.0
+**Status:** S1–S7 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
 stage says otherwise.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
@@ -28,7 +28,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S4 | Plane split — control on GigE, data on `bond-fabric0` | ✅ Complete 2026-08-29 |
 | S5 | Screener before the dispatcher (L1 deploy + L2 build) | ✅ Complete 2026-08-29 |
 | S6 | `hermes-dispatch` — stock-weight dispatcher as a Buzz subscriber | ✅ Complete 2026-08-29 |
-| S7 | `hermes-presenter` — thin Matrix client, one fleet voice | ⬜ Not started |
+| S7 | `hermes-presenter` — thin Matrix client, one fleet voice | ✅ Complete 2026-08-29 |
 | S8 | Retire Sintra and Amy; internal agents get prompts, not souls | ⬜ Not started |
 | S9 | Node residency lock-in + model registry on Forge | ⬜ Not started |
 | S10 | Kiln isolation + media agent ownership | ⬜ Not started |
@@ -710,6 +710,76 @@ pattern, which already works and touches no disk.
   certainty, or resolve ambiguity the underlying agent left open.
 - **Debug attribution toggle** — `[dispatch→code]` annotations, off by default.
 
+#### S7 — executed 2026-08-29
+
+**Matrix account provisioned live**, following `infra/continuwuity/README.md` §4's own recipe exactly
+(temporarily `allow_registration = true`, register via the config's `registration_token`, flip back, restart
+— both restarts confirmed clean, both gateways recovered on their own retry logic with zero manual
+intervention). `@hermes-presenter:spark`, credentials in a new `matrix-presenter` vault item.
+
+**Builds the seam, not the voice**, per operator direction (§4.4): `hermes-presenter.py` has no styling
+model call at all. Every reply is exact passthrough of whatever the completing agent wrote to
+`hermes-memory`'s `presented` column — this trivially satisfies target §6.3 and means the insulation
+contract's fidelity-drift failure mode (§6.2 leak path 4) cannot occur yet, by construction, since there is
+no styling pass to drift. Holds a Matrix sync cursor locally (normal for any Matrix client) but no in-memory
+index of outstanding tasks — every pending task's reply-destination lives in `hermes-memory`'s
+`agent_state` (new `GET /state/<agent>` list endpoint, added this stage) so a restart mid-conversation loses
+nothing but a few seconds of latency.
+
+**One small bug, caught on the very first test invite:** `join_room()` called Matrix's join-by-room-ID
+endpoint with `PUT`; it's `POST` (`PUT` is for the txn-keyed send-message endpoint, a different route).
+Fixed same-day.
+
+**One real Matrix protocol lesson, not a code bug:** a room invite that arrives while a client's incremental
+`/sync` cursor is already past that point in the stream will not be replayed by later incremental syncs,
+even though the invite is still genuinely pending server-side — confirmed by checking the room's own
+`m.room.member` state directly. A transient failure to act on an invite the first time it's seen can
+therefore make it invisible to normal operation; recovery is either a fresh invite (a new membership event)
+or a full initial sync (no `since` parameter). Documented in `infra/hermes-presenter/README.md` rather than
+worked around in code — normal Matrix clients rely on the same "you get one look" contract.
+
+**The real investigation of this stage:** after the join fix, every single Matrix `/sync` call started
+failing with "Remote end closed connection without response" — persistently, from a freshly-started
+process's very first call, reproducible whether launched by systemd, by the wrapper script directly, or by
+running `hermes-presenter.py` itself with manually-exported credentials. An hour of systematic elimination
+(manual `curl` reproductions of the exact request, a byte-for-byte copy of `sync_once()` run standalone,
+proxy-env-var comparison, connection-state inspection) ruled out Continuwuity, the network, and Matrix
+entirely — **every one of those reproductions succeeded.** Only line-by-line diagnostic logging inside the
+actual code path found the truth: the Matrix sync itself always succeeded; the failure was in
+`_post(MEMORY_URL/turns, ...)`, called from `handle_message()` *inside* `sync_once()` — an exception raised
+there propagates up through the same generic `except Exception` in `main()`'s sync loop, so it was logged as
+"sync error" and looked exactly like a Matrix problem. **The actual bug was two layers away from where
+every symptom pointed.**
+
+Root cause, in `hermes-memory.py`: `turns.id` was a bare `INTEGER PRIMARY KEY` (a ROWID alias SQLite is free
+to reuse after a delete) even though `vec_turns.turn_id` implicitly assumes that id is never reused. A row
+deleted during an earlier stage's test cleanup (using the wrong quoting, which silently no-op'd the
+`vec_turns` half of that cleanup — a real mistake in this session's own work, not a pre-existing bug) left
+an orphaned `vec_turns` entry; a later insert reused that same now-free id and collided with it, raising
+`UNIQUE constraint failed`. That exception was **uncaught**, so the request died with zero bytes written to
+the socket — indistinguishable, from any caller anywhere, from the far end simply hanging up.
+
+**Two fixes, both in `hermes-memory.py` 1.1.1:**
+1. `turns.id` → real `AUTOINCREMENT`, migrated in place on the live database (existing rows' ids preserved,
+   confirmed via `sqlite_sequence` and a direct row check before and after).
+2. `do_GET`/`do_POST` now wrap every route in a handler that always sends *some* HTTP response — even a
+   500 — instead of letting an uncaught exception die silently. This is a general hardening, not specific
+   to the bug that exposed it: any future bug in any route now surfaces as an error from this service,
+   never a dead connection blamed on whoever happened to be calling it.
+
+**Verified, live, the complete round trip, unprompted at the dispatch layer:** sent a real Matrix message
+("Can you review this Python function for bugs?") from a test account into a room the presenter had joined.
+The presenter wrote it to `hermes-memory` byte-for-byte, published a pointer envelope to Buzz — and
+`hermes-dispatch.py`, still running from S6 with no changes, **picked it up on its own** and correctly
+routed it to `code`. Manually completed the task the way a future specialist eventually will; the presenter
+delivered the exact `presented` text back into the room within one poll cycle, confirmed by reading the raw
+Matrix event directly (`sender: @hermes-presenter:spark`, the styled reply text, no attribution prefix —
+`DEBUG_ATTRIBUTION` off by default as designed).
+
+**All test data cleaned from Buzz and `hermes-memory`** afterward; the throwaway Matrix test room was left
+alone deliberately (harmless and dormant, same posture as the already-dormant `SintraAmy` room — not worth
+the complexity of trying to fully purge a Matrix room for a one-off verification artifact).
+
 ### S8 — Retire the personas
 
 Stop both gateways. Retire `hermes-gateway-amy.service`, `hermes-gateway.service`, and the two `SOUL.md`
@@ -888,3 +958,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.4.0 | 2026-08-29 | S4 executed and closed out live on the fleet: audited every control-plane bind, rejected rebinding model backends/Continuwuity to a LAN-only address (would have broken same-node loopback callers — traced actual callers first), fixed the real gap instead — narrowed both nodes' `10.129.9.0/30` ufw rule from blanket-allow to SSH-only, after confirming live that the fabric interface could reach spark's `nano` backend before the fix. Documented in `infra/network-planes.md`. |
 | 1.5.0 | 2026-08-29 | S5 executed and closed out live on the fleet: corrected the Layer 1 discovery (already live since S1's router restarts, not merely wired) and deliberately stopped chasing a false-positive on Amy's soon-to-retire status-exchange automation rather than protect it further. Built and deployed Layer 2 (`hermes-guard.py`, Prompt Guard 2, stock, CPU-only via `transformers`), wired into `hermes-router.py` 2.6.0 scoped to the newest message only, verified live against both a semantic bypass attempt and a benign passthrough, verdicts confirmed logged to `hermes-memory` independent of the router's own log. |
 | 1.6.0 | 2026-08-29 | S6 executed and closed out live on the fleet: `hermes-dispatch.py` built (stock `dispatch` role added to the router, all three non-negotiables enforced in code), verified end to end with a real pointer envelope routed correctly to `code` and confirmed as pure pointer bytes on the wire. Two real bugs (Buzz rejecting empty-body pointer envelopes; `dispatch` missing from Buzz's sender allowlist, which crashed the whole daemon) found and fixed live, the second also exposing and fixing a missing per-cycle exception handler — which then self-healed a crashed run's abandoned claim with zero intervention, an unplanned live proof of non-negotiable #3. |
+| 1.7.0 | 2026-08-29 | S7 executed and closed out live on the fleet: `hermes-presenter.py` built and deployed (`@hermes-presenter:spark` provisioned via Continuwuity's own documented recipe), passthrough-only per operator direction. A join-endpoint verb bug (PUT vs POST) was fixed immediately. A misleading hour-long investigation into an apparent Matrix connectivity failure — every reproduction of the Matrix call succeeded — traced to the real bug two layers away: `hermes-memory.py`'s `turns.id` reused ids after delete, collided with an orphaned `vec_turns` row, and the uncaught exception killed the request with zero response, indistinguishable from the caller's side from a dead connection. Fixed (`AUTOINCREMENT` migration + a general uncaught-exception safety net on every route) and verified: a real Matrix message flowed presenter → Buzz → `hermes-dispatch` (unmodified since S6, picked it up on its own) → routed to `code`, and a manually-completed task delivered its exact styled reply back into the room within one poll cycle. |
