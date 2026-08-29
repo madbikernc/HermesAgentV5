@@ -1,8 +1,8 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.0.0
-**Status:** Planning only. Nothing here is built or deployed. `HermesAgentV4` stays live and authoritative
-until a stage below says otherwise.
+**Version:** 1.1.0
+**Status:** S1 complete, live on the fleet. `HermesAgentV4` stays live and authoritative until a later
+stage says otherwise.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** described in [`firmament-fleet-target-architecture.md`](firmament-fleet-target-architecture.md)
@@ -22,7 +22,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | # | Stage | Status |
 |---|---|---|
 | S0 | Repo scaffolding, discovery, this document | ✅ Complete 2026-08-29 |
-| S1 | Reclaim `spark-2`; restore the two-node split (Watch/Forge) | ⬜ Not started |
+| S1 | Reclaim `spark-2`; restore the two-node split (Watch/Forge) | ✅ Complete 2026-08-29 |
 | S2 | `hermes-memory` — the shared memory service, dual-channel | ⬜ Not started |
 | S3 | Buzz 2.0 — topics, claims, pointer envelopes | ⬜ Not started |
 | S4 | Plane split — control on GigE, data on `bond-fabric0` | ⬜ Not started |
@@ -310,6 +310,83 @@ and record what transport actually engages. Target §2.3 flags NCCL falling back
 all-reduce around 2 GB/s. The link has carried ICMP and nothing else since 2026-08-27. This number
 constrains S12 entirely and is cheap to get.
 
+#### S1 — executed 2026-08-29
+
+**Node-to-node access.** No SSH trust existed between `spark` and `spark-2` directly (only against the
+operator's machine) — needed for the LAN weight transfer below. Persistent ed25519 keypairs now exist both
+directions: `~/.ssh/spark2_access` on spark, `~/.ssh/spark_access` on spark-2, each added to the peer's
+`authorized_keys`. Kept permanently, not torn down — general node-to-node access, not scoped to this
+transfer.
+
+**Weight migration.** `muse` (21.2 GB), `omni` (23.9 GB), and `mmproj-F16.gguf` (1.6 GB) rsynced from
+spark's `/mnt/hermes-data/models/` to a newly created `/mnt/hermes-data/models/` on spark-2 (that directory
+didn't exist — spark-2's LUKS volume had no `models/` subtree at all post-2026-08-26 migration). ~46.6 GB
+over LAN GigE at a steady ~110 MB/s, byte-verified against source after (sizes match exactly).
+
+**Start scripts and units.** spark-2's leftover `llama-muse.service`/`start-muse.sh` and disabled
+`llama-amy-vision.service`/`start-amy-vision.sh` pointed at a stale pre-LUKS path
+(`/opt/hermes-models/...`) — not reused. Wrote fresh `start-muse.sh` and `start-omni.sh` at
+`/mnt/hermes-data/models/` paths, and a fresh `llama-omni.service` (spark-2 had no unit under that name).
+**`omni` now runs with `--reasoning off` on spark-2** — missing on every prior deployment of this backend
+(V4 §9 risk 6), fixed here rather than carried forward.
+
+**`hermes-router.py` → 2.5.0.** `ROLES` map edited on both branches (`NODE == "spark"` vs. else) so `muse`
+and `omni` resolve to spark-2's LAN IP from spark's router and to `127.0.0.1` from spark-2's own. Committed
+and pushed to `HermesAgentV4` (`68eaf9b`), pulled onto both nodes' checkouts. No shape change to the ROLES
+table, only which host each entry resolves to.
+
+**Cutover sequence, verified at each step:** spark-2's `llama-muse`/`llama-omni` brought up and health-checked
+(`/health` 200) → cross-node reachability confirmed from spark before touching anything live → spark-2's
+router restarted and end-to-end chat-completion tested against local `muse` → **only then** stopped/disabled
+`llama-muse`/`llama-omni` on spark → spark's router restarted and end-to-end tested against `omni` proxied
+cross-node to spark-2, and against `nano` (unaffected role, sanity check). `hermes-gateway.service` (Sintra)
+and `hermes-gateway-amy.service` logged zero errors across the whole restart window — no observed disruption.
+
+**`coder2` benchmark — concluded, not abandoned.** Its unit was already `inactive`/`disabled`: it fails to
+load with `unknown model architecture: 'qwen4exp'` — this llama.cpp build doesn't support the format.
+Confirms §3.4's decision to keep `coder` (Qwen3.8-27B-abliterated) without needing a live bake-off. Removed
+the stale `8096/tcp` ufw rule (spark→spark-2) and the disabled `llama-coder2.service` unit. **Not removed:**
+~86 GB of downloaded coder2 candidate weights at `/opt/hermes-models/qwen3.8-flash-next/` on spark-2 — disk
+isn't the constrained resource (1.9 TB free on that volume) and deleting a multi-GB download is one-way;
+left for the operator to clear if wanted.
+
+**Resident headroom, measured with legacy backends actually stopped** (not `free -h`'s optimistic
+"available" — V4 §4a's own warning):
+
+| Node | Used | Available | Resident backends |
+|---|---|---|---|
+| spark (Watch) | 62 GiB | **58 GiB** | nano, super, embed |
+| spark-2 (Forge) | 53 GiB | **67 GiB** | muse, omni |
+
+Matches §2's projected split. Real KV-cache headroom now exists on both nodes for the first time since
+2026-08-26.
+
+**`bond-fabric0` measurement — the number that gates S12.** iperf3 installed on both nodes (not previously
+present; `iperf` v2 was, `iperf3` wasn't).
+
+- **Raw TCP, 4 parallel streams, 10s:** ~117 Gbit/s aggregate sustained (10.129.9.1 ↔ 10.129.9.2, MTU 9000).
+  Far above the target §2.3 worst case.
+- **NCCL over this link — real finding, not the one expected.** Using both nodes' existing
+  `/opt/benchmark-venv` (PyTorch 2.13.0+cu13.0, NCCL 2.29.7 — present on **both** nodes, correcting V4 §9
+  risk 16's claim that spark-2 has no `/opt/benchmark-venv`) with `NCCL_SOCKET_IFNAME=bond-fabric0`:
+  - With RDMA enabled (default): NCCL detects and **commits to real RoCE** — `NET/IB : Using
+    [0]rocep1s0f0:1/RoCE [1]roceP2p1s0f0:1/RoCE`, not a silent socket fallback — negotiates the full 16-channel
+    topology, then **fails during actual data movement**: `IBV_WC_RETRY_EXC_ERR(12)` on
+    `IBV_WC_SEND`, both ranks' watchdog threads throw and the process group tears down. RDMA is reachable at
+    the verbs/negotiation layer but not reliable under real traffic today — consistent with RoCEv2 typically
+    needing lossless-fabric config (PFC/ECN) that hasn't been set up. Not investigated further here — that's
+    a networking-hardening task, out of scope for a measurement stage.
+  - With `NCCL_IB_DISABLE=1` (forced socket fallback): clean, complete run, all_reduce throughput
+    **plateaus at ~2.0 GB/s** (1MB: 0.41 GB/s warming up, 16MB+: 1.87–2.03 GB/s) — matches target §2.3's
+    pessimistic estimate almost exactly.
+  - **Reading:** the fabric itself has far more raw capacity (117 Gbit/s TCP) than either NCCL path
+    currently realizes. Socket-mode NCCL is the safe, working ~2 GB/s baseline. RDMA is close — it gets
+    through connection setup — but is not usable yet. Treat every merged-mode plan as socket-bound (§7 risk 1
+    unchanged) until someone puts in the RoCE lossless-fabric work; that's new scope, not part of S1.
+
+**Everything else in this stage's original description is done:** ufw rules for muse/omni cross-node access
+were already correct in both directions from before the 2026-08-26 collapse and needed no change.
+
 ### S2 — `hermes-memory`
 
 New service on Watch, `/mnt/hermes-data/memory/memory.db`, port 8102. Schema carries: tasks, turns
@@ -529,15 +606,20 @@ reference chain across two retired repos settles it in favour of forking.
 
 ## 7. Risks and open questions
 
-1. **`bond-fabric0` has never carried a real workload.** RDMA on ARM64 is an open issue upstream; target
-   §2.3 reports NCCL falling back to sockets at ~2 GB/s. S1 measures it. Until then treat every merged-mode
-   plan as speculative — including V4's never-run Inkling-Small experiment.
+1. **`bond-fabric0` measured 2026-08-29 (S1) — resolved to "usable but not RDMA-ready."** Raw TCP hits
+   ~117 Gbit/s; NCCL over sockets is a clean ~2 GB/s (matches target §2.3's estimate almost exactly); NCCL
+   over RDMA negotiates real RoCE but fails mid-transfer (`IBV_WC_RETRY_EXC_ERR`) — reachable, not reliable.
+   Treat every merged-mode plan as socket-bound (~2 GB/s) until someone does the RoCE lossless-fabric work
+   (PFC/ECN) — that's unscoped, new work, not carried by S1. Detail in S1's execution log above.
 2. **The dispatcher checkpoint does not exist on disk yet.** A stock Qwen3.6-35B-A3B Q8 is a ~35 GB
    download. The abliterated build of the same base is already there as `muse`, which makes an A/B on
    identical architecture unusually cheap — take that measurement, it directly tests target §12.2.
 3. **S8 is irreversible.** Everything before it is additive.
-4. **`spark-2` still has no NAS2 mount and no `/opt/benchmark-venv`** (V4 §9 risks 15, 16). Both block S9
-   and S11 respectively. Both need real root on `spark-2`, which V4 S17 identified as a human-attended task.
+4. **V4 §9 risks 15/16 are stale — both checked during S1 and found not to hold.** `/mnt/nas2-hermes-backup`
+   (the exact path `hermes-model-archive.py` expects) is mounted and working on spark-2 today, and
+   `/opt/benchmark-venv` exists there too (PyTorch 2.13.0+cu13.0, NCCL 2.29.7 — same version as spark's).
+   Neither blocks S9 or S11 anymore; re-verify before relying on this if much time passes before those
+   stages start.
 5. **Only `nano` / `super` are firewalled for HomeD13 access.** S10's isolation work must not assume the
    current reachability matrix is either complete or intentional.
 6. **Prompt Guard 2's availability and licence for the `guard` role are unverified.** If unavailable, the
@@ -556,3 +638,4 @@ reference chain across two retired repos settles it in favour of forking.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-08-29 | Initial plan: discovery against the live V4 fleet, gap analysis against `firmament-fleet-target-architecture.md`, four ratified deviations, twelve-stage migration, carry-forward audit. |
+| 1.1.0 | 2026-08-29 | S1 executed and closed out live on the fleet: muse/omni moved to spark-2 (46.6 GB weight transfer, fresh start scripts/units, `omni`'s missing `--reasoning off` fixed), `hermes-router.py` → 2.5.0, coder2 benchmark concluded (failed to load, incumbent `coder` confirmed), real headroom verified on both nodes, `bond-fabric0` measured (117 Gbit/s TCP; NCCL sockets ~2 GB/s; NCCL RDMA negotiates but fails mid-transfer). Corrected two stale V4 §9 risks (15, 16) found false during verification. |
