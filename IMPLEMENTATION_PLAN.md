@@ -1,7 +1,7 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.10.0
-**Status:** S1–S10 complete (S10's network isolation half is an operator checklist, not yet executed). S8
+**Version:** 1.11.0
+**Status:** S1–S11 complete (S10's network isolation half is an operator checklist, not yet executed). S8
 was the point of no return — Sintra and Amy no longer have live gateways. `HermesAgentV4` stays live and
 authoritative for everything else until a later stage says otherwise.
 
@@ -33,7 +33,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S8 | Retire Sintra and Amy; internal agents get prompts, not souls | ✅ Complete 2026-08-29 |
 | S9 | Node residency lock-in + model registry on Forge | ✅ Complete 2026-08-29 |
 | S10 | Kiln isolation + media agent ownership | 🟡 Software complete; network isolation is an operator checklist (2026-08-29) |
-| S11 | Per-role eval sets, then scoped abliteration | ⬜ Not started |
+| S11 | Per-role eval sets, then scoped abliteration | ✅ Done (2026-08-29) |
 | S12 | Deferred: merged mode, dispatcher failover | ⬜ Not started |
 
 ---
@@ -1044,6 +1044,81 @@ Prefer self-produced abliteration on Forge over community checkpoints for anythi
 §12.4) — `hermes-abliterate-model.sh` and `infra/model-abliteration/` already exist and already know to
 borrow memory from Forge's swappable slots rather than touching Watch.
 
+#### S11 — executed 2026-08-29
+
+**The harness claim checked out.** `infra/model-benchmark/` is docs-only (README, no scripts) — same shape
+as every other `infra/<service>/` directory in this repo, scripts live in `tools/`. Confirmed live on
+`spark`: `/opt/benchmark-venv` real and populated, `hermes-benchmark-model.sh`/`.py`,
+`hermes-benchmark-compare.py`, and `hermes_benchmark_common.py` all present and already used for real V4
+bake-offs (`coder` vs the abandoned `coder2`, `nano` vs a Nemotron 3.5 Lightning candidate) going back to
+2026-08-24. This stage really was configuration, not a rebuild.
+
+**One real bug found before any usable number came out: the router itself blocks MMLU-Pro.** Role-mode
+runs default to `hermes-router`'s `:8080`, same as BFCL originally tried before S11's own README documented
+why it can't. First real run against `super` returned `400`s on every `mmlu_pro` request:
+`request blocked by injection guard, categories: unicode_smuggling`. Traced to `hermes_injection_guard.py`'s
+L1 patterns (bidi-override / zero-width / Unicode-tag-block characters, `_ALWAYS_BLOCK` — deliberately
+zero-tolerance, S5's own design) tripping on real content inside MMLU-Pro's scraped, multilingual question
+set — not an attack, not a guard bug, just adversarial-shaped text the eval harness happens to send and a
+production user mostly wouldn't. Fixed by pointing `mmlu_pro`/`ifeval` at each role's own `llama-server`
+port directly, the same bypass BFCL's README section already established and for the same underlying reason
+— a benchmark tool isn't a real end user and shouldn't be measuring the security layer's precision instead
+of the model. `ifeval` had passed through the router fine (its prompts don't contain the same characters),
+so this was silent until `mmlu_pro` was added — worth remembering if any other suite grows multilingual
+sources later.
+
+**Real numbers, `super` (GLM-4.7-Flash, abliterated, live on Watch:8095), n=75:**
+`mmlu_pro=0.614`, `ifeval=0.72`. `gpqa_diamond` skipped — still blocked on the same HF gate acceptance
+V4's README documented on 2026-08-24 and never resolved (a one-time human web-UI step, no fleet tool can do
+it). `bfcl` skipped — confirmed live (again) that `bfcl-eval`'s `local_inference` handler has no GLM
+architecture support, same finding V4 recorded 2026-08-27. **No stock GLM-4.7-Flash counterpart is deployed
+anywhere on the fleet**, so no true stock-vs-abliterated head-to-head was possible without downloading and
+running a second ~18 GB model purely for comparison. Deliberately not done: this checkpoint has been live in
+production for days already (S9's registry shows it pre-dating this migration), so a stock comparison now
+would be forensic curiosity, not a promotion gate — the real, current capability numbers above are the
+useful output of this stage, and a stock pull is a legitimate but explicitly deferred follow-up if those
+numbers ever look wrong in practice.
+
+**Real numbers, `muse` (Qwen3.6-35B-A3B, abliterated, live on Forge:8090), n=75:**
+`mmlu_pro=0.749`, `ifeval=0.893`, `bfcl=0.008` (`simple_python` category only — `all` was not run, matching
+V4's own precedent of bounding BFCL to avoid multi-hour ceilings on a smoke-scale eval). **A genuine, free
+stock-vs-abliterated comparison was possible here** — `dispatch`'s own resident backend is
+`Qwen/Qwen3.6-35B-A3B`, the same base model pre-abliteration, already live on Watch:8088 for an unrelated
+reason (S6). Ran the identical three suites against it: `mmlu_pro=0.58`, `ifeval=0.907`, `bfcl=0.0`.
+`ifeval` shows the expected small tax (−1.3pp). `mmlu_pro` shows abliterated *ahead* of stock by +16.9pp,
+which is not what target §12.2 predicts. Flagged rather than smoothed over: the two GGUFs use different
+quantization schemes (`dispatch` is an Unsloth `UD-Q4_K_M`, `muse` is a plain `Q4_K_M`), which is a
+plausible confound large enough to produce a swing this size on a 75-sample subset by itself — this is not
+a clean isolated abliteration effect, and is recorded as an open question, not a result. `bfcl` for both
+sits near the floor (0.0 / 0.008), consistent with the README's own pre-existing caveat that no BFCL model
+entry exactly matches this fleet's checkpoints — noise, not signal, either way.
+
+**All four real runs and the router-guard bug are recorded in the shared history JSONL**
+(`/mnt/nas2-hermes-backup/Private/Hermes/Benchmarks/history.jsonl`) with honest notes on what was skipped
+and why, and the corresponding rows in S9's `model_registry` (`super` id 2, `muse` id 8) now carry a real
+`eval_ref` pointing at the exact history timestamps instead of `null`.
+
+**"The log analyst" is not a separate benchmark target.** Target §12.1's generic "Log analyst" role maps
+onto this fleet's actual `super` — §4.1's own role table already describes `super` as "analyst escalation,
+log analysis." There is still no Buzz `logs`-topic subscriber agent built (S8's finding stands: "S6/S7 built
+a pipeline with no real subscriber on any specialist topic," and S10 only filled `media`, not `logs`) — so
+"the log analyst" names a future consumer of `super`'s already-abliterated checkpoint, not a second model
+needing its own eval set. Building a duplicate benchmark under a different label for a topic with no live
+subscriber would be exactly the manufactured-ahead-of-need work this migration has been steering away from
+since S5/S8. `super`'s numbers above are the log-analyst coverage, until a real `logs`-topic agent exists
+to need anything more specific.
+
+**Supply chain (target §12.4), documented not remediated.** Every abliterated checkpoint actually deployed
+today — `super`, `muse`, `coder`, and `nano` (being retired as a role name, not touched here) — is a
+community checkpoint (`huihui-ai`), not self-produced. S9 already covers the letter of §12.4's mitigation
+(pinned revision hashes, byte-verified checksums, Node B placement); the spirit — self-produced abliteration
+preferred for anything load-bearing — is not met by any currently-live checkpoint. `hermes-abliterate-model.sh`
+and `infra/model-abliteration/`'s `heretic` install were confirmed still present and live-verified as of
+2026-08-19, so the capability to close this gap exists and is unused. Not acted on here: re-abliterating
+three already-deployed, already-working checkpoints is a real compute-and-validation undertaking, not
+configuration, and nothing in this stage's real eval numbers gave a reason to force it now. Recorded as a
+genuine, currently-accepted risk and an explicit candidate for future work, not silently dropped.
+
 ### S12 — Deferred
 
 Merged mode as a documented, scriptable procedure — **only if S1's `nccl-tests` numbers justify it.**
@@ -1170,3 +1245,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.8.0 | 2026-08-29 | S8 executed live on the fleet, with explicit operator confirmation given its irreversibility. 19 persona-owning/persona-automation units stopped and disabled across both nodes (not just the two gateways — every dependent watcher, guard, and timer). Matrix accounts left intact but dormant (not deactivated — operator decision, since deactivation is generally permanent and disconnecting already achieves retirement in practice). Found and fixed a real companion bug: `hermes-buzz-lockup-check.sh` would have false-alarmed forever on the now-intentionally-stopped watchers. `llama-nano.service` and `agents/*/PROMPT.md` creation both explicitly deferred to when they have a real purpose (S9, and whenever a real specialist agent exists, respectively) rather than manufactured now. All shared/fleet-wide services confirmed healthy throughout. |
 | 1.9.0 | 2026-08-29 | S9 executed and closed out live on the fleet: model registry built (`hermes-memory.py` 1.2.0's `model_registry`, 10 rows across all 8 active roles, byte-verified `sha256`, revision-pinned against HuggingFace's current HEAD with an honest forward-only caveat), `hermes-forge-residency.py` built and a real bug in it (role-keyed dict silently dropping multi-file rows) fixed on first use, `hermes-model-archive.py` actually deployed to spark-2 for the first time (closing a real gap — `omni` had never been archived anywhere) with a weekly timer now enabled on both nodes. Also: a real process mistake (overwriting pre-existing, correctly-designed service/timer files without reading them first) caught via `git diff` and reverted in the open rather than folded away. |
 | 1.10.0 | 2026-08-29 | S10's software half executed and verified live with two real renders (default engine, ~14s; `--engine flux2` explicitly, ~89s — closing V4 §9 risk 12 with real evidence, not assertion): `hermes-media.py` (the media agent, bridging Buzz's `media` topic to the existing broker/render-worker pipeline) and image screening inside `hermes-render-worker.py` (real magic-byte checks before an artifact is ever uploaded or delivered). The network-isolation half was deliberately not automated — `hermes-pfsense.py`'s own pre-existing docstring already decided pfSense gets no scripted actuation path, for exactly this class of change — and is instead a 7-item operator checklist, including a real currently-live exposure found (ComfyUI's port 8188 open to the whole LAN, not just Forge) and flagged rather than silently narrowed. |
+| 1.11.0 | 2026-08-29 | S11 executed and closed out live on the fleet: V4's benchmark harness (MMLU-Pro/GPQA-Diamond/IFEval/BFCL) confirmed real and already in use, not just documented. Found and worked around a real bug live: `mmlu_pro` sent through `hermes-router` gets blocked by the L1 injection guard's `unicode_smuggling` check on real (non-adversarial) characters inside the dataset itself — fixed by hitting each role's own `llama-server` port directly, same bypass BFCL's own README already established. Real per-role numbers recorded for `super` (mmlu_pro=0.614, ifeval=0.72) and `muse` (mmlu_pro=0.749, ifeval=0.893, bfcl=0.008), plus a genuine zero-cost stock-vs-abliterated comparison for `muse` against `dispatch`'s stock same-base backend — flagged an unresolved quantization confound rather than reporting a clean effect. `model_registry` rows for `super`/`muse` now carry a real `eval_ref`. Scoped "the log analyst" to `super`'s own already-covered role (target §4.1) rather than inventing a duplicate eval for a Buzz `logs`-topic agent that still doesn't exist — consistent with S8's own finding. Documented, not remediated: every live abliterated checkpoint (`super`/`muse`/`coder`/`nano`) is a community (`huihui-ai`) checkpoint, not self-produced, despite target §12.4's preference and working `heretic` tooling being available — a real, currently-accepted risk, not silently dropped. |
