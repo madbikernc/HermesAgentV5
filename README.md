@@ -1,16 +1,23 @@
 # HermesAgentV5
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 The Firmament's V5 rebuild: moving from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** specified in
 [`firmament-fleet-target-architecture.md`](firmament-fleet-target-architecture.md).
 
-**Status: planning only.** Nothing here is built, deployed, or verified. `../HermesAgentV4` stays live and
-authoritative until a stage in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) says otherwise.
+**Status: live and authoritative.** As of 2026-08-30, `tools/`, `skills/`, and `infra/` are consolidated
+here (~230 files, carried over from `HermesAgentV4` with every `REPO_DIR`/`ExecStart`/identity string
+repointed at this repo — nothing here shells out to or imports from `../HermesAgentV4`), and all three
+nodes (`spark`, `spark-2`, `HomeD13`) are cut over: every live systemd unit's `ExecStart` resolves to
+`../HermesAgentV5`, and `hermes-repo-autopull.timer` keeps each node's checkout current from
+[this repo's GitHub remote](https://github.com/madbikernc/HermesAgentV5). See
+[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the staged migration this repo's own code/content
+went through, and its own status section for what's still ahead architecturally (the dispatcher/presenter
+work below is largely built; this repo becoming the deployed checkout was a separate, later step).
 
-**Predecessors, both kept on disk in full, permanently:** `../HermesAgentV4` (live), `../HermesAgentRedo`
-(retired 2026-08-23). Neither is deleted; neither is depended on.
+**Predecessors, both kept on disk in full, permanently:** `../HermesAgentV4` (superseded 2026-08-30),
+`../HermesAgentRedo` (retired 2026-08-23). Neither is deleted; neither is depended on.
 
 ## What's changing, and why
 
@@ -54,3 +61,4 @@ Hostnames stay `spark` / `spark-2` / `HomeD13`. Watch, Forge, and Kiln are role 
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-08-29 | Initial migration-plan overview. |
+| 1.1.0 | 2026-08-30 | Status updated from "planning only" to "live and authoritative": `tools/`/`skills/`/`infra/` consolidated from `HermesAgentV4` into this repo, and all three fleet nodes cut over to it. `HermesAgentV4` marked superseded to match. |
