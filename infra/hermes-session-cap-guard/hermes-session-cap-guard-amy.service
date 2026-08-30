@@ -1,0 +1,14 @@
+[Unit]
+Description=hermes-session-cap-guard (Amy) - hard session-length cap with rotation
+After=network.target hermes-gateway-amy.service
+
+[Service]
+Type=simple
+User=amy
+Environment=VAULT_NODE=amy
+ExecStart=/home/amy/HermesAgentV5/tools/hermes-session-cap-guard.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
