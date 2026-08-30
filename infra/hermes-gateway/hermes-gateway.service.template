@@ -1,0 +1,62 @@
+# Version: 1.3.0
+[Unit]
+Description=Hermes Agent Gateway - Messaging Platform Integration
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+# The only line that differs from what `hermes gateway install --system` generates:
+# ExecStart points at the Vaultwarden-fetching wrapper instead of the venv's python
+# directly, so EMAIL_PASSWORD/MATRIX_ACCESS_TOKEN/TAVILY_API_KEY are injected into this
+# process's environment straight from Vaultwarden and never touch disk. See
+# tools/hermes-gateway-wrapper.sh for what it does before exec-ing the real gateway.
+# Re-apply this ExecStart line by hand after any future `hermes gateway install --system`
+# re-run, which will regenerate this file from scratch and overwrite the customization.
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-gateway-wrapper.sh
+WorkingDirectory=/home/pmoney/.hermes
+Environment="HOME=/home/pmoney"
+Environment="USER=pmoney"
+Environment="LOGNAME=pmoney"
+Environment="PATH=/home/pmoney/.hermes/hermes-agent/venv/bin:/home/pmoney/.hermes/hermes-agent/node_modules/.bin:/home/pmoney/.hermes/node/bin:/home/pmoney/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="VIRTUAL_ENV=/home/pmoney/.hermes/hermes-agent/venv"
+Environment="HERMES_HOME=/home/pmoney/.hermes"
+# REQUIRED per node, no placeholder left in: which Vaultwarden machine account
+# tools/hermes-gateway-wrapper.sh (via vault-get-secret.sh) fetches secrets as.
+# Setting it here means this unit never falls through to the host-wide
+# /etc/hermes/vault-node-name file, which answers for whichever identity wrote
+# it last and, when this node runs more than one identity's gateway (as amy and
+# sintra both do on the Spark), previously caused a real cross-identity fetch —
+# see LESSONS_LEARNED.md §2j and infra/vaultwarden/README.md step 5's warning.
+Environment="VAULT_NODE=<amy|sintra>"
+Restart=always
+# Exponential backoff (systemd >= 254), not a fixed 5s retry -- real incident,
+# 2026-08-15: both identities' gateways crash-looped on a Vaultwarden login
+# failure simultaneously, each restart attempting up to 3 more `bw login`
+# calls every 5s, which kept re-tripping Vaultwarden's own login rate limit
+# indefinitely (never clearing on its own). StartLimitIntervalSec=0 stays --
+# this must still recover on its own without a human, per §2b's accepted
+# trade-off -- but each successive retry now waits longer, self-limiting the
+# hammering instead of sustaining it. Sequence from RestartSec up to
+# RestartMaxDelaySec over RestartSteps: ~5s, 8s, 12s, 20s, 31s, 49s, 77s,
+# 121s, 191s, then holds at 300s (5min) -- comparable to the manual cooldown
+# this same failure mode needed by hand, both here and in
+# hermes-repo-sync.sh's 2026-08-09 incident.
+RestartSec=5
+RestartSteps=9
+RestartMaxDelaySec=300
+RestartForceExitStatus=75
+RestartPreventExitStatus=78
+KillMode=mixed
+KillSignal=SIGTERM
+ExecReload=/bin/kill -USR1 $MAINPID
+ExecStopPost=-/home/pmoney/.hermes/hermes-agent/venv/bin/python -m gateway.cgroup_cleanup
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

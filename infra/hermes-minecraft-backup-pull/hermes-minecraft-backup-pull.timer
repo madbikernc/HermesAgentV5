@@ -1,0 +1,10 @@
+[Unit]
+Description=Run hermes-minecraft-backup-pull daily
+
+[Timer]
+OnCalendar=*-*-* 04:05:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

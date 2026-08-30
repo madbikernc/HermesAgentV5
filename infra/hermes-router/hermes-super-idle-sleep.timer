@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every 5 minutes whether llama-super has been idle long enough to stop (spark only)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Watch pmoney's HermesAgentV5 checkout for a pull, trigger hermes-repo-sync.service
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-repo-sync/README.md
+
+[Path]
+# .git/logs/HEAD is the reflog -- appended to by any operation that moves
+# HEAD (pull, merge, checkout, reset), robust against refs/heads/main ever
+# being packed (which `git pack-refs` can do to inactive branches, though
+# not typically the one actually checked out). A bare `git fetch` alone
+# does NOT touch this file -- it only updates FETCH_HEAD and the remote-
+# tracking ref -- so this fires on an actual pull, not just a fetch,
+# matching the intended trigger exactly.
+PathChanged=/home/pmoney/HermesAgentV5/.git/logs/HEAD
+Unit=hermes-repo-sync.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+[Unit]
+Description=Hermes Buzz - topic-based pub/sub messaging plane for the fleet's agents
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-buzz/README.md
+After=network-online.target
+Wants=network-online.target
+# The database lives inside the LUKS container, which is never auto-mounted.
+# After a reboot this will fail and retry harmlessly until hermes-unlock.sh runs.
+# Intended behaviour, identical to hermes-broker.service — not a defect.
+RequiresMountsFor=/mnt/hermes-data
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment="BUZZ_DB=/mnt/hermes-data/buzz/messages.db"
+Environment="BUZZ_BIND=10.129.1.15"
+Environment="BUZZ_PORT=8101"
+Environment="MATRIX_HOMESERVER=http://127.0.0.1:6167"
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-buzz-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

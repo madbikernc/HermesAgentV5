@@ -1,0 +1,10 @@
+[Unit]
+Description=Run hermes-game-server-monitor daily
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

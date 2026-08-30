@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-rag-ingest-kb - daily catch-up ingestion of the personal-KB RAG corpus (Phase 30f)
+After=network.target hermes-embed.service
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-rag-ingest-kb.py

@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "description": "FLUX.2 Klein 4B text-to-image, ComfyUI API format (the 'prompt' key below is what gets POSTed to /prompt, wrapped as {\"prompt\": ..., \"client_id\": ...}). Hand-derived from the official comfyui-workflow-templates 'image_flux2_klein_text_to_image.json' UI-format template, whose generation logic is bundled as a subgraph that the classic /prompt execution API doesn't accept directly.",
+    "verified": "IMPLEMENTATION_PLAN.md Stage 3, live on HomeD13 2026-08-21: real image generated in 78s, ~7.4GB peak GPU usage on a 12GB RTX 3060, output correctly matched the prompt.",
+    "override_per_request": "node \"74\" (positive prompt text) and node \"9\" (filename_prefix) are the two fields a real caller should set per request."
+  },
+  "prompt": {
+    "70": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux-2-klein-4b-fp8.safetensors", "weight_dtype": "default"}},
+    "71": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_3_4b_fp4_flux2.safetensors", "type": "flux2"}},
+    "72": {"class_type": "VAELoader", "inputs": {"vae_name": "flux2-vae.safetensors"}},
+    "67": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["71", 0]}},
+    "74": {"class_type": "CLIPTextEncode", "inputs": {"text": "REPLACE ME - the real prompt", "clip": ["71", 0]}},
+    "62": {"class_type": "Flux2Scheduler", "inputs": {"steps": 20, "width": 1024, "height": 1024}},
+    "63": {"class_type": "CFGGuider", "inputs": {"cfg": 5, "model": ["70", 0], "positive": ["74", 0], "negative": ["67", 0]}},
+    "61": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+    "73": {"class_type": "RandomNoise", "inputs": {"noise_seed": 42}},
+    "66": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
+    "64": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["73", 0], "guider": ["63", 0], "sampler": ["61", 0], "sigmas": ["62", 0], "latent_image": ["66", 0]}},
+    "65": {"class_type": "VAEDecode", "inputs": {"samples": ["64", 0], "vae": ["72", 0]}},
+    "9": {"class_type": "SaveImage", "inputs": {"images": ["65", 0], "filename_prefix": "Flux2-Klein"}}
+  }
+}

@@ -1,0 +1,9 @@
+[Unit]
+Description=hermes-buzz-checkin - optional Buzz check-in nudge for %i
+After=network.target hermes-buzz.service
+
+[Service]
+Type=oneshot
+User=pmoney
+Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-buzz-checkin-trigger.sh %i

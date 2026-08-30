@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-pfsense-report - daily pfSense firewall log digest, emailed
+After=network.target hermes-router.service
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-pfsense-report.py

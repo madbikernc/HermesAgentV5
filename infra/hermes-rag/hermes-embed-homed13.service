@@ -1,0 +1,13 @@
+[Unit]
+Description=llama.cpp server - Qwen3-Embedding-0.6B (HomeD13 bulk-ingestion embedding, Phase 30c)
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+ExecStart=/opt/llama.cpp/start-embed-homed13.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

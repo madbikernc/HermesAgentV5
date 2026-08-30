@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-nfsensei-watch - daily nfSensei blog check, emailed on a matched criterion
+After=network.target hermes-router.service
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-nfsensei-watch.py

@@ -1,0 +1,24 @@
+[Unit]
+Description=Tailscale node agent (tailnet 2 - external game access, muncraft)
+Documentation=https://tailscale.com/kb/
+Wants=network-pre.target
+After=network-pre.target tailscaled.service
+
+[Service]
+ExecStart=/usr/sbin/tailscaled \
+  --state=/var/lib/tailscale-ext/tailscaled.state \
+  --socket=/run/tailscale-ext/tailscaled.sock \
+  --tun=tailscale1 \
+  --port=41642 \
+  --netfilter-mode=off
+ExecStopPost=/usr/sbin/tailscaled --cleanup \
+  --state=/var/lib/tailscale-ext/tailscaled.state \
+  --socket=/run/tailscale-ext/tailscaled.sock \
+  --tun=tailscale1
+Restart=on-failure
+RuntimeDirectory=tailscale-ext
+StateDirectory=tailscale-ext
+Type=notify
+
+[Install]
+WantedBy=multi-user.target

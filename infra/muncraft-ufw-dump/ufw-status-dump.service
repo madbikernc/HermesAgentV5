@@ -1,0 +1,6 @@
+[Unit]
+Description=Dump UFW status for hermes-game-server-monitor's firewall check
+
+[Service]
+Type=oneshot
+ExecStart=/opt/zomboid/server/ufw-status-dump.sh

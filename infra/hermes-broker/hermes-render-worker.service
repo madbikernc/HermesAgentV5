@@ -1,0 +1,26 @@
+[Unit]
+Description=Hermes render worker - pulls render jobs from the broker on the Spark
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-broker/README.md
+After=network-online.target comfyui-homed13.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment="BROKER_URL=http://10.129.1.15:8100"
+Environment="WORKER_NAME=homed13"
+Environment="POLL_SECONDS=10"
+Environment="JOB_TIMEOUT=900"
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-render-worker-wrapper.sh
+Restart=always
+RestartSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

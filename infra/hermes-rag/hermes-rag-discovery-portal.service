@@ -1,0 +1,30 @@
+[Unit]
+Description=Hermes RAG source-discovery review portal (Phase 33) - browser UI for discovery_candidates
+After=network-online.target hermes-embed.service
+Wants=network-online.target
+# vectors.db lives inside the LUKS container, which is never auto-mounted.
+# After a reboot this will fail and retry harmlessly until hermes-unlock.sh
+# runs. Intended behaviour, identical to hermes-broker.service -- not a defect.
+RequiresMountsFor=/mnt/hermes-data
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+# Tailnet IP only -- a human's browser reaches this, not another fleet node,
+# so LAN/internet exposure buys nothing (see hermes-rag-discovery-portal.py's
+# own module docstring). Never set to 0.0.0.0.
+Environment="PORTAL_BIND=100.96.59.79"
+Environment="PORTAL_PORT=8093"
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-rag-discovery-portal-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

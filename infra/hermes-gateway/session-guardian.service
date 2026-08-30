@@ -1,0 +1,16 @@
+[Unit]
+Description=Hermes session guardian - detects stuck sessions, alerts, Boss-triggered cleanup
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+WorkingDirectory=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/session-guardian.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

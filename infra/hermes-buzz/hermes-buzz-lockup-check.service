@@ -1,0 +1,9 @@
+[Unit]
+Description=hermes-buzz-lockup-check - frequent Buzz channel/watcher health check, alerts FleetOps on a real problem
+After=network.target hermes-buzz.service
+
+[Service]
+Type=oneshot
+User=pmoney
+Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-buzz-lockup-check.sh

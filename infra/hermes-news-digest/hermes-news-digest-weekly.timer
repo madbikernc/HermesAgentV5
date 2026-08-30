@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly run of hermes-news-digest, Mondays after the daily run (Phase 31)
+
+[Timer]
+OnCalendar=Mon *-*-* 07:20:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

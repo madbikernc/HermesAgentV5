@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily run of hermes-news-digest (Phase 31)
+
+[Timer]
+OnCalendar=*-*-* 07:10:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

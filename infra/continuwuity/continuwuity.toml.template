@@ -1,0 +1,22 @@
+# Continuwuity homeserver config — Hermes Fleet template.
+# Version: 1.0.0
+#
+# Copy to /etc/continuwuity/continuwuity.toml and fill in CHANGEME values.
+# See ../README.md in this directory for the full ordered setup.
+[global]
+server_name = "CHANGEME"          # e.g. "spark" — becomes the @user:CHANGEME suffix for every account
+database_path = "/var/lib/continuwuity/db"
+
+address = "0.0.0.0"
+port = 6167
+
+allow_federation = false
+allow_public_room_directory = false
+
+# Open only long enough to register the fleet's accounts (see README), then
+# flip to false and restart — never leave this true.
+allow_registration = true
+registration_token = "CHANGEME"   # openssl rand -base64 32 | tr -d '/+=' | head -c 40
+
+[global.well_known]
+client = "https://CHANGEME.your-tailnet.ts.net"   # Tailscale Serve hostname for phone clients

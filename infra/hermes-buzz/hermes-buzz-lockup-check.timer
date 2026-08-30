@@ -1,0 +1,10 @@
+[Unit]
+Description=Run hermes-buzz-lockup-check every 5 minutes
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=5min
+Unit=hermes-buzz-lockup-check.service
+
+[Install]
+WantedBy=timers.target

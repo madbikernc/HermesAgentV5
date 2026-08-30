@@ -1,0 +1,13 @@
+[Unit]
+Description=llama.cpp server - Qwen3-Embedding-0.6B (RAG query-time embedding, Phase 30a)
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+ExecStart=/opt/llama.cpp/start-embed.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

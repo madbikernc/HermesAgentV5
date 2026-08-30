@@ -1,0 +1,9 @@
+[Unit]
+Description=hermes-self-repair-reminder - daily reminder to The Boss to review any self-repaired scripts/skills
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-remediate/README.md
+After=network.target
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-self-repair-reminder.py

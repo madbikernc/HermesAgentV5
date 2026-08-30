@@ -1,0 +1,10 @@
+#!/bin/bash
+# Version: 1.0.0
+#
+# Convenience wrapper so `tailscale-ext status`/`up`/etc. don't require
+# spelling out --socket every time. Talks to the second tailscaled instance
+# (tailnet 2, external game access) started by tailscaled-ext.service —
+# the box's primary tailscaled/tailnet is untouched by this wrapper.
+set -euo pipefail
+
+exec /usr/bin/tailscale --socket=/run/tailscale-ext/tailscaled.sock "$@"

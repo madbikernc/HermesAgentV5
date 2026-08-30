@@ -1,0 +1,20 @@
+{
+  "llama_cpp_qwen4exp": {
+    "alerted": true,
+    "evidence_url": "https://github.com/ggml-org/llama.cpp/pull/27742"
+  },
+  "qwen4_flash": {
+    "alerted": false,
+    "evidence_url": null
+  },
+  "glm_5_3_seen": [
+    "zai-org/GLM-5.3-Flash",
+    "unsloth/GLM-5.3-Flash-GGUF",
+    "AtomicChat/GLM-5.3-Flash-GGUF",
+    "Blackfrost-AI/GLM-5.3-Flash-DERISKED-GGUF",
+    "DevQuasar/zai-org.GLM-5.3-Flash-GGUF",
+    "avar6/GLM-5.3-Flash-BF16-gguf",
+    "unsloth/GLM-5.3-GGUF",
+    "LibertAIDAI/GLM-5.3-Flash-NVFP4"
+  ]
+}

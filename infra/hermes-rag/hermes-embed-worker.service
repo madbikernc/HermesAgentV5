@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes embed worker - pulls bulk-embedding jobs from the broker on the Spark (Phase 30c)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-rag/README.md
+After=network-online.target hermes-embed-homed13.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment="BROKER_URL=http://10.129.1.15:8100"
+Environment="WORKER_NAME=homed13"
+Environment="JOB_TYPE=embed"
+Environment="POLL_SECONDS=10"
+Environment="JOB_TIMEOUT=300"
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-embed-worker-wrapper.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

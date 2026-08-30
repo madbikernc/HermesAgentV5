@@ -1,0 +1,11 @@
+[Unit]
+Description=Run hermes-self-repair-reminder daily
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=hermes-self-repair-reminder.service
+
+[Install]
+WantedBy=timers.target

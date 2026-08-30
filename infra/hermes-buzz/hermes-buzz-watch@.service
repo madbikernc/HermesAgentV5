@@ -1,0 +1,16 @@
+[Unit]
+Description=hermes-buzz-watch for %i - watches Buzz inbox, nudges on new messages
+After=network-online.target hermes-buzz.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-buzz-watch.sh %i
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

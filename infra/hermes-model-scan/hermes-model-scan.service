@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-model-scan - weekly open-weight model scan, emailed with fleet hardware fit
+After=network.target hermes-router.service
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-model-scan.py

@@ -1,0 +1,15 @@
+[Unit]
+Description=ComfyUI - HomeD13's render-worker image generation stack (post-Stage-3: sole GPU consumer)
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+WorkingDirectory=/opt/comfyui
+ExecStart=/opt/comfyui/venv/bin/python main.py --listen 0.0.0.0 --port 8188
+ExecStartPost=/home/pmoney/HermesAgentV5/infra/comfyui/comfyui-warmup.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

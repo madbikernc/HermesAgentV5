@@ -1,0 +1,19 @@
+[Unit]
+Description=continuwuity Matrix homeserver
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=continuwuity
+Group=continuwuity
+ExecStart=/opt/continuwuity/continuwuity -c /etc/continuwuity/continuwuity.toml
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/var/lib/continuwuity
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/continuwuity
+
+[Install]
+WantedBy=multi-user.target

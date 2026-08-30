@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodically pull pmoney's own HermesAgentV5 checkout on this node (fast-forward-only)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-repo-sync/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/usr/bin/git -C /home/pmoney/HermesAgentV5 pull --ff-only
+StandardOutput=journal
+StandardError=journal

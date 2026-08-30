@@ -1,0 +1,10 @@
+[Unit]
+Description=Run hermes-dispatch-standby-check every 2 minutes
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=2min
+Unit=hermes-dispatch-standby-check.service
+
+[Install]
+WantedBy=timers.target

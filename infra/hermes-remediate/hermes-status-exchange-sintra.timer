@@ -1,0 +1,11 @@
+[Unit]
+Description=Run hermes-status-exchange for sintra on the hour
+
+[Timer]
+OnCalendar=*-*-* *:00:00
+Persistent=true
+RandomizedDelaySec=60
+Unit=hermes-status-exchange@sintra.service
+
+[Install]
+WantedBy=timers.target

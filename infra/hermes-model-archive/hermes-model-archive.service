@@ -1,0 +1,9 @@
+[Unit]
+Description=hermes-model-archive - archive downloaded model files to NAS2
+After=network.target mnt-nas2\x2dhermes\x2dbackup.automount
+Wants=mnt-nas2\x2dhermes\x2dbackup.automount
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-model-archive.py --verbose

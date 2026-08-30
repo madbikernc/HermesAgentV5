@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly run of hermes-rag-source-discovery scan (Phase 30h) — throttled, newest chunks first
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

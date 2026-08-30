@@ -1,0 +1,17 @@
+# Phase 31 news-digest topics of interest — one topic per line.
+#
+# Boss-edited directly, not chat-driven: hermes-news-digest.py reads this
+# file verbatim on every run, no NLP or LLM judgment involved in parsing it.
+# Blank lines and lines starting with # are ignored. Despite the .yaml
+# extension (kept for continuity with the original plan), no YAML structure
+# is actually required or parsed — this is deliberately just a flat list.
+#
+# Each topic becomes a real semantic search against the RAG index (fleet
+# docs, podcast archive, ops snapshots, personal notes), restricted to
+# content added since the last digest run. Empty right now — add real
+# topics whenever you're ready; both `daily` and `weekly` no-op cleanly
+# (print a note, send no email) until this file has at least one real line.
+#
+# Example (remove the # to activate):
+# artificial intelligence safety research
+# home network security vulnerabilities

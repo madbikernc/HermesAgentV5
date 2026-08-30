@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes media agent - bridges the Buzz media topic to the existing broker render pipeline
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-media/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-media-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

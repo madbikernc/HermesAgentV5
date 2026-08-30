@@ -1,0 +1,9 @@
+[Unit]
+Description=hermes-rag-ingest-podcasts - daily catch-up ingestion of the podcast-archive RAG corpus (Phase 30c)
+After=network.target hermes-embed.service
+
+[Service]
+Type=oneshot
+User=pmoney
+TimeoutStartSec=21600
+ExecStart=/opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-rag-ingest-podcasts.py

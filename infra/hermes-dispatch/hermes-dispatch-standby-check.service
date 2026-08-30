@@ -1,0 +1,9 @@
+[Unit]
+Description=hermes-dispatch-standby-check - watches Watch's dispatch heartbeat from Forge, alerts FleetOps on staleness (does not auto-promote)
+After=network.target
+
+[Service]
+Type=oneshot
+User=pmoney
+Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-dispatch-standby-check.sh

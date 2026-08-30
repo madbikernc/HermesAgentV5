@@ -1,0 +1,37 @@
+[Unit]
+Description=Hermes job broker - durable cross-node execution plane
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-broker/README.md
+After=network-online.target
+Wants=network-online.target
+# The database lives inside the LUKS container, which is never auto-mounted.
+# After a reboot this will fail and retry harmlessly until hermes-unlock.sh runs.
+# Intended behaviour, identical to llama-sintra-core.service — not a defect.
+RequiresMountsFor=/mnt/hermes-data
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment="BROKER_DB=/mnt/hermes-data/broker/jobs.db"
+Environment="BROKER_ARTIFACTS=/mnt/hermes-data/broker/artifacts"
+Environment="BROKER_BIND=10.129.1.15"
+Environment="BROKER_PORT=8100"
+Environment="MATRIX_HOMESERVER=http://127.0.0.1:6167"
+# 900s (the code default) is shorter than a real 121-frame video job's
+# measured worst-case runtime (~1415s) -- the lease is global across every
+# job type, not per-type, so a video job's own worker could still be
+# legitimately mid-render when reap_expired_leases() requeued it out from
+# under it. Raised well above that measured worst case, with margin.
+Environment="BROKER_LEASE_SECONDS=2400"
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-broker-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

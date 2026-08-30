@@ -1,0 +1,11 @@
+[Unit]
+Description=Propagate pmoney's HermesAgentV5 pull to Sintra's/Amy's checkouts and restart affected services
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-repo-sync/README.md
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-repo-sync.sh
+StandardOutput=journal
+StandardError=journal

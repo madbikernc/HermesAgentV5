@@ -1,0 +1,9 @@
+[Unit]
+Description=hermes-status-exchange - hourly cross-node status check for %i
+After=network.target hermes-buzz.service
+
+[Service]
+Type=oneshot
+User=pmoney
+Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-status-exchange-trigger.sh %i

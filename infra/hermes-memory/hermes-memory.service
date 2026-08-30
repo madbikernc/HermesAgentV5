@@ -1,0 +1,29 @@
+[Unit]
+Description=Hermes memory service - shared conversational memory, dual-channel, semantic recall
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-memory/README.md
+After=network-online.target
+Wants=network-online.target
+# The database lives inside the LUKS container, which is never auto-mounted.
+# After a reboot this will fail and retry harmlessly until hermes-unlock.sh runs.
+# Intended behaviour, identical to hermes-broker.service and llama-sintra-core.service.
+RequiresMountsFor=/mnt/hermes-data
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment="MEMORY_DB=/mnt/hermes-data/memory/memory.db"
+Environment="MEMORY_BIND=10.129.1.15"
+Environment="MEMORY_PORT=8102"
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-memory-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

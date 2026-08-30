@@ -1,0 +1,9 @@
+[Unit]
+Description=Stop llama-super if it has sat idle too long (spark only, triggered by hermes-super-idle-sleep.timer)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-router/README.md
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-idle-sleep.sh super llama-super 900

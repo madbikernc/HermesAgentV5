@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-rag-ingest-docs - daily catch-up ingestion of the fleet-docs RAG corpus (Phase 30b)
+After=network.target hermes-embed.service
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-rag-ingest-docs.py --repo /home/pmoney/HermesAgentV5

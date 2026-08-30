@@ -1,0 +1,9 @@
+[Unit]
+Description=hermes-wiki-checkin - daily wiki-maintenance check-in prompt for %i
+After=network.target hermes-router.service
+
+[Service]
+Type=oneshot
+User=pmoney
+Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-wiki-checkin-trigger.sh %i

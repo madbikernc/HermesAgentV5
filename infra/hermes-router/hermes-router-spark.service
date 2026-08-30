@@ -1,0 +1,23 @@
+[Unit]
+Description=hermes-router (spark) - names a role instead of a port, cross-node capability endpoints
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-router/README.md
+After=network-online.target llama-nano.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment="HERMES_NODE=spark"
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-router-wrapper.sh
+Restart=always
+RestartSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=Zomboid World Backup
+After=zomboid.service
+
+[Service]
+User=muncraft
+ExecStart=/opt/zomboid/server/zomboid-backup.sh

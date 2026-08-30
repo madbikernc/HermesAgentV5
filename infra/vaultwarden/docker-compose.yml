@@ -1,0 +1,38 @@
+# Vaultwarden — Hermes Fleet primary/standby template.
+# Version: 1.0.0
+#
+# This is the actual, working shape of NAS2's primary (and NAS1's standby, with
+# a different DOMAIN in .env). It intentionally does NOT include the Caddy
+# reverse-proxy service tried earlier in this project — that attempt hit an
+# unresolved TLS bug and was abandoned in favor of Vaultwarden's own native
+# ROCKET_TLS support below. See IMPLEMENTATION_PLAN.md §3a for the full story.
+#
+# Setup: see ../README.md in this directory for the ordered steps to go from
+# this file to a fully working instance (cert generation, .env, first-run org
+# setup, sealed bootstrap secrets).
+services:
+  vaultwarden:
+    image: vaultwarden/server:1.37.0 # pinned deliberately, never :latest
+    container_name: vaultwarden
+    restart: unless-stopped
+    ports:
+      # Both bindings are needed: the LAN IP for direct node/browser access,
+      # loopback for Tailscale Serve's proxy (which only supports 127.0.0.1
+      # targets). Replace 10.129.1.167 with this NAS's real LAN IP.
+      - "10.129.1.167:8222:80"
+      - "127.0.0.1:8222:80"
+    volumes:
+      - ./data:/data
+      - ./certs:/certs:ro
+    env_file:
+      - ./.env
+    environment:
+      # Self-signed cert generated per the README (CN/SAN = this NAS's LAN IP).
+      # Vaultwarden's own Rocket server speaks TLS directly — no reverse proxy.
+      - ROCKET_TLS={certs="/certs/vw-lan.crt",key="/certs/vw-lan.key"}
+      - WEBSOCKET_ENABLE=true
+      - LOG_LEVEL=warn
+      # Keep this false except during the brief first-run account-creation
+      # window (see README) — flip back to false and redeploy immediately after.
+      - SIGNUPS_ALLOWED=false
+      - INVITATIONS_ALLOWED=true

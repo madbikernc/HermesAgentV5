@@ -1,0 +1,21 @@
+{
+  "_comment": "Per-identity remediation allowlist for hermes-remediate-worker.py. An identity may only request a restart or nudge target listed here for her -- anything else is refused and logged, not silently ignored. Add new approved actions by adding entries here; no code change needed. Gateway services are deliberately excluded (direct decision, 2026-08-21: restarting one's own gateway kills the current turn -- too risky for an unattended v1).",
+  "sintra": {
+    "restart-service": [
+      "hermes-fabrication-guard.service",
+      "hermes-session-guardian-sintra.service",
+      "hermes-session-cap-guard-sintra.service",
+      "hermes-buzz-watch@sintra.service"
+    ],
+    "send-nudge": ["amy"]
+  },
+  "amy": {
+    "restart-service": [
+      "hermes-fabrication-guard-amy.service",
+      "hermes-session-guardian-amy.service",
+      "hermes-session-cap-guard-amy.service",
+      "hermes-buzz-watch@amy.service"
+    ],
+    "send-nudge": ["sintra"]
+  }
+}

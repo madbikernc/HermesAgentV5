@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-rag-source-discovery - hourly throttled scan of newly-indexed RAG chunks for external-resource mentions (Phase 30h)
+After=network.target hermes-embed.service hermes-router.service
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-rag-source-discovery.py scan

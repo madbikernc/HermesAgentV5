@@ -1,0 +1,11 @@
+[Unit]
+Description=Run hermes-status-exchange for amy on the half hour
+
+[Timer]
+OnCalendar=*-*-* *:30:00
+Persistent=true
+RandomizedDelaySec=60
+Unit=hermes-status-exchange@amy.service
+
+[Install]
+WantedBy=timers.target

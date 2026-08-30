@@ -1,0 +1,27 @@
+[Unit]
+Description=Hermes guard - Layer 2 injection/jailbreak classifier (Llama Prompt Guard 2, stock, CPU-only)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-guard/README.md
+After=network.target
+# Model weights live inside the LUKS container, which is never auto-mounted. After a reboot
+# this will fail and retry harmlessly until hermes-unlock.sh runs -- same intended behaviour
+# as every other service reading from /mnt/hermes-data.
+RequiresMountsFor=/mnt/hermes-data
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment="GUARD_BIND=10.129.1.15"
+Environment="GUARD_PORT=8096"
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-guard-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

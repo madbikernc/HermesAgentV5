@@ -1,0 +1,22 @@
+# Packages for /opt/hermes/venvs/rag/ -- the shared venv every RAG tool
+# (hermes-rag-query.py, hermes-rag-ingest-*.py, hermes-rag-source-discovery.py,
+# hermes-news-digest.py) runs under. Added 2026-08-15: this venv existed
+# before this file did, set up ad hoc across Phase 30's build -- no
+# requirements.txt tracked its package list anywhere in the repo until now,
+# a real gap found while adding PDF/docx support to hermes-rag-ingest-kb.py.
+# If this list turns out incomplete against the venv's real, live packages,
+# trust the live venv (`pip freeze`) over this file and fix this file to
+# match -- it's documentation of intent, not the source of truth.
+#
+# sqlite-vec's own Python bindings are NOT listed here on purpose: they're
+# loaded as a runtime SQLite extension (hermes_rag_common.py's connect()),
+# not imported as a regular package.
+pypdf>=5.0
+python-docx>=1.1
+# lxml was already resident in the venv (a transitive python-docx
+# dependency, confirmed live via `pip list` before adding EPUB support) --
+# listed explicitly now that hermes-rag-ingest-kb.py imports it directly
+# for HTML-tag stripping, rather than adding beautifulsoup4 as a second way
+# to do the same job and leaving the real import undeclared.
+lxml>=5.0
+EbookLib>=0.18

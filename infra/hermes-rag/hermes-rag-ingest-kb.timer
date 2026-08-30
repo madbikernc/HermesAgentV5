@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily catch-up run of hermes-rag-ingest-kb (Phase 30f)
+
+[Timer]
+OnCalendar=*-*-* 06:59:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run hermes-wiki-checkin for sintra daily
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=hermes-wiki-checkin@sintra.service
+
+[Install]
+WantedBy=timers.target

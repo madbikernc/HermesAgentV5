@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes logs - the log analyst (super-backed, Buzz logs-topic subscriber)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-logs/README.md
+After=network-online.target hermes-buzz.service hermes-memory.service hermes-router.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-logs-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

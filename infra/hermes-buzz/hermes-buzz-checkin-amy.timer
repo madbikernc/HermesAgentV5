@@ -1,0 +1,11 @@
+[Unit]
+Description=Run hermes-buzz-checkin for amy every 4 hours, offset 1h from sintra's
+
+[Timer]
+OnCalendar=*-*-* 01,05,09,13,17,21:00:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=hermes-buzz-checkin@amy.service
+
+[Install]
+WantedBy=timers.target

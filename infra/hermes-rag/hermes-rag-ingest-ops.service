@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-rag-ingest-ops - daily catch-up ingestion of the ops (node-health) RAG corpus (Phase 30e)
+After=network.target hermes-embed.service
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-rag-ingest-ops.py

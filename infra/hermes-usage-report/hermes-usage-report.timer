@@ -1,0 +1,10 @@
+[Unit]
+Description=Run hermes-usage-report weekly
+
+[Timer]
+OnCalendar=Mon *-*-* 08:15:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

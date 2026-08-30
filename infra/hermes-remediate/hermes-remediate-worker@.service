@@ -1,0 +1,18 @@
+[Unit]
+Description=hermes-remediate-worker for %i - executes allowlisted self-remediation actions
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-remediate/README.md
+After=network-online.target hermes-broker.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-remediate-worker-wrapper.sh %i
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

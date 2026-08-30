@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily catch-up run of hermes-rag-ingest-podcasts (Phase 30c)
+
+[Timer]
+OnCalendar=*-*-* 06:50:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
