@@ -1,5 +1,35 @@
 #!/usr/bin/env python3
-# Version: 1.0.1
+# Version: 1.1.0
+#
+# 1.1.0 (2026-08-30) — minimal light-voice styling pass added on the outbound success path only
+# (check_outstanding()'s `state == "done"` branch) -- target §6.2/§6.3, operator direction: "keep
+# it minimal, light voice, no named persona." New looks_technical()/should_style() implement
+# passthrough-by-default (§6.3): code fences, stack traces, JSON bodies, multi-line timestamped
+# log output, and anything over STYLE_MAX_CHARS skip styling and go out exactly as stored; only
+# short-enough, chat-shaped replies reach a model call at all. New style_reply() calls `dispatch`
+# through hermes-router's OpenAI-compatible proxy at ROUTER_URL, same request shape hermes-logs.py
+# already establishes for calling a role this way. Model choice took a real correction during
+# build: the obvious precedent (`super`, matching hermes-logs.py's own choice) turned out to be
+# running an abliterated checkpoint live (Huihui-GLM-4.7-Flash-abliterated) -- confirmed by
+# curling its /v1/models -- which would have silently violated target §12.1's own table
+# ("Presenter | Stock | Outbound only; no benefit") and the operator's explicit stock-weights
+# choice. Checked every other resident role's actual loaded model before picking one: `muse` is
+# also abliterated live; `omni` is stock but on spark-2 (cross-node hop) and sized for
+# multimodal/reasoning, not light restyling; `dispatch` (Qwen3.6-35B-A3B, confirmed stock per S6,
+# "never abliterated") is the only always-resident, confirmed-stock, right-sized option. Reusing
+# it means styling calls share the one backend target §6.1 argues for keeping response-formatting
+# away from -- an accepted, operator-confirmed tradeoff, not an oversight, since styling calls are
+# low-volume (only fire on a chat reply actually being delivered, not on every routing decision).
+# STYLE_SYSTEM_PROMPT states target §6.2's hard contract
+# directly: forbid omitting/softening any fact (especially failures), forbid inventing certainty,
+# forbid resolving ambiguity the source left open. Graceful degradation is unconditional: any
+# exception, timeout, or empty/malformed model response falls straight back to the original raw
+# text -- style_reply() never raises and never blocks delivery. The three failure paths
+# (screened-out / dispatch-recording-failure / timeout) are untouched, still hardcoded plain
+# text, per the module docstring's own "failures escalate verbatim" rule. Does not write the
+# styled text back to hermes-memory's `presented` column -- no PATCH/update route exists on that
+# table (hermes-memory.py's /turns is insert-only), and dispatch already reads `raw` per the
+# insulation contract's own rule, so nothing downstream needs it.
 #
 # 1.0.1 — real bug found live during this stage's own verification: `join_room()` called the
 # join-by-room-ID endpoint with PUT, which is wrong — that verb is for the txn-keyed
@@ -12,23 +42,30 @@
 # target §6.1's whole argument: keep the latency-critical router/dispatcher out of response
 # formatting, make personality a config file instead of baked into N agents' prompts.
 #
-# **This stage builds the seam, not the voice** (V5 IMPLEMENTATION_PLAN.md §4.4, operator
-# direction). No styling model call exists here at all — every reply is passthrough, which
-# trivially satisfies target §6.3's "passthrough by default" and defers the actual interactive
-# persona as a separate decision. Add a styling pass later without touching the insulation
-# contract below; do not backfill one in here casually.
+# **A minimal styling pass now exists** (1.1.0), scoped to the outbound success path only —
+# passthrough-by-default for anything that looks technical, stock weights (`super`), unconditional
+# fallback to raw text on any failure. This is that "later, separate decision" V5
+# IMPLEMENTATION_PLAN.md §4.4 deferred. Re-read the insulation contract below before extending it
+# further.
 #
-# The insulation contract (target §6.2), enforced in code, not a prompt this process doesn't
-# even have one of:
+# The insulation contract (target §6.2), enforced in code:
 #   1. Inbound normalization — inbound text goes to hermes-memory and Buzz byte-for-byte. No
-#      paraphrase, no trimming beyond what Matrix itself already did.
+#      paraphrase, no trimming beyond what Matrix itself already did. Untouched by the styling
+#      pass — handle_message() never calls style_reply(), only check_outstanding() does, and only
+#      on the outbound side.
 #   2. Conversation history — not this process's concern; hermes-dispatch.py reads raw from
-#      hermes-memory directly, this process never re-derives or forwards "what was said."
-#   3. Clarifying questions — out of scope for this stage (no styling pass exists to frame one).
-#   4. Fidelity drift — cannot happen without a styling pass; passthrough is exact by
-#      construction. A future styling stage must re-read this contract before adding one.
+#      hermes-memory directly, this process never re-derives or forwards "what was said." The
+#      styled text a user reads is never what a future dispatch decision is made from.
+#   3. Clarifying questions — the presenter still never asks one in-character; nothing routes a
+#      styled reply back into the dispatch path.
+#   4. Fidelity drift — actively defended now, not structurally impossible: should_style() scopes
+#      the model call to short, chat-shaped text only (see looks_technical()), STYLE_SYSTEM_PROMPT
+#      explicitly forbids omitting/softening facts or inventing certainty, and style_reply() falls
+#      back to the untouched raw text unconditionally on any exception, timeout, or malformed
+#      response.
 #   Failures escalate verbatim: a screened-out, errored, or timed-out task gets a plain, honest
-#   status message, never silence and never invented certainty.
+#   status message, never silence and never invented certainty. check_outstanding()'s three
+#   failure branches never call style_reply() at all.
 #
 # Holds real local state (a Matrix sync cursor — normal for any Matrix client, unrelated to
 # hermes-dispatch.py's routing-state non-negotiable) but no in-memory index of outstanding tasks:
@@ -46,9 +83,34 @@
 #   TASK_TIMEOUT_SECONDS default 300 — how long before an undelivered task gets a plain timeout
 #                        notice instead of silence
 #   DEBUG_ATTRIBUTION   default "0" — set "1" to prefix replies with "[dispatch→<topic>] "
+#   ROUTER_URL          default http://127.0.0.1:8080 — hermes-router's OpenAI-compatible proxy;
+#                        presenter and the router both run on Watch (spark), same node `super`
+#                        lives on, same pattern hermes-logs.py's ROUTER_URL already establishes.
+#                        No bearer token — port 8080 is deliberately loopback-only and unauthed.
+#   STYLE_ENABLED       default "1" — set "0" to fully disable the styling pass (instant rollback
+#                        to pure passthrough without a code change)
+#   STYLE_MODEL         default "dispatch" — role name sent as `model`; stock weights only (target
+#                        §12.1: "Presenter | Stock | Outbound only; no benefit"). Not `super`
+#                        (confirmed abliterated live: Huihui-GLM-4.7-Flash-abliterated) or `muse`
+#                        (confirmed abliterated live). `dispatch` is the only always-resident,
+#                        confirmed-stock role (Qwen3.6-35B-A3B, never abliterated per S6) — the
+#                        cross-node hop and wrong-shape model size ruled out `omni` (also stock,
+#                        but on spark-2). Accepted tradeoff, operator confirmed: styling calls
+#                        share dispatch's own inference queue, the one backend target §6.1 argues
+#                        for keeping response-formatting away from — acceptable here since styling
+#                        calls are low-volume (only fire on a chat reply actually being delivered).
+#   STYLE_TIMEOUT_SECONDS default 25 — bounded well under the router's own on-demand wake budget
+#                        so a cold `super` can never stall this process's single-threaded poll
+#                        loop; on timeout, falls straight back to raw text
+#   STYLE_MIN_LEN       default 40 — replies shorter than this skip styling (not enough text to
+#                        benefit, not worth a model call)
+#   STYLE_MAX_CHARS     default 4000 — replies longer than this are treated as technical/bulk
+#                        output and skip styling regardless of shape (cost control + the largest
+#                        fidelity-drift surface, target §6.3)
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -71,6 +133,13 @@ SYNC_STATE_FILE = Path(os.environ.get("SYNC_STATE_FILE", str(Path.home() / ".her
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "300"))
 DEBUG_ATTRIBUTION = os.environ.get("DEBUG_ATTRIBUTION", "0") == "1"
+
+ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
+STYLE_ENABLED = os.environ.get("STYLE_ENABLED", "1") == "1"
+STYLE_MODEL = os.environ.get("STYLE_MODEL", "dispatch")
+STYLE_TIMEOUT_SECONDS = int(os.environ.get("STYLE_TIMEOUT_SECONDS", "25"))
+STYLE_MIN_LEN = int(os.environ.get("STYLE_MIN_LEN", "40"))
+STYLE_MAX_CHARS = int(os.environ.get("STYLE_MAX_CHARS", "4000"))
 
 
 def log(msg):
@@ -211,9 +280,86 @@ def format_reply(topic, text):
     return text
 
 
+STYLE_SYSTEM_PROMPT = (
+    "You lightly restyle a fleet agent's reply before it reaches the user in chat. Keep it brief "
+    "and natural -- you may smooth phrasing, tighten wording, and remove redundancy. You must "
+    "not: omit, soften, or bury any fact -- especially an error, failure, warning, or caveat; "
+    "invent certainty the original text does not have; resolve any ambiguity or open question the "
+    "original text left open; add information, opinions, or a persona that was not already "
+    "there. If the original already reads naturally, return it unchanged. Reply with only the "
+    "rewritten text -- no preamble, no quotation marks, no commentary."
+)
+
+_CODE_FENCE_RE = re.compile(r"```")
+_STACK_TRACE_RE = re.compile(
+    r"Traceback \(most recent call last\)|"
+    r"^\s*File \"[^\"]+\", line \d+|"
+    r"Exception in thread|"
+    r"^\s*at [\w.$]+\(.*\)|"
+    r"\.(?:py|java|js|go|rb):\d+",
+    re.MULTILINE,
+)
+_TIMESTAMP_LINE_RE = re.compile(r"^\s*\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", re.MULTILINE)
+
+
+def looks_technical(text):
+    """Cheap, deterministic, no model call — target §6.3's passthrough-by-default. Errs toward
+    over-detecting: a chat reply wrongly skipped just loses voice on that one message (harmless);
+    technical output wrongly styled is the actual risk this exists to prevent."""
+    if _CODE_FENCE_RE.search(text):
+        return True
+    if _STACK_TRACE_RE.search(text):
+        return True
+    stripped = text.strip()
+    if stripped[:1] in "{[" and stripped[-1:] in "}]":
+        try:
+            json.loads(stripped)
+            return True
+        except (ValueError, json.JSONDecodeError):
+            pass
+    if len(_TIMESTAMP_LINE_RE.findall(text)) >= 3:
+        return True
+    if len(text) > STYLE_MAX_CHARS:
+        return True
+    return False
+
+
+def should_style(text):
+    if not text or len(text) < STYLE_MIN_LEN:
+        return False
+    return not looks_technical(text)
+
+
+def style_reply(text):
+    """Best-effort light restyling via `super` (stock weights, target §12.1). Never raises and
+    never blocks delivery — any failure, timeout, or empty/malformed model response falls
+    straight back to the original raw text. Only reached for replies should_style() already
+    decided are chat-shaped; blocked/errored/timed-out task paths in check_outstanding() never
+    call this at all (failures escalate verbatim, unmodified by this stage)."""
+    if not STYLE_ENABLED or not should_style(text):
+        return text
+    try:
+        body = {
+            "model": STYLE_MODEL,
+            "messages": [
+                {"role": "system", "content": STYLE_SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            "max_tokens": 800,
+        }
+        result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=STYLE_TIMEOUT_SECONDS)
+        styled = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        return styled or text
+    except Exception as exc:
+        log(f"styling call failed, sending raw text instead: {exc}")
+        return text
+
+
 def check_outstanding():
-    """No styling pass — passthrough only (see module docstring). Failures escalate verbatim:
-    blocked/errored/timed-out tasks get a plain, honest status message, never silence."""
+    """Chat-shaped success replies get a light styling pass (style_reply()); technical output
+    (looks_technical()) and all three failure paths below remain untouched passthrough. Failures
+    escalate verbatim: blocked/errored/timed-out tasks get a plain, honest status message, never
+    silence, never styled."""
     try:
         pending = _get(f"{MEMORY_URL}/state/presenter", MEMORY_TOKEN).get("state", [])
     except Exception as exc:
@@ -240,7 +386,10 @@ def check_outstanding():
         if state == "done":
             turns = _get(f"{MEMORY_URL}/turns?task_id={task_id}&limit=50", MEMORY_TOKEN).get("turns", [])
             reply = next((t for t in reversed(turns) if t["agent"] != "presenter"), None)
-            text = (reply.get("presented") or reply.get("raw")) if reply else "(task completed with no reply content)"
+            if reply:
+                text = style_reply(reply.get("presented") or reply.get("raw"))
+            else:
+                text = "(task completed with no reply content)"  # never styled -- not agent content
             send_room_message(room_id, format_reply(task.get("topic"), text))
             _mark_delivered(task_id, value)
             log(f"task {task_id}: delivered to {room_id}")
