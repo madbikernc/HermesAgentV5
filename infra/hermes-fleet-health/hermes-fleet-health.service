@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-fleet-health - daily fleet-wide health rollup, emailed (Phase 14)
+After=network.target hermes-broker.service
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-fleet-health.py

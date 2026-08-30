@@ -1,0 +1,14 @@
+[Unit]
+Description=hermes-session-cap-guard (Sintra) - hard session-length cap with rotation
+After=network.target hermes-router.service hermes-gateway.service
+
+[Service]
+Type=simple
+User=sintra
+Environment=VAULT_NODE=sintra
+ExecStart=/home/sintra/HermesAgentV5/tools/hermes-session-cap-guard.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

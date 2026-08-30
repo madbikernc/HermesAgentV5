@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-canary-probe-report - canary events + full source investigation (Phase 18)
+After=network.target
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-canary-probe-report.py

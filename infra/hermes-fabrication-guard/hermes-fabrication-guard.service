@@ -1,0 +1,14 @@
+[Unit]
+Description=hermes-fabrication-guard - catches fabricated Weaver/Muse usage claims in real time
+After=network.target hermes-router.service hermes-gateway.service
+
+[Service]
+Type=simple
+User=sintra
+Environment=VAULT_NODE=sintra
+ExecStart=/home/sintra/HermesAgentV5/tools/hermes-fabrication-guard.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

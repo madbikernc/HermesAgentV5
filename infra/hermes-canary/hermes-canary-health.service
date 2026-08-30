@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-canary-health - OpenCanary honeypot health check + auto-recovery (Phase 18)
+After=network.target
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-canary-health.py

@@ -1,0 +1,10 @@
+[Unit]
+Description=hermes-wiki-sync - publish live fleet status to the Firmament wiki (Phase 11)
+After=network.target hermes-router.service hermes-broker.service
+
+[Service]
+Type=oneshot
+User=sintra
+Environment=VAULT_NODE=sintra
+Environment=HERMES_REPO_DIR=/home/sintra/HermesAgentV5
+ExecStart=/usr/bin/python3 /home/sintra/HermesAgentV5/tools/hermes-wiki-sync.py

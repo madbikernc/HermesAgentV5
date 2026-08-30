@@ -1,0 +1,15 @@
+[Unit]
+Description=hermes-session-guardian (Sintra) - detects stuck sessions, alerts, Boss-triggered cleanup
+After=network.target hermes-gateway.service
+
+[Service]
+Type=simple
+User=sintra
+Environment=VAULT_NODE=sintra
+WorkingDirectory=/home/sintra/HermesAgentV5
+ExecStart=/home/sintra/HermesAgentV5/tools/session-guardian.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
