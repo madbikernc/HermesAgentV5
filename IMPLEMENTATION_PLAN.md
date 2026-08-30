@@ -1,8 +1,11 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.12.0
-**Status:** S1–S12 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
-merged mode stays deliberately deferred, per S1's own numbers). S8
+**Version:** 1.13.0
+**Status:** S1–S14 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
+merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
+audit found real, live drift the original twelve stages hadn't closed — nano still running, several
+schedulers still Sintra/Amy-shaped, a security-relevant sudoers leftover, a sync-coverage gap, and a
+live-caught executable-bit regression, all real, all fixed. S8
 was the point of no return — Sintra and Amy no longer have live gateways. `HermesAgentV4` stays live and
 authoritative for everything else until a later stage says otherwise.
 
@@ -36,6 +39,8 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S10 | Kiln isolation + media agent ownership | 🟡 Software complete; network isolation is an operator checklist (2026-08-29) |
 | S11 | Per-role eval sets, then scoped abliteration | ✅ Done (2026-08-29) |
 | S12 | Deferred: merged mode, dispatcher failover | ✅ Done (2026-08-29) — merged mode stays deferred (S1's own numbers); failover ladder built and live-verified |
+| S13 | Complete nano's retirement, fix stale role/persona references | ✅ Done (2026-08-29) |
+| S14 | Ops tooling retarget, rename debt, sync coverage, cross-repo comparability | ✅ Done (2026-08-29) |
 
 ---
 
@@ -1194,6 +1199,134 @@ Files: `hermes-dispatch.py` 1.0.1→1.1.0, new `hermes-dispatch-standby-check.sh
 1.0.0→1.1.0 (new §4 runbook; also corrected a stale S6-era claim that no specialist topic has a real
 subscriber — `media` has since S10).
 
+### S13 — Complete nano's retirement, fix stale role/persona references
+
+Added after S12, direct request: a live audit ("what V4 capabilities and scheduled tasks are not
+accounted for in V5?") turned up real, live drift the original twelve stages never closed. `nano`'s
+retirement (target §4.1: "its function splits between `dispatch` and `presenter`") was announced at S6
+and then deferred at S6, S8, and S9 in turn — `llama-nano.service` was still `active` and still every
+stale default's fallback. This stage is the one that actually does it, plus everything downstream that
+was still pointed at it.
+
+#### S13 — executed 2026-08-29
+
+**`llama-nano.service` stopped and disabled.** `hermes-router.py` 2.8.0 drops `nano` from `ROLES` on
+both branches first, restarted and health-checked on both nodes (`roles: [super, coder, muse, omni,
+dispatch]`, confirmed live) *before* the backend itself was touched — same cutover-sequencing
+discipline every prior live change in this migration has used. A request for role `nano` now gets a
+real `400` (`unknown model/role 'nano'`) instead of silently succeeding against a backend nothing else
+expects to exist.
+
+**Downstream defaults fixed to match, each verified against what it was actually chosen for, not
+guessed:** `hermes-model-scan.py`/`hermes-nfsensei-watch.py`'s `LLM_MODEL` default (`nano` → `dispatch`
+— same always-resident/stock shape); `hermes-usage-report.py`'s `ROLES` list (kept in sync with
+`hermes-router.py`'s own map by design — confirmed `guard`/`embed`/`asr` deliberately excluded, since
+none of them are router roles, they'd never appear in the usage log this report summarizes regardless);
+`hermes-pfsense-report.py`'s `ROUTER_MODEL` (`nano` → `dispatch` — its own 1.3.0 history explains
+exactly why an always-resident, never-waking role was required for an unattended daily digest, and
+`dispatch` is the only current option that still satisfies it).
+
+**Two tools stopped rather than patched field-by-field:** `hermes-wiki-sync.py` and
+`hermes-self-repair-reminder.py` are both built entirely around a per-persona data model — Sintra's and
+Amy's own wiki pages, their own self-authored self-repair indexes — that has had no live referent since
+S8. Every scheduled run since then had been auto-publishing status to two dead personas' pages, or
+re-reporting the same frozen (or empty) index forever. Patching `ROUTER_MODELS`' descriptions alone
+would have left the real problem — there is no "Sintra's page" anymore — untouched, and inventing a new
+V5-era wiki page design or self-repair concept is a real product decision nobody has made, not something
+to manufacture inside a currency-fix pass. Both timers stopped and disabled; both scripts document
+exactly why in their own header, so re-enabling either is a deliberate future call, not an accident.
+
+Files: `hermes-router.py` 2.7.0→2.8.0, `hermes-model-scan.py` 1.1.0→1.2.0, `hermes-nfsensei-watch.py`
+1.1.0→1.2.0, `hermes-usage-report.py` 1.1.0→1.2.0, `hermes-pfsense-report.py` 1.3.0→1.4.0,
+`hermes-wiki-sync.py` 1.2.0→1.3.0 (stopped), `hermes-self-repair-reminder.py` 1.0.0→1.1.0 (stopped).
+
+### S14 — Ops tooling retarget, rename debt, sync coverage, cross-repo comparability
+
+The rest of what the same audit found: tooling that references OS identities/units that no longer do
+what they used to, a rename Category B always intended but never executed, a real coverage gap in how
+code reaches the fleet's own nodes, and two other repos in this project's own lineage that read as
+current when they aren't.
+
+#### S14 — executed 2026-08-29
+
+**`hermes-restart-fleet.sh` fully retargeted (2.0.0 → 3.0.0), built from a live `systemctl
+list-units --all` inventory on both nodes, not re-guessed from old docs.** The old `SPARK_SERVICES`/
+`SPARK2_SERVICES` arrays were entirely Sintra's/Amy's own gateways and six guard daemons, all stopped
+and disabled since S8 — restarting them now would either no-op or (worse) briefly un-retire a disabled
+unit, since `systemctl restart` doesn't care whether a unit is enabled. Real V5 services that have
+existed since S2–S12 (`hermes-buzz`, `hermes-memory`, `hermes-guard`, `hermes-dispatch`,
+`hermes-presenter`, `hermes-media`) had never been in a coordinated restart at all until now. Confirmed
+live that every real spark-2 service already runs as `User=pmoney`, not `amy` — the `spark2-amy` SSH
+alias (a dedicated key, connects as `amy`) is retired from this script's own use in favor of a new plain
+`spark2` alias (`pmoney`, S1's own node-to-node key, `~/.ssh/spark2_access` — confirmed working before
+committing to it). `llama-coder` (moved to spark, gained its own idle-sleep timer since 2.0.0) now gets
+the same on-demand "only if active" treatment `llama-super` already had. Live-verified with a full
+`--dry-run` pass across all three nodes: every unit correctly identified, both on-demand roles correctly
+checked rather than assumed, SSH connectivity to the new `spark2` alias and to HomeD13 both confirmed
+working, clean exit.
+
+**A real, separate security leftover closed, not just documented:** `/etc/sudoers.d/amy-repo-sync` on
+spark-2 still granted Amy's OS account passwordless root-level `systemctl restart` on 8 units —
+including shared `hermes-router.service` — despite her account and services being retired since S8. Now
+that `hermes-restart-fleet.sh` no longer needs `amy` for anything (confirmed pmoney already has its own
+general passwordless sudo on spark-2, unrelated to this grant), the file was removed outright, verified
+with `visudo -c` before and after. `/etc/sudoers.d/amy-vault` (scoped narrowly to Amy's own sealed
+credential files, confirmed her account currently runs zero processes) was deliberately left — real but
+much lower blast radius, and fully decommissioning an OS account is a bigger, more definitive action
+than this pass's actual scope.
+
+**`amy-generate-image.sh` renamed to `hermes-generate-image.sh`, `skills/amy-image-gen/` to
+`skills/image-gen/`.** The script's own logic has been persona-agnostic since the Migration Stage 3
+rewrite (no VRAM swap, no Matrix delivery of its own) — only the name still said otherwise.
+`hermes-render-worker.py`'s `GENERATE_SCRIPT` default updated to match (1.4.0→1.5.0) — the one place
+this rename is functionally load-bearing, not cosmetic. The many scattered "same pattern as
+amy-generate-image.sh" comments across `hermes-generate-video.sh`, `hermes-render-request.sh`,
+`hermes-model-archive.py`, and two READMEs were deliberately left alone — informational color, not
+functional references, and rewriting every one of them for a pure rename risked more than it was worth.
+
+**A real, live sync-coverage gap fixed.** Comparing `git log -1` across all three checkouts found
+HomeD13 several commits behind (missing `hermes-media.py` and everything through S12) while spark-2 had
+only ever been kept current by hand, all migration. Root cause: `hermes-repo-sync.path` — the only
+mechanism that ever propagated `pmoney`'s pulls onward — was correctly disabled at S8 as a side effect
+of retiring Sintra's and Amy's own separate-checkout sync, but HomeD13's sync rode the same trigger
+despite having nothing to do with either persona, and nobody rebuilt a path for it afterward. spark-2
+never had one at all — true and fine under V4, not true once it started running real V5 services.
+Fixed with the simplest thing that's actually true now: `hermes-repo-autopull.timer` deployed
+independently on all three nodes, no cascade, no auto-restart step (same as it never auto-restarted
+anything on spark either — new code on disk still needs an explicit `hermes-restart-fleet.sh` run or a
+manual `systemctl restart`, on any node, same as it always has).
+
+**One real, self-inflicted regression found and fixed live during this stage's own deployment, not
+before:** `hermes-dispatch-wrapper.sh`, `hermes-guard-wrapper.sh`, `hermes-media-wrapper.sh`,
+`hermes-memory-wrapper.sh`, `hermes-presenter-wrapper.sh`, and `hermes-unlock.sh` had all been committed
+as `100644` (non-executable) at some point since S2–S10 — masked for weeks by a manual `chmod +x` on
+each live checkout that was never actually recorded in git. The exact same bug class
+`HermesAgentRedo/IMPLEMENTATION_PLAN.md` already documents once (`hermes-finetune-model.sh`,
+2026-08-19) — not re-learned, just not yet applied here. Surfaced when an earlier mode-bit reset (used
+to clear an unrelated stray local diff blocking a `git pull`) reset these six files to their real,
+wrong, tracked mode: `hermes-media.service` crash-looped 97 times on spark-2 before this was caught, and
+`hermes-dispatch`/`hermes-guard`/`hermes-memory`/`hermes-presenter` on spark were all non-executable on
+disk at the same moment — one crash or reboot away from taking down four services simultaneously, only
+still running because none of their existing processes had needed a restart yet. Executable bit restored
+live immediately on both nodes, then fixed at the source (`git update-index --chmod=+x`, committed,
+pulled clean everywhere, verified `100755` via `git ls-files -s` afterward, not just `ls -la`) so a
+future checkout can't silently reintroduce it.
+
+**Cross-repo comparability: `HermesAgentRedo`.** Its `README.md`/`CLAUDE.md`/`IMPLEMENTATION_PLAN.md`
+each presented as live, current-state documentation — no mention anywhere that `HermesAgentV4`, and now
+`HermesAgentV5`, superseded it. A superseded-repo banner was added to the top of all three, pointing
+forward to the current repo; no technical content changed, this repo's own phase-by-phase historical
+record stays exactly as written, per this project's own "mark superseded sections explicitly rather than
+leaving them wrong" convention — just finally applied to the whole repo's relationship to its
+successors, not only to sections within it.
+
+Files: `hermes-restart-fleet.sh` 2.0.0→3.0.0, `tools/amy-generate-image.sh`→`hermes-generate-image.sh`
+3.0.0→3.1.0, `skills/amy-image-gen/`→`skills/image-gen/` 2.2.0→2.3.0, `hermes-render-worker.py`
+1.4.0→1.5.0, `infra/hermes-repo-sync/README.md` 2.0.0→2.1.0 + `hermes-repo-autopull.service` (generic
+description), six wrapper/unlock scripts' git mode fixed (`100644`→`100755`, no content change), plus
+`HermesAgentRedo/README.md`/`CLAUDE.md`/`IMPLEMENTATION_PLAN.md` banners (separate repo, separate
+commit/push).
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -1316,3 +1449,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.10.0 | 2026-08-29 | S10's software half executed and verified live with two real renders (default engine, ~14s; `--engine flux2` explicitly, ~89s — closing V4 §9 risk 12 with real evidence, not assertion): `hermes-media.py` (the media agent, bridging Buzz's `media` topic to the existing broker/render-worker pipeline) and image screening inside `hermes-render-worker.py` (real magic-byte checks before an artifact is ever uploaded or delivered). The network-isolation half was deliberately not automated — `hermes-pfsense.py`'s own pre-existing docstring already decided pfSense gets no scripted actuation path, for exactly this class of change — and is instead a 7-item operator checklist, including a real currently-live exposure found (ComfyUI's port 8188 open to the whole LAN, not just Forge) and flagged rather than silently narrowed. |
 | 1.11.0 | 2026-08-29 | S11 executed and closed out live on the fleet: V4's benchmark harness (MMLU-Pro/GPQA-Diamond/IFEval/BFCL) confirmed real and already in use, not just documented. Found and worked around a real bug live: `mmlu_pro` sent through `hermes-router` gets blocked by the L1 injection guard's `unicode_smuggling` check on real (non-adversarial) characters inside the dataset itself — fixed by hitting each role's own `llama-server` port directly, same bypass BFCL's own README already established. Real per-role numbers recorded for `super` (mmlu_pro=0.614, ifeval=0.72) and `muse` (mmlu_pro=0.749, ifeval=0.893, bfcl=0.008), plus a genuine zero-cost stock-vs-abliterated comparison for `muse` against `dispatch`'s stock same-base backend — flagged an unresolved quantization confound rather than reporting a clean effect. `model_registry` rows for `super`/`muse` now carry a real `eval_ref`. Scoped "the log analyst" to `super`'s own already-covered role (target §4.1) rather than inventing a duplicate eval for a Buzz `logs`-topic agent that still doesn't exist — consistent with S8's own finding. Documented, not remediated: every live abliterated checkpoint (`super`/`muse`/`coder`/`nano`) is a community (`huihui-ai`) checkpoint, not self-produced, despite target §12.4's preference and working `heretic` tooling being available — a real, currently-accepted risk, not silently dropped. |
 | 1.12.0 | 2026-08-29 | S12 executed and closed out live on the fleet. Merged mode stays deferred — S1's own NCCL numbers (socket-mode ~2.0 GB/s, RDMA negotiates but fails during real data movement) already answered the gating question; no RoCE-hardening work was done, so nothing changed. Dispatcher failover built and live-verified up all three rungs of target §11.2: rung 1 (systemd auto-restart) already existed; rung 2 (`hermes-dispatch.py` 1.1.0's new heartbeat + `hermes-dispatch-standby-check.sh` on Forge, alerting FleetOps on staleness) surfaced a real architectural constraint — `hermes-router`'s `:8080` is deliberately loopback-only *and has no bearer-auth of its own*, so a standby bypasses it entirely via a new `DISPATCH_CHAT_URL` pointed straight at the `dispatch` role's own `llama-server` port, needing one narrow ufw rule matching S1's existing cross-node pattern; a real bug (`MATRIX_URL`'s loopback default, copied from scripts that always run on Watch, silently wrong once run on Forge) was caught and fixed on the very first live test. Rung 3 (any-node respawn) needed no new code — S6's non-negotiable #3 already guaranteed it — and was proven for the first time here: primary stopped on Watch, a real pointer envelope queued, the promotion command run for real from Forge, correctly claimed and routed the work, heartbeat and task state confirmed by direct query; then stood back down and the primary restored, full cycle both directions. Promotion stays a human-run command, not automatic, matching every other live-topology decision this fleet keeps manual. |
+| 1.13.0 | 2026-08-29 | S13/S14 added and executed after a post-S12 currency audit ("what V4 capabilities and scheduled tasks are not accounted for in V5?") found real, live gaps. S13: `nano` finally retired (deferred at S6/S8/S9 in turn) — stopped, disabled, dropped from `hermes-router.py`'s `ROLES`, every downstream `LLM_MODEL`/`ROUTER_MODEL`/`ROLES` default fixed to match; `hermes-wiki-sync.py`/`hermes-self-repair-reminder.py` stopped rather than patched, since both are built entirely around a per-persona data model with no V5 successor. S14: `hermes-restart-fleet.sh` fully retargeted from a live unit inventory (old Sintra/Amy units out, real V5 services in, live-verified `--dry-run` across all three nodes); a real security leftover closed (Amy's OS account still had passwordless root on 8 units including shared `hermes-router.service`, now removed); `amy-generate-image.sh`/`skills/amy-image-gen/` renamed (Category B's original, never-executed plan); a real sync-coverage gap fixed (HomeD13 had gone stale, spark-2 never had coverage — `hermes-repo-autopull.timer` now on all three nodes); `HermesAgentRedo` given superseded-repo banners. **One real, self-inflicted regression found and fixed live during S14's own deployment:** six wrapper/unlock scripts had been committed non-executable since S2–S10, masked by an unrecorded manual `chmod`, surfaced when clearing an unrelated stray mode-bit diff reset them to their real tracked mode — `hermes-media` crash-looped 97 times before catching it, and `hermes-dispatch`/`guard`/`memory`/`presenter` were simultaneously one restart away from the same failure. Fixed live on both nodes immediately, then fixed at the source (`git update-index --chmod=+x`) so it can't recur. |
