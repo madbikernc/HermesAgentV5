@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.4.1
+# Version: 1.5.0
+#
+# 1.5.0 (2026-08-30) — real bug found live: guard_status()'s spark-2 entry always failed
+# ("stats unavailable — exit 28"), every single run, since the day it was written — traced to
+# hermes-router.py's ROUTER_BIND defaulting to 127.0.0.1 on both nodes (deliberately, S12: no
+# bearer-auth of its own), so the old ROUTER_URLS["spark-2"] = "http://10.129.1.17:8080" was
+# never actually reachable; 1.4.0's own changelog had already flagged this code path as "not
+# yet exercised against a live router." Fixed by reaching spark-2's router over SSH (pmoney's
+# `Host spark2` alias) and curling its own loopback instead, same shape collect_remote_ssh()
+# already uses for Amy's node-health report — not by opening the router's LAN exposure, which
+# stays intentionally closed.
 #
 # 1.4.1 (2026-08-30) — HermesAgentV5 consolidation: REPO_DIR default and the fleet
 # target table's per-node repo_dir entries repointed from HermesAgentV4 to
@@ -71,10 +81,17 @@ REPO_DIR = "/home/pmoney/HermesAgentV5"
 VAULT_GET = f"{REPO_DIR}/tools/vault-get-secret.sh"
 
 BROKER_URL = "http://10.129.1.15:8100"
-# spark's router is reached locally (this script always runs on spark, as pmoney — same as
-# hermes-router.py itself); spark-2's is reached over the LAN, same IP hermes-router.py's own
-# SPARK2_LAN_IP default uses.
-ROUTER_URLS = {"spark": "http://127.0.0.1:8080", "spark-2": "http://10.129.1.17:8080"}
+# hermes-router.py's ROUTER_BIND defaults to 127.0.0.1 on both nodes, deliberately — it has no
+# bearer-auth of its own (IMPLEMENTATION_PLAN.md S12), so it's never meant to be LAN-reachable.
+# spark's router is reached locally (this script always runs on spark, as pmoney). spark-2's
+# CANNOT be reached over the LAN for the same reason its own port is loopback-only there too —
+# curling its LAN IP just times out (confirmed live, 2026-08-30, exit 28 every time). Reached
+# instead via SSH (pmoney's own `Host spark2` alias, ~/.ssh/spark2_access) running curl against
+# spark-2's own loopback, same shape collect_remote_ssh() already uses for Amy's node-health
+# report -- this file's original ROUTER_URLS entry for spark-2 assumed LAN-reachability that
+# was never actually true, unexercised since guard_status() was first written (1.4.0's own
+# changelog already flagged it as "not yet exercised against a live router").
+ROUTER_SSH_HOST = "spark2"
 EMAIL_TO = "notifications@canislupisnc.net"
 EMAIL_TO_NAME = "Fleet Notifications"
 
@@ -198,8 +215,12 @@ def guard_status():
     it must not be conflated with an actual block, and must not silently
     zero out the other node's real counts."""
     per_node = {}
-    for node, url in ROUTER_URLS.items():
-        out, err, rc = run(["curl", "-s", "-m", "5", f"{url}/guard/stats"])
+    for node, cmd in (
+        ("spark", ["curl", "-s", "-m", "5", "http://127.0.0.1:8080/guard/stats"]),
+        ("spark-2", ["ssh", "-o", "ConnectTimeout=8", ROUTER_SSH_HOST,
+                     "curl -s -m 5 http://127.0.0.1:8080/guard/stats"]),
+    ):
+        out, err, rc = run(cmd)
         if rc != 0 or not out.strip():
             per_node[node] = {"reachable": False, "error": err.strip() or f"exit {rc}"}
             continue
