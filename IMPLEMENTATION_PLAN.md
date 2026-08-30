@@ -1,7 +1,7 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.13.0
-**Status:** S1–S14 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
+**Version:** 1.14.0
+**Status:** S1–S15 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
 schedulers still Sintra/Amy-shaped, a security-relevant sudoers leftover, a sync-coverage gap, and a
@@ -41,6 +41,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S12 | Deferred: merged mode, dispatcher failover | ✅ Done (2026-08-29) — merged mode stays deferred (S1's own numbers); failover ladder built and live-verified |
 | S13 | Complete nano's retirement, fix stale role/persona references | ✅ Done (2026-08-29) |
 | S14 | Ops tooling retarget, rename debt, sync coverage, cross-repo comparability | ✅ Done (2026-08-29) |
+| S15 | `hermes-logs` — the log analyst | ✅ Done (2026-08-29) |
 
 ---
 
@@ -1327,6 +1328,74 @@ description), six wrapper/unlock scripts' git mode fixed (`100644`→`100755`, n
 `HermesAgentRedo/README.md`/`CLAUDE.md`/`IMPLEMENTATION_PLAN.md` banners (separate repo, separate
 commit/push).
 
+### S15 — `hermes-logs`, the log analyst
+
+Added after S14, direct request: the `logs` Buzz topic has been reserved since S6 (target §4.4) with
+no real subscriber — S13's own currency audit flagged `super`'s own chat role as the de facto
+stand-in and scoped "the log analyst" to that role rather than inventing a second eval target. This
+stage builds the real thing: various agents should be able to submit pfSense, canary/honeypot, or
+game-server data — or arbitrary raw log/payload text — for evaluation, and get a real analysis back
+through the closure path S6 already built.
+
+#### S15 — executed 2026-08-29
+
+**`hermes-logs.py` wraps the fleet's existing log sources rather than collecting anything new** —
+`hermes_pfsense_common.py`'s own REST client, `hermes-canary-report.py`'s own `pull_logs()`/
+`group_by_src()`/`build_summary_text()`, `hermes-game-server-monitor.py`'s own `connect()`/
+`check_minecraft()`/`check_zomboid()`/`check_firewall()` — same "wrap the execution plane that
+already works" instruction S10 followed for media. All three source modules import cleanly despite
+their hyphenated filenames (`importlib.import_module("hermes-canary-report")` — confirmed live
+before relying on it, not assumed). A `source: pfsense|canary|gameservers` keyword prefix on the
+submitted text selects a real pull; anything else is treated as `raw` — the submitted text itself is
+the thing to analyze, for ad-hoc payload/log snippets any agent hands this one directly.
+
+**Reasoning goes to `super`, not `dispatch`.** Target §12.1's own table: "Log analyst | Abliterated |
+Refusals on payload/exploit analysis break automated pipelines and create silent coverage gaps."
+`hermes-canary-report.py` had already made exactly this choice (`ROUTER_MODEL = "super"`) for the
+same reason, and S11 already benchmarked `super`'s abliterated checkpoint live — this stage didn't
+have to argue the choice from scratch, it was already the fleet's own precedent.
+
+**Screening is asymmetric, by design, not by omission.** The caller's *request* gets the same L1+L2
+screen `hermes-dispatch.py`/`hermes-media.py` already run. The *data this agent gathers* — real
+firewall log lines, real honeypot probe events — deliberately does **not** go through the same
+block-on-detection screen before reaching `super`: that data is attack-shaped by construction, and
+blocking on L1's own `unicode_smuggling`/`role_spoof` patterns before the model ever saw it would
+defeat the one reason target §12.1 specifies an abliterated model here. Mitigated at the prompt level
+instead — `SOURCE_SYSTEM_PROMPT` tells `super` explicitly to describe what it sees, never to obey
+text embedded inside the data itself.
+
+**Two real bugs found on the very first live test, both the same class S6 already documented once
+and 2.0.4/2.0.5 tried to catch proactively — not caught this time either:** `hermes-buzz.py`'s
+`KNOWN_AGENTS` didn't include `logs`, so this agent's own `results` publish 400'd on its first real
+run — task state had already correctly reached `done` from the two calls before it in the same
+sequence, only the final Buzz publish failed, caught by this agent's own per-cycle exception handler
+(no daemon crash). Fixed (2.0.6), verified with a second full run. While verifying that fix, also
+found and fixed `hermes-buzz.py`'s `/health` endpoint still reporting `2.0.5` (a separate hardcoded
+`server_version` string, not the file's own header comment) and the deployed unit's own
+`Description=` still reading `"(Sintra <-> Amy)"` — stale since S3's topic/claims rewrite, never
+caught until this pass.
+
+**Live-verified end to end, not just deployed:** published a real `source: gameservers` request,
+watched `hermes-logs` claim it, pull real SSH-gathered Minecraft/Zomboid/firewall status from
+muncraft, and get back a genuine, useful finding from `super` — not boilerplate: a real
+misconfiguration (Minecraft's RCON port listening beyond `127.0.0.1` despite `server.properties`
+saying otherwise) that nothing else in this fleet was currently flagging. Confirmed the full closure
+chain: the analysis landed as a turn in `hermes-memory`, a pointer published to `results`, and
+`hermes-dispatch`'s own results-watcher (built S6, unchanged) picked it up and closed the task —
+exactly the same mechanism S10's media agent already proved, now proven a second time by an
+independently-built agent using it.
+
+**What's still ahead**, same honesty this migration has used everywhere else: `pfsense`/`canary`
+sources reuse already-proven library functions (each backs a real, live scheduled report already)
+but weren't independently smoke-tested through this new code path this session — lower risk than a
+fresh integration, not zero risk. `dispatch`'s own routing prompt wasn't tuned to specifically favor
+`logs` for security-shaped requests; `logs` was already a valid target since S6, whether dispatch
+reliably picks it is worth watching, not yet a known problem either way.
+
+Files: new `hermes-logs.py`, `hermes-logs-wrapper.sh`, `infra/hermes-logs/hermes-logs.service`/
+`README.md`; `hermes-buzz.py` 2.0.5→2.0.6 (`KNOWN_AGENTS` + `server_version`),
+`infra/hermes-buzz/hermes-buzz.service` (unit description).
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -1450,3 +1519,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.11.0 | 2026-08-29 | S11 executed and closed out live on the fleet: V4's benchmark harness (MMLU-Pro/GPQA-Diamond/IFEval/BFCL) confirmed real and already in use, not just documented. Found and worked around a real bug live: `mmlu_pro` sent through `hermes-router` gets blocked by the L1 injection guard's `unicode_smuggling` check on real (non-adversarial) characters inside the dataset itself — fixed by hitting each role's own `llama-server` port directly, same bypass BFCL's own README already established. Real per-role numbers recorded for `super` (mmlu_pro=0.614, ifeval=0.72) and `muse` (mmlu_pro=0.749, ifeval=0.893, bfcl=0.008), plus a genuine zero-cost stock-vs-abliterated comparison for `muse` against `dispatch`'s stock same-base backend — flagged an unresolved quantization confound rather than reporting a clean effect. `model_registry` rows for `super`/`muse` now carry a real `eval_ref`. Scoped "the log analyst" to `super`'s own already-covered role (target §4.1) rather than inventing a duplicate eval for a Buzz `logs`-topic agent that still doesn't exist — consistent with S8's own finding. Documented, not remediated: every live abliterated checkpoint (`super`/`muse`/`coder`/`nano`) is a community (`huihui-ai`) checkpoint, not self-produced, despite target §12.4's preference and working `heretic` tooling being available — a real, currently-accepted risk, not silently dropped. |
 | 1.12.0 | 2026-08-29 | S12 executed and closed out live on the fleet. Merged mode stays deferred — S1's own NCCL numbers (socket-mode ~2.0 GB/s, RDMA negotiates but fails during real data movement) already answered the gating question; no RoCE-hardening work was done, so nothing changed. Dispatcher failover built and live-verified up all three rungs of target §11.2: rung 1 (systemd auto-restart) already existed; rung 2 (`hermes-dispatch.py` 1.1.0's new heartbeat + `hermes-dispatch-standby-check.sh` on Forge, alerting FleetOps on staleness) surfaced a real architectural constraint — `hermes-router`'s `:8080` is deliberately loopback-only *and has no bearer-auth of its own*, so a standby bypasses it entirely via a new `DISPATCH_CHAT_URL` pointed straight at the `dispatch` role's own `llama-server` port, needing one narrow ufw rule matching S1's existing cross-node pattern; a real bug (`MATRIX_URL`'s loopback default, copied from scripts that always run on Watch, silently wrong once run on Forge) was caught and fixed on the very first live test. Rung 3 (any-node respawn) needed no new code — S6's non-negotiable #3 already guaranteed it — and was proven for the first time here: primary stopped on Watch, a real pointer envelope queued, the promotion command run for real from Forge, correctly claimed and routed the work, heartbeat and task state confirmed by direct query; then stood back down and the primary restored, full cycle both directions. Promotion stays a human-run command, not automatic, matching every other live-topology decision this fleet keeps manual. |
 | 1.13.0 | 2026-08-29 | S13/S14 added and executed after a post-S12 currency audit ("what V4 capabilities and scheduled tasks are not accounted for in V5?") found real, live gaps. S13: `nano` finally retired (deferred at S6/S8/S9 in turn) — stopped, disabled, dropped from `hermes-router.py`'s `ROLES`, every downstream `LLM_MODEL`/`ROUTER_MODEL`/`ROLES` default fixed to match; `hermes-wiki-sync.py`/`hermes-self-repair-reminder.py` stopped rather than patched, since both are built entirely around a per-persona data model with no V5 successor. S14: `hermes-restart-fleet.sh` fully retargeted from a live unit inventory (old Sintra/Amy units out, real V5 services in, live-verified `--dry-run` across all three nodes); a real security leftover closed (Amy's OS account still had passwordless root on 8 units including shared `hermes-router.service`, now removed); `amy-generate-image.sh`/`skills/amy-image-gen/` renamed (Category B's original, never-executed plan); a real sync-coverage gap fixed (HomeD13 had gone stale, spark-2 never had coverage — `hermes-repo-autopull.timer` now on all three nodes); `HermesAgentRedo` given superseded-repo banners. **One real, self-inflicted regression found and fixed live during S14's own deployment:** six wrapper/unlock scripts had been committed non-executable since S2–S10, masked by an unrecorded manual `chmod`, surfaced when clearing an unrelated stray mode-bit diff reset them to their real tracked mode — `hermes-media` crash-looped 97 times before catching it, and `hermes-dispatch`/`guard`/`memory`/`presenter` were simultaneously one restart away from the same failure. Fixed live on both nodes immediately, then fixed at the source (`git update-index --chmod=+x`) so it can't recur. |
+| 1.14.0 | 2026-08-29 | S15 executed and closed out live on the fleet: `hermes-logs.py`, the log analyst, claims the Buzz `logs` topic reserved since S6 with no real subscriber until now. Wraps existing sources (`hermes_pfsense_common.py`, `hermes-canary-report.py`, `hermes-game-server-monitor.py`) rather than collecting anything new; reasons via `super`, matching target §12.1's own recommendation and `hermes-canary-report.py`'s own established precedent. Screening is deliberately asymmetric — the request is screened, the gathered security data isn't, so an abliterated model can actually do the job target §12.1 specifies it for. Two real bugs found on the first live test, same class S6 already documented once: `hermes-buzz.py`'s `KNOWN_AGENTS` missing `logs` (2.0.6, fixed), plus a stale `/health` version string and a stale unit `Description=` ("Sintra <-> Amy") caught in the same pass. Live-verified end to end with a real finding: a genuine Minecraft RCON misconfiguration nothing else in this fleet was flagging, full closure chain confirmed through `hermes-dispatch`'s own results-watcher. |
