@@ -1,5 +1,5 @@
 [Unit]
-Description=Hermes presenter - the fleet's one interactive voice (thin Matrix client, passthrough only)
+Description=Hermes presenter - the fleet's one interactive voice (thin Matrix client, light styling pass on chat-shaped replies)
 Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-presenter/README.md
 After=network-online.target continuwuity.service hermes-buzz.service hermes-memory.service
 Wants=network-online.target
