@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 1.1.2
+# Version: 1.2.0
+#
+# 1.2.0 (2026-08-30) — DEFAULT_CONFIG's "services" no longer defaults to expecting
+# hermes-gateway. Root cause of hermes-fleet-health.service's daily failure, traced from
+# the email report down through this script: hermes-gateway was retired fleet-wide at S8,
+# but nothing that expected it to be running was ever updated to know that, so the "Agent
+# router (hermes-gateway): not active" check (section_services()) has been reporting a
+# permanent, correctly-predicted critical every single day since. Sintra's and Amy's own
+# ~/.hermes/config/node-health.json (not in git, fixed directly on each host) had the same
+# problem for hermes-gateway/hermes-gateway-amy plus the four now-dormant S8 daemons
+# (hermes-fabrication-guard, hermes-session-cap-guard-*, hermes-session-guardian-*) and
+# three retired timers (hermes-wiki-checkin-{amy,sintra}.timer, hermes-wiki-sync.timer) —
+# all removed from each identity's expected services/timers, since none of them are
+# supposed to be running post-S8. This default only ever mattered as a fallback for a node
+# with no config file of its own; every node currently in the fleet already has one.
 #
 # 1.1.2 (2026-08-26) — real bug found live: the "Managed cron jobs" check reported "warn"
 # whenever zero cron lines matched cfg["cron_patterns"], without distinguishing "patterns
@@ -106,10 +120,7 @@ DEFAULT_CONFIG = {
     "agent_role": None,
     "operational_environment": None,
     "host_hardware_override": None,
-    "services": [
-        {"name": "hermes-gateway", "scope": "user"},
-        {"name": "hermes-gateway", "scope": "system"},
-    ],
+    "services": [],
     "model_endpoints": [
         {"name": "Ollama",       "port": 11434},
         {"name": "vLLM",         "port": 8000},
