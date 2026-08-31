@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.2.1
+# Version: 1.3.0
+#
+# 1.3.0 (2026-08-31) — added `status` to VALID_TARGETS: direct operator request for chat access
+# to a curated, read-only subset of the fleet's own skills/ status monitors (pfsense, generac,
+# moen-flo, wyze, game servers, vivint status, botnet-intel), landed as the new tools/hermes-status.py
+# and Buzz `status` topic. Unlike `websearch` (presenter-dispatched only, never a routing target),
+# `status` is a normal classifier destination — a status-shaped question routes here the same way
+# any other topic is chosen. No change to choose_topic()/the single-word-reply contract; just one
+# more valid word for the model to pick.
 #
 # 1.2.1 (2026-08-30) — real bug found live building the internet-search fallback: process_results()
 # unconditionally overwrote every completed task's state to `done` on any `results` message,
@@ -134,7 +142,7 @@ ROUTING_HISTORY_TURNS = int(os.environ.get("ROUTING_HISTORY_TURNS", "6"))
 
 # Target §4.4's internal topic set, minus `dispatch` itself and `results` (a destination
 # specialists publish completion to, never something the dispatcher routes fresh work into).
-VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train"}
+VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status"}
 
 ROUTING_SYSTEM_PROMPT = (
     "You are a routing classifier. Given a piece of text (optionally preceded by recent "

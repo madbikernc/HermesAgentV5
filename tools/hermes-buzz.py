@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.0.8
+# Version: 2.0.9
+#
+# 2.0.9 (2026-08-31) — added `status` to `KNOWN_AGENTS`/`KNOWN_TOPICS`, proactively, ahead of the
+# new curated read-only skill-status agent's own first publish — same recurring bug class every
+# entry below this one documents. Unlike `websearch`, `status` IS a normal
+# `hermes-dispatch.py` routing target (VALID_TARGETS) — see hermes-status.py.
 #
 # 2.0.8 (2026-08-30) — added `websearch` to `KNOWN_AGENTS`/`KNOWN_TOPICS`, proactively, ahead of
 # the new internet-search fallback agent's own first publish — same recurring bug class every
@@ -141,14 +146,14 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1). Most of
 # these have no subscriber yet — same ahead-of-the-consumer posture as hermes-memory's `tasks`
 # table.
 KNOWN_TOPICS = KNOWN_AGENTS | {
     "dispatch", "retrieve", "screen", "logs", "code", "vision", "media", "train", "results",
-    "websearch",
+    "websearch", "status",
 }
 
 _db_lock = threading.Lock()
