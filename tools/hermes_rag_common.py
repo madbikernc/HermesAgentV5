@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 — S16b: reranking. search() over-fetches a wider KNN candidate pool (RERANK_WIDEN, default
+# 4x top_k) and reranks it down to the real top_k via a cross-encoder (Qwen3-Reranker-0.6B,
+# infra/hermes-rag/start-rerank.sh, port 8093 — reserved for this since target §4.1's own model
+# table, unused until now). Real bug found and fixed before this shipped, not assumed away: the
+# first GGUF tried (a third-party conversion) produced backwards relevance scores — confirmed
+# live with a real query, then confirmed as a known llama.cpp issue (ggml-org/llama.cpp#16407,
+# missing `cls.output.weight`) rather than a local misconfiguration, and a `--pooling rank
+# --embedding` requirement neither `--reranking` alone nor the broken GGUF's own defaults
+# surfaced. Fails open on any rerank error (backend down, timeout, malformed response) — same
+# graceful-degradation shape hermes-router.py already uses for Layer 2 (guard unreachable,
+# proceed on Layer 1 alone): a worse-ranked top_k beats a hard failure on every retrieval in the
+# fleet.
 #
 # 1.4.0 — Phase 33: discovery_candidates/discovery_scanned_chunks' schema and
 # the list/decide operations on them moved here from
@@ -67,6 +80,7 @@ infra/hermes-rag/), never re-implemented per caller.
 import datetime
 import hashlib
 import json
+import sys
 import os
 import re
 import sqlite3
@@ -78,6 +92,9 @@ DB_PATH = Path(os.environ.get("HERMES_RAG_DB", "/mnt/hermes-data/rag/vectors.db"
 EMBED_URL = os.environ.get("HERMES_RAG_EMBED_URL", "http://127.0.0.1:8092/v1/embeddings")
 EMBED_DIMS = 1024
 EMBED_TIMEOUT = 30
+RERANK_URL = os.environ.get("HERMES_RAG_RERANK_URL", "http://127.0.0.1:8093/rerank")
+RERANK_TIMEOUT = 15
+RERANK_WIDEN = 4  # candidate pool fetched before reranking = top_k * RERANK_WIDEN
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chunks (
@@ -167,7 +184,30 @@ def pack_vec(vec: list) -> bytes:
     return sqlite_vec.serialize_float32(vec)
 
 
-def search(text: str, corpus: str = None, top_k: int = 5, min_chunk_id: int = None):
+def rerank(query: str, candidates: list) -> list:
+    """Reorders `candidates` (each a dict with a "text" key, from search()'s own row shape) by a
+    real cross-encoder relevance score against `query`. Returns the same dicts, most-relevant
+    first, each with a new "rerank_score" key. Raises on failure — callers decide whether to fail
+    open, same as embed()'s own contract; search() below fails open, a caller with a harder
+    requirement doesn't have to."""
+    payload = json.dumps({
+        "query": query, "documents": [c["text"] for c in candidates],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        RERANK_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=RERANK_TIMEOUT) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    scored = []
+    for r in body["results"]:
+        c = dict(candidates[r["index"]])
+        c["rerank_score"] = r["relevance_score"]
+        scored.append(c)
+    scored.sort(key=lambda c: c["rerank_score"], reverse=True)
+    return scored
+
+
+def search(text: str, corpus: str = None, top_k: int = 5, min_chunk_id: int = None, use_rerank: bool = True):
     """Cosine-similarity search over the vector store — the one retrieval
     implementation both hermes-rag-query.py and hermes-news-digest.py use,
     factored out once the news digest needed the same search restricted to
@@ -187,6 +227,11 @@ def search(text: str, corpus: str = None, top_k: int = 5, min_chunk_id: int = No
         widen *= 4
     if min_chunk_id is not None:
         widen *= 8
+    if use_rerank:
+        widen *= RERANK_WIDEN  # a wider candidate pool for the reranker to actually choose among —
+                                # reranking a pool the same size as top_k can only ever reorder,
+                                # never surface a real KNN-runner-up the initial pass ranked just
+                                # outside top_k
 
     sql = (
         "SELECT c.id, c.citation, c.corpus, c.source_path, c.chunk_text, v.distance "
@@ -199,12 +244,21 @@ def search(text: str, corpus: str = None, top_k: int = 5, min_chunk_id: int = No
         rows = [r for r in rows if r[2] == corpus]
     if min_chunk_id is not None:
         rows = [r for r in rows if r[0] > min_chunk_id]
-    rows = rows[:top_k]
 
-    return [
+    candidates = [
         {"chunk_id": r[0], "citation": r[1], "corpus": r[2], "source_path": r[3], "text": r[4], "distance": r[5]}
         for r in rows
     ]
+
+    if use_rerank and len(candidates) > 1:
+        try:
+            candidates = rerank(text, candidates)
+        except Exception as exc:
+            # Fails open, same shape as hermes-router.py's own Layer 2 degradation: a worse-ranked
+            # top_k (plain KNN order) beats a hard failure on every retrieval in the fleet.
+            print(f"WARNING: rerank failed, falling back to KNN order: {exc}", file=sys.stderr)
+
+    return candidates[:top_k]
 
 
 ROUTER_URL = os.environ.get("HERMES_ROUTER_URL", "http://127.0.0.1:8080")

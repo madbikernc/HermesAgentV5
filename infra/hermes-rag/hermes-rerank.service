@@ -1,0 +1,13 @@
+[Unit]
+Description=llama.cpp server - Qwen3-Reranker-0.6B (RAG cross-encoder reranking, S16b)
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+ExecStart=/opt/llama.cpp/start-rerank.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
