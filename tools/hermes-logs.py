@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 1.3.1
+# Version: 1.3.2
+#
+# 1.3.2 (2026-08-31) — real gap found live testing the previous fix: "pfesense log review" (a
+# typo) correctly declined via the bare-instruction guard, but investigating it surfaced a much
+# bigger, previously-undiscovered problem -- `pfsense` and `canary` had NEVER been reachable via
+# natural language at all, only the literal `source: pfsense`/`source: canary` API-style prefix,
+# which no chat user would know to type. Every plain "pfsense log review" or canary/honeypot
+# mention silently fell through to `raw` and correctly declined rather than fabricate, but never
+# ran the real check -- fleethealth and gameabuse only got keyword coverage because they happened
+# to hit live bugs tonight; these two just never got the same treatment. Added PFSENSE_KEYWORDS/
+# CANARY_KEYWORDS (bare-mention triggers, no combination check needed -- see parse_source()'s own
+# docstring for why). `gameservers`-via-logs deliberately left prefix-only: hermes-status.py
+# already covers plain minecraft/zomboid health mentions better (direct, deterministic, no `super`
+# cold-wake), so there's no real gap there to close.
 #
 # 1.3.1 (2026-08-31) — real gap found live minutes after 1.3.0 shipped: "analyze minecraft logs"
 # matched none of GAMEABUSE_KEYWORDS' exact phrases (fell through to `raw`, correctly declined via
@@ -156,6 +169,17 @@ GAMEABUSE_GAME_WORDS = ("minecraft", "zomboid", "muncraft")
 GAMEABUSE_INTENT_WORDS = ("log", "logs", "abuse", "grief", "griefing", "cheat", "cheating",
                           "ban", "banned", "kick", "kicked")
 
+# Real gap found live (2026-08-31) right after fixing the gameabuse one: `pfsense` and `canary`
+# were ONLY ever reachable via the literal `source: pfsense`/`source: canary` API-style prefix --
+# no chat user would know to type that. "pfsense log review" and any canary/honeypot mention
+# always fell through to `raw` and correctly declined rather than fabricate, but never actually
+# ran the real check. By the time text reaches parse_source() the topic-level status-vs-logs
+# ambiguity is already resolved (dispatch routed here via TOPIC_DESCRIPTIONS), so a bare mention
+# is enough here -- no combination check needed like gameabuse's, since neither word means
+# anything else in this fleet's domain.
+PFSENSE_KEYWORDS = ("pfsense",)
+CANARY_KEYWORDS = ("canary", "honeypot")
+
 SOURCE_SYSTEM_PROMPT = (
     "You are the fleet's log analyst. You will be shown real security/operations data — firewall "
     "log lines, honeypot probe events, game-server health output, game-server admin/connection/PvP "
@@ -284,15 +308,18 @@ def _looks_like_bare_instruction(text):
 
 def parse_source(text):
     """`source: pfsense|canary|gameservers|fleethealth|gameabuse` (case-insensitive) as the first
-    line selects a real data pull. A plain request that never uses that prefix but is clearly
-    asking about fleet health (FLEETHEALTH_KEYWORDS) or game-server abuse patterns
+    line selects a real data pull. A plain request that never uses that prefix also selects a real
+    source via keyword matching: fleet health (FLEETHEALTH_KEYWORDS), game-server abuse
     (GAMEABUSE_STRONG_KEYWORDS alone, or a GAMEABUSE_GAME_WORDS + GAMEABUSE_INTENT_WORDS
-    combination) also selects the matching source — same reason FLEETHEALTH_KEYWORDS exists:
-    "Report on the fleet health" once fell all the way
-    through to `raw` with nothing to analyze, and `super` fabricated a status report rather than
-    admit it had no data. Anything else means "raw" — analyze the submitted text itself. Keyword
-    matching throughout, not an LLM classification: this only needs to be right, not smart, and a
-    wrong LLM guess here would silently analyze the wrong thing."""
+    combination), or a bare mention of pfsense/canary/honeypot (PFSENSE_KEYWORDS/CANARY_KEYWORDS
+    -- no combination needed for these two, since by the time text reaches this function the
+    topic-level status-vs-logs ambiguity is already resolved by dispatch's own routing, and
+    neither word means anything else in this fleet). Same reason FLEETHEALTH_KEYWORDS exists in
+    the first place: "Report on the fleet health" once fell all the way through to `raw` with
+    nothing to analyze, and `super` fabricated a status report rather than admit it had no data.
+    Anything else means "raw" — analyze the submitted text itself. Keyword matching throughout,
+    not an LLM classification: this only needs to be right, not smart, and a wrong LLM guess here
+    would silently analyze the wrong thing."""
     first_line = text.strip().splitlines()[0].strip().lower() if text.strip() else ""
     if first_line.startswith("source:"):
         candidate = first_line.split(":", 1)[1].strip()
@@ -307,6 +334,10 @@ def parse_source(text):
     if (any(g in lowered for g in GAMEABUSE_GAME_WORDS)
             and any(i in lowered for i in GAMEABUSE_INTENT_WORDS)):
         return "gameabuse", text
+    if any(kw in lowered for kw in PFSENSE_KEYWORDS):
+        return "pfsense", text
+    if any(kw in lowered for kw in CANARY_KEYWORDS):
+        return "canary", text
     return "raw", text
 
 
