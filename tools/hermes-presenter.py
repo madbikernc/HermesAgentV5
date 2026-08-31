@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-08-30) — internet-search fallback offer, direct operator request: "search RAG
+# first, then offer to search the internet if RAG doesn't have what I need." hermes-retrieve.py
+# 1.2.0 now publishes a distinct `no-match` task state (instead of `done`) when it genuinely has
+# no grounded answer; check_outstanding() watches for that state, sends a fixed offer message, and
+# stashes the original question's task_id/memory_ref under a new per-room `websearch-offer:*`
+# presenter-state key (same agent_state identity as this process's own `pending:*` keys, distinct
+# prefix so the two never collide in a `GET /state/presenter` listing). handle_message() checks
+# for a live offer before anything else: a deterministic yes/no phrase match (same "doesn't need
+# to be smart, needs to be right" reasoning NEW_CONVERSATION_PHRASES already uses) either resumes
+# the SAME task_id on the new `websearch` Buzz topic (bypassing hermes-dispatch.py's classifier
+# entirely — this fallback is reachable only through this explicit offer/confirm exchange, never
+# routed to directly, per the operator's own scoping) or sends a plain decline acknowledgment;
+# anything else clears the offer and falls through to normal handling, so an unrelated new message
+# after an unanswered offer is never mistaken for a reply to it. Reusing the original task_id
+# (rather than minting a new one) is deliberate: it's the same logical request continuing on a
+# different backend, hermes-memory's `tasks` table already upserts by id, and every specialist's
+# fetch_raw_text() only searches turns scoped to task_id, so a fresh task_id with no turns of its
+# own would find nothing to answer regardless of what memory_ref pointed to. `agent_state`'s
+# `_set_state` rejects a null value outright (confirmed by reading hermes-memory.py directly, not
+# guessed) — offers are "cleared" by overwriting with `{}`, which reads back falsy at every call
+# site that checks `if offer:`, without needing a delete route that doesn't exist.
 #
 # 1.3.0 (2026-08-30) — conversation continuity. Every message now belongs to a conv_id, tagged
 # on its turn at write time (hermes-memory.py 1.3.0's new `turns.conv_id` column) and resolved by
@@ -88,8 +110,14 @@
 #      from hermes-memory by conv_id, this process just tags each turn with one at write time
 #      (hermes_conversation_common.py). The styled text a user reads is still never what a future
 #      dispatch/specialist decision is built from.
-#   3. Clarifying questions — the presenter still never asks one in-character; nothing routes a
-#      styled reply back into the dispatch path.
+#   3. Clarifying questions — the presenter still never asks one in-character, and nothing routes
+#      a *styled* reply back into the dispatch path. One narrow, fixed exception exists as of
+#      1.4.0: the internet-search fallback offer is a single hardcoded yes/no question with
+#      deterministic phrase matching on the reply (same "doesn't need to be smart, needs to be
+#      right" contract NEW_CONVERSATION_PHRASES already uses), not a model-generated question and
+#      not free-form routing — a "yes" resumes the exact same task_id on a single fixed topic
+#      (`websearch`), nothing else. This is a scoped, operator-approved exception (RAG-fallback
+#      only, never a general dispatch target), not a reopening of this rule.
 #   4. Fidelity drift — actively defended now, not structurally impossible: should_style() scopes
 #      the model call to short, chat-shaped text only (see looks_technical()), STYLE_SYSTEM_PROMPT
 #      explicitly forbids omitting/softening facts or inventing certainty, and style_reply() falls
@@ -152,6 +180,19 @@
 #                        comma-separated; a message matching one exactly (case-insensitive,
 #                        trailing punctuation stripped) starts a fresh conversation immediately,
 #                        with no dispatch at all
+#   WEBSEARCH_OFFER_MESSAGE default "I couldn't find anything about that in the fleet's knowledge
+#                        base. Want me to search the internet for it?" — sent when
+#                        hermes-retrieve.py reports its new `no-match` task state
+#   WEBSEARCH_ACK_MESSAGE default "Searching the internet for that now." — sent once a websearch
+#                        offer is confirmed, same reasoning ACK_MESSAGE already documents
+#   WEBSEARCH_DECLINE_MESSAGE default "Okay, I won't search the internet for that." — sent when a
+#                        websearch offer is explicitly declined
+#   WEBSEARCH_YES_PHRASES default "yes,y,yeah,yep,sure,please,go ahead,do it,search the
+#                        internet,search online" — comma-separated, same exact-match-after-
+#                        strip/lower/punctuation-strip contract as NEW_CONVERSATION_PHRASES
+#   WEBSEARCH_NO_PHRASES default "no,n,nah,nope,no thanks,never mind,cancel" — comma-separated,
+#                        same matching contract; anything matching neither list clears the offer
+#                        and falls through to normal handling instead of guessing
 
 import json
 import os
@@ -196,6 +237,24 @@ MAX_CONV_CHARS = int(os.environ.get("MAX_CONV_CHARS", "16000"))
 NEW_CONVERSATION_PHRASES = tuple(
     p.strip() for p in os.environ.get(
         "NEW_CONVERSATION_PHRASES", "new conversation,/new,start over,reset conversation"
+    ).split(",")
+)
+WEBSEARCH_OFFER_MESSAGE = os.environ.get(
+    "WEBSEARCH_OFFER_MESSAGE",
+    "I couldn't find anything about that in the fleet's knowledge base. "
+    "Want me to search the internet for it?",
+)
+WEBSEARCH_ACK_MESSAGE = os.environ.get("WEBSEARCH_ACK_MESSAGE", "Searching the internet for that now.")
+WEBSEARCH_DECLINE_MESSAGE = os.environ.get("WEBSEARCH_DECLINE_MESSAGE", "Okay, I won't search the internet for that.")
+WEBSEARCH_YES_PHRASES = tuple(
+    p.strip() for p in os.environ.get(
+        "WEBSEARCH_YES_PHRASES",
+        "yes,y,yeah,yep,sure,please,go ahead,do it,search the internet,search online",
+    ).split(",")
+)
+WEBSEARCH_NO_PHRASES = tuple(
+    p.strip() for p in os.environ.get(
+        "WEBSEARCH_NO_PHRASES", "no,n,nah,nope,no thanks,never mind,cancel"
     ).split(",")
 )
 
@@ -361,6 +420,69 @@ def resolve_conversation(room_id, body):
     return conv_id
 
 
+def get_websearch_offer(room_id):
+    """List+filter, same reasoning get_room_conv_state() already documents for room_id-keyed
+    state. A cleared offer reads back as `{}` (falsy) rather than a missing key or None -- see the
+    module docstring on why `_set_state` can't store a null value."""
+    try:
+        entries = _get(f"{MEMORY_URL}/state/presenter", MEMORY_TOKEN).get("state", [])
+    except Exception as exc:
+        log(f"could not read websearch offer state: {exc}")
+        return None
+    key = f"websearch-offer:{room_id}"
+    for entry in entries:
+        if entry["key"] == key:
+            return entry["value"]
+    return None
+
+
+def set_websearch_offer(room_id, task_id, memory_ref):
+    try:
+        _post(f"{MEMORY_URL}/state", {
+            "agent": "presenter", "key": f"websearch-offer:{room_id}",
+            "value": {"task_id": task_id, "memory_ref": memory_ref, "offered_at": time.time()},
+        }, MEMORY_TOKEN)
+    except Exception as exc:
+        log(f"could not write websearch offer state: {exc}")
+
+
+def clear_websearch_offer(room_id):
+    try:
+        _post(f"{MEMORY_URL}/state", {
+            "agent": "presenter", "key": f"websearch-offer:{room_id}", "value": {},
+        }, MEMORY_TOKEN)
+    except Exception as exc:
+        log(f"could not clear websearch offer state: {exc}")
+
+
+def dispatch_websearch(room_id, offer):
+    """Resumes the SAME task_id the original (now no-match) retrieve attempt used -- see the
+    module docstring for why a fresh task_id can't work here. Mirrors handle_message()'s own
+    dispatch shape (re-arm pending:<task_id>, publish the Buzz envelope, send an ack)."""
+    task_id = offer.get("task_id")
+    memory_ref = offer.get("memory_ref")
+    if not task_id or not memory_ref:
+        log(f"room {room_id}: websearch offer confirmed but missing task_id/memory_ref, dropping")
+        return
+
+    _post(f"{MEMORY_URL}/state", {
+        "agent": "presenter", "key": f"pending:{task_id}",
+        "value": {"room_id": room_id, "requested_at": time.time(), "delivered": False},
+    }, MEMORY_TOKEN)
+
+    _post(f"{BUZZ_URL}/messages", {
+        "from": "presenter", "topic": "websearch",
+        "task_id": task_id, "memory_ref": memory_ref,
+    }, BUZZ_TOKEN)
+
+    log(f"task {task_id}: websearch confirmed by {room_id}, dispatched")
+
+    try:
+        send_room_message(room_id, WEBSEARCH_ACK_MESSAGE)
+    except Exception as exc:
+        log(f"task {task_id}: websearch ack send failed (non-fatal, dispatch already happened): {exc}")
+
+
 def handle_message(room_id, event):
     content = event.get("content", {})
     if content.get("msgtype") != "m.text":
@@ -368,6 +490,20 @@ def handle_message(room_id, event):
     body = content.get("body", "")
     if not body:
         return
+
+    offer = get_websearch_offer(room_id)
+    if offer:
+        clear_websearch_offer(room_id)
+        stripped = body.strip().lower().strip(".,!?\"'")
+        if stripped in WEBSEARCH_YES_PHRASES:
+            dispatch_websearch(room_id, offer)
+            return
+        if stripped in WEBSEARCH_NO_PHRASES:
+            send_room_message(room_id, WEBSEARCH_DECLINE_MESSAGE)
+            return
+        # Neither a recognized yes nor no -- treat as an unrelated new message rather than
+        # guessing; the offer is already cleared above so it can't be answered late by a future
+        # unrelated message either.
 
     conv_id = resolve_conversation(room_id, body)
     if conv_id is None:
@@ -538,6 +674,19 @@ def check_outstanding():
             send_room_message(room_id, format_reply(task.get("topic"), text))
             _mark_delivered(task_id, value)
             log(f"task {task_id}: delivered to {room_id}")
+        elif state == "no-match":
+            turns = _get(f"{MEMORY_URL}/turns?task_id={task_id}&limit=50", MEMORY_TOKEN).get("turns", [])
+            user_turn = next((t for t in turns if t["agent"] == "presenter" and t["role"] == "user"), None)
+            if user_turn:
+                set_websearch_offer(room_id, task_id, f"turn:{user_turn['id']}")
+                send_room_message(room_id, WEBSEARCH_OFFER_MESSAGE)
+            else:
+                # Defensive fallback only -- presenter itself always writes this turn in
+                # handle_message(), so this should be unreachable in practice. Degrade to the
+                # plain no-match text rather than offering a search we couldn't resume anyway.
+                send_room_message(room_id, "No relevant documents were found in the fleet's knowledge base "
+                                            "for this question.")
+            _mark_delivered(task_id, value)
         elif state == "blocked":
             send_room_message(room_id, "This request was rejected by the fleet's screening layer and was not processed.")
             _mark_delivered(task_id, value)
