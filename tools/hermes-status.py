@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.1.1
+# Version: 1.1.2
+#
+# 1.1.2 (2026-08-31) — real bug found live: moenflo's 30s timeout was too short. A real,
+# successful run of tools/hermes-moen-flo.py --detail (confirmed live, real data returned) took
+# ~58s — cloud API auth overhead this source's timeout didn't account for. Raised to 90s, matching
+# generac's own already-generous budget for the same class of cloud-auth overhead.
 #
 # 1.1.1 (2026-08-31) — real usability gap found live: a bare "Moen" didn't match the moenflo
 # keyword tuple (required the full phrase "moen flo"). Added the bare brand name; also added
@@ -104,7 +109,7 @@ STATUS_SOURCES = {
     "moenflo": (
         ("moen", "moen flo", "moen-flo", "water shutoff", "leak detector", "flo valve"),
         ["/opt/hermes/venvs/moen-flo/bin/python3", str(REPO_DIR / "tools" / "hermes-moen-flo.py"), "--detail"],
-        30,
+        90,  # confirmed live: a real run took ~58s (cloud API auth overhead); 30s timed out every time
     ),
     "wyze": (
         ("wyze",),
