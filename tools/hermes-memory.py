@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.3.1
+#
+# 1.3.1 (2026-08-30) — fix a real deploy-time crash caught live on spark's restart: the static
+# SCHEMA string's `CREATE INDEX idx_turns_conv` ran via executescript() *before*
+# `_migrate_turns_conv_id()`, and `CREATE TABLE IF NOT EXISTS` no-ops against the already-existing
+# pre-1.3.0 `turns` table -- so the index statement tried to build against a `conv_id` column that
+# didn't exist yet on that table and crashed the service with `no such column: conv_id`. Moved the
+# index out of SCHEMA entirely; the migration now always issues `CREATE INDEX IF NOT EXISTS` after
+# confirming the column is present (whether just-added or already there from a fresh DB's SCHEMA).
 #
 # 1.3.0 (2026-08-30) — conversation continuity, the piece that was actually missing: `turns`
 # gains a nullable `conv_id` column (+ index), `POST /turns` accepts it, `GET /turns` gains it as
@@ -144,7 +152,6 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 CREATE INDEX IF NOT EXISTS idx_turns_task ON turns(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_turns_agent ON turns(agent, created_at);
-CREATE INDEX IF NOT EXISTS idx_turns_conv ON turns(conv_id, created_at);
 
 CREATE TABLE IF NOT EXISTS agent_state (
     agent       TEXT NOT NULL,
@@ -226,13 +233,18 @@ def _migrate_turns_conv_id(conn):
     _migrate_turns_autoincrement()'s constraint change, ALTER TABLE ADD COLUMN handles this
     directly, no rename-and-rebuild needed. Idempotent per connect() call, same guard shape:
     checked via PRAGMA table_info rather than sqlite_master's SQL text, since a plain ADD COLUMN
-    doesn't change the table's own CREATE-statement string the way the AUTOINCREMENT rebuild did."""
+    doesn't change the table's own CREATE-statement string the way the AUTOINCREMENT rebuild did.
+    The index is deliberately NOT in the static SCHEMA string: executescript(SCHEMA) runs before
+    this migration on every connect(), and CREATE TABLE IF NOT EXISTS no-ops against an existing
+    pre-1.3.0 table -- an index on conv_id in SCHEMA would still try to build against a column
+    that doesn't exist yet on that table, and crash the service. Creating it here, after the
+    column is guaranteed present (either just-added or already in a fresh DB's SCHEMA), avoids
+    that ordering hazard; IF NOT EXISTS makes it safe to run on every connect() regardless."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(turns)").fetchall()}
-    if "conv_id" in cols:
-        return  # fresh DB (SCHEMA already has it) or already migrated
-    conn.execute("ALTER TABLE turns ADD COLUMN conv_id TEXT")
+    if "conv_id" not in cols:
+        conn.execute("ALTER TABLE turns ADD COLUMN conv_id TEXT")
+        log("migrated turns: added conv_id column")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_conv ON turns(conv_id, created_at)")
-    log("migrated turns: added conv_id column + index")
 
 
 def connect(readonly=False):
