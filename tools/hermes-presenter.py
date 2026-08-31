@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.5.1
+# Version: 1.6.0
+#
+# 1.6.0 (2026-08-31) — direct operator request: the inbound "Got it — working on that." ack
+# should say which specialist is actually handling the request. handle_message() itself can't do
+# this -- it fires before hermes-dispatch.py's async routing decision even happens, so the topic
+# genuinely isn't known yet at that point. Moved the ack out of handle_message() entirely and into
+# check_outstanding()'s own polling loop: a new terminal `elif` fires the first time a still-in-
+# progress task's real topic becomes visible (dispatch.py's `dispatched` state always carries it),
+# sends "Got it — routing this to {topic}.", and marks the pending-state entry's new `acked` flag
+# so it's never resent. A task that resolves fast (before the next poll) never gets a preliminary
+# ack at all -- correct, since the real answer arriving is strictly better information than
+# "working on it" would have been. dispatch_websearch() is pre-marked acked=True since it already
+# knows its one fixed destination and sends its own specific message immediately, same as before.
 #
 # 1.5.1 (2026-08-31) — real bug found live: check_outstanding() never had a branch for
 # state == "error" — every specialist's own ok=False failure (a real, specific message: "Retrieval
@@ -190,9 +202,15 @@
 #                        output and skip styling regardless of shape (cost control + the largest
 #                        fidelity-drift surface, target §6.3)
 #   ACK_ENABLED         default "1" — set "0" to send no inbound acknowledgment at all
-#   ACK_MESSAGE         default "Got it — working on that." — sent once, immediately after a
-#                        message is dispatched, so silence during an on-demand model's cold wake
-#                        (up to ~150s) doesn't read as "did this even arrive?"
+#   ACK_MESSAGE_TEMPLATE default "Got it — routing this to {topic}." — sent once check_outstanding()
+#                        first observes the task's real routed topic (hermes-dispatch.py's own
+#                        `dispatched` state, which always carries topic), not immediately on
+#                        dispatch — handle_message() itself doesn't know the topic yet, since
+#                        routing is a separate async decision. Never re-sent once sent (tracked via
+#                        the pending-state entry's own `acked` flag) and skipped entirely for a task
+#                        that resolves to a terminal state before the next poll — silence during an
+#                        on-demand model's cold wake (up to ~150s) still doesn't read as "did this
+#                        even arrive?", it just also now says which specialist is handling it.
 #   IDLE_TIMEOUT_SECONDS default 3600 (1 hour) — a room's conversation auto-closes after this long
 #                        with no message; expect to tune this, not a load-bearing constant
 #   MAX_CONV_TURNS      default 40 — a conversation hard-resets once it holds this many turns
@@ -205,8 +223,9 @@
 #   WEBSEARCH_OFFER_MESSAGE default "I couldn't find anything about that in the fleet's knowledge
 #                        base. Want me to search the internet for it?" — sent when
 #                        hermes-retrieve.py reports its new `no-match` task state
-#   WEBSEARCH_ACK_MESSAGE default "Searching the internet for that now." — sent once a websearch
-#                        offer is confirmed, same reasoning ACK_MESSAGE already documents
+#   WEBSEARCH_ACK_MESSAGE default "Searching the internet for that now." — sent immediately once a
+#                        websearch offer is confirmed (this path already knows its exact
+#                        destination, no need to wait for check_outstanding()'s routed ack)
 #   WEBSEARCH_DECLINE_MESSAGE default "Okay, I won't search the internet for that." — sent when a
 #                        websearch offer is explicitly declined
 #   WEBSEARCH_YES_PHRASES default "yes,y,yeah,yep,sure,please,go ahead,do it,search the
@@ -256,7 +275,7 @@ STYLE_TIMEOUT_SECONDS = int(os.environ.get("STYLE_TIMEOUT_SECONDS", "25"))
 STYLE_MIN_LEN = int(os.environ.get("STYLE_MIN_LEN", "40"))
 STYLE_MAX_CHARS = int(os.environ.get("STYLE_MAX_CHARS", "4000"))
 ACK_ENABLED = os.environ.get("ACK_ENABLED", "1") == "1"
-ACK_MESSAGE = os.environ.get("ACK_MESSAGE", "Got it — working on that.")
+ACK_MESSAGE_TEMPLATE = os.environ.get("ACK_MESSAGE_TEMPLATE", "Got it — routing this to {topic}.")
 IDLE_TIMEOUT_SECONDS = int(os.environ.get("IDLE_TIMEOUT_SECONDS", "3600"))
 MAX_CONV_TURNS = int(os.environ.get("MAX_CONV_TURNS", "40"))
 MAX_CONV_CHARS = int(os.environ.get("MAX_CONV_CHARS", "16000"))
@@ -513,7 +532,11 @@ def dispatch_websearch(room_id, offer):
 
     _post(f"{MEMORY_URL}/state", {
         "agent": "presenter", "key": f"pending:{task_id}",
-        "value": {"room_id": room_id, "requested_at": time.time(), "delivered": False},
+        # acked: True from the start -- this path already knows its exact destination (always
+        # `websearch`, no classifier involved) and sends its own specific message below; without
+        # this, check_outstanding()'s routed-ack branch would also fire and send a second,
+        # redundant "Got it — routing this to websearch." right after.
+        "value": {"room_id": room_id, "requested_at": time.time(), "delivered": False, "acked": True},
     }, MEMORY_TOKEN)
 
     _post(f"{BUZZ_URL}/messages", {
@@ -570,7 +593,10 @@ def handle_message(room_id, event):
 
     _post(f"{MEMORY_URL}/state", {
         "agent": "presenter", "key": f"pending:{task_id}",
-        "value": {"room_id": room_id, "requested_at": time.time(), "delivered": False},
+        # acked: False -- check_outstanding()'s routed-ack branch sends "Got it — routing this to
+        # {topic}." once the real topic is known (handle_message() itself never learns it; routing
+        # is a separate async decision made by hermes-dispatch.py).
+        "value": {"room_id": room_id, "requested_at": time.time(), "delivered": False, "acked": False},
     }, MEMORY_TOKEN)
 
     _post(f"{BUZZ_URL}/messages", {
@@ -579,12 +605,6 @@ def handle_message(room_id, event):
     }, BUZZ_TOKEN)
 
     log(f"task {task_id}: inbound from {room_id}, dispatched")
-
-    if ACK_ENABLED:
-        try:
-            send_room_message(room_id, ACK_MESSAGE)
-        except Exception as exc:
-            log(f"task {task_id}: ack send failed (non-fatal, dispatch already happened): {exc}")
 
 
 def sync_once(since):
@@ -765,10 +785,26 @@ def check_outstanding():
             send_room_message(room_id, "No specialist has completed this request yet — it may still be in flight, "
                                         "or nothing is currently watching the topic it was routed to.")
             _mark_delivered(task_id, value)
+        elif ACK_ENABLED and not value.get("acked") and task.get("topic"):
+            # Still in progress, not yet acked, and the real routed topic is now known
+            # (hermes-dispatch.py's own `dispatched` state always carries topic) -- send the
+            # routed ack exactly once. A task that reaches a terminal state before this branch is
+            # ever hit (fast round-trip) never gets one at all, which is correct: the real answer
+            # arriving is a better signal than a preliminary "working on it" would have been.
+            try:
+                send_room_message(room_id, ACK_MESSAGE_TEMPLATE.format(topic=task["topic"]))
+            except Exception as exc:
+                log(f"task {task_id}: routed ack send failed (non-fatal): {exc}")
+            _mark_acked(task_id, value)
 
 
 def _mark_delivered(task_id, value):
     value = dict(value, delivered=True)
+    _post(f"{MEMORY_URL}/state", {"agent": "presenter", "key": f"pending:{task_id}", "value": value}, MEMORY_TOKEN)
+
+
+def _mark_acked(task_id, value):
+    value = dict(value, acked=True)
     _post(f"{MEMORY_URL}/state", {"agent": "presenter", "key": f"pending:{task_id}", "value": value}, MEMORY_TOKEN)
 
 
