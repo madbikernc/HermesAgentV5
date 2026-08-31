@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-08-31) — /help, direct operator request: several capabilities built this session
+# (the fleet-health keyword trigger, the curated status-check keywords, the new-conversation
+# control phrases) only work if the user already knows the right words to say, with no way to
+# discover them from inside the chat itself. HELP_PHRASES ("/help", "help") is checked first in
+# handle_message(), before even the websearch-offer check, so asking for help never consumes or
+# clears a pending offer -- it just answers and leaves whatever state existed untouched. Sends a
+# fixed, hardcoded HELP_MESSAGE (no model call — this only needs to be accurate, not natural
+# language, and a model paraphrase of it risks exactly the kind of capability-description drift
+# this project's anti-fabrication stance exists to prevent). No turn, no task, no dispatch — same
+# shape the control-phrase branch below already established.
 #
 # 1.4.0 (2026-08-30) — internet-search fallback offer, direct operator request: "search RAG
 # first, then offer to search the internet if RAG doesn't have what I need." hermes-retrieve.py
@@ -193,6 +204,10 @@
 #   WEBSEARCH_NO_PHRASES default "no,n,nah,nope,no thanks,never mind,cancel" — comma-separated,
 #                        same matching contract; anything matching neither list clears the offer
 #                        and falls through to normal handling instead of guessing
+#   HELP_PHRASES         default "/help,help" — comma-separated, same exact-match contract;
+#                        checked first in handle_message(), before the websearch-offer lookup
+#   HELP_MESSAGE         default: a fixed capability summary — see HELP_MESSAGE below for the
+#                        exact text
 
 import json
 import os
@@ -257,6 +272,26 @@ WEBSEARCH_NO_PHRASES = tuple(
         "WEBSEARCH_NO_PHRASES", "no,n,nah,nope,no thanks,never mind,cancel"
     ).split(",")
 )
+HELP_PHRASES = tuple(p.strip() for p in os.environ.get("HELP_PHRASES", "/help,help").split(","))
+HELP_MESSAGE = os.environ.get("HELP_MESSAGE", (
+    "Here's what I can do:\n\n"
+    "• General questions — just ask; I'll route it automatically (knowledge-base search, coding "
+    "questions, image generation, log/security analysis).\n"
+    "• Fleet health — say \"fleet health\" or \"fleet status\" for a full aggregated report.\n"
+    "• System status checks — mention pfsense, generac, wyze, moen flo / water shutoff / leak "
+    "detector, minecraft / zomboid / game server, or vivint / security system / alarm status for "
+    "a live read-only check. Mention \"botnet\" or \"threat intel\" with an IP address to check it "
+    "against the local threat-intel cache. These are status checks only — none of them can change "
+    "or control anything.\n"
+    "• Knowledge-base search — if I don't have an answer in the fleet's own knowledge base, I'll "
+    "offer to search the internet; reply \"yes\" to confirm or \"no\" to decline.\n\n"
+    "Conversation control:\n"
+    "• \"new conversation\", \"/new\", \"start over\", or \"reset conversation\" — start a fresh "
+    "thread now.\n"
+    "• A conversation also resets automatically after an hour of inactivity, or once it gets too "
+    "long — I'll tell you plainly either time.\n"
+    "• \"/help\" or \"help\" — show this message again."
+))
 
 
 def log(msg):
@@ -490,6 +525,12 @@ def handle_message(room_id, event):
     body = content.get("body", "")
     if not body:
         return
+
+    stripped_for_help = body.strip().lower().strip(".,!?\"'")
+    if stripped_for_help in HELP_PHRASES:
+        send_room_message(room_id, HELP_MESSAGE)
+        return  # checked first, before the offer lookup below — asking for help must never
+                # consume or clear a pending websearch offer
 
     offer = get_websearch_offer(room_id)
     if offer:
