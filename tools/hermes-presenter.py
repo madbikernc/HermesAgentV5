@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.6.2
+# Version: 1.6.3
+#
+# 1.6.3 (2026-08-31) — direct operator request: HELP_MESSAGE updated for everything built after
+# 1.5.0 first wrote it -- the `probe` topic (network scans, ack-now/report-later), and `logs`'
+# new gameabuse/pfsense/canary natural-language reachability (previously only status-check
+# coverage was documented here, log/security analysis wasn't mentioned at all).
 #
 # 1.6.2 (2026-08-31) — supports the new `probe` topic (tools/hermes-probe.py), the fleet's first
 # genuinely long-running specialist: a real node probe can legitimately take up to ~30 minutes.
@@ -338,13 +343,19 @@ HELP_PHRASES = tuple(p.strip() for p in os.environ.get("HELP_PHRASES", "!help,he
 HELP_MESSAGE = os.environ.get("HELP_MESSAGE", (
     "Here's what I can do:\n\n"
     "• General questions — just ask; I'll route it automatically (knowledge-base search, coding "
-    "questions, image generation, log/security analysis).\n"
+    "questions, image generation).\n"
     "• Fleet health — say \"fleet health\" or \"fleet status\" for a full aggregated report.\n"
     "• System status checks — mention pfsense, generac, wyze, moen flo / water shutoff / leak "
     "detector, minecraft / zomboid / game server, or vivint / security system / alarm status for "
     "a live read-only check. Mention \"botnet\" or \"threat intel\" with an IP address to check it "
     "against the local threat-intel cache. These are status checks only — none of them can change "
     "or control anything.\n"
+    "• Log/security analysis — \"pfsense log review\" for firewall log analysis, \"canary\" or "
+    "\"honeypot\" for honeypot activity, or \"griefing\"/\"cheating\"/\"minecraft logs\"/"
+    "\"zomboid logs\" for a Minecraft/Zomboid abuse-pattern review.\n"
+    "• Network probe — \"probe <IP address>\" runs a real scan (hostnames, MAC/vendor, OS "
+    "fingerprint, all ports) against that address. Takes up to ~30 minutes; I'll ack right away "
+    "and send the real report as a follow-up once it finishes. Only one probe runs at a time.\n"
     "• Knowledge-base search — if I don't have an answer in the fleet's own knowledge base, I'll "
     "offer to search the internet; reply \"yes\" to confirm or \"no\" to decline.\n\n"
     "Conversation control:\n"
