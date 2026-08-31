@@ -1,5 +1,24 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 — HermesAgentV5 S16c: optional OCR for scanned/image-only PDF pages, direct request.
+# `--ocr` is off by default and must be passed explicitly — a personal-notes folder can hold large
+# scanned-image PDFs (an old photo album exported as PDF, for example) where OCR would turn a
+# quick catch-up ingest into a multi-hour run, and that trade-off is the operator's call each run,
+# not a default this script should make for them. Per-page, not per-document: `extract_pdf_text()`
+# already worked page-by-page; a page whose own native extraction comes back near-empty (<50 chars
+# — a bare heading or page number on an otherwise-scanned page counts as "empty" for this purpose)
+# is individually rasterized (`pdftoppm`, already installed system-wide, confirmed live rather than
+# assumed) and OCR'd (`tesseract`, installed for this stage — `apt-get install tesseract-ocr`, no
+# new Python dependency, same "shell out to a real established tool" pattern hermes-logs.py already
+# used for pfSense/canary/game-server data) — a partially-scanned document gets its scanned pages
+# recovered without discarding the pages that already had a real text layer. Mechanics verified
+# live against a real PDF already in `RAGDocs` before writing the ingestion path: rasterize a real
+# page, OCR it, confirm real recognizable text comes back (it does, cleanly, on body-text pages;
+# stylized cover-page fonts recognize less reliably, expected OCR behavior, not a pipeline bug).
+# Every OCR'd page is logged explicitly (which page, how many characters recovered) — same "every
+# skipped file is named explicitly" discipline this script's own docstring already commits to,
+# extended to "every OCR'd page," not silent either way.
 #
 # 1.3.0 — direct request: adds `.epub` (via `EbookLib`, HTML stripped with
 # `lxml.html`, already in the venv for other reasons) alongside the existing
@@ -61,11 +80,18 @@ approach the podcast archive's scale, so there's no bus-contention
 rationale here to justify the broker/HomeD13 path 30c built.
 
 Usage:
-    /opt/hermes/venvs/rag/bin/python3 hermes-rag-ingest-kb.py [--root PATH] [--dry-run]
+    /opt/hermes/venvs/rag/bin/python3 hermes-rag-ingest-kb.py [--root PATH] [--dry-run] [--ocr]
+
+--ocr (S16c) is off by default — the daily scheduled timer never passes it. Run it by hand when a
+scanned/image-only PDF is known to be in the folder; see this file's own 1.4.0 header for why it
+stays an explicit, per-run operator choice rather than an automatic default.
 """
 import argparse
 import datetime
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import ebooklib
@@ -82,14 +108,66 @@ MAX_CHUNK_CHARS = 1800
 ROOT = "/mnt/nas2-hermes-backup/RAGDocs"
 HANDLED_EXTENSIONS = {".md", ".txt", ".pdf", ".docx", ".epub"}
 EPUB_BLOCK_XPATH = ".//p | .//li | .//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6"
+OCR_MIN_CHARS = 50  # a page's own native extraction below this is treated as "empty" for OCR
+OCR_DPI = 200
 
 
-def extract_pdf_text(path: Path) -> str:
-    """Join every page's extracted text. Returns "" for a scanned/image-only
-    PDF with no real text layer (pypdf has no OCR) -- callers must treat
-    that as "skip, don't index," not an error."""
+def ocr_pdf_page(pdf_path: Path, page_num: int) -> str:
+    """Rasterizes one PDF page (1-indexed, matching pypdf's own enumeration once +1'd by the
+    caller) via pdftoppm and OCRs it via tesseract. Both are real system binaries, checked live
+    before this path was written, not assumed present — raises RuntimeError with the real
+    stderr/exit code if either is missing or fails, so a broken OCR install surfaces as a real
+    error on first use rather than a silent empty page."""
+    if not shutil.which("pdftoppm") or not shutil.which("tesseract"):
+        raise RuntimeError("pdftoppm/tesseract not found on PATH — install poppler-utils/tesseract-ocr")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        prefix = tmp_path / "page"
+        result = subprocess.run(
+            ["pdftoppm", "-png", "-f", str(page_num), "-l", str(page_num), "-r", str(OCR_DPI),
+             str(pdf_path), str(prefix)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"pdftoppm failed on page {page_num}: {result.stderr.strip()}")
+        pngs = sorted(tmp_path.glob("page*.png"))
+        if not pngs:
+            raise RuntimeError(f"pdftoppm produced no image for page {page_num}")
+        result = subprocess.run(
+            ["tesseract", str(pngs[0]), "stdout"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"tesseract failed on page {page_num}: {result.stderr.strip()}")
+        return result.stdout.strip()
+
+
+def extract_pdf_text(path: Path, ocr: bool = False) -> str:
+    """Join every page's extracted text. Returns "" for a scanned/image-only PDF with no real
+    text layer and ocr=False (pypdf alone has no OCR) -- callers must treat that as "skip, don't
+    index," not an error. With ocr=True (S16c, off by default -- see this file's own 1.4.0 header),
+    any individual page whose native extraction comes back under OCR_MIN_CHARS is rasterized and
+    OCR'd instead, page by page -- a partially-scanned document keeps its real text-layer pages
+    exactly as before and only recovers the scanned ones."""
     reader = pypdf.PdfReader(str(path))
-    return "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    pages = []
+    for i, page in enumerate(reader.pages):
+        native = (page.extract_text() or "").strip()
+        if ocr and len(native) < OCR_MIN_CHARS:
+            try:
+                recovered = ocr_pdf_page(path, i + 1)
+            except Exception as exc:
+                print(f"WARNING: {path.name} page {i + 1}: OCR failed, keeping native "
+                      f"extraction ({len(native)} chars): {exc}", file=sys.stderr)
+                pages.append(native)
+                continue
+            if len(recovered) > len(native):
+                print(f"  {path.name} page {i + 1}: OCR recovered {len(recovered)} chars "
+                      f"(native extraction had {len(native)})", file=sys.stderr)
+                pages.append(recovered)
+                continue
+        pages.append(native)
+    return "\n\n".join(pages).strip()
 
 
 def extract_docx_text(path: Path) -> str:
@@ -144,12 +222,12 @@ def discover_files(root: Path):
     return handled, skipped
 
 
-def ingest_file(conn, root: Path, path: Path, dry_run: bool) -> int:
+def ingest_file(conn, root: Path, path: Path, dry_run: bool, ocr: bool = False) -> int:
     rel = str(path.relative_to(root))
     suffix = path.suffix.lower()
 
     if suffix == ".pdf":
-        text = extract_pdf_text(path)
+        text = extract_pdf_text(path, ocr=ocr)
     elif suffix == ".docx":
         text = extract_docx_text(path)
     elif suffix == ".epub":
@@ -158,8 +236,9 @@ def ingest_file(conn, root: Path, path: Path, dry_run: bool) -> int:
         text = path.read_text(encoding="utf-8", errors="replace")
 
     if not text.strip():
+        hint = "" if (suffix == ".pdf" and ocr) else " (pass --ocr for scanned/image-only PDFs)" if suffix == ".pdf" else ""
         print(f"WARNING: {rel}: no extractable text — skipping (scanned/image-only PDF, "
-              f"empty document, or extraction failure)", file=sys.stderr)
+              f"empty document, or extraction failure){hint}", file=sys.stderr)
         return 0
 
     # Hash the extracted text, not the raw file bytes -- a PDF/docx re-save
@@ -216,6 +295,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=ROOT)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--ocr", action="store_true",
+                     help="OCR scanned/image-only PDF pages (S16c) — off by default; a "
+                          "scanned-image-heavy folder can turn a quick catch-up ingest into a "
+                          "multi-hour run, so this stays an explicit per-run choice")
     args = ap.parse_args()
 
     root = Path(args.root)
@@ -237,7 +320,7 @@ def main():
     changed = 0
     for path in handled:
         try:
-            n = ingest_file(conn, root, path, args.dry_run)
+            n = ingest_file(conn, root, path, args.dry_run, ocr=args.ocr)
         except RuntimeError as e:
             print(f"ERROR embedding {path}: {e}", file=sys.stderr)
             continue
