@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.3.1
+#
+# 1.3.1 (2026-08-31) — real gap found live minutes after 1.3.0 shipped: "analyze minecraft logs"
+# matched none of GAMEABUSE_KEYWORDS' exact phrases (fell through to `raw`, correctly declined via
+# the 1.2.1 bare-instruction guard rather than fabricating, but never reached gameabuse at all).
+# Replaced the flat phrase list with GAMEABUSE_STRONG_KEYWORDS (unambiguous alone) plus a
+# GAMEABUSE_GAME_WORDS + GAMEABUSE_INTENT_WORDS combination check, covering real phrasing variety
+# without trying to enumerate every way someone might ask.
 #
 # 1.3.0 (2026-08-31) — direct operator request ("build it right") after confirming live that no
 # existing tool reviews Minecraft/Zomboid logs for abuse patterns: new `gameabuse` source. Real
@@ -137,11 +144,17 @@ FLEETHEALTH_KEYWORDS = (
     "fleet health", "fleet status", "health of the fleet", "status of the fleet", "fleet report",
 )
 
-GAMEABUSE_KEYWORDS = (
-    "griefing", "grief", "cheating", "minecraft abuse", "zomboid abuse", "game abuse",
-    "player abuse", "game server abuse", "review the game logs", "abuse on the server",
-    "minecraft log review", "zomboid log review", "review minecraft", "review zomboid",
-)
+# Real gap found live (2026-08-31): a flat exact-phrase list missed "analyze minecraft logs" --
+# it required specific phrasings ("review minecraft", "minecraft log review") that didn't cover
+# how people actually ask. Replaced with a two-part check: GAMEABUSE_STRONG_KEYWORDS alone are
+# unambiguous enough to trigger by themselves (nothing else in this fleet's domain means
+# "griefing"), while GAMEABUSE_GAME_WORDS + GAMEABUSE_INTENT_WORDS both need to appear (in any
+# order/phrasing) -- catches "analyze minecraft logs", "zomboid player bans", "is anyone cheating
+# on zomboid", etc. without needing to enumerate every real phrasing by hand.
+GAMEABUSE_STRONG_KEYWORDS = ("griefing", "grief", "cheating")
+GAMEABUSE_GAME_WORDS = ("minecraft", "zomboid", "muncraft")
+GAMEABUSE_INTENT_WORDS = ("log", "logs", "abuse", "grief", "griefing", "cheat", "cheating",
+                          "ban", "banned", "kick", "kicked")
 
 SOURCE_SYSTEM_PROMPT = (
     "You are the fleet's log analyst. You will be shown real security/operations data — firewall "
@@ -273,8 +286,9 @@ def parse_source(text):
     """`source: pfsense|canary|gameservers|fleethealth|gameabuse` (case-insensitive) as the first
     line selects a real data pull. A plain request that never uses that prefix but is clearly
     asking about fleet health (FLEETHEALTH_KEYWORDS) or game-server abuse patterns
-    (GAMEABUSE_KEYWORDS) also selects the matching source — same fixed-substring-list approach,
-    same reason FLEETHEALTH_KEYWORDS exists: "Report on the fleet health" once fell all the way
+    (GAMEABUSE_STRONG_KEYWORDS alone, or a GAMEABUSE_GAME_WORDS + GAMEABUSE_INTENT_WORDS
+    combination) also selects the matching source — same reason FLEETHEALTH_KEYWORDS exists:
+    "Report on the fleet health" once fell all the way
     through to `raw` with nothing to analyze, and `super` fabricated a status report rather than
     admit it had no data. Anything else means "raw" — analyze the submitted text itself. Keyword
     matching throughout, not an LLM classification: this only needs to be right, not smart, and a
@@ -288,7 +302,10 @@ def parse_source(text):
     lowered = text.strip().lower()
     if any(kw in lowered for kw in FLEETHEALTH_KEYWORDS):
         return "fleethealth", text
-    if any(kw in lowered for kw in GAMEABUSE_KEYWORDS):
+    if any(kw in lowered for kw in GAMEABUSE_STRONG_KEYWORDS):
+        return "gameabuse", text
+    if (any(g in lowered for g in GAMEABUSE_GAME_WORDS)
+            and any(i in lowered for i in GAMEABUSE_INTENT_WORDS)):
         return "gameabuse", text
     return "raw", text
 
