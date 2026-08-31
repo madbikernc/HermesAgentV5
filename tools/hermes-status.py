@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-08-31) — real routing collision found live: a "fleet health"-shaped question can
+# plausibly route to either `logs` (hermes-logs.py 1.2.0's own fleethealth source, added the same
+# day) or `status` (this file) -- dispatch's classifier isn't deterministic about which, and
+# picked differently between two near-identical live test messages. Rather than trying to make
+# routing itself deterministic (a bigger, riskier change to hermes-dispatch.py's routing prompt),
+# this file now also recognizes the same FLEETHEALTH_KEYWORDS and answers with the exact same real
+# report hermes-logs.py's gather_fleethealth() produces (same build_report()/render_text() call) —
+# so either routing outcome gives the same correct answer instead of one being a dead end.
 #
 # hermes-status — chat access to a curated, read-only subset of the fleet's own skills/ status
 # monitors. Owns the new Buzz `status` topic. Direct operator request, scoped explicitly in two
@@ -14,9 +23,12 @@
 # Not a general tool-calling loop -- deliberately, matching hermes-code.py's own precedent and the
 # two real incidents its header cites (an agent using a shared, unscoped-sudo account to install
 # an unauthorized system service; a delegated agent destroying 27GB of data while self-reporting
-# success). Each source below is ONE hardcoded subprocess call to that skill's own already-vetted
-# script, using the exact interpreter/flags its SKILL.md documents -- never an LLM deciding what
-# command to run or improvising arguments.
+# success). Each source below is ONE hardcoded call to that skill's own already-vetted script or
+# function -- a subprocess with the exact interpreter/flags its SKILL.md documents for every
+# venv-dependent skill, or (fleethealth only, 1.1.0) a direct in-process call to
+# tools/hermes-fleet-health.py's own build_report()/render_text(), same reasoning
+# hermes-logs.py's identical fleethealth source already documents. Never an LLM deciding what
+# command to run or improvising arguments, either way.
 #
 # Source selection is deterministic keyword matching (parse_source()), same "doesn't need to be
 # smart, needs to be right" contract hermes-logs.py's own parse_source() already established --
@@ -52,6 +64,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_injection_guard  # noqa: E402
+import importlib
+
+_fleet_health = importlib.import_module("hermes-fleet-health")
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 
@@ -105,7 +120,16 @@ STATUS_SOURCES = {
 BOTNET_KEYWORDS = ("botnet", "c2 ", "threat intel", "threat-intel", "malicious ip", "known bad ip")
 IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
-KNOWN_SOURCE_NAMES = ", ".join(sorted(STATUS_SOURCES) + ["botnet-intel (needs an IP address)"])
+# Same list hermes-logs.py's own FLEETHEALTH_KEYWORDS uses — kept in sync deliberately (see the
+# 1.1.0 changelog above), not imported from there to avoid a cross-specialist import dependency
+# for six words.
+FLEETHEALTH_KEYWORDS = (
+    "fleet health", "fleet status", "health of the fleet", "status of the fleet", "fleet report",
+)
+
+KNOWN_SOURCE_NAMES = ", ".join(
+    sorted(STATUS_SOURCES) + ["fleethealth", "botnet-intel (needs an IP address)"]
+)
 
 
 def log(msg):
@@ -211,6 +235,8 @@ def parse_source(text):
     if any(kw in lowered for kw in BOTNET_KEYWORDS):
         m = IP_RE.search(text)
         return "botnet-intel", (m.group(0) if m else None)
+    if any(kw in lowered for kw in FLEETHEALTH_KEYWORDS):
+        return "fleethealth", None
     for name, (keywords, _cmd, _timeout) in STATUS_SOURCES.items():
         if any(kw in lowered for kw in keywords):
             return name, None
@@ -312,6 +338,12 @@ def process_one():
                             "I didn't find an IP address in your request. Which IP would you like me to check?")
             return True
         result, err = run_botnet_lookup(arg)
+    elif source == "fleethealth":
+        try:
+            fleet = _fleet_health.build_report()
+            result, err = _fleet_health.render_text(fleet), None
+        except Exception as exc:
+            result, err = None, f"fleet-health pull failed: {exc}"
     else:
         result, err = run_source(source)
 
@@ -331,7 +363,7 @@ def main():
     if not GUARD_TOKEN:
         log("WARNING: GUARD_TOKEN not set — this agent's own Layer 2 screening is skipped")
     log(f"watching Buzz topic 'status', polling every {POLL_SECONDS}s, "
-        f"sources={sorted(STATUS_SOURCES) + ['botnet-intel']}")
+        f"sources={sorted(STATUS_SOURCES) + ['fleethealth', 'botnet-intel']}")
     while True:
         try:
             did_work = process_one()

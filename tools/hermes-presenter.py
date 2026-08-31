@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.5.1
+#
+# 1.5.1 (2026-08-31) — real bug found live: check_outstanding() never had a branch for
+# state == "error" — every specialist's own ok=False failure (a real, specific message: "Retrieval
+# failed: <exc>", "Could not gather pfsense data: <err>", etc.) silently fell through every
+# existing branch until TASK_TIMEOUT_SECONDS elapsed, then surfaced as the generic "No specialist
+# has completed this request yet" text, which reads as "still in flight" rather than "it ran and
+# failed" — directly contradicting this function's own documented promise ("failures escalate
+# verbatim"). Caught on a live status-check task that DID complete, with a real honest answer
+# already published, that the user never saw. Added the missing branch: same turn-lookup as
+# `done`, delivering the specialist's actual message, never styled (same as every other failure
+# branch here).
 #
 # 1.5.0 (2026-08-31) — /help, direct operator request: several capabilities built this session
 # (the fleet-health keyword trigger, the curated status-check keywords, the new-conversation
@@ -728,6 +739,22 @@ def check_outstanding():
                 send_room_message(room_id, "No relevant documents were found in the fleet's knowledge base "
                                             "for this question.")
             _mark_delivered(task_id, value)
+        elif state == "error":
+            # Real bug found live 2026-08-31: this branch never existed, so every specialist's
+            # own ok=False failure (a real, specific message -- "Retrieval failed: <exc>",
+            # "Could not gather pfsense data: <err>", etc.) silently fell through every branch
+            # here until TASK_TIMEOUT_SECONDS elapsed, then got the generic, misleading "No
+            # specialist has completed this request yet" text below -- which reads as "still in
+            # flight," not "it ran and failed," directly contradicting this function's own
+            # docstring ("failures escalate verbatim"). Same turn-lookup shape as `done`, but
+            # never styled, matching every other failure branch here.
+            turns = _get(f"{MEMORY_URL}/turns?task_id={task_id}&limit=50", MEMORY_TOKEN).get("turns", [])
+            reply = next((t for t in reversed(turns) if t["agent"] != "presenter"), None)
+            text = (reply.get("presented") or reply.get("raw")) if reply else \
+                "This request failed, with no further detail recorded."
+            send_room_message(room_id, format_reply(task.get("topic"), text))
+            _mark_delivered(task_id, value)
+            log(f"task {task_id}: error delivered to {room_id}")
         elif state == "blocked":
             send_room_message(room_id, "This request was rejected by the fleet's screening layer and was not processed.")
             _mark_delivered(task_id, value)
