@@ -1,12 +1,13 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.16.0
-**Status:** S1–S15 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
+**Version:** 1.17.0
+**Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
 schedulers still Sintra/Amy-shaped, a security-relevant sudoers leftover, a sync-coverage gap, and a
-live-caught executable-bit regression, all real, all fixed. S16 (RAG: eval harness, reranker, optional OCR —
-the retriever itself is already live, independently built) is planned but not yet started. S8
+live-caught executable-bit regression, all real, all fixed. S16 closed the RAG stack's remaining gaps —
+reranking measured a real +16.7pp recall@5 improvement (0.538→0.705), not an assumed one; optional
+per-page OCR verified against a real, naturally-occurring scanned page, not a staged one. S8
 was the point of no return — Sintra and Amy no longer have live gateways. **2026-08-30: the "later stage"
 this line used to wait on happened — `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` were consolidated
 into this repo and all three nodes (`spark`, `spark-2`, `HomeD13`) were cut over to it. `HermesAgentV4` is
@@ -47,7 +48,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S13 | Complete nano's retirement, fix stale role/persona references | ✅ Done (2026-08-29) |
 | S14 | Ops tooling retarget, rename debt, sync coverage, cross-repo comparability | ✅ Done (2026-08-29) |
 | S15 | `hermes-logs` — the log analyst | ✅ Done (2026-08-29) |
-| S16 | RAG stack: eval harness, reranker, optional OCR (retriever already live, independently built) | ⬜ Planned, not started |
+| S16 | RAG stack: eval harness, reranker, optional OCR (retriever already live, independently built) | ✅ Done (2026-08-31) — recall@5 0.538→0.705 |
 
 ---
 
@@ -1471,6 +1472,63 @@ operator's call each time, not a default this stage should make for them. `fleet
 otherwise). S16c (OCR) is independent of both — a personal-kb ingestion-time capability, unrelated to
 query-time retrieval or reranking, and can land in any order relative to them.
 
+#### S16 — executed 2026-08-31
+
+**S16a — `hermes-rag-eval.py` built and run.** Rather than hand-write 80-120 questions, the eval set
+is generated: sample real chunks from the live store, ask `dispatch` to write one specific question
+each chunk directly answers (`SKIP` on a chunk too generic to support one — a bare heading, a
+timestamp line), keep the real ones. 78 real questions survived across the four corpora (24
+fleet-docs, 20 podcasts, 22 ops, 12 personal-kb — capped to what each corpus actually holds; `ops`
+and `personal-kb` are genuinely small, 24 and 17 chunks respectively). Run unscoped
+(`corpus=None`), matching how `hermes-retrieve.py` actually calls `search()` in production — the
+harder, realistic test of whether the system finds the right corpus *and* chunk, not just ranks
+within a known one. **Real baseline, no reranker: recall@5 = 0.538 (42/78)**, with `ops` notably
+weak (0.318) — genuine headroom, not a number invented to justify building S16b next.
+
+**S16b — the reranker, and two real bugs found deploying it, neither assumed away.** First: the
+initial GGUF tried (a third-party conversion, `dean2155/Qwen3-Reranker-0.6B-Q8_0-GGUF`) produced
+backwards relevance scores on a live test — a stop-sign query scored an unrelated "bananas are
+yellow" document highest. Traced to a real, matching upstream report (`ggml-org/llama.cpp#16407`):
+most third-party Qwen3-Reranker GGUF conversions are missing the `cls.output.weight` tensor
+`convert_hf_to_gguf.py` extracts from the model's own `lm_head`, without which the rerank pooling
+head has nothing real to score with. Switched to `ggml-org`'s own upload (llama.cpp's own
+organization — the GGUF conversion known to be correct), re-verified with the same stop-sign query
+before trusting it (0.999 vs. ~0.0003, correctly ordered this time). Second: the first full eval run
+against the fixed model still 500'd on 50 of 78 requests (`"input (761 tokens) is too large to
+process"`) — `search()`'s wider reranking candidate pool (up to 20 real chunks in one request)
+tokenizes past `llama-server`'s own default `--ubatch-size` (512) easily. `search()`'s fail-open
+design meant this never broke anything downstream (those 50 silently fell back to plain KNN order),
+but it also meant most of the first run's improvement came from the ~28 calls that fit, not a clean
+signal. Fixed (`--ubatch-size 4096`, matching `--ctx-size`), re-run clean, zero rerank failures.
+**Real result: recall@5 = 0.705 (55/78), up from 0.538 — a genuine +16.7pp improvement, measured
+against the exact same 78 questions, not a resampled or friendlier set.** Per-corpus: fleet-docs
+0.458→0.667, podcasts 0.650→0.700, ops 0.318→0.636 (the weakest corpus improved the most), personal-kb
+0.917→0.917 (already near-ceiling, nothing to gain). `hermes_rag_common.py` 1.4.0→1.5.0 — both
+existing callers (`hermes-rag-query.py`, `hermes-retrieve.py`) get reranking automatically, no
+changes needed on either.
+
+**S16c — OCR, verified against a real, naturally-occurring case, not a manufactured one.**
+`tesseract-ocr` installed (`apt-get install`); `pdftoppm`/`pdftocairo` (poppler-utils) were already
+present, confirmed live rather than assumed before writing the ingestion path. Mechanics tested
+first in isolation against a real PDF already in `RAGDocs` (a firearms buyer's guide) — a
+stylized cover page recognized partially (expected OCR behavior on decorative fonts, not a bug), a
+real body-text page recognized cleanly. Wired into `extract_pdf_text()` per-page (not
+per-document): a page whose own native `pypdf` extraction comes back under 50 characters gets
+individually rasterized and OCR'd, so a partially-scanned document keeps its real text-layer pages
+untouched and only recovers the scanned ones. Running the real function against that same real PDF
+end to end (not the isolated mechanics test) surfaced a genuinely unplanned, real confirmation: page
+11 of that actual document has zero native text (an image-only page in the wild, not staged), and
+the OCR path caught it automatically — `page 11: OCR recovered 104 chars (native extraction had
+0)`, logged exactly as designed. `--ocr` stays off by default; the daily scheduled timer
+(`hermes-rag-ingest-kb.timer`) never passes it, unchanged, so nothing about the existing scheduled
+ingestion behavior changed by adding this. `hermes-rag-ingest-kb.py` 1.3.0→1.4.0.
+
+Files: new `tools/hermes-rag-eval.py`; `tools/hermes_rag_common.py` 1.4.0→1.5.0 (`rerank()`, wired
+into `search()`); new `infra/hermes-rag/start-rerank.sh`/`hermes-rerank.service`; `tools/hermes-rag-
+ingest-kb.py` 1.3.0→1.4.0 (`--ocr`, per-page OCR fallback). Real eval history at
+`~/.hermes/state/rag-eval-history.jsonl` on Watch — baseline and with-reranker runs both recorded,
+not just the final number.
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -1599,3 +1657,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.14.0 | 2026-08-29 | S15 executed and closed out live on the fleet: `hermes-logs.py`, the log analyst, claims the Buzz `logs` topic reserved since S6 with no real subscriber until now. Wraps existing sources (`hermes_pfsense_common.py`, `hermes-canary-report.py`, `hermes-game-server-monitor.py`) rather than collecting anything new; reasons via `super`, matching target §12.1's own recommendation and `hermes-canary-report.py`'s own established precedent. Screening is deliberately asymmetric — the request is screened, the gathered security data isn't, so an abliterated model can actually do the job target §12.1 specifies it for. Two real bugs found on the first live test, same class S6 already documented once: `hermes-buzz.py`'s `KNOWN_AGENTS` missing `logs` (2.0.6, fixed), plus a stale `/health` version string and a stale unit `Description=` ("Sintra <-> Amy") caught in the same pass. Live-verified end to end with a real finding: a genuine Minecraft RCON misconfiguration nothing else in this fleet was flagging, full closure chain confirmed through `hermes-dispatch`'s own results-watcher. |
 | 1.15.0 | 2026-08-30 | Repo-level consolidation, separate from the S1-S15 code work above: `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` copied into this repo (~230 files) with every `REPO_DIR`/`ExecStart`/identity path repointed from `HermesAgentV4` to `HermesAgentV5`, while every dated changelog/Revision-History entry narrating a real past event was left untouched (an initial blanket find-replace corrupted several of these — e.g. rewrote "HermesAgentV4 rewrite of HermesAgentRedo's..." to say V5 — caught and redone surgically before anything was committed). Found and captured 16 systemd unit files that were live on spark/spark-2 but had never been committed to either repo's git history (canary health/probe-report, fleet-health, nfs-backup, wiki-sync, and both identities' fabrication-guard/session-cap-guard/session-guardian/remediate-worker). Found and preserved 3 live-only unit customizations a blind copy would have silently dropped (`VAULT_NODE=sintra`/`amy` on each node's router, `BROKER_QUIET_TYPES=embed,wake` on the broker, `MALLOC_ARENA_MAX=1` on the embed server). Found and fixed a genuine regression this same migration introduced: the Windows-side `cp -r` (both repos checked out on the same machine) silently dropped the executable bit on 103 script files, caught live when homed13's render/embed workers crash-looped on first restart — fixed via `git update-index --chmod=+x` and repulled everywhere before it could hit spark-2 or spark. All three nodes (`homed13` → `spark-2` → `spark`, lowest-criticality first) cut over one service at a time, catching and recovering from a Vaultwarden rate-limit incident on spark-2 (two services sharing the `amy` identity restarted within 10s) without losing any in-flight work. `HermesAgentV4` marked superseded to match. |
 | 1.16.0 | 2026-08-31 | S16 planned (not executed): closes the RAG stack's remaining real gaps — an eval harness (recall@k against a hand-curated per-corpus question set, built before the reranker so "it helped" is a measured claim, not an assumption), a reranker (Qwen3-Reranker candidate, port `8093` already reserved for it and unused), and optional OCR for `personal-kb`'s scanned/image-only PDFs (`tesseract`, off by default, triggered only on near-zero native text extraction). This section's own first draft proposed a fourth item — a new retriever agent — before discovering, immediately before committing, that `hermes-retrieve.py` already exists and is already live (built independently since the S15 checkpoint, alongside the broader V4→V5 consolidation in 1.15.0): real per-chunk screening, `dispatch` for synthesis with better reasoning than this draft's own first guess (`super`) would have had, a `NO_ANSWER_FOUND`/`no-match` path feeding a real web-search fallback. Rewritten to document what's actually there instead of proposing a duplicate, and to correct this draft's own mistaken reading of non-negotiable #1 along the way. |
+| 1.17.0 | 2026-08-31 | S16 executed and closed out live on the fleet. Eval harness (`hermes-rag-eval.py`) generated 78 real questions from real indexed chunks (not hand-invented) and measured a real baseline: recall@5 = 0.538, no reranker. Reranker deployment found two real bugs before it worked: a third-party Qwen3-Reranker GGUF conversion producing backwards relevance scores (missing `cls.output.weight` — a known llama.cpp issue, `ggml-org/llama.cpp#16407` — fixed by switching to `ggml-org`'s own correctly-converted upload), then a wide-candidate-pool request 500ing past `llama-server`'s default `--ubatch-size` on 50 of 78 real eval questions (fixed, `--ubatch-size 4096`). With both fixed: recall@5 = 0.705, a measured +16.7pp, `ops` (the weakest corpus) improving the most (0.318→0.636). Both existing RAG callers get reranking automatically via `hermes_rag_common.search()`, no changes needed on either. Optional per-page OCR (`--ocr`, off by default, `tesseract` + `pdftoppm`) added to `hermes-rag-ingest-kb.py`, verified against a real, naturally-occurring image-only page found while testing (not a staged/manufactured case) — recovered real text automatically, logged explicitly, the daily scheduled ingest timer unaffected since it never passes the flag. |
