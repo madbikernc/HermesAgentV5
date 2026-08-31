@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.1.2
+# Version: 1.1.3
+#
+# 1.1.3 (2026-08-31) — same class of bug as 1.1.2, two more instances found live: gameservers
+# (real run ~31s, SSH + vault-fetch overhead) and vivint (real run needing re-authentication
+# ~103s) both timed out at their original 30s. Raised to 60s/150s respectively, based on real
+# measured runs, not guesses. Also confirmed (not fixed) that wyze genuinely hangs, independent of
+# timeout length -- see the inline comment on that source; a separate investigation into
+# hermes-wyze.py itself is needed, out of scope for this file.
 #
 # 1.1.2 (2026-08-31) — real bug found live: moenflo's 30s timeout was too short. A real,
 # successful run of tools/hermes-moen-flo.py --detail (confirmed live, real data returned) took
@@ -114,17 +121,25 @@ STATUS_SOURCES = {
     "wyze": (
         ("wyze",),
         ["/opt/hermes/venvs/wyze/bin/python3", str(REPO_DIR / "tools" / "hermes-wyze.py"), "list"],
+        # KNOWN ISSUE, not fixed here (2026-08-31): confirmed live that `hermes-wyze.py list`
+        # genuinely hangs -- zero stdout/stderr for 90s+ even with stdin explicitly redirected
+        # from /dev/null (ruling out an interactive-prompt cause), and raw HTTPS connectivity to
+        # api.wyzecam.com through the tool's own CA bundle works fine in isolation, ruling out the
+        # TLS gap its own SKILL.md documents. Root cause is inside hermes-wyze.py itself, not this
+        # wiring -- a separate investigation, out of scope for "wire up an already-working tool."
+        # Timeout left bounded (not raised further) so a hang fails cleanly instead of tying up
+        # this service's single-threaded poll loop indefinitely; it will currently always time out.
         30,
     ),
     "gameservers": (
         ("game server", "gameserver", "minecraft", "zomboid"),
         [PY, str(REPO_DIR / "tools" / "hermes-game-server-monitor.py"), "--dry-run"],
-        30,
+        60,  # confirmed live: a real run took ~31s (SSH round trip + vault fetch); 30s timed out
     ),
     "vivint": (
         ("vivint", "security system", "alarm status", "home security"),
         [PY, str(REPO_DIR / "tools" / "hermes-vivint.py"), "status"],
-        30,
+        150,  # confirmed live: a real run needing re-authentication took ~103s; 30s timed out
     ),
 }
 
