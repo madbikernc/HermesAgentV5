@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.2.1
+#
+# 1.2.1 (2026-08-30) — real bug found live building the internet-search fallback: process_results()
+# unconditionally overwrote every completed task's state to `done` on any `results` message,
+# regardless of what the specialist that published it had actually set. Harmless by coincidence for
+# plain success (every specialist already sets `done` itself via publish_result()) but silently
+# clobbered `error` back to `done`, and outright broke hermes-retrieve.py 1.2.0's new `no-match`
+# state -- the offer to search the internet never fired because this write raced it and won every
+# time, moments after retrieve.py's own set_task_state("no-match") call, confirmed live via a real
+# test task's final stored state (`agent: dispatch, state: done`) despite retrieve's own turn
+# already containing its no-match text. Root cause: every specialist now owns setting its own
+# final task state as part of publish_result() (or equivalent); this dispatcher-side write was
+# never removed when that ownership moved to each specialist, so two writers raced for the same
+# field with the wrong one winning. Fixed by deleting the write entirely -- process_results() now
+# only acks the claim so the `results` topic doesn't back up; it was never anything more than a
+# drain loop once every specialist started setting its own state.
 #
 # 1.2.0 (2026-08-30) — conversation continuity, the routing half. choose_topic() gains an
 # optional `history` param, prepended before the current message when given -- real gap this
@@ -325,16 +340,18 @@ def send_heartbeat():
 
 def process_results():
     """Watches the `results` topic — target §10.1's "results path back through the dispatcher."
-    Closes the loop by marking the task done in hermes-memory; does not hold this fact anywhere
-    else."""
+    Does NOT write task state (1.2.1 fix): every specialist already sets its own final state
+    (done/error/no-match/etc.) via its own set_task_state() call before or as part of publishing
+    here, and this dispatcher used to unconditionally overwrite that with a blind "done" — right
+    by coincidence for plain success, wrong for anything else. This is now purely a drain loop so
+    the `results` topic's claims don't pile up unacked; hermes-memory's task state is left alone."""
     claim = claim_next("results")
     if not claim:
         return False
     msg = claim["message"]
     task_id = msg.get("task_id")
     if task_id:
-        set_task_state(task_id, "dispatch", "done")
-        log(f"claim {claim['id']}: task {task_id!r} -> done (via results)")
+        log(f"claim {claim['id']}: task {task_id!r} results received")
     ack_claim(claim["id"])
     return True
 
