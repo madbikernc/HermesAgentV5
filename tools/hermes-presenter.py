@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-08-30) — inbound acknowledgment: handle_message() now sends a fixed, unstyled
+# "Got it — working on that." immediately after a message dispatches, before the real reply. Real
+# UX gap found live during this stage's own verification: a message routed to an on-demand model
+# (coder, ~150s cold-wake budget) gives no sign anything happened until either the real answer or,
+# if something's actually wrong, the 300s timeout message -- indistinguishable from a dropped
+# message the whole time in between. Deliberately not run through style_reply() -- a fixed status
+# string needs to be instant, not wait on a model call, same reasoning the three hardcoded failure
+# messages in check_outstanding() already skip styling for. Toggleable (ACK_ENABLED) and
+# best-effort (a failed ack send is logged, never blocks or retries the real dispatch, which has
+# already succeeded by the time this runs).
 #
 # 1.1.0 (2026-08-30) — minimal light-voice styling pass added on the outbound success path only
 # (check_outstanding()'s `state == "done"` branch) -- target §6.2/§6.3, operator direction: "keep
@@ -107,6 +118,10 @@
 #   STYLE_MAX_CHARS     default 4000 — replies longer than this are treated as technical/bulk
 #                        output and skip styling regardless of shape (cost control + the largest
 #                        fidelity-drift surface, target §6.3)
+#   ACK_ENABLED         default "1" — set "0" to send no inbound acknowledgment at all
+#   ACK_MESSAGE         default "Got it — working on that." — sent once, immediately after a
+#                        message is dispatched, so silence during an on-demand model's cold wake
+#                        (up to ~150s) doesn't read as "did this even arrive?"
 
 import json
 import os
@@ -140,6 +155,8 @@ STYLE_MODEL = os.environ.get("STYLE_MODEL", "dispatch")
 STYLE_TIMEOUT_SECONDS = int(os.environ.get("STYLE_TIMEOUT_SECONDS", "25"))
 STYLE_MIN_LEN = int(os.environ.get("STYLE_MIN_LEN", "40"))
 STYLE_MAX_CHARS = int(os.environ.get("STYLE_MAX_CHARS", "4000"))
+ACK_ENABLED = os.environ.get("ACK_ENABLED", "1") == "1"
+ACK_MESSAGE = os.environ.get("ACK_MESSAGE", "Got it — working on that.")
 
 
 def log(msg):
@@ -252,6 +269,12 @@ def handle_message(room_id, event):
     }, BUZZ_TOKEN)
 
     log(f"task {task_id}: inbound from {room_id}, dispatched")
+
+    if ACK_ENABLED:
+        try:
+            send_room_message(room_id, ACK_MESSAGE)
+        except Exception as exc:
+            log(f"task {task_id}: ack send failed (non-fatal, dispatch already happened): {exc}")
 
 
 def sync_once(since):
