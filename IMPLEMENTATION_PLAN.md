@@ -1,11 +1,12 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.15.0
+**Version:** 1.16.0
 **Status:** S1–S15 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
 schedulers still Sintra/Amy-shaped, a security-relevant sudoers leftover, a sync-coverage gap, and a
-live-caught executable-bit regression, all real, all fixed. S8
+live-caught executable-bit regression, all real, all fixed. S16 (RAG: eval harness, reranker, optional OCR —
+the retriever itself is already live, independently built) is planned but not yet started. S8
 was the point of no return — Sintra and Amy no longer have live gateways. **2026-08-30: the "later stage"
 this line used to wait on happened — `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` were consolidated
 into this repo and all three nodes (`spark`, `spark-2`, `HomeD13`) were cut over to it. `HermesAgentV4` is
@@ -46,6 +47,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S13 | Complete nano's retirement, fix stale role/persona references | ✅ Done (2026-08-29) |
 | S14 | Ops tooling retarget, rename debt, sync coverage, cross-repo comparability | ✅ Done (2026-08-29) |
 | S15 | `hermes-logs` — the log analyst | ✅ Done (2026-08-29) |
+| S16 | RAG stack: eval harness, reranker, optional OCR (retriever already live, independently built) | ⬜ Planned, not started |
 
 ---
 
@@ -1400,6 +1402,75 @@ Files: new `hermes-logs.py`, `hermes-logs-wrapper.sh`, `infra/hermes-logs/hermes
 `README.md`; `hermes-buzz.py` 2.0.5→2.0.6 (`KNOWN_AGENTS` + `server_version`),
 `infra/hermes-buzz/hermes-buzz.service` (unit description).
 
+### S16 — RAG stack: close the remaining gaps (reranker, eval harness, optional OCR)
+
+**Correction before this plan was even committed:** the first draft of this section proposed a new
+`hermes-retrieve.py` (S16a) to wire the `retrieve` Buzz topic into the dispatcher. Re-checking the
+live fleet immediately before committing found that work already done — real, live, better-reasoned
+in one place than this draft was. Rewritten below to reflect what's actually there instead of
+proposing a duplicate.
+
+**Already live, not this stage's work: `hermes-retrieve.py` (currently 1.2.0).** Claims the `retrieve`
+topic (reserved since S6, unclaimed for a long time — the plan's own repeated notes on this were
+right), wraps `hermes_rag_common.search()` unchanged, screens both the caller's question *and* each
+retrieved chunk before synthesis (target §8.1's "prompt-injection patterns in retrieved documents" —
+chunks are screened with `role="tool"`, the stricter path `hermes_injection_guard.py` already applies
+there), and answers only from retrieved text with citations — a `NO_ANSWER_FOUND` sentinel plus a
+`no-match` task state (distinct from `done`/`error`) lets `hermes-presenter.py` offer a real internet
+search (`hermes-websearch.py`) rather than ever silently failing or fabricating. Synthesis model is
+`dispatch` — **this plan's own first draft got that call wrong**, reasoning that non-negotiable #1
+("dispatch runs stock weights," S6) meant the `dispatch` *process* stays routing-only. It doesn't:
+the constraint is on the model's weights, not on who else may call that same stock, always-resident
+backend — `hermes-presenter.py` already shares it for its own styling pass, and target §12.1's
+stock/abliterated table carves out no exception for Retriever the way it does for Log analyst. Using
+`super` here, as this draft first proposed, would have been the wrong call — an unnecessary wake-cost
+tax with no §12.1 justification for it.
+
+What's still real and still missing, confirmed against the current tree (no reranker anywhere, no
+`*rag*eval*` script, target §5.1's own "owns embed+rerank" not yet true): the two gaps below, plus one
+addition, direct request.
+
+**S16a — a real evaluation harness, built before the reranker, not after.** A small, hand-curated
+eval set per corpus (~20–30 real questions each, four corpora, each with a known-good expected chunk
+citation) — the same "eval sets before promoting anything" discipline S11 used for abliteration,
+applied here to retrieval quality instead of a model checkpoint. A script runs each question through
+`hermes_rag_common.search()` and checks whether the expected chunk actually lands in top-k — a real
+recall@k number, not a read-through. Deliberately sequenced before S16b: without a real baseline,
+"the reranker helped" is an assumption dressed as a finding, the exact thing this migration has kept
+catching and refusing to leave in place.
+
+**S16b — the reranker itself.** A real cross-encoder stage between `sqlite-vec`'s KNN pass and the
+final top-k — the gap V5's own original carry-forward table named ("add reranker alongside
+embeddings") and nothing since S1 ever built, `hermes-retrieve.py`'s own arrival included. Candidate:
+a Qwen3-Reranker variant, matching the embedding model's own family — its exact HF repo ID needs live
+verification against a real listing before anything is trusted, same discipline S9's own
+Nemotron-Omni correction already established; not verified yet, because this stage isn't executing
+yet. Port `8093` is already reserved for this in target §4.1's own model table and is currently unused
+on Watch — no port conflict to resolve. Once deployed, wire it into `hermes_rag_common.py`'s `search()`
+(both callers, `hermes-rag-query.py` and `hermes-retrieve.py`, get it automatically — over-fetch a
+wider KNN pass, rerank down to the real top-k) and re-run S16a's harness with reranking on. Ship it
+only if the recall@k number actually moved — the harness exists specifically so this isn't asserted
+on faith either way.
+
+**S16c — OCR, as an optional capability, direct request.** `personal-kb`'s ingester already reads
+`.pdf`/`.docx`/`.epub` but has no path for a scanned/image-only PDF — a real, common case for a
+personal-notes folder (a scanned receipt, a photographed whiteboard, an old paper document run
+through a scanner) that today ingests as zero or near-zero extractable text and is silently
+unsearchable, not flagged as a problem anywhere. Scope: `tesseract` (subprocess-invoked, same "shell
+out to a real established tool rather than a heavy new Python dependency" pattern this fleet already
+uses for `nmap`/`whois`/etc — not a departure), triggered **only** when native PDF text extraction
+returns near-zero characters for a page — never run against a document that already extracted
+cleanly, since OCR is slow and a redundant second pass on already-good text buys nothing. **Optional
+by design, not partial delivery:** off by default, behind an explicit ingester flag/config value — a
+personal-notes corpus can include large scanned-image PDFs (old photo albums exported as PDF, for
+example) where OCR would turn a quick catch-up ingest into a multi-hour run, and that trade-off is the
+operator's call each time, not a default this stage should make for them. `fleet-docs`/`podcasts`/
+`ops` are not in scope — none of them have a realistic scanned-document case today.
+
+**Ordering:** S16a must precede S16b (nothing to compare a "with reranker" number against
+otherwise). S16c (OCR) is independent of both — a personal-kb ingestion-time capability, unrelated to
+query-time retrieval or reranking, and can land in any order relative to them.
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -1412,6 +1483,8 @@ Files: new `hermes-logs.py`, `hermes-logs-wrapper.sh`, `infra/hermes-logs/hermes
 - S1 (link measurement) **before** S12 (merged mode)
 - **New, not in the target document:** S1 (reclaim Forge) **before** S2 — building the memory service on a
   node already at 80 GB of 105 GB resident is how V4 got its memory-overcommit crash (§9 risk 1).
+- S16a (eval harness) **before** S16b (reranker) — nothing to measure "helped" against otherwise.
+  S16c (optional OCR) is independent of both.
 
 ---
 
@@ -1525,3 +1598,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.13.0 | 2026-08-29 | S13/S14 added and executed after a post-S12 currency audit ("what V4 capabilities and scheduled tasks are not accounted for in V5?") found real, live gaps. S13: `nano` finally retired (deferred at S6/S8/S9 in turn) — stopped, disabled, dropped from `hermes-router.py`'s `ROLES`, every downstream `LLM_MODEL`/`ROUTER_MODEL`/`ROLES` default fixed to match; `hermes-wiki-sync.py`/`hermes-self-repair-reminder.py` stopped rather than patched, since both are built entirely around a per-persona data model with no V5 successor. S14: `hermes-restart-fleet.sh` fully retargeted from a live unit inventory (old Sintra/Amy units out, real V5 services in, live-verified `--dry-run` across all three nodes); a real security leftover closed (Amy's OS account still had passwordless root on 8 units including shared `hermes-router.service`, now removed); `amy-generate-image.sh`/`skills/amy-image-gen/` renamed (Category B's original, never-executed plan); a real sync-coverage gap fixed (HomeD13 had gone stale, spark-2 never had coverage — `hermes-repo-autopull.timer` now on all three nodes); `HermesAgentRedo` given superseded-repo banners. **One real, self-inflicted regression found and fixed live during S14's own deployment:** six wrapper/unlock scripts had been committed non-executable since S2–S10, masked by an unrecorded manual `chmod`, surfaced when clearing an unrelated stray mode-bit diff reset them to their real tracked mode — `hermes-media` crash-looped 97 times before catching it, and `hermes-dispatch`/`guard`/`memory`/`presenter` were simultaneously one restart away from the same failure. Fixed live on both nodes immediately, then fixed at the source (`git update-index --chmod=+x`) so it can't recur. |
 | 1.14.0 | 2026-08-29 | S15 executed and closed out live on the fleet: `hermes-logs.py`, the log analyst, claims the Buzz `logs` topic reserved since S6 with no real subscriber until now. Wraps existing sources (`hermes_pfsense_common.py`, `hermes-canary-report.py`, `hermes-game-server-monitor.py`) rather than collecting anything new; reasons via `super`, matching target §12.1's own recommendation and `hermes-canary-report.py`'s own established precedent. Screening is deliberately asymmetric — the request is screened, the gathered security data isn't, so an abliterated model can actually do the job target §12.1 specifies it for. Two real bugs found on the first live test, same class S6 already documented once: `hermes-buzz.py`'s `KNOWN_AGENTS` missing `logs` (2.0.6, fixed), plus a stale `/health` version string and a stale unit `Description=` ("Sintra <-> Amy") caught in the same pass. Live-verified end to end with a real finding: a genuine Minecraft RCON misconfiguration nothing else in this fleet was flagging, full closure chain confirmed through `hermes-dispatch`'s own results-watcher. |
 | 1.15.0 | 2026-08-30 | Repo-level consolidation, separate from the S1-S15 code work above: `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` copied into this repo (~230 files) with every `REPO_DIR`/`ExecStart`/identity path repointed from `HermesAgentV4` to `HermesAgentV5`, while every dated changelog/Revision-History entry narrating a real past event was left untouched (an initial blanket find-replace corrupted several of these — e.g. rewrote "HermesAgentV4 rewrite of HermesAgentRedo's..." to say V5 — caught and redone surgically before anything was committed). Found and captured 16 systemd unit files that were live on spark/spark-2 but had never been committed to either repo's git history (canary health/probe-report, fleet-health, nfs-backup, wiki-sync, and both identities' fabrication-guard/session-cap-guard/session-guardian/remediate-worker). Found and preserved 3 live-only unit customizations a blind copy would have silently dropped (`VAULT_NODE=sintra`/`amy` on each node's router, `BROKER_QUIET_TYPES=embed,wake` on the broker, `MALLOC_ARENA_MAX=1` on the embed server). Found and fixed a genuine regression this same migration introduced: the Windows-side `cp -r` (both repos checked out on the same machine) silently dropped the executable bit on 103 script files, caught live when homed13's render/embed workers crash-looped on first restart — fixed via `git update-index --chmod=+x` and repulled everywhere before it could hit spark-2 or spark. All three nodes (`homed13` → `spark-2` → `spark`, lowest-criticality first) cut over one service at a time, catching and recovering from a Vaultwarden rate-limit incident on spark-2 (two services sharing the `amy` identity restarted within 10s) without losing any in-flight work. `HermesAgentV4` marked superseded to match. |
+| 1.16.0 | 2026-08-31 | S16 planned (not executed): closes the RAG stack's remaining real gaps — an eval harness (recall@k against a hand-curated per-corpus question set, built before the reranker so "it helped" is a measured claim, not an assumption), a reranker (Qwen3-Reranker candidate, port `8093` already reserved for it and unused), and optional OCR for `personal-kb`'s scanned/image-only PDFs (`tesseract`, off by default, triggered only on near-zero native text extraction). This section's own first draft proposed a fourth item — a new retriever agent — before discovering, immediately before committing, that `hermes-retrieve.py` already exists and is already live (built independently since the S15 checkpoint, alongside the broader V4→V5 consolidation in 1.15.0): real per-chunk screening, `dispatch` for synthesis with better reasoning than this draft's own first guess (`super`) would have had, a `NO_ANSWER_FOUND`/`no-match` path feeding a real web-search fallback. Rewritten to document what's actually there instead of proposing a duplicate, and to correct this draft's own mistaken reading of non-negotiable #1 along the way. |
