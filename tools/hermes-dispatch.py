@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.3.1
+#
+# 1.3.1 (2026-08-31) — added `probe` to VALID_TARGETS: direct operator request, "probe <IP>"
+# should fire tools/hermes-node-probe.py's real LAN/network investigation (hostnames, MAC/vendor,
+# OS fingerprint, full port scan) against that address. New tools/hermes-probe.py and Buzz `probe`
+# topic; a normal classifier destination, same as `status`, not presenter-dispatched-only like
+# `websearch`.
 #
 # 1.3.0 (2026-08-31) — added `status` to VALID_TARGETS: direct operator request for chat access
 # to a curated, read-only subset of the fleet's own skills/ status monitors (pfsense, generac,
@@ -142,7 +148,7 @@ ROUTING_HISTORY_TURNS = int(os.environ.get("ROUTING_HISTORY_TURNS", "6"))
 
 # Target §4.4's internal topic set, minus `dispatch` itself and `results` (a destination
 # specialists publish completion to, never something the dispatcher routes fresh work into).
-VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status"}
+VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe"}
 
 ROUTING_SYSTEM_PROMPT = (
     "You are a routing classifier. Given a piece of text (optionally preceded by recent "

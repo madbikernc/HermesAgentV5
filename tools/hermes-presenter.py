@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.6.1
+# Version: 1.6.2
+#
+# 1.6.2 (2026-08-31) — supports the new `probe` topic (tools/hermes-probe.py), the fleet's first
+# genuinely long-running specialist: a real node probe can legitimately take up to ~30 minutes.
+# The one change needed here: check_outstanding()'s existing TASK_TIMEOUT_SECONDS check (default
+# 300s) would otherwise falsely report a probe as stuck well before it finishes. New
+# PROBE_TASK_TIMEOUT_SECONDS (default 2100s/35min, matching hermes-probe.py's own outer safety
+# net) applies only when topic == "probe"; every other topic is unaffected. No other change needed
+# -- the routed ack and the delayed-delivery poll loop already handle an arbitrarily long-running
+# task correctly, since neither has ever assumed a task resolves quickly.
 #
 # 1.6.1 (2026-08-31) — real bug found live: "/help" opened Element's own client-side app help
 # instead of ever reaching this process -- Matrix clients generally intercept a leading "/" as
@@ -185,6 +194,13 @@
 #   POLL_SECONDS        default 5 — how often outstanding tasks are checked for completion
 #   TASK_TIMEOUT_SECONDS default 300 — how long before an undelivered task gets a plain timeout
 #                        notice instead of silence
+#   PROBE_TASK_TIMEOUT_SECONDS default 2100 (35 min) — same idea, but for topic == "probe" only.
+#                        tools/hermes-probe.py's real scans legitimately take up to ~30 minutes
+#                        (its own PROBE_TIMEOUT_SECONDS outer safety net); the generic 300s
+#                        TASK_TIMEOUT_SECONDS would otherwise falsely report a probe as stuck
+#                        while it was still correctly running — matches hermes-probe.py's own
+#                        outer budget so both time out around the same point rather than presenter
+#                        giving up first on a task that's actually about to finish
 #   DEBUG_ATTRIBUTION   default "0" — set "1" to prefix replies with "[dispatch→<topic>] "
 #   ROUTER_URL          default http://127.0.0.1:8080 — hermes-router's OpenAI-compatible proxy;
 #                        presenter and the router both run on Watch (spark), same node `super`
@@ -281,6 +297,7 @@ MEMORY_TOKEN = os.environ.get("MEMORY_TOKEN", "")
 SYNC_STATE_FILE = Path(os.environ.get("SYNC_STATE_FILE", str(Path.home() / ".hermes" / "presenter" / "sync-token")))
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "300"))
+PROBE_TASK_TIMEOUT_SECONDS = int(os.environ.get("PROBE_TASK_TIMEOUT_SECONDS", "2100"))
 DEBUG_ATTRIBUTION = os.environ.get("DEBUG_ATTRIBUTION", "0") == "1"
 
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -796,7 +813,8 @@ def check_outstanding():
         elif state == "error-no-content":
             send_room_message(room_id, "Something went wrong recording this request — it was never actually dispatched.")
             _mark_delivered(task_id, value)
-        elif now - value.get("requested_at", now) > TASK_TIMEOUT_SECONDS:
+        elif now - value.get("requested_at", now) > (
+                PROBE_TASK_TIMEOUT_SECONDS if task.get("topic") == "probe" else TASK_TIMEOUT_SECONDS):
             send_room_message(room_id, "No specialist has completed this request yet — it may still be in flight, "
                                         "or nothing is currently watching the topic it was routed to.")
             _mark_delivered(task_id, value)

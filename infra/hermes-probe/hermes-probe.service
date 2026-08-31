@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes probe - async LAN/network node investigation via hermes-node-probe.py (Buzz probe-topic subscriber)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-probe/README.md
+After=network-online.target hermes-buzz.service hermes-memory.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-probe-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
