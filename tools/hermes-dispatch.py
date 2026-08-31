@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 1.3.1
+# Version: 1.4.0
+#
+# 1.4.0 (2026-08-31) — real, confirmed misroute: "check for griefing on the zomboid server" routed
+# to `status` instead of `logs`, verified live by injecting a real task through Buzz's `dispatch`
+# topic directly and reading back the routed task record. Root cause: ROUTING_SYSTEM_PROMPT gave
+# the classifier nothing but a bare topic-name list, so it had only word association to go on --
+# and both `logs` (the new `gameabuse` source) and `status` (the `gameservers` source) can
+# plausibly claim anything mentioning "zomboid"/"minecraft". Unlike the earlier fleethealth
+# collision (fixed by teaching `status` the same capability too), this one couldn't be fixed that
+# way: `status` deliberately never makes a model call at all, so it has no way to actually perform
+# judgment-based log/abuse analysis even if it caught the request. Added TOPIC_DESCRIPTIONS, a
+# one-line accurate description per topic now included in the routing prompt, so the classifier
+# has real signal to disambiguate "check X's current status" from "analyze X's logs" instead of
+# guessing from the topic word alone.
 #
 # 1.3.1 (2026-08-31) — added `probe` to VALID_TARGETS: direct operator request, "probe <IP>"
 # should fire tools/hermes-node-probe.py's real LAN/network investigation (hostnames, MAC/vendor,
@@ -150,13 +163,38 @@ ROUTING_HISTORY_TURNS = int(os.environ.get("ROUTING_HISTORY_TURNS", "6"))
 # specialists publish completion to, never something the dispatcher routes fresh work into).
 VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe"}
 
+# One-line, accurate descriptions per topic -- added 2026-08-31 after a real, confirmed
+# misroute: "check for griefing on the zomboid server" went to `status` instead of `logs`,
+# because a bare topic-name list gives the classifier nothing but word association to go on, and
+# both topics can plausibly claim anything mentioning "zomboid"/"minecraft"/"fleet health". Unlike
+# the earlier fleethealth collision (fixed by duplicating that one capability into both agents),
+# this one can't be fixed that way: `status` deliberately never makes a model call at all (target
+# §12.1-style scoping decision, kept intentionally simple/deterministic), so it has no way to
+# actually perform judgment-based log/abuse analysis even if it caught the request. The real fix
+# is a better-informed routing decision, not more duplicated capability.
+TOPIC_DESCRIPTIONS = {
+    "retrieve": "search the fleet's own knowledge base (RAG) for an answer with citations",
+    "screen": "classify one specific piece of text as malicious/safe on demand",
+    "logs": "analyze security/log data for patterns or issues -- pfsense firewall logs, canary "
+            "honeypot events, a full aggregated fleet-health report, Minecraft/Zomboid "
+            "admin/connection/PvP logs for griefing or abuse, or raw pasted log text",
+    "code": "answer a coding question (no code execution)",
+    "vision": "reserved, not yet staffed",
+    "media": "generate an image or video via the render broker",
+    "train": "reserved, not yet staffed",
+    "status": "a quick, real-time status/reading check for one named external system -- pfsense, "
+              "generac, moen-flo, wyze, a game server's health, Vivint alarm state, a fleet-health "
+              "snapshot, or a botnet/threat-intel IP lookup",
+    "probe": "run a real network scan (nmap) against one specific IP address",
+}
+
 ROUTING_SYSTEM_PROMPT = (
     "You are a routing classifier. Given a piece of text (optionally preceded by recent "
     "conversation history for context), reply with EXACTLY ONE WORD: the name of the topic the "
     "final message should be routed to. If that message has no clear topic of its own -- a "
     "follow-up like \"tell me more\" or \"what about X instead\" -- infer the topic from what the "
     "conversation was already about, don't guess blindly. Valid topics, choose exactly one:\n"
-    + ", ".join(sorted(VALID_TARGETS))
+    + "\n".join(f"- {t}: {TOPIC_DESCRIPTIONS.get(t, '')}" for t in sorted(VALID_TARGETS))
     + "\n\nReply with only the topic name, nothing else — no punctuation, no explanation."
 )
 
