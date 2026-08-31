@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.2.1
+#
+# 1.2.1 (2026-08-31) — the exact same fabrication recurred live, a different trigger: "Pfsense
+# logs" (no `source:` prefix, no real pasted data) fell through to `raw`, and `super` invented
+# "This indicates that the system is running, as a full crash would generate a timestamped error"
+# from nothing -- proof the 1.2.0 prompt hardening alone isn't reliably honored by this model on
+# ungrounded input. Added the code-level backstop that fix should have included the first time:
+# `_looks_like_bare_instruction()` deterministically detects a short, single-line, data-free `raw`
+# request and skips the model call entirely, publishing an honest "nothing to analyze" message
+# instead of trusting the prompt a second time.
 #
 # 1.2.0 (2026-08-30) — real fabrication caught live: a user asked "Report on the fleet health",
 # dispatch routed it to `logs` (a reasonable guess from the topic name alone), and since the text
@@ -223,6 +232,21 @@ def screen_request(text):
     return True
 
 
+BARE_INSTRUCTION_MAX_CHARS = 200
+
+
+def _looks_like_bare_instruction(text):
+    """True for a short, single-line, plain-English request with nothing pasted alongside it --
+    real log/security data is inherently multi-line (multiple events) or, at minimum, a single
+    long structured line (timestamps, fields); a short one-liner never is. Deliberately a
+    conjunction (no newline AND short) rather than either alone, so one unusually long single raw
+    log line a user might legitimately paste doesn't get misclassified. See the `raw`-source
+    fabrication note in process_one() for why this exists as a code-level gate, not just a prompt
+    instruction."""
+    stripped = text.strip()
+    return "\n" not in stripped and len(stripped) <= BARE_INSTRUCTION_MAX_CHARS
+
+
 def parse_source(text):
     """`source: pfsense|canary|gameservers|fleethealth` (case-insensitive) as the first line
     selects a real data pull. A plain request that never uses that prefix but is clearly asking
@@ -393,6 +417,24 @@ def process_one():
         # source exists to avoid (see the 1.2.0 changelog above); no model call for this source.
         publish_result(task_id, memory_ref, True, gathered)
         log(f"task {task_id!r}: fleet-health report published directly, no model pass")
+        return True
+
+    if source == "raw" and _looks_like_bare_instruction(gathered):
+        # Real second occurrence of the exact fabrication this file's 1.2.0 changelog already
+        # fixed once: "Pfsense logs" (no `source:` prefix, no real pasted data) fell through to
+        # `raw`, and `super` invented "This indicates that the system is running, as a full crash
+        # would generate a timestamped error" from literally nothing -- the SOURCE_SYSTEM_PROMPT
+        # hardening alone isn't reliably honored by this model on ungrounded input. This is the
+        # code-level backstop 1.2.0's own changelog should have added the first time: real
+        # log/security data is inherently multi-line or a single long structured line; a short,
+        # single-line, plain-English request never is. Skip the model call entirely rather than
+        # trust the prompt a second time.
+        publish_result(task_id, memory_ref, False,
+                        "I don't have any real log or security data to analyze here -- just your "
+                        "request text, with nothing pasted to look at. Paste the actual log/data "
+                        "you want analyzed, or ask about a specific source (pfsense, canary, "
+                        "gameservers, fleet health).")
+        log(f"task {task_id!r}: raw source had no real data, skipped the model call")
         return True
 
     conv_id = hermes_conversation_common.fetch_conv_id(MEMORY_URL, MEMORY_TOKEN, task_id, memory_ref)
