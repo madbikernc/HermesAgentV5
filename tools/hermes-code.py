@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-08-30) — conversation continuity: ask_coder() now takes recent conversation history
+# (ANSWER_HISTORY_TURNS, default 20) and prepends it before the current question, via the shared
+# hermes_conversation_common.py helpers every specialist but hermes-screen.py now uses. Real gap
+# this closes: a follow-up like "what about for Python instead?" had nothing to be "instead" of
+# without seeing the prior exchange.
 #
 # hermes-code — the fleet's coding-question agent. Owns the Buzz `code` topic, reserved since S6
 # with no real subscriber until now (confirmed live during the presenter verification session: a
@@ -40,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_injection_guard  # noqa: E402
+import hermes_conversation_common  # noqa: E402
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
@@ -52,6 +59,7 @@ ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 MODEL_TIMEOUT_SECONDS = int(os.environ.get("MODEL_TIMEOUT_SECONDS", "170"))
 CLAIMANT = os.environ.get("CLAIMANT", "hermes-code")
+ANSWER_HISTORY_TURNS = int(os.environ.get("ANSWER_HISTORY_TURNS", "20"))
 
 CODE_SYSTEM_PROMPT = (
     "You are the fleet's coding assistant. Answer the question directly and technically -- "
@@ -155,13 +163,16 @@ def screen(text):
     return True
 
 
-def ask_coder(question):
+def ask_coder(question, history=None):
+    """`history` (conversation continuity) is prepended before the current question when given —
+    same shared fetch/format helpers every other specialist but hermes-screen.py now uses."""
+    messages = [{"role": "system", "content": CODE_SYSTEM_PROMPT}]
+    if history:
+        messages.extend(hermes_conversation_common.as_messages(history))
+    messages.append({"role": "user", "content": question})
     body = {
         "model": "coder",
-        "messages": [
-            {"role": "system", "content": CODE_SYSTEM_PROMPT},
-            {"role": "user", "content": question},
-        ],
+        "messages": messages,
         "max_tokens": 1200,
     }
     result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=MODEL_TIMEOUT_SECONDS)
@@ -213,8 +224,12 @@ def process_one():
     set_task_state(task_id, "answering", topic="code")
     log(f"claim {claim_id}: task {task_id!r} -> asking coder")
 
+    conv_id = hermes_conversation_common.fetch_conv_id(MEMORY_URL, MEMORY_TOKEN, task_id, memory_ref)
+    history = hermes_conversation_common.fetch_history(
+        MEMORY_URL, MEMORY_TOKEN, conv_id, limit=ANSWER_HISTORY_TURNS) if conv_id else []
+
     try:
-        answer = ask_coder(question)
+        answer = ask_coder(question, history=history)
     except Exception as exc:
         log(f"task {task_id!r}: coder call failed: {exc}")
         publish_result(task_id, memory_ref, False, f"Coding-question call failed: {exc}")

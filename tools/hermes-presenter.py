@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-08-30) — conversation continuity. Every message now belongs to a conv_id, tagged
+# on its turn at write time (hermes-memory.py 1.3.0's new `turns.conv_id` column) and resolved by
+# hermes-dispatch.py/each specialist off the same turn they already fetch by task_id — no change
+# to Buzz's message schema or the tasks table needed at all. Three reset paths, each a fresh
+# conv_id: an explicit control phrase (NEW_CONVERSATION_PHRASES, matched deterministically, not
+# by a model call — same "doesn't need to be smart, needs to be right" reasoning
+# hermes-logs.py's own parse_source() already established for exactly this kind of choice);
+# IDLE_TIMEOUT_SECONDS (1hr default) with no activity; MAX_CONV_TURNS/MAX_CONV_CHARS overflow.
+# The idle and overflow paths both send an explicit plain-text notice before continuing —
+# operator direction, given both ways in. Per-room bookkeeping (which conv_id is active, when it
+# was last used) lives in hermes-memory's agent_state under a dedicated "continuity" identity,
+# read via list+filter rather than the path-keyed GET /state/<agent>/<key> route — Matrix room
+# ids contain characters that route's own handler never unquotes. New shared library
+# hermes_conversation_common.py holds the three operations hermes-dispatch.py and every
+# specialist but hermes-screen.py now also need (fetch_conv_id/fetch_history/as_messages) --
+# factored out once rather than duplicated six times, same reasoning every other shared module in
+# this fleet already exists for.
 #
 # 1.2.0 (2026-08-30) — inbound acknowledgment: handle_message() now sends a fixed, unstyled
 # "Got it — working on that." immediately after a message dispatches, before the real reply. Real
@@ -64,9 +82,12 @@
 #      paraphrase, no trimming beyond what Matrix itself already did. Untouched by the styling
 #      pass — handle_message() never calls style_reply(), only check_outstanding() does, and only
 #      on the outbound side.
-#   2. Conversation history — not this process's concern; hermes-dispatch.py reads raw from
-#      hermes-memory directly, this process never re-derives or forwards "what was said." The
-#      styled text a user reads is never what a future dispatch decision is made from.
+#   2. Conversation history — this process now owns *which* conversation a message belongs to
+#      (conv_id lifecycle: minting, idle/overflow reset), but still never re-derives or forwards
+#      *what was said* — routing and every specialist's own history read pulls raw text straight
+#      from hermes-memory by conv_id, this process just tags each turn with one at write time
+#      (hermes_conversation_common.py). The styled text a user reads is still never what a future
+#      dispatch/specialist decision is built from.
 #   3. Clarifying questions — the presenter still never asks one in-character; nothing routes a
 #      styled reply back into the dispatch path.
 #   4. Fidelity drift — actively defended now, not structurally impossible: should_style() scopes
@@ -122,6 +143,15 @@
 #   ACK_MESSAGE         default "Got it — working on that." — sent once, immediately after a
 #                        message is dispatched, so silence during an on-demand model's cold wake
 #                        (up to ~150s) doesn't read as "did this even arrive?"
+#   IDLE_TIMEOUT_SECONDS default 3600 (1 hour) — a room's conversation auto-closes after this long
+#                        with no message; expect to tune this, not a load-bearing constant
+#   MAX_CONV_TURNS      default 40 — a conversation hard-resets once it holds this many turns
+#   MAX_CONV_CHARS      default 16000 — or once the accumulated raw text hits this many characters,
+#                        whichever comes first
+#   NEW_CONVERSATION_PHRASES default "new conversation,/new,start over,reset conversation" —
+#                        comma-separated; a message matching one exactly (case-insensitive,
+#                        trailing punctuation stripped) starts a fresh conversation immediately,
+#                        with no dispatch at all
 
 import json
 import os
@@ -133,6 +163,9 @@ import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hermes_conversation_common  # noqa: E402
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER", f"http://{SPARK_IP}:6167").rstrip("/")
@@ -157,6 +190,14 @@ STYLE_MIN_LEN = int(os.environ.get("STYLE_MIN_LEN", "40"))
 STYLE_MAX_CHARS = int(os.environ.get("STYLE_MAX_CHARS", "4000"))
 ACK_ENABLED = os.environ.get("ACK_ENABLED", "1") == "1"
 ACK_MESSAGE = os.environ.get("ACK_MESSAGE", "Got it — working on that.")
+IDLE_TIMEOUT_SECONDS = int(os.environ.get("IDLE_TIMEOUT_SECONDS", "3600"))
+MAX_CONV_TURNS = int(os.environ.get("MAX_CONV_TURNS", "40"))
+MAX_CONV_CHARS = int(os.environ.get("MAX_CONV_CHARS", "16000"))
+NEW_CONVERSATION_PHRASES = tuple(
+    p.strip() for p in os.environ.get(
+        "NEW_CONVERSATION_PHRASES", "new conversation,/new,start over,reset conversation"
+    ).split(",")
+)
 
 
 def log(msg):
@@ -243,6 +284,83 @@ def handle_invite(room_id, invite_state):
     join_room(room_id)
 
 
+def get_room_conv_state(room_id):
+    """List+filter, not GET /state/<agent>/<key> — Matrix room_ids contain characters (`!`, `:`)
+    that would need careful URL-path percent-encoding hermes-memory.py's own _get_state() never
+    unquotes (confirmed by reading it: agent/key come straight from parsed.path.split("/") with
+    no urllib.parse.unquote() call anywhere), which would silently desync a percent-encoded read
+    from the plain-string key a JSON POST body wrote. Same list+filter shape check_outstanding()
+    already uses for its own pending:* keys — sidesteps the question entirely rather than getting
+    it subtly wrong."""
+    try:
+        entries = _get(f"{MEMORY_URL}/state/continuity", MEMORY_TOKEN).get("state", [])
+    except Exception as exc:
+        log(f"could not read conversation state: {exc}")
+        return None
+    key = f"room:{room_id}"
+    for entry in entries:
+        if entry["key"] == key:
+            return entry["value"]
+    return None
+
+
+def set_room_conv_state(room_id, conv_id, last_activity):
+    try:
+        _post(f"{MEMORY_URL}/state", {
+            "agent": "continuity", "key": f"room:{room_id}",
+            "value": {"conv_id": conv_id, "last_activity": last_activity},
+        }, MEMORY_TOKEN)
+    except Exception as exc:
+        log(f"could not write conversation state: {exc}")
+
+
+def resolve_conversation(room_id, body):
+    """Returns the conv_id this message belongs to, or None if `body` was itself a recognized
+    control phrase — already fully handled (state written, confirmation sent) by the time this
+    returns; the caller must not dispatch anything in that case. Every reset path (explicit
+    request, idle, overflow) is a fresh conv_id plus a write to hermes-memory's agent_state under
+    a dedicated "continuity" identity — distinct from this process's own "presenter" agent_state
+    keys (pending:*) so the two never mix in a GET /state/presenter listing."""
+    stripped = body.strip().lower().strip(".,!?\"'")
+    if stripped in NEW_CONVERSATION_PHRASES:
+        conv_id = uuid.uuid4().hex[:12]
+        set_room_conv_state(room_id, conv_id, time.time())
+        send_room_message(room_id, "Starting a new conversation.")
+        log(f"room {room_id}: new conversation started by request ({conv_id})")
+        return None
+
+    now = time.time()
+    state = get_room_conv_state(room_id)
+
+    if not state or not state.get("conv_id"):
+        conv_id = uuid.uuid4().hex[:12]
+        set_room_conv_state(room_id, conv_id, now)
+        log(f"room {room_id}: first message, new conversation ({conv_id})")
+        return conv_id
+
+    conv_id = state["conv_id"]
+    last_activity = state.get("last_activity", 0)
+
+    if now - last_activity > IDLE_TIMEOUT_SECONDS:
+        conv_id = uuid.uuid4().hex[:12]
+        set_room_conv_state(room_id, conv_id, now)
+        send_room_message(room_id, "This conversation was idle for over an hour, so I've started a fresh thread.")
+        log(f"room {room_id}: conversation reset (idle) -> {conv_id}")
+        return conv_id
+
+    history = hermes_conversation_common.fetch_history(MEMORY_URL, MEMORY_TOKEN, conv_id, limit=MAX_CONV_TURNS + 1)
+    total_chars = sum(len(t.get("raw") or "") for t in history)
+    if len(history) >= MAX_CONV_TURNS or total_chars >= MAX_CONV_CHARS:
+        conv_id = uuid.uuid4().hex[:12]
+        set_room_conv_state(room_id, conv_id, now)
+        send_room_message(room_id, "This conversation's context filled up, so I've started a fresh thread.")
+        log(f"room {room_id}: conversation reset (overflow, {len(history)} turns/{total_chars} chars) -> {conv_id}")
+        return conv_id
+
+    set_room_conv_state(room_id, conv_id, now)
+    return conv_id
+
+
 def handle_message(room_id, event):
     content = event.get("content", {})
     if content.get("msgtype") != "m.text":
@@ -251,11 +369,15 @@ def handle_message(room_id, event):
     if not body:
         return
 
+    conv_id = resolve_conversation(room_id, body)
+    if conv_id is None:
+        return  # a recognized control phrase — already fully handled, nothing to dispatch
+
     task_id = uuid.uuid4().hex[:16]
 
     # Byte-for-byte, no normalization, no paraphrase (insulation contract §1).
     turn = _post(f"{MEMORY_URL}/turns", {
-        "task_id": task_id, "agent": "presenter", "role": "user", "raw": body,
+        "task_id": task_id, "agent": "presenter", "role": "user", "raw": body, "conv_id": conv_id,
     }, MEMORY_TOKEN)
 
     _post(f"{MEMORY_URL}/state", {

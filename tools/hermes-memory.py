@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-08-30) — conversation continuity, the piece that was actually missing: `turns`
+# gains a nullable `conv_id` column (+ index), `POST /turns` accepts it, `GET /turns` gains it as
+# a third filter alongside `task_id`/`agent`. `task_id` itself could not double as the
+# conversation key -- reusing one across multiple user messages would collide with
+# hermes-presenter.py's own one-task-id-per-outstanding-request delivery tracking
+# (`pending:<task_id>`) the moment two messages in the same conversation were ever in flight at
+# once. New `_migrate_turns_conv_id()` follows `_migrate_turns_autoincrement()`'s idempotent
+# per-connect() migration shape, but simpler -- a nullable column addition is a plain
+# `ALTER TABLE ADD COLUMN`, no rename-and-rebuild needed (that dance was only required for
+# 1.1.1's constraint change, not additive columns). Existing rows get `conv_id = NULL` -- inert,
+# they simply never match any `conv_id` filter.
 #
 # 1.2.0 — HermesAgentV5 S9: new `model_registry` table + `/models` API. Keyed on (node, path) —
 # one row per physical file, multiple rows share a `role` for multi-file backends (omni's GGUF +
@@ -127,10 +139,12 @@ CREATE TABLE IF NOT EXISTS turns (
     role        TEXT NOT NULL,
     raw         TEXT NOT NULL,
     presented   TEXT,
+    conv_id     TEXT,
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turns_task ON turns(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_turns_agent ON turns(agent, created_at);
+CREATE INDEX IF NOT EXISTS idx_turns_conv ON turns(conv_id, created_at);
 
 CREATE TABLE IF NOT EXISTS agent_state (
     agent       TEXT NOT NULL,
@@ -207,6 +221,20 @@ def _migrate_turns_autoincrement(conn):
     log("migrated turns.id to real AUTOINCREMENT")
 
 
+def _migrate_turns_conv_id(conn):
+    """`turns.conv_id` (1.3.0) is a plain nullable column addition -- unlike
+    _migrate_turns_autoincrement()'s constraint change, ALTER TABLE ADD COLUMN handles this
+    directly, no rename-and-rebuild needed. Idempotent per connect() call, same guard shape:
+    checked via PRAGMA table_info rather than sqlite_master's SQL text, since a plain ADD COLUMN
+    doesn't change the table's own CREATE-statement string the way the AUTOINCREMENT rebuild did."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(turns)").fetchall()}
+    if "conv_id" in cols:
+        return  # fresh DB (SCHEMA already has it) or already migrated
+    conn.execute("ALTER TABLE turns ADD COLUMN conv_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_conv ON turns(conv_id, created_at)")
+    log("migrated turns: added conv_id column + index")
+
+
 def connect(readonly=False):
     """Open the memory store with the sqlite-vec extension loaded. Raises if sqlite_vec isn't
     importable — callers must run under an interpreter that has it (this service's systemd unit
@@ -230,6 +258,7 @@ def connect(readonly=False):
     if not readonly:
         conn.executescript(SCHEMA)
         _migrate_turns_autoincrement(conn)
+        _migrate_turns_conv_id(conn)
         conn.execute(VEC_TABLE_SQL.format(dims=EMBED_DIMS))
         conn.commit()
     conn.row_factory = sqlite3.Row
@@ -268,7 +297,7 @@ def pack_vec(vec: list) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "hermes-memory/1.2.0"
+    server_version = "hermes-memory/1.3.0"
 
     def log_message(self, fmt, *args):
         log(f"{self.address_string()} {fmt % args}")
@@ -406,6 +435,7 @@ class Handler(BaseHTTPRequestHandler):
         role = payload.get("role")
         raw = payload.get("raw")
         presented = payload.get("presented")
+        conv_id = payload.get("conv_id")
 
         if not (task_id and agent and role and raw):
             self._send(400, {"error": "task_id, agent, role, and raw are required"})
@@ -424,9 +454,9 @@ class Handler(BaseHTTPRequestHandler):
         with _db_lock, connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute(
-                "INSERT INTO turns (task_id, agent, role, raw, presented, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (task_id, agent, role, raw, presented, now),
+                "INSERT INTO turns (task_id, agent, role, raw, presented, conv_id, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (task_id, agent, role, raw, presented, conv_id, now),
             )
             turn_id = cur.lastrowid
             conn.execute(
@@ -441,13 +471,14 @@ class Handler(BaseHTTPRequestHandler):
     def _list_turns(self, qs):
         task_id = (qs.get("task_id") or [None])[0]
         agent = (qs.get("agent") or [None])[0]
+        conv_id = (qs.get("conv_id") or [None])[0]
         try:
             limit = min(int((qs.get("limit") or ["50"])[0]), 500)
         except ValueError:
             self._send(400, {"error": "invalid limit"})
             return
-        if not task_id and not agent:
-            self._send(400, {"error": "task_id or agent is required"})
+        if not task_id and not agent and not conv_id:
+            self._send(400, {"error": "task_id, agent, or conv_id is required"})
             return
 
         clauses, params = [], []
@@ -457,12 +488,15 @@ class Handler(BaseHTTPRequestHandler):
         if agent:
             clauses.append("agent = ?")
             params.append(agent)
+        if conv_id:
+            clauses.append("conv_id = ?")
+            params.append(conv_id)
         where = " AND ".join(clauses)
         params.append(limit)
 
         with connect(readonly=True) as conn:
             rows = conn.execute(
-                f"SELECT id, task_id, agent, role, raw, presented, created_at FROM turns "
+                f"SELECT id, task_id, agent, role, raw, presented, conv_id, created_at FROM turns "
                 f"WHERE {where} ORDER BY created_at DESC LIMIT ?",
                 params,
             ).fetchall()

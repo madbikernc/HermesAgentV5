@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-08-30) — conversation continuity: the synthesis call now includes recent
+# conversation history (ANSWER_HISTORY_TURNS, default 20) before the current question, via the
+# shared hermes_conversation_common.py helpers every specialist but hermes-screen.py now uses —
+# so a retrieve-shaped follow-up right after a different specialist's answer can still reference
+# it ("one unified thread" across topics, not scoped per specialist).
 #
 # hermes-retrieve — the fleet's RAG retrieval agent. Owns the Buzz `retrieve` topic, reserved
 # since S6 with no real subscriber until now (IMPLEMENTATION_PLAN.md's own audit repeatedly noted
@@ -46,6 +52,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_injection_guard  # noqa: E402
 import hermes_rag_common  # noqa: E402
+import hermes_conversation_common  # noqa: E402
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
@@ -58,6 +65,7 @@ ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 TOP_K = int(os.environ.get("TOP_K", "5"))
 CLAIMANT = os.environ.get("CLAIMANT", "hermes-retrieve")
+ANSWER_HISTORY_TURNS = int(os.environ.get("ANSWER_HISTORY_TURNS", "20"))
 
 SYNTHESIS_SYSTEM_PROMPT = (
     "You answer a question using ONLY the retrieved excerpts you are given -- never your own "
@@ -234,12 +242,16 @@ def process_one():
     excerpts = "\n\n".join(
         f"[{c['citation']}]\n{c['text']}" for c in clean_chunks
     )
+    conv_id = hermes_conversation_common.fetch_conv_id(MEMORY_URL, MEMORY_TOKEN, task_id, memory_ref)
+    history = hermes_conversation_common.fetch_history(
+        MEMORY_URL, MEMORY_TOKEN, conv_id, limit=ANSWER_HISTORY_TURNS) if conv_id else []
+    messages = [{"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT}]
+    messages.extend(hermes_conversation_common.as_messages(history))
+    messages.append(
+        {"role": "user", "content": f"Question: {question}\n\n--- RETRIEVED EXCERPTS ---\n{excerpts[:20000]}"})
     try:
         answer = hermes_rag_common.router_chat(
-            [
-                {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Question: {question}\n\n--- RETRIEVED EXCERPTS ---\n{excerpts[:20000]}"},
-            ],
+            messages,
             model="dispatch",
             timeout=60,
         )

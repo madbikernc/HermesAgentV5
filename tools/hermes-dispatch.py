@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-08-30) — conversation continuity, the routing half. choose_topic() gains an
+# optional `history` param, prepended before the current message when given -- real gap this
+# closes: a follow-up like "tell me more about that" has no topic-shaped content of its own, so
+# without context it either misroutes or the routing model just guesses. process_one() resolves
+# `conv_id` off the same turn it already fetches by task_id (hermes_conversation_common.py's
+# fetch_conv_id(), same pointer-resolution logic fetch_raw_text() already has, just returning a
+# different field) and fetches a small window of recent history (ROUTING_HISTORY_TURNS, default
+# 6 -- deliberately smaller than what specialists use for their own answers, since routing only
+# needs to recognize "this is a continuation of X," not reconstruct the whole exchange).
+# ROUTING_SYSTEM_PROMPT gains one added instruction covering exactly this case. VALID_TARGETS and
+# the single-word-reply contract are unchanged.
 #
 # 1.1.0 — HermesAgentV5 S12: failover, up target §11.2's escalation ladder. Rung 1 (systemd
 # auto-restart) already existed (hermes-dispatch.service, Restart=always). This adds what rung 2
@@ -89,6 +101,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_injection_guard  # noqa: E402
+import hermes_conversation_common  # noqa: E402
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
@@ -102,14 +115,18 @@ GUARD_TOKEN = os.environ.get("GUARD_TOKEN", "")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 CLAIMANT = os.environ.get("CLAIMANT", "hermes-dispatch")
 HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get("HEARTBEAT_INTERVAL_SECONDS", "30"))
+ROUTING_HISTORY_TURNS = int(os.environ.get("ROUTING_HISTORY_TURNS", "6"))
 
 # Target §4.4's internal topic set, minus `dispatch` itself and `results` (a destination
 # specialists publish completion to, never something the dispatcher routes fresh work into).
 VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train"}
 
 ROUTING_SYSTEM_PROMPT = (
-    "You are a routing classifier. Given a piece of text, reply with EXACTLY ONE WORD: the name "
-    "of the topic it should be routed to. Valid topics, choose exactly one:\n"
+    "You are a routing classifier. Given a piece of text (optionally preceded by recent "
+    "conversation history for context), reply with EXACTLY ONE WORD: the name of the topic the "
+    "final message should be routed to. If that message has no clear topic of its own -- a "
+    "follow-up like \"tell me more\" or \"what about X instead\" -- infer the topic from what the "
+    "conversation was already about, don't guess blindly. Valid topics, choose exactly one:\n"
     + ", ".join(sorted(VALID_TARGETS))
     + "\n\nReply with only the topic name, nothing else — no punctuation, no explanation."
 )
@@ -224,16 +241,22 @@ def screen(text):
     return True
 
 
-def choose_topic(text):
+def choose_topic(text, history=None):
     """Calls the stock `dispatch` role via hermes-router.py, same call shape any other role
     caller uses. Returns a validated topic name, or None if the model's reply doesn't parse to
-    one of VALID_TARGETS — a bad response is a failure to route, never a silent guess."""
+    one of VALID_TARGETS — a bad response is a failure to route, never a silent guess.
+
+    `history` (conversation continuity, 1.2.0), when given, is prepended before the current
+    message — a smaller window than specialists use for their own answers (ROUTING_HISTORY_TURNS
+    default 6 vs. specialists' default 20): routing only needs enough to recognize "this is a
+    continuation of X," not the full conversation."""
+    messages = [{"role": "system", "content": ROUTING_SYSTEM_PROMPT}]
+    if history:
+        messages.extend(hermes_conversation_common.as_messages(history))
+    messages.append({"role": "user", "content": text[:4000]})
     body = {
         "model": "dispatch",
-        "messages": [
-            {"role": "system", "content": ROUTING_SYSTEM_PROMPT},
-            {"role": "user", "content": text[:4000]},
-        ],
+        "messages": messages,
         "max_tokens": 10,
     }
     try:
@@ -273,7 +296,10 @@ def process_one():
         ack_claim(claim_id)
         return True
 
-    topic = choose_topic(raw_text)
+    conv_id = hermes_conversation_common.fetch_conv_id(MEMORY_URL, MEMORY_TOKEN, task_id, memory_ref)
+    history = hermes_conversation_common.fetch_history(
+        MEMORY_URL, MEMORY_TOKEN, conv_id, limit=ROUTING_HISTORY_TURNS) if conv_id else []
+    topic = choose_topic(raw_text, history=history)
     if not topic:
         log(f"claim {claim_id}: task {task_id!r} — dispatch model gave no valid topic, "
             f"leaving claim unacked for retry after lease expiry")

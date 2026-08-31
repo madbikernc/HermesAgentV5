@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-08-30) — conversation continuity's one genuinely different shape among the
+# specialists that got it: this agent never called a model before submitting a prompt to the
+# broker at all, so there was no existing call to prepend history to. New synthesize_prompt()
+# rewrites the current request into a complete standalone prompt using recent conversation
+# history, only when history exists (MAX_REGENERATE_ATTEMPTS's sibling constant,
+# ANSWER_HISTORY_TURNS, default 20) -- one extra `dispatch` call, added right after screening,
+# before the broker submit. Zero behavior change for the common single-shot case (no history ->
+# prompt used exactly as received, same as 1.1.0 and before).
 #
 # 1.1.0 (2026-08-30) — target §9.2's generate->evaluate->regenerate loop, the co-resident half
 # ("Can loop with the co-resident vision evaluator: generate -> evaluate -> regenerate"),
@@ -82,6 +91,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_injection_guard  # noqa: E402
+import hermes_conversation_common  # noqa: E402
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
@@ -99,6 +109,16 @@ ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
 EVAL_ENABLED = os.environ.get("EVAL_ENABLED", "1") == "1"
 EVAL_TIMEOUT_SECONDS = int(os.environ.get("EVAL_TIMEOUT_SECONDS", "60"))
 MAX_REGENERATE_ATTEMPTS = int(os.environ.get("MAX_REGENERATE_ATTEMPTS", "1"))
+ANSWER_HISTORY_TURNS = int(os.environ.get("ANSWER_HISTORY_TURNS", "20"))
+
+SYNTHESIZE_PROMPT_SYSTEM = (
+    "You rewrite an image/video generation request into one complete, standalone prompt, using "
+    "recent conversation history for context -- e.g. \"make it a different color\" after a prior "
+    "request for \"a red bicycle\" becomes a complete prompt describing that bicycle in a "
+    "different color. If the current request is already a complete, standalone prompt on its "
+    "own, return it completely unchanged. Never invent details the history and the request don't "
+    "actually imply. Reply with only the rewritten prompt -- no preamble, no commentary."
+)
 
 EVAL_SYSTEM_PROMPT = (
     "You judge whether a generated image matches its prompt and looks correct -- no obvious "
@@ -211,6 +231,29 @@ def screen(text):
     return True
 
 
+def synthesize_prompt(prompt, history):
+    """Conversation continuity's one genuinely different shape in this file: unlike the other
+    specialists (which prepend history before an answer-generating model call they already had),
+    this agent never called a model before submitting a prompt to the broker at all -- `prompt`
+    went straight from fetch_raw_text() to submit_broker_job(), verbatim. A follow-up like "make
+    it a different color" is meaningless as a standalone render prompt without the prior request,
+    so when history exists, one extra `dispatch` call rewrites it into a complete prompt first.
+    Only called when history is non-empty (see call site) -- the common single-shot case is
+    completely unchanged, zero extra latency or cost."""
+    body = {
+        "model": "dispatch",
+        "messages": (
+            [{"role": "system", "content": SYNTHESIZE_PROMPT_SYSTEM}]
+            + hermes_conversation_common.as_messages(history)
+            + [{"role": "user", "content": prompt}]
+        ),
+        "max_tokens": 400,
+    }
+    result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=30)
+    rewritten = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    return rewritten or prompt
+
+
 def submit_broker_job(prompt):
     return _post(f"{BROKER_URL}/jobs", {"type": "render", "payload": {"prompt": prompt}}, BROKER_TOKEN)
 
@@ -294,6 +337,15 @@ def process_media_request():
         publish_result(task_id, memory_ref, False,
                         "This image/video request was rejected by the fleet's screening layer.")
         return True
+
+    conv_id = hermes_conversation_common.fetch_conv_id(MEMORY_URL, MEMORY_TOKEN, task_id, memory_ref)
+    history = hermes_conversation_common.fetch_history(
+        MEMORY_URL, MEMORY_TOKEN, conv_id, limit=ANSWER_HISTORY_TURNS) if conv_id else []
+    if history:
+        try:
+            prompt = synthesize_prompt(prompt, history)
+        except Exception as exc:
+            log(f"claim {claim_id}: prompt synthesis failed, using request as-is: {exc}")
 
     try:
         job = submit_broker_job(prompt)
