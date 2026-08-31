@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.2.1
+# Version: 1.3.0
+#
+# 1.3.0 (2026-08-30) — new GET /jobs/{id}/artifact route, streaming a completed job's raw
+# artifact bytes. Added for hermes-media.py's own generate->evaluate->regenerate loop (target
+# §9.2): that agent runs on spark-2, this broker (and its LUKS-mounted ARTIFACT_DIR) runs on
+# spark, and no route existed to move artifact bytes between them at all — confirmed by reading
+# every existing GET route (/jobs, /jobs/claim, /jobs/{id}, /jobs/{id}/result), none of which
+# serve raw bytes, only JSON metadata. Bearer-authed like every other route; re-validates the
+# stored artifact path resolves inside ARTIFACT_DIR before serving, defense in depth on top of
+# 1.1.0's write-side path-traversal fix even though `artifact` should never contain a path
+# outside it already. 404s (not an error) for a job with no artifact or one still in flight.
 #
 # 1.2.1 — real bug found 2026-08-21 while adding a second artifact-less job type (remediate,
 # alongside the existing wake): `_result()`'s state-transition only ever set `done` when
@@ -111,6 +121,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import threading
@@ -305,6 +316,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(blob)
 
+    def _send_file(self, artifact_path):
+        """Streams a stored artifact's raw bytes — added for hermes-media.py's own
+        generate->evaluate->regenerate loop (target §9.2), which runs on spark-2 and has no
+        filesystem access to this node's LUKS-mounted ARTIFACT_DIR. Defense in depth on top of
+        the write-side path-traversal fix (1.1.0): re-resolves the stored path and refuses to
+        serve anything outside ARTIFACT_DIR, even though `artifact` should never contain such a
+        path already."""
+        resolved = os.path.realpath(artifact_path)
+        artifact_root = os.path.realpath(ARTIFACT_DIR)
+        if not (resolved == artifact_root or resolved.startswith(artifact_root + os.sep)):
+            log(f"refusing to serve artifact outside ARTIFACT_DIR: {artifact_path!r}")
+            self._send(404, {"error": "no such job"})
+            return
+        if not os.path.isfile(resolved):
+            self._send(404, {"error": "artifact file missing on disk"})
+            return
+        content_type, _ = mimetypes.guess_type(resolved)
+        size = os.path.getsize(resolved)
+        self.send_response(200)
+        self.send_header("Content-Type", content_type or "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        with open(resolved, "rb") as fh:
+            shutil.copyfileobj(fh, self.wfile)
+
     def _authed(self):
         presented = self.headers.get("Authorization", "")
         if hmac.compare_digest(presented, f"Bearer {TOKEN}"):
@@ -348,6 +384,22 @@ class Handler(BaseHTTPRequestHandler):
                     "FROM jobs ORDER BY created_at DESC LIMIT 100"
                 ).fetchall()
             self._send(200, {"jobs": [dict(r) for r in rows]})
+            return
+
+        if parsed.path.startswith("/jobs/") and parsed.path.endswith("/artifact"):
+            job_id = parsed.path.split("/")[2]
+            if not JOB_ID_RE.match(job_id):
+                self._send(400, {"error": "invalid job id"})
+                return
+            with connect() as conn:
+                row = conn.execute("SELECT artifact,state FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not row:
+                self._send(404, {"error": "no such job"})
+                return
+            if row["state"] != "done" or not row["artifact"]:
+                self._send(404, {"error": "job has no artifact"})
+                return
+            self._send_file(row["artifact"])
             return
 
         if parsed.path.startswith("/jobs/"):

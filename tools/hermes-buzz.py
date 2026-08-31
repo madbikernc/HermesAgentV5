@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 2.0.6
+# Version: 2.0.7
+#
+# 2.0.7 (2026-08-30) — added `retrieve`, `code`, `screen` to `KNOWN_AGENTS`, proactively this
+# time, ahead of the three new specialist agents' own first `results` publish — same recurring
+# bug class every entry below this one documents.
 #
 # 2.0.6 — HermesAgentV5 S15: added `logs` to `KNOWN_AGENTS`. Same bug class S6 hit with
 # `dispatch`, not caught proactively this time despite 2.0.4/2.0.5's own precedent: found live
@@ -131,7 +135,7 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1). Most of
 # these have no subscriber yet — same ahead-of-the-consumer posture as hermes-memory's `tasks`
