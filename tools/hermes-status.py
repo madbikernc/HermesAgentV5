@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.1.1
+#
+# 1.1.1 (2026-08-31) — real usability gap found live: a bare "Moen" didn't match the moenflo
+# keyword tuple (required the full phrase "moen flo"). Added the bare brand name; also added
+# "gameserver" (no space) alongside "game server" for the same reason. Every other source's
+# keyword set was already a single distinctive word (pfsense, generac, wyze, vivint) and didn't
+# need this.
 #
 # 1.1.0 (2026-08-31) — real routing collision found live: a "fleet health"-shaped question can
 # plausibly route to either `logs` (hermes-logs.py 1.2.0's own fleethealth source, added the same
@@ -96,7 +102,7 @@ STATUS_SOURCES = {
         90,  # drives a real headless-browser OAuth login, per its own SKILL.md
     ),
     "moenflo": (
-        ("moen flo", "moen-flo", "water shutoff", "leak detector", "flo valve"),
+        ("moen", "moen flo", "moen-flo", "water shutoff", "leak detector", "flo valve"),
         ["/opt/hermes/venvs/moen-flo/bin/python3", str(REPO_DIR / "tools" / "hermes-moen-flo.py"), "--detail"],
         30,
     ),
@@ -106,7 +112,7 @@ STATUS_SOURCES = {
         30,
     ),
     "gameservers": (
-        ("game server", "minecraft", "zomboid"),
+        ("game server", "gameserver", "minecraft", "zomboid"),
         [PY, str(REPO_DIR / "tools" / "hermes-game-server-monitor.py"), "--dry-run"],
         30,
     ),
