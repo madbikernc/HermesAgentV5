@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.6.1
+#
+# 1.6.1 (2026-08-31) — real bug found live: "/help" opened Element's own client-side app help
+# instead of ever reaching this process -- Matrix clients generally intercept a leading "/" as
+# their own command syntax before it's sent as a room message. Switched the control-phrase escape
+# from "/" to "!" for both NEW_CONVERSATION_PHRASES ("/new" -> "!new") and HELP_PHRASES ("/help"
+# -> "!help"), per direct operator request that "!" become this fleet's default command-escape
+# convention going forward, not just a one-off fix for these two. The plain-English alternatives
+# ("start over", "reset conversation", bare "help") are untouched -- they were never at risk of
+# client-side interception in the first place, only literal "/"-prefixed text was.
 #
 # 1.6.0 (2026-08-31) — direct operator request: the inbound "Got it — working on that." ack
 # should say which specialist is actually handling the request. handle_message() itself can't do
@@ -216,10 +225,15 @@
 #   MAX_CONV_TURNS      default 40 — a conversation hard-resets once it holds this many turns
 #   MAX_CONV_CHARS      default 16000 — or once the accumulated raw text hits this many characters,
 #                        whichever comes first
-#   NEW_CONVERSATION_PHRASES default "new conversation,/new,start over,reset conversation" —
+#   NEW_CONVERSATION_PHRASES default "new conversation,!new,start over,reset conversation" —
 #                        comma-separated; a message matching one exactly (case-insensitive,
 #                        trailing punctuation stripped) starts a fresh conversation immediately,
-#                        with no dispatch at all
+#                        with no dispatch at all. "!" not "/" -- Element (and Matrix clients
+#                        generally) intercept a leading "/" as their own client-side command
+#                        syntax before it ever reaches the room as a real message; confirmed live
+#                        when "/help" opened Element's own app help instead of reaching this
+#                        process at all. "!" is this fleet's own command-escape convention now,
+#                        for every control phrase, not just these two.
 #   WEBSEARCH_OFFER_MESSAGE default "I couldn't find anything about that in the fleet's knowledge
 #                        base. Want me to search the internet for it?" — sent when
 #                        hermes-retrieve.py reports its new `no-match` task state
@@ -234,8 +248,9 @@
 #   WEBSEARCH_NO_PHRASES default "no,n,nah,nope,no thanks,never mind,cancel" — comma-separated,
 #                        same matching contract; anything matching neither list clears the offer
 #                        and falls through to normal handling instead of guessing
-#   HELP_PHRASES         default "/help,help" — comma-separated, same exact-match contract;
-#                        checked first in handle_message(), before the websearch-offer lookup
+#   HELP_PHRASES         default "!help,help" — comma-separated, same exact-match contract;
+#                        checked first in handle_message(), before the websearch-offer lookup.
+#                        "!" not "/" -- see NEW_CONVERSATION_PHRASES above for why
 #   HELP_MESSAGE         default: a fixed capability summary — see HELP_MESSAGE below for the
 #                        exact text
 
@@ -281,7 +296,7 @@ MAX_CONV_TURNS = int(os.environ.get("MAX_CONV_TURNS", "40"))
 MAX_CONV_CHARS = int(os.environ.get("MAX_CONV_CHARS", "16000"))
 NEW_CONVERSATION_PHRASES = tuple(
     p.strip() for p in os.environ.get(
-        "NEW_CONVERSATION_PHRASES", "new conversation,/new,start over,reset conversation"
+        "NEW_CONVERSATION_PHRASES", "new conversation,!new,start over,reset conversation"
     ).split(",")
 )
 WEBSEARCH_OFFER_MESSAGE = os.environ.get(
@@ -302,7 +317,7 @@ WEBSEARCH_NO_PHRASES = tuple(
         "WEBSEARCH_NO_PHRASES", "no,n,nah,nope,no thanks,never mind,cancel"
     ).split(",")
 )
-HELP_PHRASES = tuple(p.strip() for p in os.environ.get("HELP_PHRASES", "/help,help").split(","))
+HELP_PHRASES = tuple(p.strip() for p in os.environ.get("HELP_PHRASES", "!help,help").split(","))
 HELP_MESSAGE = os.environ.get("HELP_MESSAGE", (
     "Here's what I can do:\n\n"
     "• General questions — just ask; I'll route it automatically (knowledge-base search, coding "
@@ -316,11 +331,11 @@ HELP_MESSAGE = os.environ.get("HELP_MESSAGE", (
     "• Knowledge-base search — if I don't have an answer in the fleet's own knowledge base, I'll "
     "offer to search the internet; reply \"yes\" to confirm or \"no\" to decline.\n\n"
     "Conversation control:\n"
-    "• \"new conversation\", \"/new\", \"start over\", or \"reset conversation\" — start a fresh "
+    "• \"new conversation\", \"!new\", \"start over\", or \"reset conversation\" — start a fresh "
     "thread now.\n"
     "• A conversation also resets automatically after an hour of inactivity, or once it gets too "
     "long — I'll tell you plainly either time.\n"
-    "• \"/help\" or \"help\" — show this message again."
+    "• \"!help\" or \"help\" — show this message again."
 ))
 
 
