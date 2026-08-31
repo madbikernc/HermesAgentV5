@@ -13,9 +13,17 @@
 # --pooling rank --embedding are both required alongside --reranking, not implied by it — a bare
 # `--reranking` alone left the model's own pooling type unset and produced the same garbage
 # scores the wrong GGUF did, before either fix was identified as the real cause.
+#
+# --ubatch-size raised from llama-server's own default (512) — real bug found on the first full
+# eval run: a wide reranking pool (hermes_rag_common.py's RERANK_WIDEN=4, so up to 20 real chunks
+# in one request) tokenizes past 512 easily (real failures logged at 761/800 tokens), and the
+# server rejects the whole request rather than processing what fits — search() fails open on this
+# (falls back to plain KNN order), so it never broke anything downstream, but it silently meant
+# most real rerank calls weren't reranking at all. 4096 matches --ctx-size, room for a genuinely
+# wide candidate pool without hitting this again at realistic chunk sizes.
 exec /opt/llama.cpp/build/bin/llama-server \
   --model /mnt/hermes-data/models/Qwen3-Reranker-0.6B-Q8_0.gguf \
   --reranking --pooling rank --embedding \
   --host 127.0.0.1 --port 8093 \
   --n-gpu-layers 99 \
-  --ctx-size 4096
+  --ctx-size 4096 --ubatch-size 4096
