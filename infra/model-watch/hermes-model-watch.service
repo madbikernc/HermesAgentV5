@@ -1,0 +1,8 @@
+[Unit]
+Description=hermes-model-watch - weekly llama.cpp architecture-support / GLM-5.3 watch, emailed
+After=network.target
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-model-watch.py
