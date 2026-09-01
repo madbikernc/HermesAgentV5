@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-01) — real false positive caught in the dry-run test, before this ever reached a
+# live timer: check_watched_terms()'s GitHub search for "GLM-5.3" matched PR #27466 ("ROCm: add
+# radix TOP_K for long rows") — completely unrelated; the term only appeared somewhere in that
+# PR's own comment thread, not its actual subject, and the naive version below treated any
+# `merged_at`-set hit as confirmed support. Deployed as originally written, this would have
+# emailed a false "GLM-5.3 support merged" claim on its very first real run. Fixed: a hit now only
+# counts if the term appears in the PR's own title (title-only search text is a much stronger, if
+# still imperfect, signal than a hit anywhere in title+body+comments), and findings are always
+# phrased as "worth a manual look," never as confirmed fact. The state schema's `alerted` field
+# was replaced with `resolved`, which this function no longer sets on its own at all — only a
+# human directly verifying support landed, or check_arch_diff() (which reads real compiled-in
+# architecture identifiers, not search text), can close out a watched term now.
+#
 """
 hermes-model-watch.py — Weekly check for new llama.cpp architecture support relevant to this
 fleet's watched model families (GLM-5.3, plus the two Qwen4 variants already found to fail on
@@ -28,9 +42,11 @@ own header already documents for keeping facts out of the model's hands):
      remote-tracking refs) — never `git pull`/`checkout`/rebuild; that stays a separate,
      deliberate human action (see infra/model-abliteration/README.md §3 for the real procedure).
   2. Watched-term PR search (check_watched_terms) — GitHub's public search API, scoped to
-     ggml-org/llama.cpp, for each name in WATCHED_TERMS. Catches support landing under a naming
-     convention the enum diff wouldn't obviously match, and gives earlier visibility into an open
-     (not yet merged) PR before it ever reaches master.
+     ggml-org/llama.cpp, for each name in WATCHED_TERMS, title-filtered (see the function's own
+     docstring for a real false positive this caught before ever shipping) and always reported as
+     a candidate for manual verification, never as confirmed support on its own. Catches activity
+     under a naming convention the enum diff wouldn't obviously match, and gives earlier
+     visibility into an open (not yet merged) PR before it ever reaches master.
 
 A third, lower-stakes check (check_hf_releases) tracks new GLM-5.3-named GGUF repos appearing on
 Hugging Face — purely informational (a GGUF existing doesn't mean llama.cpp can load it), kept
@@ -112,20 +128,28 @@ def load_state():
         return json.loads(STATE_FILE.read_text())
     if LEGACY_SEED_FILE.exists():
         # One-time migration of real historical data left behind when this capability was
-        # designed but never actually built — see module docstring.
+        # designed but never actually built — see module docstring. Legacy `alerted` -> `resolved`:
+        # the qwen4exp entry's `alerted: true` reflected a real, independently-corroborated finding
+        # (coder2 failing to load with "unknown model architecture: 'qwen4exp'", documented in
+        # tools/hermes-router.py's own changelog) — trusted and carried forward as already
+        # resolved. Going forward, only a human directly verifying support landed (or the
+        # architecture-diff check reading real compiled-in identifiers) can mark something
+        # resolved — see check_watched_terms()'s own docstring for why search hits alone no
+        # longer do that automatically.
         seed = json.loads(LEGACY_SEED_FILE.read_text())
         return {
             "watched": {
                 term: {
-                    "alerted": seed.get(term, {}).get("alerted", False),
+                    "resolved": seed.get(term, {}).get("alerted", False),
                     "evidence_url": seed.get(term, {}).get("evidence_url"),
+                    "last_hits": [],
                 }
                 for term in WATCHED_TERMS
             },
             "hf_seen": {"glm_5_3": seed.get("glm_5_3_seen", [])},
         }
     return {
-        "watched": {term: {"alerted": False, "evidence_url": None} for term in WATCHED_TERMS},
+        "watched": {term: {"resolved": False, "evidence_url": None, "last_hits": []} for term in WATCHED_TERMS},
         "hf_seen": {},
     }
 
@@ -205,24 +229,39 @@ def search_llama_cpp_prs(term):
 
 
 def check_watched_terms(state, findings):
+    """Deliberately conservative, after a real false positive caught live before this ever
+    shipped: GitHub's search API's `"GLM-5.3"` query matched PR #27466 ("ROCm: add radix TOP_K
+    for long rows") — completely unrelated, the term only appeared somewhere in its comment
+    thread, not its actual subject. Full-text search across title+body+comments is not evidence
+    of a PR actually implementing something; treating any hit as "merged support found" would
+    have emailed a confirmed-false claim. Two changes from the naive version: (1) a hit only
+    counts if the term appears in the PR's own *title*, a much stronger (if imperfect) signal;
+    (2) findings are always phrased as "worth a manual look," never as confirmed support — this
+    check's job is to surface candidates for a human to verify, not to assert facts on its own.
+    `resolved` is intentionally never set by this function — only a human editing state (once
+    they've actually verified real support landed) or the architecture-diff check in
+    check_arch_diff() (which reads real compiled-in architecture identifiers, not search text)
+    can be trusted to close out a watched term."""
     for key, label in WATCHED_TERMS.items():
-        watch = state["watched"].setdefault(key, {"alerted": False, "evidence_url": None})
-        if watch["alerted"]:
+        watch = state["watched"].setdefault(key, {"resolved": False, "evidence_url": None, "last_hits": []})
+        if watch.get("resolved"):
             continue
         try:
             items = search_llama_cpp_prs(label)
         except Exception as exc:
             print(f"PR search for {label!r} failed: {exc}", file=sys.stderr)
             continue
-        merged = next((i for i in items if i.get("pull_request", {}).get("merged_at")), None)
-        if merged:
-            findings.append(f"{label}: merged PR found in llama.cpp — {merged['html_url']}")
-            watch["alerted"] = True
-            watch["evidence_url"] = merged["html_url"]
-        elif items:
-            # Open/unmerged activity — informational, doesn't set alerted (so this fires again
-            # once it's actually merged, which is the point).
-            findings.append(f"{label}: open activity in llama.cpp, not yet merged — {items[0]['html_url']}")
+        term_key = label.split()[0].lower()  # e.g. "glm-5.3" out of "GLM-5.3"
+        title_matches = [i for i in items if term_key in i.get("title", "").lower()]
+        seen = set(watch.get("last_hits", []))
+        new_hits = [i["html_url"] for i in title_matches if i["html_url"] not in seen]
+        if new_hits:
+            findings.append(
+                f"{label}: possible llama.cpp activity worth a manual look (title-matched, but "
+                f"NOT confirmation of actual merged support — verify directly before acting on "
+                f"it): " + ", ".join(new_hits)
+            )
+            watch["last_hits"] = sorted(seen | set(new_hits))
 
 
 # ── check 3: HF release tracking (informational only) ──────────────────────
