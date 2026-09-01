@@ -1,6 +1,6 @@
 # Network plane separation — `spark` ↔ `spark-2`
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 HermesAgentV5's S4 (`../../HermesAgentV5/IMPLEMENTATION_PLAN.md`). Two physically separate links exist
 between the Spark nodes, and they carry different kinds of traffic on purpose:
@@ -55,6 +55,30 @@ The LAN path (`10.129.1.15`/`10.129.1.17`) is unaffected in both directions — 
 (routers, gateways, HomeD13's SWE-bench tooling) already used the LAN address, never the fabric one, so
 nothing needed to change on the calling side.
 
+## SSH aliases for the fabric (2026-09-01)
+
+Direct request to actually set up node-to-node use of the bond, after benchmarking it for the
+first time since S4 (real SSH-piped throughput: ~481 MB/s over the fabric vs. ~110 MB/s over the
+regular LAN for the same transfer — a real ~4.4x speedup, both well under the 400Gb/s physical
+capacity since SSH's own encryption is the bottleneck, not the link). The S1 keys
+(`~/.ssh/spark2_access` on spark, `~/.ssh/spark_access` on spark-2) already existed and already
+authenticate in both directions (confirmed live during S4's own verification table above) — they
+just had no SSH config alias pointing at the fabric IP specifically. Added one on each node:
+
+| Node  | Alias           | Resolves to  | Key                      |
+|-------|-----------------|--------------|--------------------------|
+| spark | `spark2-fabric` | `10.129.9.2` | `~/.ssh/spark2_access`   |
+| spark-2 | `spark-fabric` | `10.129.9.1` | `~/.ssh/spark_access`   |
+
+`ssh spark2-fabric` / `ssh spark-fabric` now work exactly like the existing `spark2`/`spark`
+LAN-address aliases, just routed over `bond-fabric0` instead — for `scp`/`rsync`-based bulk
+transfer only, per the firewall rule above (port 22 is all `10.129.9.0/30` permits). No script in
+this repo uses these yet as of this writing — a real, one-time cross-node model-weight sync
+(similar in shape to S1's own ~46.6GB `muse`+`omni` migration) is the clearest candidate for
+actually needing this; day-to-day cross-node calls in this codebase are small config/state files
+or plain HTTP API calls, neither of which benefit meaningfully from the fabric's throughput
+advantage over its own connection/negotiation overhead.
+
 ## Extending this later
 
 If a future stage needs the fabric for something beyond SSH-based transfer (S12's merged-mode NCCL is the
@@ -68,3 +92,4 @@ deliberate, auditable exception list.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-08-29 | Initial version — S4 executed: narrowed both nodes' `10.129.9.0/30` ufw rule from blanket-allow to `22/tcp` only, confirmed the prior cross-plane exposure live before fixing it, verified the fix both directions plus SSH continuity, documented why bind-address changes were rejected in favor of a firewall fix. |
+| 1.1.0 | 2026-09-01 | Direct request: benchmarked the fabric for the first time since S4 (real ~4.4x SSH-throughput speedup over the LAN) and added `spark2-fabric`/`spark-fabric` SSH config aliases on each node so the already-existing, already-working S1 keys can actually be used over `bond-fabric0` without remembering the raw `10.129.9.x` addresses. No script uses them yet. |
