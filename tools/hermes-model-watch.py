@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.1.1
+#
+# 1.1.1 (2026-09-01) — real bug found by inspecting the state file after the real (non-dry-run)
+# first run: qwen4exp silently migrated as unresolved, losing its real historical evidence (PR
+# #27742). Cause: the legacy alert-state.json's own key is "llama_cpp_qwen4exp", not "qwen4exp" —
+# load_state() assumed the keys matched WATCHED_TERMS 1:1 and never checked. Added LEGACY_KEY_MAP,
+# an explicit mapping instead of an assumed equality. The already-written live state file was
+# hand-corrected to match (not re-run, to avoid sending a duplicate email minutes after the first).
 #
 # 1.1.0 (2026-09-01) — real false positive caught in the dry-run test, before this ever reached a
 # live timer: check_watched_terms()'s GitHub search for "GLM-5.3" matched PR #27466 ("ROCm: add
@@ -123,6 +130,17 @@ def vault_get(item, field):
 
 # ── state ────────────────────────────────────────────────────────────────
 
+# Legacy alert-state.json's own top-level keys don't match WATCHED_TERMS' keys 1:1 (found live,
+# by inspecting the migrated state file after a real run: "qwen4exp" silently migrated as
+# unresolved because the legacy key is actually "llama_cpp_qwen4exp", not "qwen4exp" —
+# seed.get("qwen4exp") was a silent no-op the whole time). Explicit mapping, not assumed equality.
+LEGACY_KEY_MAP = {
+    "glm_5_3": None,  # legacy only ever had the HF-seen list for this, no per-term alert object
+    "qwen4exp": "llama_cpp_qwen4exp",
+    "qwen4_flash": "qwen4_flash",
+}
+
+
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
@@ -137,17 +155,16 @@ def load_state():
         # resolved — see check_watched_terms()'s own docstring for why search hits alone no
         # longer do that automatically.
         seed = json.loads(LEGACY_SEED_FILE.read_text())
-        return {
-            "watched": {
-                term: {
-                    "resolved": seed.get(term, {}).get("alerted", False),
-                    "evidence_url": seed.get(term, {}).get("evidence_url"),
-                    "last_hits": [],
-                }
-                for term in WATCHED_TERMS
-            },
-            "hf_seen": {"glm_5_3": seed.get("glm_5_3_seen", [])},
-        }
+        watched = {}
+        for term in WATCHED_TERMS:
+            legacy_key = LEGACY_KEY_MAP.get(term)
+            entry = seed.get(legacy_key, {}) if legacy_key else {}
+            watched[term] = {
+                "resolved": entry.get("alerted", False),
+                "evidence_url": entry.get("evidence_url"),
+                "last_hits": [],
+            }
+        return {"watched": watched, "hf_seen": {"glm_5_3": seed.get("glm_5_3_seen", [])}}
     return {
         "watched": {term: {"resolved": False, "evidence_url": None, "last_hits": []} for term in WATCHED_TERMS},
         "hf_seen": {},
