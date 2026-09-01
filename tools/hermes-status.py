@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.1.3
+# Version: 1.2.0
+#
+# 1.2.0 (2026-09-01) — direct operator request after a real, repeated gap surfaced live twice:
+# "Canary status"/"Canary health" had no home anywhere in this file. Canary only ever had
+# log/event *review* via hermes-logs.py's own `canary` source (judgment-based, runs `super`); no
+# quick deterministic status check the way pfsense/generac/wyze/etc. all have. New `canary` source
+# reuses tools/hermes-canary-report.py's own pull_logs()/group_by_src()/build_summary_text()/
+# build_botnet_section() directly, deliberately skipping its ask_llm() call -- same "no LLM pass
+# on the output" rule this file already commits to for every other source. Own independent 24h
+# lookback window, never touches hermes-canary-report.py's own scheduled-run state file.
 #
 # 1.1.3 (2026-08-31) — same class of bug as 1.1.2, two more instances found live: gameservers
 # (real run ~31s, SSH + vault-fetch overhead) and vivint (real run needing re-authentication
@@ -78,6 +87,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -85,6 +95,7 @@ import hermes_injection_guard  # noqa: E402
 import importlib
 
 _fleet_health = importlib.import_module("hermes-fleet-health")
+_canary_report = importlib.import_module("hermes-canary-report")
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 
@@ -153,8 +164,14 @@ FLEETHEALTH_KEYWORDS = (
     "fleet health", "fleet status", "health of the fleet", "status of the fleet", "fleet report",
 )
 
+# Real gap found live 2026-09-01: "Canary status"/"Canary health" had no home anywhere in this
+# file -- canary only had log/event *review* via hermes-logs.py's own CANARY_KEYWORDS, no quick
+# deterministic status check the way pfsense/generac/etc. all have. This closes that gap.
+CANARY_KEYWORDS = ("canary", "honeypot")
+CANARY_LOOKBACK_HOURS = 24
+
 KNOWN_SOURCE_NAMES = ", ".join(
-    sorted(STATUS_SOURCES) + ["fleethealth", "botnet-intel (needs an IP address)"]
+    sorted(STATUS_SOURCES) + ["fleethealth", "canary", "botnet-intel (needs an IP address)"]
 )
 
 
@@ -263,6 +280,8 @@ def parse_source(text):
         return "botnet-intel", (m.group(0) if m else None)
     if any(kw in lowered for kw in FLEETHEALTH_KEYWORDS):
         return "fleethealth", None
+    if any(kw in lowered for kw in CANARY_KEYWORDS):
+        return "canary", None
     for name, (keywords, _cmd, _timeout) in STATUS_SOURCES.items():
         if any(kw in lowered for kw in keywords):
             return name, None
@@ -291,6 +310,29 @@ def run_botnet_lookup(ip):
     for m in matches:
         lines.append(f"  - {m.get('label', m.get('source'))}: {m.get('tag')} (confidence: {m.get('confidence')})")
     return "\n".join(lines), None
+
+
+def run_canary_status():
+    """Deterministic status check, not the judgment-based review hermes-logs.py's own `canary`
+    source already does -- reuses tools/hermes-canary-report.py's own pull_logs()/group_by_src()/
+    build_summary_text()/build_botnet_section() directly (same "wrap what already works"
+    reasoning fleethealth already established in this file), but deliberately skips its
+    ask_llm() call entirely, same "no LLM pass on the output" rule this file's own header commits
+    to for every source. Own fixed 24h lookback window -- independent of
+    hermes-canary-report.py's own scheduled-run state file (_load_since()/_save_since()), which
+    this never touches, so an ad hoc chat check can never desync the real scheduled report's own
+    "since" marker."""
+    since = datetime.now(timezone.utc) - timedelta(hours=CANARY_LOOKBACK_HOURS)
+    try:
+        events = _canary_report.pull_logs(since)
+    except Exception as exc:
+        return None, f"could not reach the canary sensor: {exc}"
+    if not events:
+        return f"No honeypot connections detected in the last {CANARY_LOOKBACK_HOURS}h (since {since.strftime('%Y-%m-%d %H:%M')} UTC).", None
+    by_src = _canary_report.group_by_src(events)
+    summary = _canary_report.build_summary_text(by_src, since)
+    botnet_text, _ = _canary_report.build_botnet_section(by_src)
+    return summary + "\n\n" + botnet_text, None
 
 
 def run_source(name):
@@ -370,6 +412,8 @@ def process_one():
             result, err = _fleet_health.render_text(fleet), None
         except Exception as exc:
             result, err = None, f"fleet-health pull failed: {exc}"
+    elif source == "canary":
+        result, err = run_canary_status()
     else:
         result, err = run_source(source)
 
@@ -389,7 +433,7 @@ def main():
     if not GUARD_TOKEN:
         log("WARNING: GUARD_TOKEN not set — this agent's own Layer 2 screening is skipped")
     log(f"watching Buzz topic 'status', polling every {POLL_SECONDS}s, "
-        f"sources={sorted(STATUS_SOURCES) + ['fleethealth', 'botnet-intel']}")
+        f"sources={sorted(STATUS_SOURCES) + ['fleethealth', 'canary', 'botnet-intel']}")
     while True:
         try:
             did_work = process_one()
