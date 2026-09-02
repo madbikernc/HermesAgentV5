@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+#
+# 1.0.1 (2026-09-01) — real finding from manual testing before this was ever wired into systemd: a
+# raw SIGTERM (what `systemctl stop`/`restart` sends) kills the process immediately at the
+# interpreter level and never reaches the `finally` cleanup block -- confirmed live, a `pkill` left
+# a stale socket file on disk. vault-get-secret.sh's own fast path already falls through correctly
+# either way (a stale socket just refuses the connection, confirmed live too), and the next start
+# already unlinks a stale file before rebinding -- but added an explicit SIGTERM handler so a clean
+# `systemctl stop` actually cleans up, rather than relying on those two safety nets alone.
+#
 """
 hermes-vault-agent.py — persistent Vaultwarden session holder, one per node.
 
@@ -231,6 +240,19 @@ def main():
     os.chmod(SOCK_PATH, 0o600)
 
     threading.Thread(target=refresh_loop, args=(session,), daemon=True).start()
+
+    # A raw SIGTERM (what `systemctl stop`/`restart` sends) kills the process immediately at the
+    # interpreter level and never reaches a `finally` block -- confirmed live: an earlier manual
+    # test left a stale socket file on disk after `pkill`. vault-get-secret.sh's own fast path
+    # still falls through correctly either way (a stale socket just refuses the connection), and
+    # the next daemon start already unlinks a stale file before rebinding (above) -- but a clean
+    # shutdown is worth doing properly rather than leaning on those two safety nets alone.
+    import signal
+
+    def _handle_sigterm(signum, frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     log(f"listening on {SOCK_PATH} for node={node}, refresh every {REFRESH_INTERVAL_SECONDS}s")
     try:
