@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-02) — real bug found live on first deploy: pubsub_listener()'s
+# google-cloud-pubsub import used to sit outside its own retry loop, so hermes-nest-wrapper.sh
+# 1.0.0 running this whole process under the system Python (missing that package) silently killed
+# the entire background thread on first startup — the on-demand Buzz path kept working with no
+# visible sign the motion-trigger path was dead. Fixed the wrapper (now execs
+# /opt/hermes/venvs/nest/bin/python3, the same venv hermes-nest-framegrab.py already used) and
+# moved the import inside pubsub_listener()'s try block so any future startup failure gets the
+# same log-and-retry treatment as every other failure mode there, instead of a second, silently
+# fatal failure shape.
+#
 """
 hermes-nest — Nest/Google Home camera specialist. Owns the Buzz `nest` topic AND runs an
 independent Google Cloud Pub/Sub subscriber for CameraMotion/CameraPerson events — two trigger
@@ -496,12 +507,22 @@ def process_new_claim(in_flight):
 def pubsub_listener(job_queue):
     """Background thread, same 'runs independently of the main loop' shape as
     hermes-vault-agent.py's refresh_loop. Wraps the streaming pull in an outer retry loop — a
-    dropped connection here must not silently stop watching for motion forever."""
-    from google.cloud import pubsub_v1
-    from google.oauth2 import service_account
+    dropped connection here must not silently stop watching for motion forever.
 
+    Real bug found live on first deploy (2026-09-02): the google-cloud-pubsub import used to sit
+    outside this while loop, at function-entry time. hermes-nest-wrapper.sh 1.0.0 ran this whole
+    process under the system Python (missing that package entirely) rather than the venv, so the
+    import raised ModuleNotFoundError once and silently killed this entire thread forever -- no
+    retry, no further log output, the on-demand Buzz path kept working with no visible sign the
+    motion-trigger path was dead. Fixed the wrapper (1.1.0) to use the right venv, but ALSO moved
+    the import inside the try block here: any future startup failure (import or otherwise) now
+    gets the same log-and-retry-in-60s treatment as every other failure mode in this loop, instead
+    of being a second, differently-shaped way for this thread to die silently."""
     while True:
         try:
+            from google.cloud import pubsub_v1
+            from google.oauth2 import service_account
+
             sa_json = hermes_nest_common.vault_get("pubsub_service_account_json")
             gcp_project_id = hermes_nest_common.vault_get("gcp_project_id")
             subscription_id = hermes_nest_common.vault_get("pubsub_subscription")
