@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+# Version: 1.4.0 (2026-09-01 — direct request, following a real architecture question: "would a
+# single persistent Vaultwarden session have the same contention [that motivated never keeping
+# one]?" Investigated live first: this script's full login/unlock/sync/lock cycle measured
+# ~15s/field under real conditions (hermes-wyze.py's own cold re-auth: 5 fields, ~77s total),
+# paid by every caller across this fleet on every single call. The original justification for
+# never holding a session -- pmoney centrally running both hermes-buzz-watch@sintra and
+# hermes-buzz-watch@amy, unable to serve two different Vaultwarden accounts from one cached
+# session -- was confirmed live to no longer apply: sintra and amy are no longer colocated on any
+# one node (sintra has zero active processes on Spark; amy has exactly one isolated daily cron job
+# on spark-2). Added an optional fast path: tools/hermes-vault-agent.py, a persistent per-node
+# daemon holding one already-unlocked session, tried first via a short-timeout Unix-socket call
+# (tools/vault-agent-client.py). ANY failure -- agent not running, timeout, item/field not found --
+# falls straight through to the complete slow path below, unchanged. No caller anywhere in this
+# fleet needs to change; the agent is an optional accelerator, never a hard dependency.
+#
 # Version: 1.3.0 (2026-08-17 — real bug found live: several processes
 # sharing one Unix account (pmoney on spark-1 runs both
 # hermes-buzz-watch@sintra and hermes-buzz-watch@amy centrally, plus ad-hoc
@@ -66,6 +81,23 @@ set -euo pipefail
 
 ITEM_NAME="${1:?usage: vault-get-secret.sh <item-name> [field]}"
 FIELD="${2:-password}"
+
+# Fast path: tools/hermes-vault-agent.py (2026-09-01), an optional persistent-session daemon --
+# see its own module docstring for the full design rationale (real measured cost, and why the
+# original two-persona conflict that justified never keeping a session no longer applies now that
+# sintra/amy are confirmed no longer colocated on one node). Tried first, with a short timeout;
+# ANY failure here (agent not running, socket missing, timeout, item/field not found) falls
+# straight through to the complete, unchanged slow path below -- this script remains fully
+# self-sufficient with or without the agent, and no caller anywhere in this fleet needs to change.
+AGENT_SOCK="${HOME}/.hermes/vault-agent.sock"
+if [ -S "$AGENT_SOCK" ]; then
+  # Empty-but-exit-0 is treated as a failure too, same as the slow path's own retry loop below
+  # ([ -n "$RESULT" ] && break) -- an empty value is indistinguishable from "not found" either way.
+  if FAST_RESULT="$(python3 "$(dirname "$0")/vault-agent-client.py" "$AGENT_SOCK" "$ITEM_NAME" "$FIELD" 2>/dev/null)" && [ -n "$FAST_RESULT" ]; then
+    printf '%s' "$FAST_RESULT"
+    exit 0
+  fi
+fi
 
 NODE="${VAULT_NODE:-}"
 if [ -z "$NODE" ] && [ -f /etc/hermes/vault-node-name ]; then

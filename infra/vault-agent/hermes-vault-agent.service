@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes vault agent - persistent per-node Vaultwarden session, optional fast path for vault-get-secret.sh
+Documentation=file:///home/pmoney/HermesAgentV5/infra/vault-agent/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-vault-agent.py
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
