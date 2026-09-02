@@ -6,8 +6,10 @@
 # cached access token had simply expired (a clean, fast SDK error), and the actual delay was
 # entirely inside its re-login path's five sequential vault_get() calls, each paying a full
 # separate `bw` login/unlock/sync/logout cycle -- measured live at ~15s/field, ~77s total, before
-# Wyze's own login call (0.8s) even ran. 30s was never going to be enough for a cold re-auth;
-# raised to 150s. See the inline comment on this source for the full measurement.
+# Wyze's own login call (0.8s) even ran. 30s was never going to be enough for a cold re-auth; first
+# raised to 150s, then to 240s after a real full end-to-end test measured 149.9s against that
+# first number -- essentially a coin flip, not real margin. See the inline comment on this source
+# for the full measurement.
 #
 # 1.2.0 (2026-09-01) — direct operator request after a real, repeated gap surfaced live twice:
 # "Canary status"/"Canary health" had no home anywhere in this file. Canary only ever had
@@ -146,12 +148,15 @@ STATUS_SOURCES = {
         # is itself a clean, fast error (confirmed directly against the SDK) -- the real delay is
         # entirely inside fresh_login()'s five SEQUENTIAL vault_get() calls (username, password,
         # api_key, key_id, totp_key), each paying a full separate `bw` login/unlock/sync/logout
-        # cycle. Measured live: ~15s per field, ~77s total just for credentials, then Wyze's own
-        # login call succeeded in 0.8s. Not a TLS/connectivity/hang bug at all -- just a real cold
-        # re-auth cost this source's 30s timeout never accounted for. 150s gives real margin above
-        # the ~80-85s measured worst case. A cached, still-valid token skips fresh_login()
-        # entirely and returns in a few seconds, same as every other source here.
-        150,
+        # cycle (~15s/field, ~77s total for credentials alone), then Wyze's own login call (0.8s)
+        # plus a real devices_list() pull (53 real devices on this account). Not a
+        # TLS/connectivity/hang bug at all -- just a real cold re-auth cost the original 30s
+        # timeout never accounted for. First fix (150s) was cut it far too close: a real full
+        # end-to-end cold-reauth run measured 149.9s against it -- essentially a coin flip on the
+        # next run, not real margin. 240s gives genuine headroom above the actual measured
+        # worst case. A cached, still-valid token skips fresh_login() entirely and returns in a
+        # few seconds, same as every other source here.
+        240,
     ),
     "gameservers": (
         ("game server", "gameserver", "minecraft", "zomboid"),
