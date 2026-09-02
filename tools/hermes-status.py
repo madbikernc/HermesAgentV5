@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.2.1
+#
+# 1.2.1 (2026-09-01) — real root cause found for wyze, correcting the 1.1.3 diagnosis: this was
+# never a hang. An instrumented, step-by-step re-run of hermes-wyze.py's own call chain showed the
+# cached access token had simply expired (a clean, fast SDK error), and the actual delay was
+# entirely inside its re-login path's five sequential vault_get() calls, each paying a full
+# separate `bw` login/unlock/sync/logout cycle -- measured live at ~15s/field, ~77s total, before
+# Wyze's own login call (0.8s) even ran. 30s was never going to be enough for a cold re-auth;
+# raised to 150s. See the inline comment on this source for the full measurement.
 #
 # 1.2.0 (2026-09-01) — direct operator request after a real, repeated gap surfaced live twice:
 # "Canary status"/"Canary health" had no home anywhere in this file. Canary only ever had
@@ -132,15 +140,18 @@ STATUS_SOURCES = {
     "wyze": (
         ("wyze",),
         ["/opt/hermes/venvs/wyze/bin/python3", str(REPO_DIR / "tools" / "hermes-wyze.py"), "list"],
-        # KNOWN ISSUE, not fixed here (2026-08-31): confirmed live that `hermes-wyze.py list`
-        # genuinely hangs -- zero stdout/stderr for 90s+ even with stdin explicitly redirected
-        # from /dev/null (ruling out an interactive-prompt cause), and raw HTTPS connectivity to
-        # api.wyzecam.com through the tool's own CA bundle works fine in isolation, ruling out the
-        # TLS gap its own SKILL.md documents. Root cause is inside hermes-wyze.py itself, not this
-        # wiring -- a separate investigation, out of scope for "wire up an already-working tool."
-        # Timeout left bounded (not raised further) so a hang fails cleanly instead of tying up
-        # this service's single-threaded poll loop indefinitely; it will currently always time out.
-        30,
+        # RESOLVED 2026-09-01 (was flagged as a KNOWN ISSUE / suspected hang on 2026-08-31 --
+        # that was wrong, not just incomplete). Root-caused with an instrumented step-by-step
+        # re-run of hermes-wyze.py's own call chain: the cached access token had expired, which
+        # is itself a clean, fast error (confirmed directly against the SDK) -- the real delay is
+        # entirely inside fresh_login()'s five SEQUENTIAL vault_get() calls (username, password,
+        # api_key, key_id, totp_key), each paying a full separate `bw` login/unlock/sync/logout
+        # cycle. Measured live: ~15s per field, ~77s total just for credentials, then Wyze's own
+        # login call succeeded in 0.8s. Not a TLS/connectivity/hang bug at all -- just a real cold
+        # re-auth cost this source's 30s timeout never accounted for. 150s gives real margin above
+        # the ~80-85s measured worst case. A cached, still-valid token skips fresh_login()
+        # entirely and returns in a few seconds, same as every other source here.
+        150,
     ),
     "gameservers": (
         ("game server", "gameserver", "minecraft", "zomboid"),
