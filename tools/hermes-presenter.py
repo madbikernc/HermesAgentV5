@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.6.3
+# Version: 1.6.5
+#
+# 1.6.5 (2026-09-02) — HELP_MESSAGE updated for the new `reolink` topic (tools/hermes-reolink.py,
+# Reolink camera snapshot + description). No timeout override needed here, unlike `probe`/`nest`
+# — a Reolink snapshot is one bounded local HTTP call, no WebRTC negotiation or long-running scan
+# involved, so the existing generic TASK_TIMEOUT_SECONDS (300s) is already generous margin.
+#
+# 1.6.4 (2026-09-01) — supports the new `nest` topic (tools/hermes-nest.py, camera snapshot +
+# description). Same shape as 1.6.2's `probe` support: check_outstanding()'s generic
+# TASK_TIMEOUT_SECONDS could fire before a real WebRTC capture finishes, so a topic-specific
+# NEST_TASK_TIMEOUT_SECONDS (default 120s -- an UNVERIFIED placeholder, see
+# tools/hermes-nest-framegrab.py's docstring; must be corrected once a real capture is timed)
+# joins PROBE_TASK_TIMEOUT_SECONDS in the same conditional. HELP_MESSAGE also updated.
 #
 # 1.6.3 (2026-08-31) — direct operator request: HELP_MESSAGE updated for everything built after
 # 1.5.0 first wrote it -- the `probe` topic (network scans, ack-now/report-later), and `logs`'
@@ -303,6 +315,7 @@ SYNC_STATE_FILE = Path(os.environ.get("SYNC_STATE_FILE", str(Path.home() / ".her
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "300"))
 PROBE_TASK_TIMEOUT_SECONDS = int(os.environ.get("PROBE_TASK_TIMEOUT_SECONDS", "2100"))
+NEST_TASK_TIMEOUT_SECONDS = int(os.environ.get("NEST_TASK_TIMEOUT_SECONDS", "120"))
 DEBUG_ATTRIBUTION = os.environ.get("DEBUG_ATTRIBUTION", "0") == "1"
 
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -356,6 +369,10 @@ HELP_MESSAGE = os.environ.get("HELP_MESSAGE", (
     "• Network probe — \"probe <IP address>\" runs a real scan (hostnames, MAC/vendor, OS "
     "fingerprint, all ports) against that address. Takes up to ~30 minutes; I'll ack right away "
     "and send the real report as a follow-up once it finishes. Only one probe runs at a time.\n"
+    "• Nest cameras — \"check the <camera name> camera\" pulls a live snapshot and describes "
+    "what's in frame. Motion/person alerts for registered cameras are sent by email, not here.\n"
+    "• Reolink camera — \"check the camera\" pulls a live snapshot and describes what's in frame. "
+    "Person/vehicle/pet alerts are sent by email, not here.\n"
     "• Knowledge-base search — if I don't have an answer in the fleet's own knowledge base, I'll "
     "offer to search the internet; reply \"yes\" to confirm or \"no\" to decline.\n\n"
     "Conversation control:\n"
@@ -825,7 +842,8 @@ def check_outstanding():
             send_room_message(room_id, "Something went wrong recording this request — it was never actually dispatched.")
             _mark_delivered(task_id, value)
         elif now - value.get("requested_at", now) > (
-                PROBE_TASK_TIMEOUT_SECONDS if task.get("topic") == "probe" else TASK_TIMEOUT_SECONDS):
+                PROBE_TASK_TIMEOUT_SECONDS if task.get("topic") == "probe" else
+                NEST_TASK_TIMEOUT_SECONDS if task.get("topic") == "nest" else TASK_TIMEOUT_SECONDS):
             send_room_message(room_id, "No specialist has completed this request yet — it may still be in flight, "
                                         "or nothing is currently watching the topic it was routed to.")
             _mark_delivered(task_id, value)

@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.4.2
+#
+# 1.4.2 (2026-09-02) — added `reolink` to VALID_TARGETS: direct operator request, chat access to
+# check a Reolink camera (pull a live snapshot, describe what's in frame). New
+# tools/hermes-reolink.py and Buzz `reolink` topic; a normal classifier destination, same as
+# `nest`/`status`/`probe`.
+#
+# 1.4.1 (2026-09-01) — added `nest` to VALID_TARGETS: direct operator request, chat access to
+# check a Nest/Google Home camera (pull a live snapshot, describe what's in frame). New
+# tools/hermes-nest.py and Buzz `nest` topic; a normal classifier destination, same as
+# `status`/`probe`, not presenter-dispatched-only like `websearch`.
 #
 # 1.4.0 (2026-08-31) — real, confirmed misroute: "check for griefing on the zomboid server" routed
 # to `status` instead of `logs`, verified live by injecting a real task through Buzz's `dispatch`
@@ -161,7 +171,7 @@ ROUTING_HISTORY_TURNS = int(os.environ.get("ROUTING_HISTORY_TURNS", "6"))
 
 # Target §4.4's internal topic set, minus `dispatch` itself and `results` (a destination
 # specialists publish completion to, never something the dispatcher routes fresh work into).
-VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe"}
+VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe", "nest", "reolink"}
 
 # One-line, accurate descriptions per topic -- added 2026-08-31 after a real, confirmed
 # misroute: "check for griefing on the zomboid server" went to `status` instead of `logs`,
@@ -186,6 +196,8 @@ TOPIC_DESCRIPTIONS = {
               "generac, moen-flo, wyze, a game server's health, Vivint alarm state, a fleet-health "
               "snapshot, or a botnet/threat-intel IP lookup",
     "probe": "run a real network scan (nmap) against one specific IP address",
+    "nest": "check a Nest/Google Home camera -- pull a live snapshot and describe what's in frame",
+    "reolink": "check the Reolink camera -- pull a live snapshot and describe what's in frame",
 }
 
 ROUTING_SYSTEM_PROMPT = (

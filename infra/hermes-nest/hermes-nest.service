@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes nest - Nest/Google Home camera agent (Buzz nest-topic subscriber + Pub/Sub motion listener)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-nest/README.md
+After=network-online.target hermes-buzz.service hermes-memory.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-nest-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
