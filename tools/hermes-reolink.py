@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-02) — real bug found by installing reolink_aio and reading its actual source on
+# spark-2, before any camera hardware existed: login()/get_snapshot()/get_ai_state() method names
+# and signatures are all confirmed exactly correct (host/username/password positional, port=
+# keyword; get_snapshot(channel) -> bytes; get_ai_state(channel) -> dict[str, bool]) -- but
+# get_ai_state()'s own source guards on `channel in self._channels`, and that list is populated by
+# a separate get_host_data() call, never by login() alone. Without it, get_ai_state() would have
+# silently returned None on every poll forever -- not a crash, just a feature that quietly never
+# worked. Fixed in camera_login() (now calls both), plus a defensive None-check in
+# check_ai_detection() for the case where `channel` genuinely doesn't exist on the camera.
+#
 """
 hermes-reolink — Reolink camera specialist. Owns the Buzz `reolink` topic (on-demand snapshot +
 description via Matrix chat) and runs an AI-detection poll loop (person/vehicle/pet, email-
@@ -19,13 +30,14 @@ username/password against the camera's own LAN IP (confirmed from `reolink_aio`'
 genuinely hang-prone piece) — a snapshot is one bounded HTTP call, so no isolated-subprocess
 pattern is needed here at all, unlike hermes-nest-framegrab.py.
 
-**The one thing NOT independently confirmed**: the exact public method names `reolink_aio.Host`
-exposes for login/snapshot/AI-state (`login()`/`get_snapshot()`/`get_ai_state()` below are the
-library's documented CGI command names translated through typical Home-Assistant-integration
-naming conventions, not read from the library's own method signatures directly). Confirm these
-against the actually-installed version (`python3 -c "from reolink_aio.api import Host; help(Host)"`
-in the venv) before trusting this file — see infra/hermes-reolink/README.md's Verification
-section, step 1.
+**Method names/signatures are now confirmed**, not inferred: read directly from `reolink_aio`'s
+actual installed source on spark-2 (2026-09-02) — `Host(host, username, password, port=...)`,
+`login()`, `get_host_data()`, `get_snapshot(channel) -> bytes`, `get_ai_state(channel) ->
+dict[str, bool]`, `logout()` all match this file's calls exactly. What's still genuinely
+unconfirmed, because it requires real hardware: whether a real camera's `get_ai_state()` dict
+actually uses the key names this file assumes (`AI_LABELS = ("people", "vehicle", "dog_cat")`),
+and the real latency of a snapshot/login call. See infra/hermes-reolink/README.md's Verification
+section.
 
 Async bridging (the one real structural difference from every other specialist in this fleet):
 every existing specialist here is a synchronous `while True: ... time.sleep()` loop using
@@ -290,7 +302,13 @@ def send_email(subject, body):
 # ── camera calls (the genuinely async half — see module docstring's naming caveat) ───────────────
 
 async def camera_login(host_obj):
+    """login() alone leaves the Host object's channel list empty -- get_ai_state()/get_snapshot()
+    both gate on `channel in self._channels`, populated only by a separate get_host_data() call.
+    Found by reading reolink_aio's actual installed source (2026-09-02, before any hardware
+    existed): get_ai_state() returns None silently rather than raising when the channel is
+    unregistered, which would have made the whole AI-detection path quietly never work."""
     await host_obj.login()
+    await host_obj.get_host_data()
 
 
 async def camera_snapshot(host_obj, channel):
@@ -354,6 +372,12 @@ async def check_ai_detection(host_obj, channel):
         state = await camera_ai_state(host_obj, channel)
     except Exception as exc:
         log(f"AI-state poll failed: {exc}")
+        return
+    if state is None:
+        # get_host_data() should have registered this channel at startup (see camera_login()) --
+        # a None here past that point means the configured `channel` doesn't exist on this camera.
+        log(f"AI-state poll returned None for channel {channel} -- check the 'channel' field on "
+            f"the '{REOLINK_ITEM}' vault item")
         return
 
     prev = _last_ai_state.get(channel, {})
