@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Version: 1.4.2
+# Version: 1.4.3
+#
+# 1.4.3 (2026-09-02) — removed `nest` from VALID_TARGETS/TOPIC_DESCRIPTIONS: direct operator
+# decision to drop the Google Home/Nest camera integration entirely. `reolink` is unaffected.
 #
 # 1.4.2 (2026-09-02) — added `reolink` to VALID_TARGETS: direct operator request, chat access to
 # check a Reolink camera (pull a live snapshot, describe what's in frame). New
@@ -171,7 +174,7 @@ ROUTING_HISTORY_TURNS = int(os.environ.get("ROUTING_HISTORY_TURNS", "6"))
 
 # Target §4.4's internal topic set, minus `dispatch` itself and `results` (a destination
 # specialists publish completion to, never something the dispatcher routes fresh work into).
-VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe", "nest", "reolink"}
+VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe", "reolink"}
 
 # One-line, accurate descriptions per topic -- added 2026-08-31 after a real, confirmed
 # misroute: "check for griefing on the zomboid server" went to `status` instead of `logs`,
@@ -196,7 +199,6 @@ TOPIC_DESCRIPTIONS = {
               "generac, moen-flo, wyze, a game server's health, Vivint alarm state, a fleet-health "
               "snapshot, or a botnet/threat-intel IP lookup",
     "probe": "run a real network scan (nmap) against one specific IP address",
-    "nest": "check a Nest/Google Home camera -- pull a live snapshot and describe what's in frame",
     "reolink": "check the Reolink camera -- pull a live snapshot and describe what's in frame",
 }
 

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 2.0.12
+# Version: 2.0.13
+#
+# 2.0.13 (2026-09-02) — removed `nest` from `KNOWN_AGENTS`/`KNOWN_TOPICS`: direct operator
+# decision to drop the Google Home/Nest camera integration entirely (`tools/hermes-nest.py` and
+# its supporting files deleted, `hermes-nest.service` stopped/disabled/removed from spark-2).
+# `reolink` is unaffected and stays. Same "actually remove a retired registration, don't just stop
+# using it" precedent `nano`'s own retirement already established here.
 #
 # 2.0.12 (2026-09-02) — added `reolink` to `KNOWN_AGENTS`/`KNOWN_TOPICS`, proactively, ahead of the
 # new Reolink camera agent's own first publish — same recurring bug class every entry below this
@@ -161,14 +167,14 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "nest", "reolink"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1). Most of
 # these have no subscriber yet — same ahead-of-the-consumer posture as hermes-memory's `tasks`
 # table.
 KNOWN_TOPICS = KNOWN_AGENTS | {
     "dispatch", "retrieve", "screen", "logs", "code", "vision", "media", "train", "results",
-    "websearch", "status", "probe", "nest", "reolink",
+    "websearch", "status", "probe", "reolink",
 }
 
 _db_lock = threading.Lock()

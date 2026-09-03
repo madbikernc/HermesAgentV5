@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.6.5
+# Version: 1.6.6
+#
+# 1.6.6 (2026-09-02) — removed the `nest` topic entirely: direct operator decision to drop the
+# Google Home/Nest camera integration (NEST_TASK_TIMEOUT_SECONDS, its check_outstanding() branch,
+# and its HELP_MESSAGE line all removed). `reolink` is unaffected and needed no timeout override
+# to begin with (1.6.5's own note: a snapshot is one bounded local HTTP call).
 #
 # 1.6.5 (2026-09-02) — HELP_MESSAGE updated for the new `reolink` topic (tools/hermes-reolink.py,
 # Reolink camera snapshot + description). No timeout override needed here, unlike `probe`/`nest`
@@ -315,7 +320,6 @@ SYNC_STATE_FILE = Path(os.environ.get("SYNC_STATE_FILE", str(Path.home() / ".her
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "300"))
 PROBE_TASK_TIMEOUT_SECONDS = int(os.environ.get("PROBE_TASK_TIMEOUT_SECONDS", "2100"))
-NEST_TASK_TIMEOUT_SECONDS = int(os.environ.get("NEST_TASK_TIMEOUT_SECONDS", "120"))
 DEBUG_ATTRIBUTION = os.environ.get("DEBUG_ATTRIBUTION", "0") == "1"
 
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -369,8 +373,6 @@ HELP_MESSAGE = os.environ.get("HELP_MESSAGE", (
     "• Network probe — \"probe <IP address>\" runs a real scan (hostnames, MAC/vendor, OS "
     "fingerprint, all ports) against that address. Takes up to ~30 minutes; I'll ack right away "
     "and send the real report as a follow-up once it finishes. Only one probe runs at a time.\n"
-    "• Nest cameras — \"check the <camera name> camera\" pulls a live snapshot and describes "
-    "what's in frame. Motion/person alerts for registered cameras are sent by email, not here.\n"
     "• Reolink camera — \"check the camera\" pulls a live snapshot and describes what's in frame. "
     "Person/vehicle/pet alerts are sent by email, not here.\n"
     "• Knowledge-base search — if I don't have an answer in the fleet's own knowledge base, I'll "
@@ -842,8 +844,7 @@ def check_outstanding():
             send_room_message(room_id, "Something went wrong recording this request — it was never actually dispatched.")
             _mark_delivered(task_id, value)
         elif now - value.get("requested_at", now) > (
-                PROBE_TASK_TIMEOUT_SECONDS if task.get("topic") == "probe" else
-                NEST_TASK_TIMEOUT_SECONDS if task.get("topic") == "nest" else TASK_TIMEOUT_SECONDS):
+                PROBE_TASK_TIMEOUT_SECONDS if task.get("topic") == "probe" else TASK_TIMEOUT_SECONDS):
             send_room_message(room_id, "No specialist has completed this request yet — it may still be in flight, "
                                         "or nothing is currently watching the topic it was routed to.")
             _mark_delivered(task_id, value)
