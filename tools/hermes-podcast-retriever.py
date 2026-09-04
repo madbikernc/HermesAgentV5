@@ -1,4 +1,61 @@
 #!/usr/bin/env python3
+# Version: 1.4.0
+#
+# 1.4.0 (2026-09-04) — direct request: integrate Club TWiT's memberfulcontent.com
+# RSS feeds (Paul Munford's paid membership; auth token in Vaultwarden as
+# twit-club-auth) as a superior discovery mechanism, replacing sequential
+# HEAD-probing for TWIG/IM and adding a new show (TWiT, "This Week in Tech").
+# Confirmed live before building: every feed item with a real episode number
+# carries a <podcast:transcript url=...> pointing at the exact same public
+# twit.tv HTML transcript page this tool already downloads for IM (no auth
+# needed for the page itself, only for discovering it) -- so this is a drop-in
+# replacement for how the URL is found, not a new download path. Concretely
+# better than probing: no guessing episode numbers, no PROBE_GIVE_UP
+# heuristic, and no separate URL template per pre/post-rebrand slug (the
+# feed already resolves to the right one) -- the exact class of gap
+# hermes-rag-ingest-podcasts.py 1.2.3 had to patch around downstream. One
+# feed (id 9064) covers both TWIG (606-804) and IM (805+) under one episode
+# numbering scheme; split by IM_FIRST_EP same as before, just sourced from
+# one shared fetch instead of two separate probe runs. Removed as dead code:
+# TWIT_TRANSCRIPT_TMPL, PROBE_GIVE_UP, _probe_twit_episodes(),
+# fetch_twit_remote_listing() -- direct request was to prefer these feeds
+# over the current methods, not run both.
+#
+# Also adds a second, independent use of the same mechanism: Security Now's
+# discovery stays GRC-first (GRC's archive goes back to episode 1; the club
+# feed only carries a rolling window from ep 813 at verification time, and
+# GRC's official show-notes PDF has no club-feed equivalent at all) -- but a
+# new sn_transcript_club_txt file type now fills a real, confirmed gap: SN-1094
+# has sat in hermes-podcast-sync.py's daily failure email since GRC never
+# published its own txt/pdf for it, yet the Club TWiT feed's own
+# podcast:transcript entry for 1094 resolves to a real page GRC's absence
+# says nothing about. Fetched only for episodes GRC's own sn_transcript_txt
+# doesn't already cover (see compute_missing()), saved to a separate
+# transcripts_txt_club/ subfolder and sn-{ep}-club.txt filename so it can
+# never collide with or shadow a genuine future GRC publication, and so
+# hermes-rag-ingest-podcasts.py can route it through the twit.tv-template
+# parser (parse_sn_club()) rather than GRC's own header/turn format, which
+# this content does not follow.
+#
+# Found live during this version's own first real backfill run (244 TWiT +
+# 236 SN-club candidates): some episodes' <podcast:transcript> URL points at
+# an unrelated /posts/tech/ news article about the episode's guest/topic
+# instead of a real transcript page (im-871 was the first confirmed case) --
+# every genuine transcript page seen across SN/IM/TWiT lives under
+# /posts/transcripts/ instead, so fetch_club_transcript_listing() now
+# rejects any transcript URL lacking that path segment at discovery time,
+# before ever downloading it -- treated the same as an episode with no
+# transcript tag at all, so it's retried (not permanently miscached) if
+# TWiT's own feed metadata is ever fixed upstream. Also found live: twit.tv
+# starts returning HTTP 418 partway through a sustained run of 100+ rapid
+# sequential requests (confirmed by hand: a URL that succeeded minutes
+# earlier in the same run later returned 418 too, on an otherwise-idle
+# connection) -- not a per-URL problem, a volume-triggered block. Only
+# matters for a first-time bulk backfill like this one; the daily catch-up
+# sync only ever requests a handful of new files a day, nowhere near this
+# threshold. No code changes made for it -- the fix is operational (retry
+# the remainder later, spaced out via --delay), not a defect in this tool.
+#
 # Version: 1.3.0
 #
 # 1.3.0 — adds Dan Carlin's three shows (show keys "dchh"/"dchha"/"dccs"):
@@ -64,9 +121,11 @@ at verification time), and TWiT's transcript URL pattern still resolves
 the same way (intelligent-machines-850-transcript: 200).
 
 Downloads transcripts, show notes, story-links, and audio files for:
-  - Security Now!         (GRC.com)             -- stored in SecurityNow/
-  - This Week in Google   (TWiT.tv)              -- stored in ThisWeekInGoogle/
-  - Intelligent Machines  (TWiT.tv)              -- stored in IntelligentMachines/
+  - Security Now!         (GRC.com, + Club TWiT feed as a gap-fill fallback)
+                                                 -- stored in SecurityNow/
+  - This Week in Google   (TWiT.tv, via Club TWiT feed) -- stored in ThisWeekInGoogle/
+  - Intelligent Machines  (TWiT.tv, via Club TWiT feed) -- stored in IntelligentMachines/
+  - This Week in Tech     (TWiT.tv, via Club TWiT feed) -- stored in ThisWeekInTech/
   - Tech Brew Ride Home   (official RSS feed)    -- stored in TechBrewRideHome/
   - Hardcore History           (official RSS feed) -- stored in DanCarlin/HardcoreHistory/
   - Hardcore History: Addendum (official RSS feed) -- stored in DanCarlin/Addendum/
@@ -78,14 +137,24 @@ Downloads transcripts, show notes, story-links, and audio files for:
 Security Now:
   Scrapes GRC year-archive pages to discover which episodes have show-notes
   PDFs, transcript PDFs, and transcript TXTs, then downloads only what is
-  missing locally.
+  missing locally -- GRC remains the primary source (full archive back to
+  episode 1; the only source for the official show-notes PDF). A second,
+  independent file type (sn_transcript_club_txt) additionally checks the
+  Club TWiT feed for episodes GRC's own txt is missing, and downloads
+  those from twit.tv's transcript page instead — a real, confirmed gap-fill
+  (see the 1.4.0 changelog entry above for SN-1094).
 
-This Week in Google / Intelligent Machines:
-  Transcripts live at:
-    https://twit.tv/posts/transcripts/twig-{ep}-transcript          (TWIG)
-    https://twit.tv/posts/transcripts/intelligent-machines-{ep}-transcript (IM)
-  The script probes episode numbers to discover which ones exist, fetches the
-  HTML page, strips it to plain text, and saves as   {show}-{ep}.txt.
+This Week in Google / Intelligent Machines / This Week in Tech:
+  Discovered via Club TWiT's memberfulcontent.com RSS feeds (Paul Munford's
+  membership; auth token in Vaultwarden as twit-club-auth — see
+  club_auth_token()), each item's <podcast:transcript url=...> resolving
+  directly to the exact public twit.tv HTML transcript page this tool has
+  always downloaded from — no auth needed for the page itself, only for
+  discovering it exists via the feed. One feed (id 9064) covers both TWIG
+  (episodes 1-804, pre-rebrand) and IM (805+) under one shared numbering
+  scheme; a separate feed (id 9066) covers TWiT. Fetches the HTML page,
+  strips it to plain text, and saves as {show}-{ep}.txt — unchanged from
+  before; only how the URL is discovered changed (see fetch_club_transcript_listing()).
 
 Tech Brew Ride Home:
   No official transcript exists for this show (confirmed live, 2026-08-15).
@@ -113,6 +182,7 @@ import email.utils
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -135,15 +205,26 @@ GRC_ARCHIVE_PAGES = [
     *(f"https://www.grc.com/sn/past/{y}.htm" for y in range(2025, 2004, -1)),
 ]
 
-# TWiT transcript page URL templates
-TWIT_TRANSCRIPT_TMPL = {
-    "twig": "https://twit.tv/posts/transcripts/twig-{ep}-transcript",
-    "im":   "https://twit.tv/posts/transcripts/intelligent-machines-{ep}-transcript",
-}
-
 # IM starts at episode 805 (formerly TWIG); TWIG episodes are 1-804
 IM_FIRST_EP   = 805
 TWIG_LAST_EP  = 804
+
+# Club TWiT (twit.memberfulcontent.com) RSS feed ids -- see 1.4.0 changelog
+# entry above. "twig" and "im" share one feed/episode-numbering scheme
+# (split by IM_FIRST_EP in run()); "sn" is a supplemental gap-fill source
+# alongside GRC, not a replacement. Auth token: Vaultwarden item
+# twit-club-auth, field "password" -- see club_auth_token().
+CLUB_FEED_ID = {
+    "sn":   "9054",
+    "im":   "9064",
+    "twig": "9064",
+    "twit": "9066",
+}
+CLUB_FEED_URL_TMPL = "https://twit.memberfulcontent.com/rss/{feed_id}?auth={token}"
+_PODCAST_NS = {"podcast": "https://podcastindex.org/namespace/1.0"}
+
+REPO_DIR = Path(__file__).resolve().parent.parent
+VAULT_SCRIPT = REPO_DIR / "tools" / "vault-get-secret.sh"
 
 # Tech Brew Ride Home's official RSS feed -- the only official source for
 # this show's per-episode story-links citation list (no transcript exists).
@@ -173,9 +254,6 @@ DANCARLIN_FEEDS = {
 }
 DANCARLIN_SHOWS = tuple(DANCARLIN_FEEDS)
 _ITUNES_NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
-
-# How many consecutive 404s before we decide we've passed the latest episode
-PROBE_GIVE_UP = 3
 
 HEADERS = {"User-Agent": "hermes-podcast-retriever/1.0 (personal archiver)"}
 DOWNLOAD_DELAY = 0.5          # seconds between requests
@@ -217,6 +295,7 @@ SHOWS = {
     "sn":    {"name": "Security Now!",              "subfolder": "SecurityNow"},
     "twig":  {"name": "This Week in Google",        "subfolder": "ThisWeekInGoogle"},
     "im":    {"name": "Intelligent Machines",       "subfolder": "IntelligentMachines"},
+    "twit":  {"name": "This Week in Tech",          "subfolder": "ThisWeekInTech"},
     "tbrh":  {"name": "Tech Brew Ride Home",        "subfolder": "TechBrewRideHome"},
     "dchh":  {"name": "Hardcore History",           "subfolder": "DanCarlin/HardcoreHistory"},
     "dchha": {"name": "Hardcore History: Addendum", "subfolder": "DanCarlin/Addendum"},
@@ -249,6 +328,20 @@ SN_FILE_TYPES = {
         "subfolder":     "transcripts_txt",
         "validate":      "text",
     },
+    # Gap-fill only, sourced from the Club TWiT feed instead of GRC -- see the
+    # 1.4.0 changelog entry above. No "url_template"/"pattern"/"validate": the
+    # URL comes straight from the feed (compute_missing()'s dedicated branch
+    # for this type), and it's fetched as an HTML transcript page, not a
+    # binary GRC file (see _download_one()'s dispatch). A distinct
+    # subfolder/filename convention (never sn-{ep}.txt) means this can never
+    # collide with or shadow a genuine future GRC publication of the same
+    # episode.
+    "sn_transcript_club_txt": {
+        "description":   "SN Transcript (Club TWiT fallback, TXT)",
+        "pattern":       re.compile(r"sn-(\d+)-club\.txt", re.IGNORECASE),
+        "filename_tmpl": "sn-{ep}-club.txt",
+        "subfolder":     "transcripts_txt_club",
+    },
 }
 
 # File type definition used for Tech Brew Ride Home -- one type, since there's
@@ -275,9 +368,12 @@ SHOW_TYPE_MAP = {
     "sn":    {"notes": ["sn_notes_pdf"],
               "pdf":   ["sn_transcript_pdf"],
               "txt":   ["sn_transcript_txt"],
-              "all":   ["sn_notes_pdf", "sn_transcript_pdf", "sn_transcript_txt"]},
+              "club":  ["sn_transcript_club_txt"],
+              "all":   ["sn_notes_pdf", "sn_transcript_pdf", "sn_transcript_txt",
+                        "sn_transcript_club_txt"]},
     "twig":  {"transcript": ["twig_transcript_txt"], "all": ["twig_transcript_txt"]},
     "im":    {"transcript": ["im_transcript_txt"],   "all": ["im_transcript_txt"]},
+    "twit":  {"transcript": ["twit_transcript_txt"], "all": ["twit_transcript_txt"]},
     "tbrh":  {"links": ["tbrh_links_json"], "all": ["tbrh_links_json"]},
     "dchh":  {"audio": ["dancarlin_audio_mp3"], "all": ["dancarlin_audio_mp3"]},
     "dchha": {"audio": ["dancarlin_audio_mp3"], "all": ["dancarlin_audio_mp3"]},
@@ -403,33 +499,6 @@ def http_get(url: str, timeout: int = 30) -> Optional[bytes]:
         return None
 
 
-def probe_url_status(url: str, timeout: int = 15) -> str:
-    """HEAD request. Returns 'exists' (200), 'missing' (a real HTTP error
-    status, e.g. a genuine 404), or 'unreachable' (DNS/connection/timeout
-    failure — the site itself couldn't be reached, which is not evidence the
-    episode doesn't exist). Security-review fix: url_exists() below used to
-    collapse all three into a bare bool, which is exactly what let a total
-    site outage look identical to "probed past the last real episode" —
-    _probe_twit_episodes() gives up after PROBE_GIVE_UP consecutive misses
-    either way, so an outage right at the start silently produced "0 episodes
-    found" instead of a distinguishable error."""
-    try:
-        req = urllib.request.Request(url, headers=HEADERS, method="HEAD")
-        with urllib.request.urlopen(req, timeout=timeout):
-            return "exists"
-    except urllib.error.HTTPError:
-        return "missing"
-    except Exception:
-        return "unreachable"
-
-
-def url_exists(url: str, timeout: int = 15) -> bool:
-    """HEAD request – True if server returns 200. Kept for any caller that
-    only cares about existence; probe_url_status() above is used wherever
-    the unreachable-vs-missing distinction actually matters."""
-    return probe_url_status(url, timeout) == "exists"
-
-
 def validate_content(data: bytes, kind: str) -> bool:
     if not data:
         return False
@@ -499,87 +568,96 @@ def fetch_sn_remote_listing(
 
 
 # ---------------------------------------------------------------------------
-# TWiT (TWIG + IM) — discover remote episodes by probing transcript URLs
+# TWiT (TWIG / IM / TWiT) + SN gap-fill — discover remote episodes via the
+# Club TWiT memberfulcontent.com RSS feeds
 # ---------------------------------------------------------------------------
 
-def _probe_twit_episodes(
-    show: str,
-    start: int,
-    end: Optional[int],
-    verbose: bool = False,
-) -> Optional[set[int]]:
+def club_auth_token() -> str:
+    """Fetch the Club TWiT feed auth token from Vaultwarden (item
+    twit-club-auth, field "password"). Raises RuntimeError on failure --
+    same convention as hermes-rag-ingest-podcasts.py's broker_token(), which
+    every caller here already follows for its own vault-backed secret."""
+    out = subprocess.run(
+        [str(VAULT_SCRIPT), "twit-club-auth", "password"],
+        capture_output=True, text=True, timeout=60,
+    )
+    token = out.stdout.strip()
+    if out.returncode != 0 or not token:
+        raise RuntimeError(f"could not fetch twit-club-auth from vault: {out.stderr.strip()}")
+    return token
+
+
+def fetch_club_transcript_listing(
+    feed_id: str, auth_token: str, verbose: bool = False
+) -> Optional[dict[int, str]]:
+    """Fetch one Club TWiT RSS feed and return {episode_int: transcript_url}
+    for every item carrying a real <itunes:episode> and a
+    <podcast:transcript url=...> -- confirmed live 2026-09-04 that this URL
+    is always the same public twit.tv HTML transcript page this tool already
+    knows how to download (see _download_one()'s generic HTML-transcript
+    branch), no auth needed for the page itself. Items with neither (the
+    feed's own auto-generated "Thank You for Subscribing!" entry, or a real
+    episode too new/old to have an AI transcript yet) are simply absent from
+    the result -- not an error. Returns None only if the feed itself
+    couldn't be fetched/parsed at all (a real outage), matching every other
+    fetch_*_remote_listing()'s None-means-failure convention; callers must
+    check for that, not just falsy.
+
+    Deliberately returns raw feed episodes with no per-show split or
+    LATEST_EPISODE marker -- one feed (9064) covers both "twig" and "im"
+    under a shared numbering scheme, so that split (by IM_FIRST_EP) and the
+    per-show marker line belong to the caller in run(), once it knows which
+    show(s) a given feed's episodes are being used for.
     """
-    Probe transcript URLs for 'show' from episode 'start' upward (or up to
-    'end' if given).  Stop after PROBE_GIVE_UP consecutive missing episodes.
-    Returns the set of episode numbers that exist, or None if the site
-    appears genuinely unreachable (PROBE_GIVE_UP consecutive connection
-    failures, not real 404s — security-review fix: a full twit.tv outage
-    previously looked identical to "probed past the last real episode,"
-    since both hit the same miss counter and produced the same empty/near-
-    empty result with no way to tell them apart).
-    """
-    tmpl = TWIT_TRANSCRIPT_TMPL[show]
-    found: set[int] = set()
-    misses = 0
-    unreachable_streak = 0
-    ep = start
+    url = CLUB_FEED_URL_TMPL.format(feed_id=feed_id, token=auth_token)
+    if verbose:
+        print(f"  Fetching Club TWiT feed {feed_id}…")
+
+    data = http_get(url, timeout=60)
+    if not data:
+        print(f"    ERROR: could not fetch Club TWiT feed {feed_id} — treating as a "
+              "fetch failure, not zero new episodes.")
+        return None
+
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as e:
+        print(f"    ERROR: could not parse Club TWiT feed {feed_id} XML: {e}")
+        return None
+
+    found: dict[int, str] = {}
+    for item in root.findall("./channel/item"):
+        ep_el = item.find("itunes:episode", _ITUNES_NS)
+        if ep_el is None or not (ep_el.text or "").strip():
+            continue
+        try:
+            ep = int(ep_el.text.strip())
+        except ValueError:
+            continue
+        transcript_el = item.find("podcast:transcript", _PODCAST_NS)
+        if transcript_el is None:
+            continue
+        transcript_url = (transcript_el.get("url") or "").strip()
+        if not transcript_url:
+            continue
+        # Found live 2026-09-04 (im-871): some episodes' <podcast:transcript>
+        # points at an unrelated /posts/tech/ news article about the
+        # episode's guest/topic, not a real transcript page -- every genuine
+        # transcript URL seen across SN/IM/TWiT lives under /posts/transcripts/.
+        # Rejected here, at discovery, rather than after a wasted download:
+        # treated the same as an episode with no transcript tag at all, so a
+        # future run keeps retrying it instead of permanently caching wrong
+        # content once TWiT's own feed metadata is eventually fixed upstream.
+        if "/posts/transcripts/" not in transcript_url:
+            continue
+        if ep in found:
+            continue  # keep the first (feed is newest-first) occurrence
+        found[ep] = transcript_url
 
     if verbose:
-        bound = f"up to {end}" if end else "until end of feed"
-        print(f"  Probing {SHOWS[show]['name']} transcripts ({bound})…")
-
-    while True:
-        if end and ep > end:
-            break
-        url = tmpl.format(ep=ep)
-        status = probe_url_status(url)
-        if status == "exists":
-            found.add(ep)
-            misses = 0
-            unreachable_streak = 0
-            if verbose and len(found) % 10 == 0:
-                print(f"    …{len(found)} found so far (last: ep {ep})")
-        elif status == "missing":
-            misses += 1
-            unreachable_streak = 0
-            if misses >= PROBE_GIVE_UP:
-                break
-        else:  # unreachable
-            unreachable_streak += 1
-            if unreachable_streak >= PROBE_GIVE_UP:
-                print(f"    ERROR: {SHOWS[show]['name']} transcript pages appear "
-                      f"unreachable ({unreachable_streak} consecutive connection "
-                      "failures) — treating as a fetch failure, not zero new episodes.")
-                return None
-        ep += 1
-        time.sleep(0.2)   # gentle probe pace
-
-    if verbose:
-        print(f"    {SHOWS[show]['name']}: {len(found)} episodes found remotely")
-
-    # Machine-parseable marker — see the matching comment in fetch_sn_remote_listing.
-    if found:
-        print(f"LATEST_EPISODE {show} {max(found)}")
+        print(f"    {len(found)} episode(s) with a transcript in feed {feed_id}")
 
     return found
-
-
-def fetch_twit_remote_listing(
-    shows: list[str], verbose: bool = False
-) -> dict[str, Optional[set[int]]]:
-    """
-    Return {show: set(episode_ints)} for each TWiT show requested.
-    Uses URL-probing (HEAD requests) rather than parsing an RSS feed. A
-    value of None for a show means its probe failed (see
-    _probe_twit_episodes) — callers must check for that, not just falsy.
-    """
-    result: dict[str, Optional[set[int]]] = {}
-    for show in shows:
-        if show == "twig":
-            result["twig"] = _probe_twit_episodes("twig", 1, TWIG_LAST_EP, verbose)
-        elif show == "im":
-            result["im"]   = _probe_twit_episodes("im", IM_FIRST_EP, None, verbose)
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -849,39 +927,65 @@ def fmt_sn(ep: int) -> str:
 def compute_missing(
     show: str,
     type_keys: list[str],
+    base_dir: Path,
     remote_sn: Optional[dict[str, set[int]]],
-    remote_twit: Optional[dict[str, set[int]]],
+    remote_twit: Optional[dict[str, Optional[dict[int, str]]]],
     local: dict[str, set[int]],
     episode_filter: Optional[set[int]],
     force: bool,
     verbose: bool = False,
     remote_tbrh: Optional[dict[int, dict]] = None,
     remote_dancarlin: Optional[dict[str, Optional[dict[int, dict]]]] = None,
+    remote_sn_club: Optional[dict[int, str]] = None,
 ) -> list[RemoteFile]:
     missing: list[RemoteFile] = []
 
     for tk in type_keys:
-        if show == "sn":
+        if show == "sn" and tk == "sn_transcript_club_txt":
+            # Gap-fill only: never re-fetch an episode GRC's own txt already
+            # covers, even under --force (force means "re-check the primary
+            # source again," not "duplicate content GRC already gave us").
+            # Scanned directly here rather than trusting local["sn_transcript_txt"]
+            # -- that key only exists in `local` when the caller's own
+            # type_keys happened to request GRC's txt type too (e.g. --types
+            # all); a standalone `--types club` run would otherwise see an
+            # empty set and wrongly think GRC covers nothing, re-fetching
+            # everything the club feed has. Found live: exactly that (236
+            # "missing" instead of ~2) on the first real dry-run of this path.
+            remote_eps = set((remote_sn_club or {}).keys())
+            local_eps = local.get(tk, set()) | _local_sn_episodes(base_dir, "sn_transcript_txt")
+        elif show == "sn":
             cfg = SN_FILE_TYPES[tk]
-            remote_eps: set[int] = (remote_sn or {}).get(tk, set())
+            remote_eps = (remote_sn or {}).get(tk, set())
+            local_eps = set() if force else local.get(tk, set())
         elif show == "tbrh":
             remote_eps = set((remote_tbrh or {}).keys())
+            local_eps = set() if force else local.get(tk, set())
         elif show in DANCARLIN_SHOWS:
             dc_listing = (remote_dancarlin or {}).get(show) or {}
             remote_eps = set(dc_listing.keys())
+            local_eps = set() if force else local.get(tk, set())
         else:
-            # TWiT: one type key per show. `or set()` (not a .get default) is
-            # needed here because a failed probe stores an explicit None for
-            # this show, not a missing key -- see fetch_twit_remote_listing().
-            remote_eps = (remote_twit or {}).get(show) or set()
+            # TWIG/IM/TWiT: one type key per show, episodes discovered via
+            # the Club TWiT feed (see fetch_club_transcript_listing()). `or {}`
+            # (not a .get default) is needed here because a failed fetch
+            # stores an explicit None for this show, not a missing key.
+            remote_map: dict[int, str] = (remote_twit or {}).get(show) or {}
+            remote_eps = set(remote_map)
+            local_eps = set() if force else local.get(tk, set())
 
-        local_eps = set() if force else local.get(tk, set())
         needed = remote_eps - local_eps
         if episode_filter:
             needed &= episode_filter
 
         for ep in sorted(needed):
-            if show == "sn":
+            if show == "sn" and tk == "sn_transcript_club_txt":
+                ep_str   = fmt_sn(ep)
+                url      = (remote_sn_club or {})[ep]
+                filename = SN_FILE_TYPES[tk]["filename_tmpl"].format(ep=ep_str)
+                missing.append(RemoteFile(show=show, episode=ep,
+                                          file_type=tk, url=url, filename=filename))
+            elif show == "sn":
                 ep_str   = fmt_sn(ep)
                 url      = cfg["url_template"].format(ep=ep_str)
                 filename = cfg["filename_tmpl"].format(ep=ep_str)
@@ -904,7 +1008,7 @@ def compute_missing(
                 missing.append(RemoteFile(show=show, episode=ep, file_type=tk,
                                           url=info["url"], filename=filename))
             else:
-                url      = TWIT_TRANSCRIPT_TMPL[show].format(ep=ep)
+                url      = remote_map[ep]
                 filename = f"{show}-{ep:03d}.txt" if ep < 1000 else f"{show}-{ep}.txt"
                 missing.append(RemoteFile(show=show, episode=ep,
                                           file_type=tk, url=url, filename=filename))
@@ -953,8 +1057,8 @@ def _download_one(rf: RemoteFile, dest: Path) -> tuple[bool, str]:
             return True, "ok"
         except OSError as e:
             return False, str(e)
-    if rf.show == "sn":
-        # Binary download (PDF or TXT file)
+    if rf.show == "sn" and rf.file_type != "sn_transcript_club_txt":
+        # Binary download (PDF or TXT file) from GRC
         data = http_get(rf.url)
         if data is None:
             return False, f"request failed: {rf.url}"
@@ -979,14 +1083,12 @@ def _download_one(rf: RemoteFile, dest: Path) -> tuple[bool, str]:
         except OSError as e:
             return False, str(e)
     else:
-        # TWiT transcript: fetch HTML page, convert to text
+        # TWiT-site transcript page (twig/im/twit, and sn's Club TWiT
+        # gap-fill): fetch HTML, convert to text.
         data = http_get(rf.url)
         if data is None:
             return False, f"request failed: {rf.url}"
         html = data.decode("utf-8", errors="replace")
-        # Quick sanity check: page should mention the show name
-        if "intelligent-machines" not in rf.url.lower():
-            pass  # TWIG pages don't embed "twig" in the same way; accept all
         text = html_to_text(html)
         if len(text) < 200:
             return False, "page too short — episode may not have a transcript yet"
@@ -1056,12 +1158,14 @@ def run(
     exit_code = 0
 
     needs_sn        = "sn" in shows
-    needs_twit      = [s for s in shows if s in ("twig", "im")]
+    needs_club_shows = [s for s in shows if s in CLUB_FEED_ID and s != "sn"]
+    needs_sn_club_fallback = needs_sn and "sn_transcript_club_txt" in type_selections.get("sn", [])
     needs_tbrh      = "tbrh" in shows
     needs_dancarlin = [s for s in shows if s in DANCARLIN_SHOWS]
 
     remote_sn        = None
-    remote_twit      = None
+    remote_twit: Optional[dict[str, Optional[dict[int, str]]]] = None
+    remote_sn_club: Optional[dict[int, str]] = None
     remote_tbrh      = None
     remote_dancarlin = None
 
@@ -1071,11 +1175,54 @@ def run(
         print("Fetching Security Now! remote listing…")
         remote_sn = fetch_sn_remote_listing(type_selections["sn"], verbose)
 
-    if needs_twit:
+    if needs_club_shows or needs_sn_club_fallback:
         print(f"\n{'='*70}")
-        print("Probing TWiT transcript pages for episode availability…")
-        print("(This uses HEAD requests and may take a few minutes)")
-        remote_twit = fetch_twit_remote_listing(needs_twit, verbose)
+        print("Fetching Club TWiT feed(s) for transcript discovery…")
+        try:
+            token = club_auth_token()
+        except RuntimeError as e:
+            print(f"    ERROR: {e}")
+            token = None
+
+        # Fetch each distinct feed id only once, even if it serves more than
+        # one show (feed 9064 covers both "twig" and "im" -- see
+        # fetch_club_transcript_listing()'s own docstring for why the split
+        # belongs here, not in that function).
+        raw_feeds: dict[str, Optional[dict[int, str]]] = {}
+        if token:
+            feed_ids_needed = {CLUB_FEED_ID[s] for s in needs_club_shows}
+            if needs_sn_club_fallback:
+                feed_ids_needed.add(CLUB_FEED_ID["sn"])
+            for feed_id in sorted(feed_ids_needed):
+                raw_feeds[feed_id] = fetch_club_transcript_listing(feed_id, token, verbose)
+
+        remote_twit = {}
+        for s in needs_club_shows:
+            raw = raw_feeds.get(CLUB_FEED_ID[s])
+            if raw is None:
+                remote_twit[s] = None
+                continue
+            if s == "twig":
+                eps = {ep: u for ep, u in raw.items() if ep <= TWIG_LAST_EP}
+            elif s == "im":
+                eps = {ep: u for ep, u in raw.items() if ep >= IM_FIRST_EP}
+            else:  # twit -- feed 9066 is TWiT-only, no split needed
+                eps = dict(raw)
+            remote_twit[s] = eps
+            # Machine-parseable marker — see the matching comment in
+            # fetch_sn_remote_listing(); preserved per-show even though the
+            # underlying fetch is now feed-based, since
+            # hermes-podcast-sync.py's suppression logic keys off this line.
+            if eps:
+                print(f"LATEST_EPISODE {s} {max(eps)}")
+
+        if needs_sn_club_fallback:
+            # A club-feed hiccup here should never fail SN's whole run --
+            # GRC remains the primary source and can succeed independently.
+            # None just means zero gap-fill candidates this run, not a
+            # show-level fetch_failed (see the per-show check below, which
+            # deliberately doesn't look at remote_sn_club at all).
+            remote_sn_club = raw_feeds.get(CLUB_FEED_ID["sn"])
 
     if needs_tbrh:
         print(f"\n{'='*70}")
@@ -1133,11 +1280,11 @@ def run(
         if verbose:
             print("  Computing missing files…")
         missing = compute_missing(
-            show=show, type_keys=type_keys,
+            show=show, type_keys=type_keys, base_dir=base_dir,
             remote_sn=remote_sn, remote_twit=remote_twit,
             local=local, episode_filter=episode_filter,
             force=force, verbose=verbose, remote_tbrh=remote_tbrh,
-            remote_dancarlin=remote_dancarlin,
+            remote_dancarlin=remote_dancarlin, remote_sn_club=remote_sn_club,
         )
 
         remote_total = stats.already_local + len(missing)
@@ -1202,15 +1349,22 @@ def main() -> int:
         prog="hermes-podcast-retriever.py",
         description=(
             "Download transcripts / show notes / story-links / episode audio for "
-            "Security Now!, This Week in Google, Intelligent Machines, Tech Brew "
-            "Ride Home, and Dan Carlin's shows."
+            "Security Now!, This Week in Google, Intelligent Machines, This Week "
+            "in Tech, Tech Brew Ride Home, and Dan Carlin's shows."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 shows:
-  sn     Security Now!        (GRC.com — notes PDF, transcript PDF/TXT)
-  twig   This Week in Google  (twit.tv — HTML transcripts saved as .txt, eps 1-804)
-  im     Intelligent Machines (twit.tv — HTML transcripts saved as .txt, eps 805+)
+  sn     Security Now!        (GRC.com primary — notes PDF, transcript PDF/TXT;
+                               plus a Club TWiT feed fallback for episodes GRC
+                               never published, see --types club below)
+  twig   This Week in Google  (Club TWiT feed 9064 — HTML transcripts saved
+                               as .txt, eps 1-804; discontinued, no new
+                               episodes, kept for on-demand backfill only)
+  im     Intelligent Machines (Club TWiT feed 9064 — HTML transcripts saved
+                               as .txt, eps 805+)
+  twit   This Week in Tech    (Club TWiT feed 9066 — HTML transcripts saved
+                               as .txt)
   tbrh   Tech Brew Ride Home  (official RSS feed — per-episode story-links JSON;
                                no transcript exists for this show. Episodes are
                                keyed by publish date, YYYYMMDD, not a sequential
@@ -1221,10 +1375,15 @@ shows:
                                number per direct request, e.g.
                                26-dchh-Addendum26-Dig-This.mp3.)
 
+Club TWiT shows (sn's fallback, twig, im, twit) require a Vaultwarden item
+named twit-club-auth (field "password") holding the feed auth token --
+see club_auth_token().
+
 file types for --types:
-  sn:            notes  pdf  txt  all
-  twig/im:       transcript  all
-  tbrh:          links  all
+  sn:              notes  pdf  txt  club  all  (club = Club TWiT fallback,
+                                                 only for episodes GRC lacks)
+  twig/im/twit:    transcript  all
+  tbrh:            links  all
   dchh/dchha/dccs: audio  all
 
 examples:
@@ -1254,11 +1413,11 @@ examples:
     parser.add_argument("--outputdir", "-o", required=True, metavar="DIR",
         help="Base directory; show-specific subfolders are created inside it")
     parser.add_argument("--shows", nargs="+",
-        choices=["sn", "twig", "im", "tbrh", "dchh", "dchha", "dccs", "all"],
+        choices=["sn", "twig", "im", "twit", "tbrh", "dchh", "dchha", "dccs", "all"],
         default=["all"], metavar="SHOW",
         help="Shows to process (default: all)")
     parser.add_argument("--types", nargs="+", default=["all"], metavar="TYPE",
-        help="File types: SN → notes pdf txt all | TWIG/IM → transcript all | "
+        help="File types: SN → notes pdf txt club all | TWIG/IM/TWiT → transcript all | "
              "TBRH → links all | Dan Carlin shows → audio all")
     parser.add_argument("--episodes", default=None, metavar="RANGE",
         help='Episode filter, e.g. "805-860" or "805,810,820"')
@@ -1274,7 +1433,7 @@ examples:
     args = parser.parse_args()
 
     shows: list[str] = (
-        ["sn", "twig", "im", "tbrh", *DANCARLIN_SHOWS] if "all" in args.shows
+        ["sn", "twig", "im", "twit", "tbrh", *DANCARLIN_SHOWS] if "all" in args.shows
         else list(dict.fromkeys(args.shows))
     )
 

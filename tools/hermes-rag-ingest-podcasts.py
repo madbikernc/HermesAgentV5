@@ -1,5 +1,41 @@
 #!/usr/bin/env python3
-# Version: 1.2.3
+# Version: 1.3.0
+#
+# 1.3.0 (2026-09-04) — adds ingestion for the two new sources
+# hermes-podcast-retriever.py 1.4.0 introduced: "twit" (This Week in Tech,
+# ThisWeekInTech/transcripts/*.txt) and "sn_club" (SN's Club TWiT gap-fill
+# fallback, SecurityNow/transcripts_txt_club/*.txt). Both land on the exact
+# same twit.tv transcript template IM's current format already parses
+# (confirmed live) -- rather than duplicate parse_intelligent_machines(),
+# factored its shared header-parsing (episode number + date from the title
+# line) into _twit_family_meta(), reused by parse_twit() and the new
+# parse_sn_club(). parse_sn_club() deliberately sets meta["show"] to plain
+# "Security Now!", identical to GRC-sourced episodes -- the citation should
+# never reveal which of the two sources actually supplied a given episode;
+# that distinction only matters upstream, for discovery/dedup.
+#
+# The turn-marker cascade this first assumed (IM_TURN_RE, falling back to
+# IM_TURN_RE_OLD) turned out incomplete once actually run against TWiT's
+# real back catalog during the same session's live backfill: TWiT episodes
+# from 2021-2022 (852, 900 confirmed) use a fourth shape, "Speaker
+# (HH:MM:SS):" -- parens, not the current format's square brackets, and
+# name-first unlike IM_TURN_RE_OLD's timestamp-first shape. Added
+# TWIT_TURN_RE_PARENS as a third fallback, and factored the growing
+# cascade (shared by all three parsers here) into _twit_family_turns()
+# rather than repeating it. Also widened TWIT_TITLE_RE: TWiT's own title
+# line drops the word "Episode" for some older episodes ("This Week in Tech
+# 968 Transcript" vs "...Episode 900 Transcript") -- found the same way,
+# live, not assumed.
+#
+# Two more of the same kind, found re-running the dry-run after the above
+# and checking every remaining "no turns parsed" straggler rather than
+# stopping at "mostly fixed": a fifth turn shape, TWIT_TURN_RE_BARE (bare
+# "Speaker:" with no timestamp at all, episodes 882/912, 2022-2023) --
+# broadest pattern in the cascade, so tried last, and paired with
+# TWIT_TURN_STOPLIST since it also matches a page-footer "Share" copy-link
+# button, confirmed live inspecting twit-912's raw text before trusting the
+# pattern. And a second TWIT_TITLE_RE gap: episode 882 titles itself with
+# the bare "TWIT" abbreviation, not "This Week in Tech" anywhere on the page.
 #
 # 1.2.3 (2026-09-03) — fixes a real, previously-hidden gap the 1.2.2 fix
 # below uncovered: with the TBRH noise gone, a second batch of "no turns
@@ -159,6 +195,45 @@ IM_TURN_RE_OLD = re.compile(
     r"^\d{1,2}(?::\d{2}){1,2} - ([A-Za-z][A-Za-z .'-]{1,40}?)(?:\s*\([A-Za-z]+\))?$",
     re.MULTILINE,
 )
+# A fourth turn-marker shape, found live 2026-09-04 in TWiT's own back
+# catalog (episodes 852 and 900, both older than any im-8xx episode this
+# tool has ever downloaded -- IM's archive starts in 2025, TWiT's goes back
+# to 2021): "Speaker (HH:MM:SS):" -- name first like the *current* format,
+# but parens instead of square brackets, and no role tag ever seen with it.
+# Tried last in the cascade (see _twit_family_meta()'s callers) since it's
+# rarer and only confirmed for TWiT so far.
+TWIT_TURN_RE_PARENS = re.compile(
+    r"^([A-Za-z][A-Za-z .'-]{1,40}) \((\d{2}:\d{2}:\d{2})\):$", re.MULTILINE
+)
+# A fifth shape, also found live in the same backfill (twit-882, twit-912,
+# both 2022-2023): no timestamp at all, just "Speaker:" on its own line --
+# an even older/simpler template. Broadest pattern in the cascade by far
+# (any capitalized "Word:" line), so tried last and paired with
+# TWIT_TURN_STOPLIST below: confirmed live that twit-912's page-footer
+# "Share:" button label (a "copy link" widget, not a speaker) matches this
+# shape too, right before real page-navigation junk ("Copied!", "All
+# Transcripts posts", "Contact", "Advertise", ...) that would otherwise
+# become one bogus trailing chunk. "Host:" is deliberately NOT stoplisted --
+# confirmed live (twit-882) it's a real, if generic, speaker attribution
+# TWiT's own template uses when a co-host isn't individually named.
+TWIT_TURN_RE_BARE = re.compile(r"^([A-Z][A-Za-z .'-]{0,30}):$", re.MULTILINE)
+TWIT_TURN_STOPLIST = {"Share"}
+
+# TWiT ("This Week in Tech") and SN's Club TWiT gap-fill fallback both land
+# on the same twit.tv transcript-page family IM's parsers already handle --
+# IM_TURN_RE/IM_TURN_RE_OLD/TWIT_TURN_RE_PARENS/TWIT_TURN_RE_BARE below are
+# reused for both rather than duplicated. Title wording varies more than
+# initially assumed: confirmed live against TWiT's real back-catalog
+# (2026-09-04, the first backfill run) that "Episode " is sometimes absent
+# ("This Week in Tech 968 Transcript" vs "...Episode 900 Transcript") --
+# optional in the pattern, not two separate regexes. A separate older
+# episode (882, 2022) titles itself with the bare abbreviation instead:
+# "TWIT Episode 882 Transcript", no "This Week in Tech" anywhere on the
+# page -- IGNORECASE already covers "TWIT"/"TWiT"/"twit" as one alternative.
+TWIT_TITLE_RE = re.compile(
+    r"(?:This Week in Tech|TWiT) (?:Episode )?(\d+) Transcript", re.IGNORECASE
+)
+SN_CLUB_TITLE_RE = re.compile(r"Security Now (\d+) transcript", re.IGNORECASE)
 
 
 def broker_token():
@@ -207,10 +282,14 @@ def parse_security_now(text: str):
     return meta, turns
 
 
-# ---- IntelligentMachines parsing ------------------------------------------
+# ---- Shared header parsing for any twit.tv AI-transcript page -------------
 
-def parse_intelligent_machines(text: str):
-    num = IM_TITLE_RE.search(text)
+def _twit_family_meta(text: str, title_re, show_name: str) -> dict:
+    """Episode number from the title line, then the next non-blank,
+    non-disclaimer line as the date -- the shape every twit.tv transcript
+    page (IM, TWiT, and SN's Club TWiT fallback) shares, just with a
+    different title wording per show."""
+    num = title_re.search(text)
     episode = num.group(1) if num else "?"
 
     date = ""
@@ -222,17 +301,61 @@ def parse_intelligent_machines(text: str):
                 date = line
                 break
 
-    meta = {"show": "Intelligent Machines", "episode": episode, "date": date, "title": ""}
+    return {"show": show_name, "episode": episode, "date": date, "title": ""}
 
-    matches = list(IM_TURN_RE.finditer(text)) or list(IM_TURN_RE_OLD.finditer(text))
-    return meta, _im_turns_from_matches(text, matches)
+
+def _twit_family_turns(text: str) -> list[str]:
+    """Try every known twit.tv turn-marker shape in order (current brackets
+    first, since it's what every recent episode across all three shows
+    uses), stopping at the first pattern that matches anything -- a given
+    page only ever uses one shape throughout, never a mix."""
+    matches = (
+        list(IM_TURN_RE.finditer(text))
+        or list(IM_TURN_RE_OLD.finditer(text))
+        or list(TWIT_TURN_RE_PARENS.finditer(text))
+        or list(TWIT_TURN_RE_BARE.finditer(text))
+    )
+    return _im_turns_from_matches(text, matches)
+
+
+# ---- IntelligentMachines parsing ------------------------------------------
+
+def parse_intelligent_machines(text: str):
+    meta = _twit_family_meta(text, IM_TITLE_RE, "Intelligent Machines")
+    return meta, _twit_family_turns(text)
+
+
+# ---- This Week in Tech parsing ---------------------------------------------
+
+def parse_twit(text: str):
+    meta = _twit_family_meta(text, TWIT_TITLE_RE, "This Week in Tech")
+    return meta, _twit_family_turns(text)
+
+
+# ---- Security Now (Club TWiT gap-fill fallback) parsing --------------------
+
+def parse_sn_club(text: str):
+    """SN episodes GRC never published its own txt for (see
+    hermes-podcast-retriever.py 1.4.0's sn_transcript_club_txt) -- sourced
+    from the same twit.tv transcript page template as IM/TWiT, not GRC's own
+    header/turn format, so this does NOT reuse parse_security_now(). meta["show"]
+    is still plain "Security Now!" (matching GRC-sourced episodes) so a RAG
+    citation looks identical regardless of which source actually supplied
+    it -- the distinction only matters for discovery/dedup, never downstream."""
+    meta = _twit_family_meta(text, SN_CLUB_TITLE_RE, "Security Now!")
+    return meta, _twit_family_turns(text)
 
 
 def _im_turns_from_matches(text: str, matches) -> list[str]:
-    # Both IM_TURN_RE and IM_TURN_RE_OLD capture the speaker name as group 1.
+    # Every turn-marker pattern in the cascade captures the speaker name as
+    # group 1. TWIT_TURN_STOPLIST catches page-chrome labels shaped exactly
+    # like a bare speaker turn (confirmed live: a "Share" copy-link button)
+    # -- see TWIT_TURN_RE_BARE's own comment for why "Host" is not included.
     turns = []
     for i, m in enumerate(matches):
         speaker = m.group(1).strip()
+        if speaker in TWIT_TURN_STOPLIST:
+            continue
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = " ".join(text[start:end].split())
@@ -269,7 +392,10 @@ def parse_tbrh(text: str):
     return meta, lines
 
 
-PARSERS = {"sn": parse_security_now, "im": parse_intelligent_machines, "tbrh": parse_tbrh}
+PARSERS = {
+    "sn": parse_security_now, "im": parse_intelligent_machines, "tbrh": parse_tbrh,
+    "twit": parse_twit, "sn_club": parse_sn_club,
+}
 
 
 def citation_base(meta: dict) -> str:
@@ -288,9 +414,15 @@ def discover_files(archive: Path):
     sn_dir = archive / "SecurityNow" / "transcripts_txt"
     if sn_dir.is_dir():
         files += [("sn", p) for p in sorted(sn_dir.glob("*.txt"))]
+    sn_club_dir = archive / "SecurityNow" / "transcripts_txt_club"
+    if sn_club_dir.is_dir():
+        files += [("sn_club", p) for p in sorted(sn_club_dir.glob("*.txt"))]
     im_dir = archive / "IntelligentMachines" / "transcripts"
     if im_dir.is_dir():
         files += [("im", p) for p in sorted(im_dir.glob("*.txt"))]
+    twit_dir = archive / "ThisWeekInTech" / "transcripts"
+    if twit_dir.is_dir():
+        files += [("twit", p) for p in sorted(twit_dir.glob("*.txt"))]
     tbrh_dir = archive / "TechBrewRideHome" / "story_links"
     if tbrh_dir.is_dir():
         files += [("tbrh", p) for p in sorted(tbrh_dir.glob("*.json"))]

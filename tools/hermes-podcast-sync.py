@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-09-04) — adds "twit" (This Week in Tech) to the daily SHOWS
+# list, following hermes-podcast-retriever.py 1.4.0's addition of the show
+# via the new Club TWiT feed-based discovery. No FILENAME_PATTERNS episode-
+# numbering quirk here (twit-{ep}.txt is a plain sequential int, same shape
+# as im-{ep}.txt) -- just a new entry. Also adds a pattern for SN's new
+# Club TWiT gap-fill files (sn-{ep}-club.txt, same retriever version):
+# mapped to the "sn" show key like every other SN pattern, so a genuine
+# failure there gets the same suppression-window treatment as GRC's own SN
+# files rather than falling through unclassified. This script's own
+# run_retriever()/compute_missing() call path needed no other changes --
+# the retriever's new discovery mechanism is entirely internal to it; this
+# wrapper still just runs it and parses stdout the same way it always has.
 #
 # 1.3.0 — adds Dan Carlin's three shows to the daily sync, direct request,
 # following hermes-podcast-retriever.py 1.3.0 (2026-08-19) adding them and a
@@ -114,7 +127,7 @@ VAULT_SCRIPT = REPO_DIR / "tools" / "vault-get-secret.sh"
 # equivalent path (/mnt/nfs/PMoney) silently stopped existing across the
 # HermesAgentV4 migration and this sync sat unscheduled as a result.
 OUTPUT_DIR = "/mnt/nas2-hermes-backup/PodCasts"
-SHOWS      = ["sn", "im", "tbrh"]
+SHOWS      = ["sn", "im", "tbrh", "twit"]
 
 # Dan Carlin's three shows write into RAGDocs (Phase 30f's personal-kb NAS
 # share, sibling to PodCasts above), per hermes-podcast-retriever.py 1.3.0's
@@ -150,7 +163,9 @@ FILENAME_PATTERNS = [
     ("sn",    re.compile(r"^SN-(\d+)-Notes\.pdf$", re.IGNORECASE)),
     ("sn",    re.compile(r"^sn-(\d+)\.pdf$", re.IGNORECASE)),
     ("sn",    re.compile(r"^sn-(\d+)\.txt$", re.IGNORECASE)),
+    ("sn",    re.compile(r"^sn-(\d+)-club\.txt$", re.IGNORECASE)),
     ("im",    re.compile(r"^im-(\d+)\.txt$", re.IGNORECASE)),
+    ("twit",  re.compile(r"^twit-(\d+)\.txt$", re.IGNORECASE)),
     ("tbrh",  re.compile(r"^tbrh-(\d{8})\.json$", re.IGNORECASE)),
     ("twig",  re.compile(r"^twig-(\d+)\.txt$", re.IGNORECASE)),
     ("dccs",  re.compile(r"^(\d+)-cswdcd", re.IGNORECASE)),
@@ -265,7 +280,7 @@ def main() -> int:
     text_parts: list[str] = []
     run_errors: list[str] = []
     for label, outputdir, shows in (
-        ("PodCasts (SN/IM/TBRH)", OUTPUT_DIR, SHOWS),
+        ("PodCasts (SN/IM/TBRH/TWiT)", OUTPUT_DIR, SHOWS),
         ("RAGDocs (Dan Carlin)", DANCARLIN_OUTPUT_DIR, DANCARLIN_SHOWS),
     ):
         try:
@@ -349,7 +364,7 @@ def main() -> int:
         parts.append(f"{len(run_errors)} retriever invocation(s) failed to run")
 
     subject = f"Podcast sync: {', '.join(parts)}"
-    body_lines = [subject, f"Locations: {OUTPUT_DIR} (SN/IM/TBRH), "
+    body_lines = [subject, f"Locations: {OUTPUT_DIR} (SN/IM/TBRH/TWiT), "
                             f"{DANCARLIN_OUTPUT_DIR} (Dan Carlin)", ""]
     for f in real_fails:
         body_lines.append(f"  FAILED: {f}")
