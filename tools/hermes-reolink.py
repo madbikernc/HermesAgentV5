@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # Version: 1.1.0
 #
+# BLOCKED as of 2026-09-03: the real camera (online at 10.129.1.19) is a standalone battery/solar
+# model with no Reolink Home Hub or NVR. Reolink's own support docs confirm standalone battery
+# cameras have no local web/CGI API at all -- this file's whole reolink_aio Host(ip, user, pass)
+# design cannot reach it until a Home Hub/NVR is purchased and the camera re-paired to it. Direct
+# decision: defer that purchase, kept this file exactly as-is for when it's unblocked. Interim
+# AI-detection alerting lives in tools/hermes-reolink-mail-watch.py instead (no local API needed).
+# Do not enable hermes-reolink.service against this camera -- see infra/hermes-reolink/README.md.
+#
 # 1.1.0 (2026-09-02) — real bug found by installing reolink_aio and reading its actual source on
 # spark-2, before any camera hardware existed: login()/get_snapshot()/get_ai_state() method names
 # and signatures are all confirmed exactly correct (host/username/password positional, port=
