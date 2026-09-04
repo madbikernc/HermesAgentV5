@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.8.0
+# Version: 2.9.0
+#
+# 2.9.0 (2026-09-04) — Direct operator request: chat access to a "model report" (which checkpoint
+# backs each role, where it lives, whether it's abliterated). `ROLES` entries grow two metadata
+# fields, `model` and `abliterated` (pure description, never branched on), and `/v1/models` now
+# echoes them alongside `backend_url`/`on_demand` so `hermes-status.py`'s new `modelreport` source
+# (1.3.0) can build the report from one local GET instead of hardcoding a second copy of this
+# table. `embed` isn't in `ROLES` (never proxied by this router) and isn't reachable this way —
+# `hermes-status.py` documents that gap where it hardcodes `embed`'s own fixed endpoint.
 #
 # 2.8.0 (2026-08-29) — HermesAgentV5 S13: `nano` removed from `ROLES` on both branches. Retirement
 # was announced at S6 ("nano is retired as a role name" — target §4.1) and deferred at S6, S8, and
@@ -197,29 +205,32 @@ NODE = os.environ.get("HERMES_NODE", "")
 if NODE not in ("spark", "spark-2"):
     sys.exit(f"HERMES_NODE must be 'spark' or 'spark-2', got {NODE!r}")
 
-# role -> (base_url, on_demand)
+# role -> (base_url, on_demand, model, abliterated). `model`/`abliterated` were added in 2.9.0
+# purely as self-describing metadata for /v1/models — the router never branches on them, so
+# there's no accuracy-enforcement mechanism beyond "update this dict when a checkpoint changes,"
+# same trust level every other value in this table already has.
 if NODE == "spark":
     ROLES = {
-        "super": ("http://127.0.0.1:8095", True),
-        "coder": ("http://127.0.0.1:8094", True),
-        "muse": (f"http://{SPARK2_IP}:8090", False),
-        "omni": (f"http://{SPARK2_IP}:8091", False),
+        "super": ("http://127.0.0.1:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
+        "coder": ("http://127.0.0.1:8094", True, "Qwen3.8-27B-abliterated", True),
+        "muse": (f"http://{SPARK2_IP}:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
+        "omni": (f"http://{SPARK2_IP}:8091", False, "Nemotron-3-Nano-Omni-30B-A3B", False),
         # Port 8097, not the target's proposed 8088 -- that was nano's port and moving dispatch onto
         # it now that nano is retired (S13) would mean touching start-dispatch.sh, this unit, ufw,
         # and S12's DISPATCH_CHAT_URL standby override in the same pass for a cosmetic port-number
         # match with no functional benefit. Deferred, not forgotten -- see IMPLEMENTATION_PLAN.md S13.
-        "dispatch": ("http://127.0.0.1:8097", False),
+        "dispatch": ("http://127.0.0.1:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
     }
 else:
     ROLES = {
-        "super": (f"http://{SPARK_IP}:8095", True),
-        "coder": (f"http://{SPARK_IP}:8094", True),
-        "muse": ("http://127.0.0.1:8090", False),
-        "omni": ("http://127.0.0.1:8091", False),
-        "dispatch": (f"http://{SPARK_IP}:8097", False),
+        "super": (f"http://{SPARK_IP}:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
+        "coder": (f"http://{SPARK_IP}:8094", True, "Qwen3.8-27B-abliterated", True),
+        "muse": ("http://127.0.0.1:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
+        "omni": ("http://127.0.0.1:8091", False, "Nemotron-3-Nano-Omni-30B-A3B", False),
+        "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
     }
 
-ON_DEMAND_ROLES = {role for role, (_, on_demand) in ROLES.items() if on_demand}
+ON_DEMAND_ROLES = {role for role, (_, on_demand, _, _) in ROLES.items() if on_demand}
 
 BROKER_URL = os.environ.get("BROKER_URL", f"http://{SPARK_IP}:8100").rstrip("/")
 BROKER_TOKEN = os.environ.get("BROKER_TOKEN", "")
@@ -430,7 +441,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/models":
             self._send_json(200, {
                 "object": "list",
-                "data": [{"id": role, "object": "model", "owned_by": "hermes-router"} for role in ROLES],
+                "data": [{
+                    "id": role, "object": "model", "owned_by": "hermes-router",
+                    "backend_url": base_url, "on_demand": role in ON_DEMAND_ROLES,
+                    "checkpoint": model, "abliterated": abliterated,
+                } for role, (base_url, _, model, abliterated) in ROLES.items()],
             })
             return
         if self.path == "/guard/stats":
@@ -515,7 +530,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": {
                 "message": f"unknown model/role {role!r} — expected one of {sorted(ROLES)}"}})
             return
-        base_url, _ = entry
+        base_url, _, _, _ = entry
 
         if role in ON_DEMAND_ROLES:
             try:

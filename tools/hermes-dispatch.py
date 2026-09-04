@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.4.3
+# Version: 1.4.4
+#
+# 1.4.4 (2026-09-04) — TOPIC_DESCRIPTIONS' `status` entry mentions the new model report (which
+# checkpoint backs each role, IP/port/API URL, abliterated or not) so the routing classifier sends
+# that phrasing to `status` -- no VALID_TARGETS/Buzz-topic change, `status` already existed and
+# hermes-status.py 1.3.0 owns the new `modelreport` source under it.
 #
 # 1.4.3 (2026-09-02) — removed `nest` from VALID_TARGETS/TOPIC_DESCRIPTIONS: direct operator
 # decision to drop the Google Home/Nest camera integration entirely. `reolink` is unaffected.
@@ -197,7 +202,8 @@ TOPIC_DESCRIPTIONS = {
     "train": "reserved, not yet staffed",
     "status": "a quick, real-time status/reading check for one named external system -- pfsense, "
               "generac, moen-flo, wyze, a game server's health, Vivint alarm state, a fleet-health "
-              "snapshot, or a botnet/threat-intel IP lookup",
+              "snapshot, a botnet/threat-intel IP lookup, or a model report (which LLM checkpoint "
+              "backs each role, its IP/port/API URL, and whether it's abliterated)",
     "probe": "run a real network scan (nmap) against one specific IP address",
     "reolink": "check the Reolink camera -- pull a live snapshot and describe what's in frame",
 }

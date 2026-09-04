@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-# Version: 1.2.1
+# Version: 1.3.0
+#
+# 1.3.0 (2026-09-04) — Direct operator request: a "model report" source -- which checkpoint backs
+# each role, where it physically lives, whether it's abliterated. Built from one local GET against
+# this node's own router (`ROUTER_URL`, default 127.0.0.1:8080) rather than a second hardcoded copy
+# of `hermes-router.py`'s `ROLES` table: `/v1/models` (router 2.9.0) already lists every role
+# regardless of which node hosts it, so asking spark's own router also answers for muse/omni on
+# spark-2. Router-reported `backend_url` values that read `127.0.0.1` (a role physically resident
+# on THIS node, per router.py's own loopback-for-local-roles convention) are rewritten to
+# `SPARK_LAN_IP` for display -- this file always runs on spark (see hermes-status.service's
+# `After=... hermes-buzz.service hermes-memory.service`, both spark-only), so that substitution is
+# safe and gives a real routable address instead of a loopback meaningless to the person reading
+# the report. `embed` isn't a router role (never proxied by hermes-router.py) and has no `/v1/
+# models` entry -- `EMBED_INFO` hardcodes its one fixed endpoint, documented here rather than
+# silently missing from the report, same "note the gap, don't hide it" precedent `canary`'s own
+# 1.2.0 entry set for this file.
 #
 # 1.2.1 (2026-09-01) — real root cause found for wyze, correcting the 1.1.3 diagnosis: this was
 # never a hang. An instrumented, step-by-step re-run of hermes-wyze.py's own call chain showed the
@@ -110,6 +125,11 @@ _canary_report = importlib.import_module("hermes-canary-report")
 REPO_DIR = Path(__file__).resolve().parent.parent
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
+ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
+# `embed` is a standalone llama-server instance, never registered in hermes-router.py's `ROLES` --
+# see this file's 1.3.0 changelog entry above. Fixed values, not derived from anywhere live.
+EMBED_INFO = ("Qwen3-Embedding-0.6B-Q8_0", f"{SPARK_IP}:8092",
+              f"http://{SPARK_IP}:8092/v1/embeddings", False)
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
 BUZZ_TOKEN = os.environ.get("BUZZ_TOKEN", "")
 MEMORY_URL = os.environ.get("MEMORY_URL", f"http://{SPARK_IP}:8102").rstrip("/")
@@ -186,8 +206,13 @@ FLEETHEALTH_KEYWORDS = (
 CANARY_KEYWORDS = ("canary", "honeypot")
 CANARY_LOOKBACK_HOURS = 24
 
+MODEL_REPORT_KEYWORDS = (
+    "model report", "models report", "model status", "which models", "what models",
+    "llama endpoints", "llama.cpp endpoints", "backend models",
+)
+
 KNOWN_SOURCE_NAMES = ", ".join(
-    sorted(STATUS_SOURCES) + ["fleethealth", "canary", "botnet-intel (needs an IP address)"]
+    sorted(STATUS_SOURCES) + ["fleethealth", "canary", "modelreport", "botnet-intel (needs an IP address)"]
 )
 
 
@@ -298,6 +323,8 @@ def parse_source(text):
         return "fleethealth", None
     if any(kw in lowered for kw in CANARY_KEYWORDS):
         return "canary", None
+    if any(kw in lowered for kw in MODEL_REPORT_KEYWORDS):
+        return "modelreport", None
     for name, (keywords, _cmd, _timeout) in STATUS_SOURCES.items():
         if any(kw in lowered for kw in keywords):
             return name, None
@@ -349,6 +376,41 @@ def run_canary_status():
     summary = _canary_report.build_summary_text(by_src, since)
     botnet_text, _ = _canary_report.build_botnet_section(by_src)
     return summary + "\n\n" + botnet_text, None
+
+
+_ROLE_ORDER = {"dispatch": 0, "super": 1, "coder": 2, "embed": 3, "muse": 4, "omni": 5}
+
+
+def run_model_report():
+    """Live Role/Model/IP/Port/API-URL/Abliterated report -- see this file's 1.3.0 changelog for
+    why one local GET against this node's own router is enough to cover every role, and why
+    `embed` is hardcoded (EMBED_INFO) instead."""
+    try:
+        resp = _get(f"{ROUTER_URL}/v1/models", timeout=10)
+    except Exception as exc:
+        return None, f"could not reach the local router at {ROUTER_URL}: {exc}"
+
+    rows = []
+    for entry in resp.get("data", []):
+        # Roles physically resident on THIS node come back as 127.0.0.1 (router.py's own
+        # loopback-for-local-roles convention) -- rewritten to this node's real LAN IP since this
+        # file only ever runs on spark (see the changelog entry above).
+        backend_url = entry["backend_url"].replace("127.0.0.1", SPARK_IP)
+        rows.append((
+            entry["id"], entry["checkpoint"], backend_url.replace("http://", ""),
+            f"{backend_url}/v1/chat/completions", entry["abliterated"],
+        ))
+    rows.append(("embed",) + EMBED_INFO)
+    rows.sort(key=lambda r: _ROLE_ORDER.get(r[0], 99))
+
+    lines = ["Model report (live via this node's router; embed is a fixed, non-routed endpoint):"]
+    for role, model, ip_port, api_url, abliterated in rows:
+        flag = "ABLITERATED" if abliterated else "stock"
+        lines.append(f"  {role:<9} {model:<46} {ip_port:<20} {flag}")
+        lines.append(f"            {api_url}")
+    lines.append("")
+    lines.append("dispatch/muse/omni/embed run always-on; super/coder wake on demand via the broker.")
+    return "\n".join(lines), None
 
 
 def run_source(name):
@@ -430,6 +492,8 @@ def process_one():
             result, err = None, f"fleet-health pull failed: {exc}"
     elif source == "canary":
         result, err = run_canary_status()
+    elif source == "modelreport":
+        result, err = run_model_report()
     else:
         result, err = run_source(source)
 
@@ -449,7 +513,7 @@ def main():
     if not GUARD_TOKEN:
         log("WARNING: GUARD_TOKEN not set — this agent's own Layer 2 screening is skipped")
     log(f"watching Buzz topic 'status', polling every {POLL_SECONDS}s, "
-        f"sources={sorted(STATUS_SOURCES) + ['fleethealth', 'canary', 'botnet-intel']}")
+        f"sources={sorted(STATUS_SOURCES) + ['fleethealth', 'canary', 'modelreport', 'botnet-intel']}")
     while True:
         try:
             did_work = process_one()
