@@ -1,6 +1,6 @@
 # hermes-rag — recreate checklist
 
-**Version:** 1.0.1
+**Version:** 1.1.0
 
 Ordered steps to stand up Phase 30's RAG infrastructure (`IMPLEMENTATION_PLAN.md` §7) from scratch: the
 shared vector store, both embedding backends, all four corpus ingesters, the query tool, hourly source
@@ -10,7 +10,7 @@ flagged and left open at the time (`IMPLEMENTATION_PLAN.md` 4.73.0's revision-hi
 
 **One shared venv, one shared database.** Every script below (`hermes-rag-query.py`, all four
 `hermes-rag-ingest-*.py`, `hermes-rag-source-discovery.py`, `hermes-news-digest.py`,
-`hermes-rag-discovery-portal.py`) imports `tools/hermes_rag_common.py` and runs under
+`hermes-rag-discovery-portal.py`, `hermes-rag-mcp.py`) imports `tools/hermes_rag_common.py` and runs under
 `/opt/hermes/venvs/rag/bin/python3` — one venv, not one per tool. All of them read/write the same file,
 `/mnt/hermes-data/rag/vectors.db` (SQLite + the `sqlite-vec` extension), which lives inside the Spark's
 LUKS container.
@@ -30,6 +30,7 @@ LUKS container.
 | `hermes-rag-discovery-portal.service` | Spark | Phase 33 — browser review UI for 30h's candidates, plus (1.4.0) a `topics.yaml` editor for Phase 31 |
 | `hermes-rag-query.py` | either | No service — a CLI, called directly or via `skills/rag-query/SKILL.md` |
 | `hermes-news-digest.py` | Spark | Phase 31 — not part of this directory (`infra/hermes-news-digest/`), but reads the same `vectors.db` via `hermes_rag_common.search()` |
+| `hermes-rag-mcp.py` | Spark | No service, no listening port — an MCP server over stdio, spawned per client session via SSH (§9) |
 
 ## 1. The venv
 
@@ -210,9 +211,65 @@ Real numbers per corpus (not zero, not an error) confirm ingestion actually ran.
 /opt/hermes/venvs/rag/bin/python3 tools/hermes-rag-query.py "test query" --top-k 1 --json
 ```
 
+## 9. MCP server (portable client access)
+
+`hermes-rag-mcp.py` (1.0.0) exposes the same index to any MCP-speaking client — Claude Desktop,
+Claude Code, or anything else that talks MCP — as three tools: `rag_search` (read-only),
+`rag_list_corpora`, and `rag_reindex` (runs one of §4's four ingest scripts, never a direct write
+to the vector store). No new service, no new listening port, no new bearer token: it's an stdio
+server, spawned fresh per client session, reached over SSH the same way every other remote
+operation on this fleet already is. **Portability is the whole point** — any client machine with
+an SSH key already configured for this host runs the identical command:
+
+```json
+{
+  "mcpServers": {
+    "hermes-rag": {
+      "command": "ssh",
+      "args": [
+        "<your-ssh-host-alias-for-the-Spark>",
+        "/opt/hermes/venvs/rag/bin/python3",
+        "/home/pmoney/HermesAgentV5/tools/hermes-rag-mcp.py"
+      ]
+    }
+  }
+}
+```
+
+Drop that into Claude Desktop's `claude_desktop_config.json` or Claude Code's own MCP config on
+*any* machine that already has a working SSH config entry for the Spark — no per-machine
+credential setup beyond the SSH key that already exists.
+
+**Injection screening on every returned string** — direct request, "always do injection
+protection at every possible interaction." A retrieved chunk's text and citation, and a
+`rag_reindex` run's captured output, are all screened before they leave the process: Layer 1
+(`hermes_injection_guard.py`'s deterministic pattern scanner, scored with `role="tool"` — the same
+treatment `hermes-router.py`'s own proxy path gives retrieved/tool content) for everything, plus
+Layer 2 (`hermes-guard`'s resident Prompt Guard 2 classifier, `10.129.1.15:8096` — **not**
+`127.0.0.1`, it binds the LAN IP explicitly, same as the broker) for a search result's chunk text
+specifically. A hit on either layer redacts that one result (citation and block reason kept, text
+withheld) rather than failing the whole call. `rag_search`'s response carries a `layer2_available`
+flag — Layer 2 fails open on its own unreachability (a classifier hiccup must not take down every
+search) but that degradation is always visible in the response, not just a server-side stderr line
+no MCP client surfaces.
+
+**Requires `guard-token` reachable from this vault** (Vaultwarden item `guard-token`, field
+`password` — same item `hermes-guard-wrapper.sh` already fetches) and `hermes-guard.service`
+running; if it's ever moved off `10.129.1.15:8096`, override via `HERMES_GUARD_URL` in the
+environment the SSH command lands in, don't hardcode a new default here.
+
+No systemd unit for this one — verify by hand:
+
+```bash
+ssh <host-alias> /opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-rag-mcp.py
+# then, from a second terminal, speak a minimal MCP initialize/tools-list handshake at it,
+# or just point a real MCP client at the config above and check its own tool-discovery UI.
+```
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-09-04 | Adds §9, `hermes-rag-mcp.py` — MCP server exposing search/reindex over stdio, portable across client machines via SSH (direct request: "the MCP ability needs to be portable enough between at least two machines"). Two-layer injection screening on every returned string per a second direct request ("always do injection protection at every possible interaction"), verified live end-to-end (initialize/tools-list/tools-call handshake, plus a real query that triggered a genuine Layer 1 block). |
 | 1.0.1 | 2026-08-30 | HermesAgentV5 consolidation: Usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
 | 1.0.0 | 2026-08-19 | Initial version — the one `infra/*` directory still missing its own README, flagged in `IMPLEMENTATION_PLAN.md` 4.73.0 and left open since. Written from the real, already-deployed unit files and scripts in this checkout, not from a fresh build — every step here reflects what Phase 30/31/33's live deployment actually needed, including the two real bugs those phases hit (the LUKS-mount root-ownership pattern shared with `hermes-broker`, and Phase 33's executable-bit deploy failure). Flags one still-open gap rather than silently fixing it: `sqlite-vec` is a real runtime import in `hermes_rag_common.py` but isn't listed in `requirements.txt`, left unpatched here since a separate, concurrent session had that exact file open the same day. |

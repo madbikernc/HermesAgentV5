@@ -1,6 +1,6 @@
 # Packages for /opt/hermes/venvs/rag/ -- the shared venv every RAG tool
 # (hermes-rag-query.py, hermes-rag-ingest-*.py, hermes-rag-source-discovery.py,
-# hermes-news-digest.py) runs under. Added 2026-08-15: this venv existed
+# hermes-news-digest.py, hermes-rag-mcp.py) runs under. Added 2026-08-15: this venv existed
 # before this file did, set up ad hoc across Phase 30's build -- no
 # requirements.txt tracked its package list anywhere in the repo until now,
 # a real gap found while adding PDF/docx support to hermes-rag-ingest-kb.py.
@@ -32,3 +32,9 @@ EbookLib>=0.18
 # real transitive dependencies (confirmed live at install time), not
 # separately pinned here -- pip resolves them from this one entry.
 pymupdf4llm>=0.0.20
+# Added 2026-09-04 for hermes-rag-mcp.py -- the official MCP Python SDK.
+# >=1.9 is where mcp.server.fastmcp.FastMCP was renamed to
+# mcp.server.mcpserver.MCPServer; hermes-rag-mcp.py targets the new name
+# directly (confirmed live against the version this actually resolved to,
+# 2.1.1) rather than pinning to the old FastMCP-era API.
+mcp>=1.9.0
