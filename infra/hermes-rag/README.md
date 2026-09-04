@@ -1,6 +1,6 @@
 # hermes-rag — recreate checklist
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Ordered steps to stand up Phase 30's RAG infrastructure (`IMPLEMENTATION_PLAN.md` §7) from scratch: the
 shared vector store, both embedding backends, all four corpus ingesters, the query tool, hourly source
@@ -213,13 +213,13 @@ Real numbers per corpus (not zero, not an error) confirm ingestion actually ran.
 
 ## 9. MCP server (portable client access)
 
-`hermes-rag-mcp.py` (1.0.0) exposes the same index to any MCP-speaking client — Claude Desktop,
-Claude Code, or anything else that talks MCP — as three tools: `rag_search` (read-only),
-`rag_list_corpora`, and `rag_reindex` (runs one of §4's four ingest scripts, never a direct write
-to the vector store). No new service, no new listening port, no new bearer token: it's an stdio
-server, spawned fresh per client session, reached over SSH the same way every other remote
-operation on this fleet already is. **Portability is the whole point** — any client machine with
-an SSH key already configured for this host runs the identical command:
+`hermes-rag-mcp.py` (1.1.0) exposes the same index to any MCP-speaking client — Claude Desktop,
+Claude Code, or anything else that talks MCP — as four tools: `rag_search` (read-only),
+`rag_list_corpora`, `rag_reindex` (runs one of §4's four ingest scripts, never a direct write to
+the vector store), and `rag_reindex_progress`. No new service, no new listening port, no new
+bearer token: it's an stdio server, spawned fresh per client session, reached over SSH the same
+way every other remote operation on this fleet already is. **Portability is the whole point** —
+any client machine with an SSH key already configured for this host runs the identical command:
 
 ```json
 {
@@ -239,6 +239,18 @@ an SSH key already configured for this host runs the identical command:
 Drop that into Claude Desktop's `claude_desktop_config.json` or Claude Code's own MCP config on
 *any* machine that already has a working SSH config entry for the Spark — no per-machine
 credential setup beyond the SSH key that already exists.
+
+**`rag_reindex` is fire-and-forget, not a blocking call.** It launches the corpus's ingest script
+detached (`start_new_session=True`, output redirected to a log file, a wrapping shell writes the
+real exit code to a sidecar file once the script actually exits) and returns immediately —
+podcasts alone has taken tens of minutes for a real backfill this project has already run, well
+past what most MCP clients let one tool call block for. Job state lives under
+`~/.hermes/state/rag-reindex/{corpus}.{json,log,exit}`, read from disk rather than kept in this
+process's own memory, specifically so `rag_reindex_progress` works from a **different** MCP
+session — even a different client machine — than the one that started the job; the launched
+process's detachment is what lets it keep running to completion after the SSH session that
+started it ends. Calling `rag_reindex` again for a corpus that's already running refuses (
+`status: "already_running"`) rather than launching a second one.
 
 **Injection screening on every returned string** — direct request, "always do injection
 protection at every possible interaction." A retrieved chunk's text and citation, and a
@@ -270,6 +282,7 @@ ssh <host-alias> /opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/to
 
 | Version | Date | Change |
 |---|---|---|
+| 1.2.0 | 2026-09-04 | `rag_reindex` rebuilt fire-and-forget plus a new `rag_reindex_progress` tool, direct request ("the mcp should have a 'rag reindex progress' as well") — the original blocking design (1.1.0) could exceed an MCP client's own tool-call timeout on a large podcast catch-up. Job state now on disk under `~/.hermes/state/rag-reindex/`, checkable from a different MCP session or client machine than the one that started the run. Verified live: start/already-running-refusal/poll-to-completion, plus a real (non-dry-run) fleet-docs reindex through the tool itself to pick up this same file's own 1.1.0 edit. |
 | 1.1.0 | 2026-09-04 | Adds §9, `hermes-rag-mcp.py` — MCP server exposing search/reindex over stdio, portable across client machines via SSH (direct request: "the MCP ability needs to be portable enough between at least two machines"). Two-layer injection screening on every returned string per a second direct request ("always do injection protection at every possible interaction"), verified live end-to-end (initialize/tools-list/tools-call handshake, plus a real query that triggered a genuine Layer 1 block). |
 | 1.0.1 | 2026-08-30 | HermesAgentV5 consolidation: Usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
 | 1.0.0 | 2026-08-19 | Initial version — the one `infra/*` directory still missing its own README, flagged in `IMPLEMENTATION_PLAN.md` 4.73.0 and left open since. Written from the real, already-deployed unit files and scripts in this checkout, not from a fresh build — every step here reflects what Phase 30/31/33's live deployment actually needed, including the two real bugs those phases hit (the LUKS-mount root-ownership pattern shared with `hermes-broker`, and Phase 33's executable-bit deploy failure). Flags one still-open gap rather than silently fixing it: `sqlite-vec` is a real runtime import in `hermes_rag_common.py` but isn't listed in `requirements.txt`, left unpatched here since a separate, concurrent session had that exact file open the same day. |

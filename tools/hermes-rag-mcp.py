@@ -1,5 +1,29 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-04) — direct request: "the mcp should have a 'rag reindex
+# progress' as well." rag_reindex's original shape (this same version's
+# 1.0.0, never released to a client before this fix) ran the ingest script
+# synchronously and blocked the whole tool call until it finished or a
+# 1-hour timeout -- fine for fleet-docs/ops (seconds), a real problem for
+# podcasts, which took tens of minutes for a real backfill this same
+# session, well past what most MCP clients let a single tool call block
+# for. Rebuilt as fire-and-forget: rag_reindex launches the ingest script
+# detached (start_new_session=True, redirected to a log file, a wrapping
+# shell writes the real exit code to a sidecar file once it's done) and
+# returns immediately; the new rag_reindex_progress tool reads that state
+# back from disk. Deliberately NOT tracked in this process's own memory --
+# an MCP server here is spawned fresh per client SSH session, so an
+# in-memory job dict would be invisible the moment that session ends, or
+# to a second session (this project's own portability requirement: check
+# progress from a different client machine than the one that started the
+# reindex, and it still has to work). Job state lives under
+# ~/.hermes/state/rag-reindex/{corpus}.{json,log,exit} instead, one set
+# per corpus -- keyed by corpus name rather than a job-id queue, since only
+# one reindex per corpus is ever meaningful to track at a time.
+# rag_reindex now refuses to start a second run for a corpus already in
+# progress (checked via the launched process's own PID liveness) rather
+# than launching a duplicate.
 #
 # 1.0.0 (2026-09-04) — direct request: expose this fleet's RAG index (all
 # four corpora — podcasts, fleet-docs, personal-kb, ops) as an MCP server,
@@ -63,8 +87,10 @@ host already configured, as an MCP client's server command):
     ssh <host-alias> /opt/hermes/venvs/rag/bin/python3 \\
         /home/pmoney/HermesAgentV5/tools/hermes-rag-mcp.py
 """
+import datetime
 import json
 import os
+import shlex
 import subprocess
 import sys
 import urllib.error
@@ -88,8 +114,6 @@ GUARD_URL = os.environ.get("HERMES_GUARD_URL", "http://10.129.1.15:8096/classify
 GUARD_TIMEOUT = 10
 GUARD_MALICIOUS_THRESHOLD = 0.5
 
-REINDEX_TIMEOUT = 3600  # podcasts alone has taken tens of minutes for a real backfill this session
-
 CORPORA = {
     "podcasts": {
         "description": ("Security Now, Intelligent Machines, This Week in Tech, Tech Brew "
@@ -112,6 +136,64 @@ CORPORA = {
         "script": "hermes-rag-ingest-ops.py",
     },
 }
+
+# ---- Reindex job tracking ---------------------------------------------
+# Plain per-corpus files under ~/.hermes/state/, matching this project's own
+# established convention for small operational state (hermes-podcast-sync.py's
+# missing-since.json, hermes_injection_guard.py's own DB under the same
+# parent) rather than a new table in the shared vectors.db -- job tracking
+# isn't RAG content, a distinct concern from what that database holds.
+#
+# One state/log/exit file set per corpus (not a job-id queue): only one
+# reindex per corpus is ever meaningful to track at a time, and keeping it
+# keyed by corpus name is what makes rag_reindex_progress's corpus=None
+# "report on all four" shape trivial.
+#
+# The exit file is the definitive "finished" signal, written by a wrapping
+# shell command AFTER the real ingest script exits -- not read from a
+# Popen object's own .poll()/.wait(), which only works from the same
+# process that spawned it. rag_reindex_progress can run in a completely
+# different MCP server process (a fresh SSH session, even from a different
+# client machine) than the one that started the job, so the launched
+# process must be independently checkable from disk alone. start_new_session
+# =True (setsid) on the launch is what makes the job survive this server
+# process exiting when that SSH session ends -- without it, the child would
+# get SIGHUP the moment the parent's session leader goes away.
+STATE_DIR = Path.home() / ".hermes" / "state" / "rag-reindex"
+REINDEX_LOG_TAIL_CHARS = 4000
+
+
+def _reindex_paths(corpus: str) -> dict[str, Path]:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    return {
+        "state": STATE_DIR / f"{corpus}.json",
+        "log": STATE_DIR / f"{corpus}.log",
+        "exit": STATE_DIR / f"{corpus}.exit",
+    }
+
+
+def _read_reindex_state(corpus: str) -> dict | None:
+    path = _reindex_paths(corpus)["state"]
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists, just not signalable -- shouldn't happen for our own child,
+        # but "exists" is the honest answer if it ever does.
+        return True
 
 
 # ---- Injection screening ---------------------------------------------------
@@ -201,13 +283,15 @@ def _screen(text: str, use_layer2: bool = True) -> tuple[str | None, str | None,
 
 mcp = MCPServer(
     name="hermes-rag",
-    version="1.0.0",
+    version="1.1.0",
     instructions=(
         "Search and reindex this fleet's RAG corpora (podcasts, fleet-docs, personal-kb, ops). "
         "Search is read-only. Reindex re-runs the existing, already-scheduled ingest pipeline "
-        "for one corpus -- it does not accept arbitrary writes to the index. Every returned "
-        "string is screened for prompt-injection content before it leaves this server; a "
-        "blocked result is redacted (citation and reason kept, text withheld)."
+        "for one corpus in the background and returns immediately -- it does not accept "
+        "arbitrary writes to the index, and does not block waiting for the run to finish; call "
+        "rag_reindex_progress to check on it. Every returned string is screened for "
+        "prompt-injection content before it leaves this server; a blocked result is redacted "
+        "(citation and reason kept, text withheld)."
     ),
 )
 
@@ -268,40 +352,123 @@ def rag_list_corpora() -> dict:
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False,
+    read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False,
 ))
 def rag_reindex(corpus: str, dry_run: bool = False) -> dict:
-    """Trigger a catch-up reindex for one corpus by running its existing ingest script -- the
-    same script its own daily timer already runs, never a direct write to the vector store.
-    `corpus`: one of podcasts/fleet-docs/personal-kb/ops. `dry_run`: report what would change
-    without embedding anything. This runs synchronously and can take a while (podcasts
-    especially, tens of minutes for a large catch-up) -- it blocks until the script exits or a
-    1-hour timeout, whichever comes first. destructive_hint is set because a reindex can prune
-    chunks for a source file that's been deleted since the last run, not because it can lose a
-    document that's still there."""
+    """Start a catch-up reindex for one corpus in the background by running its existing ingest
+    script -- the same script its own daily timer already runs, never a direct write to the
+    vector store. `corpus`: one of podcasts/fleet-docs/personal-kb/ops. `dry_run`: report what
+    would change without embedding anything.
+
+    Returns immediately -- this does NOT wait for the run to finish. Podcasts especially can take
+    tens of minutes for a large catch-up, well past what most MCP clients allow a single tool call
+    to block for. Call rag_reindex_progress with the same corpus to check on it. Refuses to start
+    a second run for a corpus that already has one in progress (returns status="already_running"
+    instead) -- check progress rather than retrying. The launched process is fully detached (a new
+    session, not a child of this server process), so it keeps running to completion even if this
+    MCP session ends; a later call to rag_reindex_progress, from this session or a different one on
+    a different client machine, can still see how it finished. destructive_hint is set because a
+    reindex can prune chunks for a source file deleted since the last run, not because it can lose
+    a document that's still there."""
     if corpus not in CORPORA:
         raise ValueError(f"unknown corpus {corpus!r} -- valid: {', '.join(CORPORA)}")
 
+    paths = _reindex_paths(corpus)
+    existing = _read_reindex_state(corpus)
+    if existing and not paths["exit"].exists() and _pid_alive(existing.get("pid", -1)):
+        return {
+            "corpus": corpus,
+            "status": "already_running",
+            "started_at": existing.get("started_at"),
+            "message": "a reindex for this corpus is already running -- call rag_reindex_progress "
+                       "instead of starting another",
+        }
+
+    # A fresh run: clear the previous run's exit/log so progress-checking
+    # can't mistake a stale prior completion for this new run's result.
+    paths["exit"].unlink(missing_ok=True)
+    paths["log"].unlink(missing_ok=True)
+
     script = REPO_DIR / "tools" / CORPORA[corpus]["script"]
-    args = [sys.executable, str(script)]
+    inner_args = [sys.executable, str(script)]
     if dry_run:
-        args.append("--dry-run")
+        inner_args.append("--dry-run")
+    # Sequential in one shell: run the ingester, redirect its combined
+    # output to the log file, THEN write its real exit code -- the exit
+    # file only appears once the ingester has actually finished, which is
+    # exactly the signal rag_reindex_progress relies on.
+    inner_cmd = (
+        f"{shlex.join(inner_args)} > {shlex.quote(str(paths['log']))} 2>&1; "
+        f"echo $? > {shlex.quote(str(paths['exit']))}"
+    )
+    proc = subprocess.Popen(
+        ["/bin/bash", "-c", inner_cmd],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
-    try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=REINDEX_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return {"corpus": corpus, "ok": False,
-                "error": f"reindex did not finish within {REINDEX_TIMEOUT}s"}
+    started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    paths["state"].write_text(json.dumps({
+        "corpus": corpus, "dry_run": dry_run, "pid": proc.pid, "started_at": started_at,
+    }))
 
-    raw_output = (result.stdout or "") + (result.stderr or "")
-    safe_output, reason, _ = _screen(raw_output, use_layer2=False)
-    return {
+    return {"corpus": corpus, "status": "started", "started_at": started_at, "pid": proc.pid}
+
+
+def _one_corpus_progress(corpus: str) -> dict:
+    paths = _reindex_paths(corpus)
+    state = _read_reindex_state(corpus)
+    if state is None:
+        return {"corpus": corpus, "status": "never_run"}
+
+    result = {
         "corpus": corpus,
-        "dry_run": dry_run,
-        "ok": result.returncode == 0,
-        "exit_code": result.returncode,
-        "output": safe_output if safe_output is not None else f"[output withheld: {reason}]",
+        "dry_run": state.get("dry_run", False),
+        "started_at": state.get("started_at"),
     }
+
+    if paths["exit"].exists():
+        try:
+            exit_code = int(paths["exit"].read_text().strip())
+        except (ValueError, OSError):
+            exit_code = None
+        result["status"] = "done" if exit_code == 0 else "failed"
+        result["exit_code"] = exit_code
+    elif _pid_alive(state.get("pid", -1)):
+        result["status"] = "running"
+    else:
+        # The process is gone but never wrote a normal exit -- killed
+        # outright (OOM, a manual kill, a host reboot mid-run), not a
+        # state this tool can distinguish further from disk alone.
+        result["status"] = "unknown"
+
+    if paths["log"].exists():
+        try:
+            log_text = paths["log"].read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            log_text = ""
+        if log_text:
+            tail = log_text[-REINDEX_LOG_TAIL_CHARS:]
+            safe_tail, reason, _ = _screen(tail, use_layer2=False)
+            result["output_tail"] = safe_tail if safe_tail is not None else f"[output withheld: {reason}]"
+
+    return result
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False))
+def rag_reindex_progress(corpus: str | None = None) -> dict:
+    """Check on a reindex started by rag_reindex. `corpus`: one of podcasts/fleet-docs/
+    personal-kb/ops, or omit to report on all four at once. `status` is one of: never_run (no
+    reindex has ever been started for this corpus through this tool), running, done, failed (the
+    script ran and exited non-zero), or unknown (the process is gone but never wrote a normal
+    exit code -- killed outright, e.g. an OOM or a host reboot mid-run). Includes up to the last
+    ~4000 characters of the run's captured output when available, screened the same as every
+    other string this server returns."""
+    if corpus is not None:
+        if corpus not in CORPORA:
+            raise ValueError(f"unknown corpus {corpus!r} -- valid: {', '.join(CORPORA)}")
+        return _one_corpus_progress(corpus)
+    return {name: _one_corpus_progress(name) for name in CORPORA}
 
 
 if __name__ == "__main__":
