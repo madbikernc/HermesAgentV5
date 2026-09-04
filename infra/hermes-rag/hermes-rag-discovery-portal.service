@@ -2,9 +2,13 @@
 Description=Hermes RAG source-discovery review portal (Phase 33) - browser UI for discovery_candidates
 After=network-online.target hermes-embed.service
 Wants=network-online.target
-# vectors.db lives inside the LUKS container, which is never auto-mounted.
-# After a reboot this will fail and retry harmlessly until hermes-unlock.sh
-# runs. Intended behaviour, identical to hermes-broker.service -- not a defect.
+# vectors.db lives inside the LUKS container, which is never auto-mounted. After a reboot this
+# will fail to start — and, found live 2026-09-03 (this exact unit sat dead for a week), Restart=
+# always does NOT retry a failed *dependency* job, so without intervention it stays dead
+# indefinitely, not "harmlessly." As of hermes-unlock.sh 1.1.0, running that script (already
+# required after every reboot) restarts this unit if it's found inactive — that script is what
+# actually makes this recoverable, not RestartSec/Restart= on their own. Same fix applies to
+# hermes-broker.service, hermes-buzz.service, hermes-memory.service, hermes-guard.service.
 RequiresMountsFor=/mnt/hermes-data
 StartLimitIntervalSec=0
 

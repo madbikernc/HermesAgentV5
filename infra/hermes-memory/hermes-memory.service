@@ -3,9 +3,12 @@ Description=Hermes memory service - shared conversational memory, dual-channel, 
 Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-memory/README.md
 After=network-online.target
 Wants=network-online.target
-# The database lives inside the LUKS container, which is never auto-mounted.
-# After a reboot this will fail and retry harmlessly until hermes-unlock.sh runs.
-# Intended behaviour, identical to hermes-broker.service and llama-sintra-core.service.
+# The database lives inside the LUKS container, which is never auto-mounted. After a reboot this
+# will fail to start — and, found live 2026-09-03, Restart=always does NOT retry a failed
+# *dependency* job, so without intervention it stays dead indefinitely, not "harmlessly." As of
+# hermes-unlock.sh 1.1.0, running that script (already required after every reboot) restarts this
+# unit if it's found inactive — that script is what actually makes this recoverable, not
+# RestartSec/Restart= on their own. Same fix applies to hermes-broker.service.
 RequiresMountsFor=/mnt/hermes-data
 StartLimitIntervalSec=0
 

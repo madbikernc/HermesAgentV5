@@ -2,9 +2,13 @@
 Description=Hermes guard - Layer 2 injection/jailbreak classifier (Llama Prompt Guard 2, stock, CPU-only)
 Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-guard/README.md
 After=network.target
-# Model weights live inside the LUKS container, which is never auto-mounted. After a reboot
-# this will fail and retry harmlessly until hermes-unlock.sh runs -- same intended behaviour
-# as every other service reading from /mnt/hermes-data.
+# Model weights live inside the LUKS container, which is never auto-mounted. After a reboot this
+# will fail to start — and, found live 2026-09-03, Restart=always does NOT retry a failed
+# *dependency* job, so without intervention it stays dead indefinitely, not "harmlessly." As of
+# hermes-unlock.sh 1.1.0, running that script (already required after every reboot) restarts this
+# unit if it's found inactive — that script is what actually makes this recoverable, not
+# RestartSec/Restart= on their own. Same applies to every other service reading from
+# /mnt/hermes-data (hermes-broker, hermes-buzz, hermes-memory, hermes-rag-discovery-portal).
 RequiresMountsFor=/mnt/hermes-data
 StartLimitIntervalSec=0
 
