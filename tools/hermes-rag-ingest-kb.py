@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-09-04) — direct request, found during a RAG-ingest coverage
+# audit: discover_files() had no sibling-preference logic at all. A `notes.pdf`
+# and `notes.md` with the same stem in the same folder were both being
+# ingested as two separate source_path rows -- duplicate content, two
+# citations, no preference either way. Now a PDF/DOCX with a same-stem `.md`
+# sibling anywhere under the scanned root (case-insensitive stem match, same
+# directory) is excluded from `handled` before conversion even runs -- the MD
+# is assumed to be the preferred/curated version, same reasoning a human
+# converting a PDF to Markdown by hand would have for keeping only the MD.
+# Reported under its own "SUPERSEDED" category, distinct from "SKIPPED
+# (unhandled type)", so an operator can tell the two apart in a run's output.
+# No extra pruning logic needed: a PDF previously indexed under its own
+# source_path before a sibling .md showed up is already excluded from
+# `handled` (and therefore from prune_stale()'s `current` set) the next run,
+# so the existing stale-source pruning removes its old chunks automatically.
 #
 # 1.5.0 (2026-09-04) — direct request: PDF/DOCX now convert to real
 # structured Markdown (new hermes_doc_to_markdown.py — pymupdf4llm for PDF,
@@ -96,10 +112,15 @@ gap this file's own 1.0.0-era docstring left as "add later if worth it").
 `.txt`/`.epub` stay on the older paragraph-boundary chunker
 (`hermes_rag_common.group_blocks()`) — plain notes have no headers to key
 on, and EPUB's own block extraction already yields paragraph-shaped text,
-not markdown. Every skipped file (unhandled type, or one that extracts to
+not markdown. Every skipped file (unhandled type, one that extracts to
 nothing — most often a scanned/image-only PDF with no real text layer and
-no `--ocr`) is named explicitly in the run's own output, not silently
-dropped.
+no `--ocr` — or a PDF/DOCX superseded by a same-stem `.md` sibling, 1.6.0)
+is named explicitly in the run's own output, not silently dropped.
+
+A PDF/DOCX with a `.md` file of the same stem in the same directory is
+never converted or indexed — the `.md` is assumed to be the preferred/
+curated version and is indexed on its own (1.6.0). This avoids duplicate
+chunks/citations for the same content under two different source_paths.
 
 Embeds locally against the resident Spark backend (127.0.0.1:8092), same
 choice 30b made for fleet-docs — a personal-notes folder is not expected to
@@ -167,17 +188,22 @@ def extract_epub_text(path: Path) -> str:
 
 
 def discover_files(root: Path):
-    handled, skipped = [], []
+    handled, skipped, superseded = [], [], []
     if not root.is_dir():
-        return handled, skipped
-    for p in sorted(root.rglob("*")):
-        if not p.is_file():
-            continue
-        if p.suffix.lower() in HANDLED_EXTENSIONS:
+        return handled, skipped, superseded
+    all_files = [p for p in sorted(root.rglob("*")) if p.is_file()]
+    md_stems = {
+        (p.parent, p.stem.lower()) for p in all_files if p.suffix.lower() == ".md"
+    }
+    for p in all_files:
+        suffix = p.suffix.lower()
+        if suffix in (".pdf", ".docx") and (p.parent, p.stem.lower()) in md_stems:
+            superseded.append(p)
+        elif suffix in HANDLED_EXTENSIONS:
             handled.append(p)
         else:
             skipped.append(p)
-    return handled, skipped
+    return handled, skipped, superseded
 
 
 def ingest_file(conn, root: Path, path: Path, dry_run: bool, ocr: bool = False) -> int:
@@ -284,9 +310,11 @@ def main():
         print(f"NOTE: {root} does not exist (yet) — nothing to ingest.")
         return 0
 
-    handled, skipped = discover_files(root)
+    handled, skipped, superseded = discover_files(root)
     for p in skipped:
         print(f"SKIPPED (unhandled type): {p.relative_to(root)}", file=sys.stderr)
+    for p in superseded:
+        print(f"SUPERSEDED (matching .md preferred, not converted): {p.relative_to(root)}", file=sys.stderr)
 
     conn = rag.connect(readonly=False)
     total_chunks = 0
@@ -308,7 +336,8 @@ def main():
         if pruned:
             print(f"Pruned {len(pruned)} stale source(s): {', '.join(pruned)}")
 
-    print(f"Scanned {len(handled)} file(s) ({len(skipped)} skipped, unhandled type), "
+    print(f"Scanned {len(handled)} file(s) ({len(skipped)} skipped, unhandled type; "
+          f"{len(superseded)} superseded by a sibling .md), "
           f"{changed} changed, {total_chunks} chunk(s) (re)embedded.")
     return 0
 

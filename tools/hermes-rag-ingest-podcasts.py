@@ -1,5 +1,41 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-09-04) — direct request, found during a RAG-ingest coverage
+# audit: two real sources sitting in the archive had been excluded from this
+# corpus entirely, flagged only in this file's own header comment below with
+# no live signal an operator would ever see. Both are now ingested:
+#   - SecurityNow/show_notes/*.pdf (645 real files, `SN-<ep>-Notes.pdf` per
+#     hermes-podcast-retriever.py's own SN_FILE_TYPES naming) — converted to
+#     real structured Markdown via hermes_doc_to_markdown.py (the same
+#     converter hermes-rag-ingest-kb.py already uses for personal-kb's PDFs),
+#     then header-aware chunked (hermes_rag_common.chunk_file()) rather than
+#     the flat turn-based group_blocks() every other show here uses — show
+#     notes are prose/bullet content with real headings, not dialogue.
+#     New show_key "sn_notes"; ingest_file() branches around the normal
+#     text-file-read + PARSERS dispatch for this one key since it needs
+#     PDF conversion instead, but still ends up as the same flat list of
+#     {"citation", "text"} dicts every other show already produces, so it
+#     rides the existing broker embed-submission path unchanged.
+#   - TheVoid/*.htm(l) (1 real file, still genuinely undocumented — no known
+#     per-episode structure like SN/IM's transcript templates) — stripped
+#     via lxml.html the same way hermes-rag-ingest-kb.py's own
+#     extract_epub_text() walks EPUB chapters, paragraph-boundary chunked
+#     like SN/IM since there's no real heading structure to key on. New
+#     "thevoid" PARSERS entry, parse_thevoid().
+# citation_base() now omits the "#?" episode tag when episode is unknown
+# ("?") rather than printing a bare "Show #?" — only visibly changes
+# TheVoid's citation (which has no episode numbering at all); every other
+# show's real regex match still produces a real episode number as before.
+#
+# Also added report_unhandled(): after discover_files() builds the known
+# file list, every other real file under the archive root not covered by any
+# known glob is now surfaced at runtime, grouped by extension with one
+# example path each — the same "every skipped file is named explicitly"
+# discipline hermes-rag-ingest-kb.py's discover_files() already applies,
+# extended here in aggregate (not per-file — this archive can hold
+# thousands of non-transcript files, e.g. audio, and a thousand-line skip
+# report in a daily timer log would bury the signal it's meant to surface).
 #
 # 1.3.0 (2026-09-04) — adds ingestion for the two new sources
 # hermes-podcast-retriever.py 1.4.0 introduced: "twit" (This Week in Tech,
@@ -107,14 +143,13 @@ transcript archive Phase 24's hermes-podcast-sync.timer already maintains at
 
 Scope, decided live against the real archive rather than the plan's original
 "two shows" assumption: covers SecurityNow/transcripts_txt/*.txt (1075 real
-files), IntelligentMachines/transcripts/*.txt (78 real files), and (1.2.0)
-TechBrewRideHome/story_links/*.json — the complete, clean-text transcript
-set plus TBRH's citation-list equivalent (no transcript exists for that
-show). Two things found in the same archive and deliberately left out of
-this pass, flagged rather than silently ingested or silently dropped:
-SecurityNow/show_notes/ (645 PDF-only files, a different corpus — per-
-episode notes, not transcripts) and a third, undocumented `TheVoid/` folder
-(1 HTML file). Neither blocks ingesting the real transcript set.
+files), IntelligentMachines/transcripts/*.txt (78 real files), (1.2.0)
+TechBrewRideHome/story_links/*.json, and (1.4.0) SecurityNow/show_notes/*.pdf
+(645 real files, converted to Markdown) and TheVoid/*.htm(l) (1 real,
+still-undocumented file) — every real source in the archive is now either
+ingested or explicitly named as skipped at runtime (report_unhandled()),
+rather than a source's exclusion living only in this comment where no
+operator running the daily timer would ever see it.
 
 Bulk embedding is compute-heavy at this corpus's real scale (~1150 episodes,
 tens of thousands of chunks) — routed through the broker's `embed` job type
@@ -133,7 +168,11 @@ than assumed —
     "Speaker Name [HH:MM:SS]:" turn markers on their own line.
 Both are chunked into ~1800-char groups via hermes_rag_common.group_blocks(),
 each chunk citation carrying the real show/episode/title/date back to the
-source per constraint 6 — never a bare excerpt.
+source per constraint 6 — never a bare excerpt. (1.4.0) SN show notes PDFs
+are prose/bullet content, not dialogue — converted to Markdown via
+hermes_doc_to_markdown.py and header-aware chunked via
+hermes_rag_common.chunk_file() instead. TheVoid's single HTML file has no
+known per-episode structure, so it's paragraph-boundary chunked like SN/IM.
 
 Content-hash dedup at the whole-file level (ingest_state table), same
 coarse-grained approach 30b uses — an unchanged episode is skipped entirely.
@@ -153,7 +192,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import lxml.html
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hermes_doc_to_markdown as doc2md  # noqa: E402
 import hermes_rag_common as rag  # noqa: E402
 
 CORPUS = "podcasts"
@@ -392,14 +434,43 @@ def parse_tbrh(text: str):
     return meta, lines
 
 
+# ---- TheVoid parsing (1.4.0) -----------------------------------------------
+
+THEVOID_BLOCK_XPATH = ".//p | .//li | .//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6"
+
+
+def parse_thevoid(text: str):
+    """The one-off `TheVoid/` folder holds a single undocumented HTML file --
+    flagged in this file's own header since before 1.4.0 but never actually
+    ingested until now. No known per-episode structure exists for it (unlike
+    SN/IM/TWiT's documented transcript templates), so this extracts flat
+    paragraph text via the same block-tag walk hermes-rag-ingest-kb.py's own
+    extract_epub_text() uses for EPUB chapters, rather than assuming a
+    turn-by-turn dialogue shape that may not apply. A page with no block tags
+    at all falls back to its whole text as one block, same "never index
+    nothing silently" discipline extract_epub_text() already follows."""
+    tree = lxml.html.fromstring(text)
+    for bad in tree.xpath(".//script | .//style"):
+        bad.getparent().remove(bad)
+    blocks = [el.text_content().strip() for el in tree.xpath(THEVOID_BLOCK_XPATH)]
+    blocks = [b for b in blocks if b]
+    if not blocks:
+        whole = tree.text_content().strip()
+        blocks = [whole] if whole else []
+    meta = {"show": "TheVoid", "episode": "?", "date": "", "title": ""}
+    return meta, blocks
+
+
 PARSERS = {
     "sn": parse_security_now, "im": parse_intelligent_machines, "tbrh": parse_tbrh,
-    "twit": parse_twit, "sn_club": parse_sn_club,
+    "twit": parse_twit, "sn_club": parse_sn_club, "thevoid": parse_thevoid,
 }
 
 
 def citation_base(meta: dict) -> str:
-    parts = [meta["show"], f"#{meta['episode']}"]
+    parts = [meta["show"]]
+    if meta["episode"] != "?":
+        parts.append(f"#{meta['episode']}")
     if meta.get("title"):
         parts.append(f"— {meta['title']}")
     if meta.get("date"):
@@ -417,6 +488,9 @@ def discover_files(archive: Path):
     sn_club_dir = archive / "SecurityNow" / "transcripts_txt_club"
     if sn_club_dir.is_dir():
         files += [("sn_club", p) for p in sorted(sn_club_dir.glob("*.txt"))]
+    sn_notes_dir = archive / "SecurityNow" / "show_notes"
+    if sn_notes_dir.is_dir():
+        files += [("sn_notes", p) for p in sorted(sn_notes_dir.glob("*.pdf"))]
     im_dir = archive / "IntelligentMachines" / "transcripts"
     if im_dir.is_dir():
         files += [("im", p) for p in sorted(im_dir.glob("*.txt"))]
@@ -426,7 +500,34 @@ def discover_files(archive: Path):
     tbrh_dir = archive / "TechBrewRideHome" / "story_links"
     if tbrh_dir.is_dir():
         files += [("tbrh", p) for p in sorted(tbrh_dir.glob("*.json"))]
+    thevoid_dir = archive / "TheVoid"
+    if thevoid_dir.is_dir():
+        files += [("thevoid", p) for p in sorted(thevoid_dir.glob("*.htm*"))]
     return files
+
+
+def report_unhandled(archive: Path, known: set):
+    """Surfaces every real file under `archive` that no known per-show glob
+    above covers, grouped by extension with one example path each -- the
+    same "every skipped file is named explicitly" discipline
+    hermes-rag-ingest-kb.py's own discover_files() already applies to
+    personal-kb, extended here in aggregate rather than per-file: this
+    archive can hold thousands of non-transcript files (audio, artwork, ...),
+    and a thousand-line skip report in a daily timer log would bury the
+    signal it's meant to surface. Added 1.4.0 after show_notes/TheVoid sat
+    unindexed for months with their only "flag" being a comment in this
+    file's own header, invisible to anyone just watching the timer's real
+    output."""
+    if not archive.is_dir():
+        return
+    by_ext = {}
+    for p in archive.rglob("*"):
+        if p.is_file() and p not in known:
+            by_ext.setdefault(p.suffix.lower(), []).append(p)
+    for ext, paths in sorted(by_ext.items()):
+        example = paths[0].relative_to(archive)
+        print(f"SKIPPED (unhandled, {len(paths)} file(s), ext={ext or '(none)'}): "
+              f"e.g. {example}", file=sys.stderr)
 
 
 def submit_embed_job(token, source_id, chunks):
@@ -447,9 +548,27 @@ def wait_for_job(token, job_id):
     raise RuntimeError(f"job {job_id} did not finish within {JOB_WAIT_TIMEOUT}s")
 
 
+SN_NOTES_NAME_RE = re.compile(r"SN-(\d+)-Notes\.pdf", re.IGNORECASE)
+
+
 def ingest_file(conn, token, show_key, path: Path, archive: Path, dry_run: bool) -> int:
     rel = str(path.relative_to(archive))
-    text = path.read_text(encoding="utf-8", errors="replace")
+
+    if show_key == "sn_notes":
+        # PDF, not a text file -- can't go through path.read_text() like
+        # every other show here. Converted via the same
+        # hermes_doc_to_markdown.py the personal-kb corpus already uses.
+        try:
+            text = doc2md.to_markdown(path)
+        except Exception as e:
+            # Broad on purpose, same reasoning hermes-rag-ingest-kb.py's own
+            # ingest_file() already documents: pymupdf4llm can raise several
+            # distinct exception types on a malformed real-world PDF, and one
+            # bad show-notes file shouldn't crash the whole 645-file batch.
+            print(f"WARNING: {rel}: could not convert to markdown, skipping: {e}", file=sys.stderr)
+            return 0
+    else:
+        text = path.read_text(encoding="utf-8", errors="replace")
     file_hash = rag.content_hash(text)
 
     row = conn.execute(
@@ -458,40 +577,60 @@ def ingest_file(conn, token, show_key, path: Path, archive: Path, dry_run: bool)
     if row and row[0] == file_hash:
         return 0
 
-    meta, turns = PARSERS[show_key](text)
-    if not turns:
-        if show_key == "tbrh":
-            # TBRH's story-links files are frequently and legitimately empty --
-            # bonus/call-in/portfolio-profile episodes cite no news stories at
-            # all (confirmed against the real archive: every empty-links file
-            # sampled is well-formed JSON with "links": [], not a broken
-            # parse). Cache the hash so it's not re-read and re-logged on
-            # every future run; a real edit to the file still invalidates it
-            # via the file_hash check above.
-            print(f"{rel}: 0 chunk(s) — no story links for this episode")
-            if not dry_run:
-                conn.execute(
-                    "INSERT INTO ingest_state (corpus, source_path, file_hash, last_ingested) "
-                    "VALUES (?,?,?,?) ON CONFLICT(corpus, source_path) DO UPDATE SET "
-                    "file_hash=excluded.file_hash, last_ingested=excluded.last_ingested",
-                    (CORPUS, rel, file_hash,
-                     datetime.datetime.now(datetime.timezone.utc).isoformat()),
-                )
-                conn.commit()
-        else:
-            # SN/IM always have real dialogue -- an empty parse here means the
-            # source format genuinely changed, not "nothing to say." Left
-            # uncached (unlike tbrh above) so it keeps surfacing until fixed.
-            print(f"WARNING: {rel}: no turns parsed — skipping (format may have changed)", file=sys.stderr)
-        return 0
+    if show_key == "sn_notes":
+        if not text.strip():
+            print(f"WARNING: {rel}: no extractable text — skipping (scanned/image-only PDF?)",
+                  file=sys.stderr)
+            return 0
+        m = SN_NOTES_NAME_RE.search(path.name)
+        show_label = "Security Now! Show Notes"
+        base = f"{show_label} #{m.group(1)}" if m else f"{show_label} ({path.stem})"
+        sections = list(rag.chunk_file(text, MAX_CHUNK_CHARS))  # [(header, body), ...]
+        n = len(sections)
+        chunks = []
+        for i, (header, body) in enumerate(sections):
+            if header not in ("(preamble)", "(no heading)"):
+                citation = f"{base} — {header}"
+            else:
+                citation = base if n == 1 else f"{base} (part {i + 1}/{n})"
+            chunks.append({"citation": citation, "text": body})
+    else:
+        meta, turns = PARSERS[show_key](text)
+        if not turns:
+            if show_key == "tbrh":
+                # TBRH's story-links files are frequently and legitimately empty --
+                # bonus/call-in/portfolio-profile episodes cite no news stories at
+                # all (confirmed against the real archive: every empty-links file
+                # sampled is well-formed JSON with "links": [], not a broken
+                # parse). Cache the hash so it's not re-read and re-logged on
+                # every future run; a real edit to the file still invalidates it
+                # via the file_hash check above.
+                print(f"{rel}: 0 chunk(s) — no story links for this episode")
+                if not dry_run:
+                    conn.execute(
+                        "INSERT INTO ingest_state (corpus, source_path, file_hash, last_ingested) "
+                        "VALUES (?,?,?,?) ON CONFLICT(corpus, source_path) DO UPDATE SET "
+                        "file_hash=excluded.file_hash, last_ingested=excluded.last_ingested",
+                        (CORPUS, rel, file_hash,
+                         datetime.datetime.now(datetime.timezone.utc).isoformat()),
+                    )
+                    conn.commit()
+            else:
+                # SN/IM/TWiT/TheVoid always have real content -- an empty parse
+                # here means the source format genuinely changed, not "nothing to
+                # say." Left uncached (unlike tbrh above) so it keeps surfacing
+                # until fixed.
+                print(f"WARNING: {rel}: no turns parsed — skipping (format may have changed)", file=sys.stderr)
+            return 0
 
-    base = citation_base(meta)
-    chunk_texts = list(rag.group_blocks(turns, MAX_CHUNK_CHARS, sep="\n\n"))
-    n = len(chunk_texts)
-    chunks = [
-        {"citation": base if n == 1 else f"{base} (part {i + 1}/{n})", "text": t}
-        for i, t in enumerate(chunk_texts)
-    ]
+        show_label = meta["show"]
+        base = citation_base(meta)
+        chunk_texts = list(rag.group_blocks(turns, MAX_CHUNK_CHARS, sep="\n\n"))
+        n = len(chunk_texts)
+        chunks = [
+            {"citation": base if n == 1 else f"{base} (part {i + 1}/{n})", "text": t}
+            for i, t in enumerate(chunk_texts)
+        ]
 
     if dry_run:
         print(f"[dry-run] {rel}: {n} chunk(s) would be (re)embedded — {base}")
@@ -522,7 +661,7 @@ def ingest_file(conn, token, show_key, path: Path, archive: Path, dry_run: bool)
         cur = conn.execute(
             "INSERT INTO chunks (corpus, source_path, section, chunk_index, chunk_text, "
             "citation, content_hash, ingested_at) VALUES (?,?,?,?,?,?,?,?)",
-            (CORPUS, rel, meta["show"], idx, chunk["text"], chunk["citation"],
+            (CORPUS, rel, show_label, idx, chunk["text"], chunk["citation"],
              rag.content_hash(chunk["text"]), now),
         )
         conn.execute(
@@ -551,6 +690,8 @@ def main():
     if not files:
         print(f"ERROR: no podcast transcript files found under {archive}", file=sys.stderr)
         return 1
+
+    report_unhandled(archive, {p for _, p in files})
 
     token = None if args.dry_run else broker_token()
     conn = rag.connect(readonly=False)

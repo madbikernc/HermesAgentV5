@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-09-04) — direct request, found during a RAG-ingest coverage
+# audit: this corpus is a deliberately curated allowlist (DOC_ROOT_FILES/
+# DOC_GLOBS below), not a repo-wide walk, and previously gave no signal at
+# all if a new top-level `.md` file showed up in the repo that the allowlist
+# didn't cover — it would just silently never be indexed. report_unhandled()
+# now lists any other `*.md` file sitting at the repo root, at runtime, same
+# "every skipped file is named explicitly" discipline the other three
+# ingesters already apply to their own corpora. Deliberately root-only, not
+# a full repo walk: this corpus's own scope is intentionally narrow (see this
+# file's own Phase 30b docstring below), and a full-tree scan would flag
+# hundreds of files (scripts, configs, non-fleet-doc notes) that were never
+# meant to be in this corpus, burying the signal a real gap would give.
 #
 # 1.3.0 (2026-09-04) — split_sections()/chunk_file() (this script's own
 # markdown-header chunking, since 30b) moved to hermes_rag_common.py once
@@ -72,6 +85,17 @@ def discover_files(repo: Path):
     return files
 
 
+def report_unhandled(repo: Path, known: set):
+    """Lists any `*.md` at the repo root not in DOC_ROOT_FILES -- this
+    corpus's own allowlist gives no other signal if a new fleet-wide doc
+    shows up that nobody added to DOC_ROOT_FILES/DOC_GLOBS. Root-only,
+    deliberately: see this file's own 1.4.0 changelog entry for why a full
+    repo walk would bury the signal instead of surfacing it."""
+    unknown = sorted(p for p in repo.glob("*.md") if p not in known)
+    for p in unknown:
+        print(f"SKIPPED (root .md not on allowlist): {p.relative_to(repo)}", file=sys.stderr)
+
+
 def ingest_file(conn, repo: Path, path: Path, dry_run: bool) -> int:
     rel = str(path.relative_to(repo))
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -132,6 +156,8 @@ def main():
     if not files:
         print(f"ERROR: no fleet-doc files found under {repo}", file=sys.stderr)
         return 1
+
+    report_unhandled(repo, set(files))
 
     conn = rag.connect(readonly=False)
     total_chunks = 0
