@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-09-04) — `run_model_report()` also lists `hermes-tts` (Kokoro-82M via Kokoro-FastAPI,
+# infra/hermes-tts/) on `spark-2` -- same "hardcode a fixed row, document why" treatment `embed`
+# already gets, for the same reason: it's a standalone service, not a `hermes-router.py` role.
+# `SPARK2_IP` (env `SPARK2_LAN_IP`, default matching `hermes-router.py`'s own default) is new in
+# this file for exactly this row -- `EMBED_INFO` never needed it since `embed` lives on spark
+# alongside this script itself, but `hermes-tts` doesn't.
 #
 # 1.3.0 (2026-09-04) — Direct operator request: a "model report" source -- which checkpoint backs
 # each role, where it physically lives, whether it's abliterated. Built from one local GET against
@@ -125,11 +132,15 @@ _canary_report = importlib.import_module("hermes-canary-report")
 REPO_DIR = Path(__file__).resolve().parent.parent
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
+SPARK2_IP = os.environ.get("SPARK2_LAN_IP", "10.129.1.17")
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
-# `embed` is a standalone llama-server instance, never registered in hermes-router.py's `ROLES` --
-# see this file's 1.3.0 changelog entry above. Fixed values, not derived from anywhere live.
+# `embed` and `hermes-tts` are standalone services, never registered in hermes-router.py's `ROLES`
+# -- see this file's 1.3.0/1.4.0 changelog entries above. Fixed values, not derived from anywhere
+# live.
 EMBED_INFO = ("Qwen3-Embedding-0.6B-Q8_0", f"{SPARK_IP}:8092",
               f"http://{SPARK_IP}:8092/v1/embeddings", False)
+TTS_INFO = ("Kokoro-82M (Kokoro-FastAPI)", f"{SPARK2_IP}:8098",
+            f"http://{SPARK2_IP}:8098/v1/audio/speech", False)
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
 BUZZ_TOKEN = os.environ.get("BUZZ_TOKEN", "")
 MEMORY_URL = os.environ.get("MEMORY_URL", f"http://{SPARK_IP}:8102").rstrip("/")
@@ -378,13 +389,13 @@ def run_canary_status():
     return summary + "\n\n" + botnet_text, None
 
 
-_ROLE_ORDER = {"dispatch": 0, "super": 1, "coder": 2, "embed": 3, "muse": 4, "omni": 5}
+_ROLE_ORDER = {"dispatch": 0, "super": 1, "coder": 2, "embed": 3, "muse": 4, "omni": 5, "tts": 6}
 
 
 def run_model_report():
-    """Live Role/Model/IP/Port/API-URL/Abliterated report -- see this file's 1.3.0 changelog for
-    why one local GET against this node's own router is enough to cover every role, and why
-    `embed` is hardcoded (EMBED_INFO) instead."""
+    """Live Role/Model/IP/Port/API-URL/Abliterated report -- see this file's 1.3.0/1.4.0 changelog
+    entries for why one local GET against this node's own router is enough to cover every router
+    role, and why `embed`/`tts` are hardcoded (EMBED_INFO/TTS_INFO) instead."""
     try:
         resp = _get(f"{ROUTER_URL}/v1/models", timeout=10)
     except Exception as exc:
@@ -401,15 +412,16 @@ def run_model_report():
             f"{backend_url}/v1/chat/completions", entry["abliterated"],
         ))
     rows.append(("embed",) + EMBED_INFO)
+    rows.append(("tts",) + TTS_INFO)
     rows.sort(key=lambda r: _ROLE_ORDER.get(r[0], 99))
 
-    lines = ["Model report (live via this node's router; embed is a fixed, non-routed endpoint):"]
+    lines = ["Model report (live via this node's router; embed/tts are fixed, non-routed endpoints):"]
     for role, model, ip_port, api_url, abliterated in rows:
         flag = "ABLITERATED" if abliterated else "stock"
-        lines.append(f"  {role:<9} {model:<46} {ip_port:<20} {flag}")
+        lines.append(f"  {role:<9} {model:<28} {ip_port:<20} {flag}")
         lines.append(f"            {api_url}")
     lines.append("")
-    lines.append("dispatch/muse/omni/embed run always-on; super/coder wake on demand via the broker.")
+    lines.append("dispatch/muse/omni/embed/tts run always-on; super/coder wake on demand via the broker.")
     return "\n".join(lines), None
 
 

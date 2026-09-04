@@ -1,0 +1,12 @@
+# hermes-tts — Kokoro-82M via remsky/Kokoro-FastAPI. CPU image, deliberately — see README for why
+# the GPU image is not used on this node.
+services:
+  hermes-tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: hermes-tts
+    restart: unless-stopped
+    ports:
+      # Bound 0.0.0.0 deliberately, matching muse/omni's own precedent — reachable from the LAN
+      # (other fleet nodes) and, via the two explicit ufw rules in README.md, from the Tailscale
+      # tailnet directly, the same access shape muse already has.
+      - "0.0.0.0:8098:8880"
