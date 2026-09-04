@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-09-04) — moved split_sections()/chunk_file() here from
+# hermes-rag-ingest-docs.py (unchanged in behavior, chunk_file() now takes
+# max_chars as a parameter instead of reading that script's own module
+# global): hermes-rag-ingest-kb.py needed the identical header-aware
+# chunking once it started converting PDF/DOCX to real structured markdown
+# via the new hermes_doc_to_markdown.py rather than flat plain text. Same
+# "a hyphenated tools/ filename can't be imported" reasoning that already
+# justified every other function in this file.
 #
 # 1.5.0 — S16b: reranking. search() over-fetches a wider KNN candidate pool (RERANK_WIDEN, default
 # 4x top_k) and reranks it down to the real top_k via a cross-encoder (Qwen3-Reranker-0.6B,
@@ -393,6 +402,50 @@ def group_blocks(blocks, max_chars: int, sep: str = "\n\n"):
             chunk = candidate
     if chunk:
         yield chunk
+
+
+HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
+
+
+def split_sections(text: str):
+    """Yield (header_path, body) for each markdown header block. header_path
+    is the nearest header text (not a full breadcrumb) — enough for a real
+    citation without over-engineering a heading-stack tracker this corpus
+    doesn't need. Originally hermes-rag-ingest-docs.py's own (Phase 30b);
+    moved here 2026-09-04 once hermes-rag-ingest-kb.py needed the identical
+    logic for markdown converted from PDF/DOCX (hermes_doc_to_markdown.py) —
+    same "a hyphenated tools/ filename can't be imported" reasoning as every
+    other function in this file."""
+    matches = list(HEADER_RE.finditer(text))
+    if not matches:
+        yield ("(no heading)", text.strip())
+        return
+    if matches[0].start() > 0:
+        preamble = text[: matches[0].start()].strip()
+        if preamble:
+            yield ("(preamble)", preamble)
+    for i, m in enumerate(matches):
+        header = m.group(2).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[start:end].strip()
+        if body:
+            yield (header, body)
+
+
+def chunk_file(text: str, max_chars: int):
+    """Header-aware chunking for markdown text: each section stays one chunk
+    unless it exceeds max_chars, in which case group_blocks()'s own
+    paragraph/sentence/hard-boundary fallback splits it further (a table row
+    or long-form entry written as one giant line with no blank-line breaks —
+    real in both the fleet-docs corpus this was built for and PDF/DOCX
+    conversions with dense paragraphs)."""
+    for header, body in split_sections(text):
+        if len(body) <= max_chars:
+            yield (header, body)
+        else:
+            for sub in group_blocks(body.split("\n\n"), max_chars):
+                yield (header, sub)
 
 
 # ---- source-discovery candidates (Phase 30h; shared with the portal since

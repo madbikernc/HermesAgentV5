@@ -11,7 +11,12 @@
 # sqlite-vec's own Python bindings are NOT listed here on purpose: they're
 # loaded as a runtime SQLite extension (hermes_rag_common.py's connect()),
 # not imported as a regular package.
-pypdf>=5.0
+# pypdf (was listed here 2026-08-15) is no longer used as of
+# hermes-rag-ingest-kb.py 1.5.0 (2026-09-04) — PDF now converts to
+# markdown via pymupdf4llm below instead of pypdf's flat text extraction.
+# Not uninstalled from the live venv (harmless if another tool outside
+# this file's own tracked set happens to use it too) — this file only
+# documents intent, per its own header above.
 python-docx>=1.1
 # lxml was already resident in the venv (a transitive python-docx
 # dependency, confirmed live via `pip list` before adding EPUB support) --
@@ -20,3 +25,10 @@ python-docx>=1.1
 # to do the same job and leaving the real import undeclared.
 lxml>=5.0
 EbookLib>=0.18
+# Added 2026-09-04 for hermes_doc_to_markdown.py's pdf_to_markdown() --
+# font-size-based heading detection, table reconstruction, and (optional,
+# --ocr) OCR for PDF, replacing hermes-rag-ingest-kb.py's old flat
+# pypdf-based extraction. Pulls in pymupdf/pymupdf-layout/onnxruntime as
+# real transitive dependencies (confirmed live at install time), not
+# separately pinned here -- pip resolves them from this one entry.
+pymupdf4llm>=0.0.20

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.2.1
+# Version: 1.3.0
+#
+# 1.3.0 (2026-09-04) — split_sections()/chunk_file() (this script's own
+# markdown-header chunking, since 30b) moved to hermes_rag_common.py once
+# hermes-rag-ingest-kb.py needed the identical logic for PDF/DOCX converted
+# to markdown. No behavior change here — chunk_file() now takes max_chars
+# as a parameter instead of reading this file's own module global, called
+# as rag.chunk_file(text, MAX_CHUNK_CHARS).
 #
 # 1.2.1 (2026-08-30) — HermesAgentV5 consolidation: --repo CLI flag default repointed
 # from HermesAgentV4 to HermesAgentV5.
@@ -38,7 +45,6 @@ Usage:
 """
 import argparse
 import datetime
-import re
 import sys
 from pathlib import Path
 
@@ -54,49 +60,6 @@ DOC_GLOBS = [
     "skills/*/SKILL.md",
     "infra/*/README.md",
 ]
-
-HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
-
-
-def split_sections(text: str):
-    """Yield (header_path, body) for each markdown header block. header_path
-    is the nearest header text (not a full breadcrumb) — enough for a real
-    citation without over-engineering a heading-stack tracker this corpus
-    doesn't need."""
-    matches = list(HEADER_RE.finditer(text))
-    if not matches:
-        yield ("(no heading)", text.strip())
-        return
-    if matches[0].start() > 0:
-        preamble = text[: matches[0].start()].strip()
-        if preamble:
-            yield ("(preamble)", preamble)
-    for i, m in enumerate(matches):
-        header = m.group(2).strip()
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        body = text[start:end].strip()
-        if body:
-            yield (header, body)
-
-
-def split_paragraphs(body: str, max_chars: int):
-    """This doc set has table rows and long-form entries written as one
-    giant line with no blank-line breaks (IMPLEMENTATION_PLAN.md's per-phase
-    log rows run several thousand characters) — rag.group_blocks()'s hard
-    sentence/character fallback handles those, shared with the podcast
-    ingester's own long-monologue-turn problem."""
-    return rag.group_blocks(body.split("\n\n"), max_chars)
-
-
-def chunk_file(text: str):
-    for header, body in split_sections(text):
-        if len(body) <= MAX_CHUNK_CHARS:
-            yield (header, body)
-        else:
-            for sub in split_paragraphs(body, MAX_CHUNK_CHARS):
-                yield (header, sub)
-
 
 def discover_files(repo: Path):
     files = []
@@ -120,7 +83,7 @@ def ingest_file(conn, repo: Path, path: Path, dry_run: bool) -> int:
     if row and row[0] == file_hash:
         return 0
 
-    chunks = list(chunk_file(text))
+    chunks = list(rag.chunk_file(text, MAX_CHUNK_CHARS))
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     if dry_run:

@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-09-04) — direct request: PDF/DOCX now convert to real
+# structured Markdown (new hermes_doc_to_markdown.py — pymupdf4llm for PDF,
+# a hand-rolled python-docx walk for DOCX) instead of the flat plain-text
+# join extract_pdf_text()/extract_docx_text() produced (both removed, now
+# dead code). Chunking follows: these two extensions plus .md now go
+# through hermes_rag_common.chunk_file(), the markdown-header chunking
+# 30b's fleet-docs ingester already had (moved there this same session so
+# both ingesters share one implementation) -- this file's own 1.0.0-era
+# docstring left header-chunking as "add later if real files show it's
+# worth it," which converting PDF/DOCX to markdown instead of flat text
+# just did. .txt/.epub are unaffected, still group_blocks()'d as before --
+# neither produces real markdown headings to key on.
+#
+# The hand-rolled pdftoppm+tesseract OCR path (ocr_pdf_page(), OCR_MIN_CHARS/
+# OCR_DPI) is also removed: pymupdf4llm does real OCR internally
+# (confirmed live -- it OCR'd 8 pages of a real scanned PDF unprompted, its
+# own use_ocr default is True) via its own use_ocr kwarg, now wired to this
+# file's pre-existing --ocr flag so the operator-facing contract (off by
+# default, explicit per-run opt-in -- S16c's own reasoning, a scanned-heavy
+# folder turning a quick catch-up into a multi-hour run) is unchanged even
+# though the mechanism underneath it is entirely different.
 #
 # 1.4.0 — HermesAgentV5 S16c: optional OCR for scanned/image-only PDF pages, direct request.
 # `--ocr` is off by default and must be passed explicitly — a personal-notes folder can hold large
@@ -62,17 +84,22 @@ location was genuinely undecided when Phase 30 was designed; direct answer
 share (`/mnt/nas2-hermes-backup/RAGDocs`) — created for this purpose, empty
 at build time ("I'll add files later").
 
-Handles `.md`/`.txt` (as plain text), `.pdf` (via `pypdf`), `.docx` (via
-`python-docx`), and `.epub` (via `EbookLib`), recursively. Paragraph-chunked
-(blank-line boundaries, same `hermes_rag_common.group_blocks()` fallback
-every other ingester uses) rather than the header-aware chunking 30b's
-fleet-docs ingester uses — a personal-notes folder's structure is unknown
-ahead of any real content, so the simpler, format-agnostic approach is the
-honest default; markdown header-chunking can be added later if real files
-show it's worth the extra complexity, not built speculatively ahead of
-that. Every skipped file (unhandled type, or a PDF/docx/epub that extracts
-to nothing — most often a scanned/image-only PDF with no real text layer)
-is named explicitly in the run's own output, not silently dropped.
+Handles `.md`/`.txt` (as plain text), `.pdf` and `.docx` (converted to real
+structured Markdown via `hermes_doc_to_markdown.py`, 2026-09-04 — see that
+file's own header for why PDF gets a real dependency, pymupdf4llm, and DOCX
+is hand-rolled against `python-docx` directly), and `.epub` (via
+`EbookLib`), recursively. `.md`/`.pdf`/`.docx` are header-aware chunked
+(`hermes_rag_common.chunk_file()`, the same markdown-header chunking 30b's
+fleet-docs ingester uses — no longer avoided here now that PDF/DOCX
+actually produce real heading structure instead of flat text, closing the
+gap this file's own 1.0.0-era docstring left as "add later if worth it").
+`.txt`/`.epub` stay on the older paragraph-boundary chunker
+(`hermes_rag_common.group_blocks()`) — plain notes have no headers to key
+on, and EPUB's own block extraction already yields paragraph-shaped text,
+not markdown. Every skipped file (unhandled type, or one that extracts to
+nothing — most often a scanned/image-only PDF with no real text layer and
+no `--ocr`) is named explicitly in the run's own output, not silently
+dropped.
 
 Embeds locally against the resident Spark backend (127.0.0.1:8092), same
 choice 30b made for fleet-docs — a personal-notes folder is not expected to
@@ -83,111 +110,42 @@ Usage:
     /opt/hermes/venvs/rag/bin/python3 hermes-rag-ingest-kb.py [--root PATH] [--dry-run] [--ocr]
 
 --ocr (S16c) is off by default — the daily scheduled timer never passes it. Run it by hand when a
-scanned/image-only PDF is known to be in the folder; see this file's own 1.4.0 header for why it
-stays an explicit, per-run operator choice rather than an automatic default.
+scanned/image-only PDF is known to be in the folder. As of 1.5.0 this is pymupdf4llm's own
+`use_ocr` (hermes_doc_to_markdown.pdf_to_markdown()), not this file's hand-rolled
+pdftoppm+tesseract path (removed, now dead code with pymupdf4llm doing real OCR internally) — the
+operator-facing contract (off by default, explicit per-run opt-in) is unchanged.
 """
 import argparse
 import datetime
-import shutil
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import ebooklib
 import lxml.html
-import pypdf
-from docx import Document
 from ebooklib import epub
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hermes_doc_to_markdown as doc2md  # noqa: E402
 import hermes_rag_common as rag  # noqa: E402
 
 CORPUS = "personal-kb"
 MAX_CHUNK_CHARS = 1800
 ROOT = "/mnt/nas2-hermes-backup/RAGDocs"
 HANDLED_EXTENSIONS = {".md", ".txt", ".pdf", ".docx", ".epub"}
+MARKDOWN_EXTENSIONS = {".md", ".pdf", ".docx"}  # header-aware chunked; see docstring
 EPUB_BLOCK_XPATH = ".//p | .//li | .//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6"
-OCR_MIN_CHARS = 50  # a page's own native extraction below this is treated as "empty" for OCR
-OCR_DPI = 200
-
-
-def ocr_pdf_page(pdf_path: Path, page_num: int) -> str:
-    """Rasterizes one PDF page (1-indexed, matching pypdf's own enumeration once +1'd by the
-    caller) via pdftoppm and OCRs it via tesseract. Both are real system binaries, checked live
-    before this path was written, not assumed present — raises RuntimeError with the real
-    stderr/exit code if either is missing or fails, so a broken OCR install surfaces as a real
-    error on first use rather than a silent empty page."""
-    if not shutil.which("pdftoppm") or not shutil.which("tesseract"):
-        raise RuntimeError("pdftoppm/tesseract not found on PATH — install poppler-utils/tesseract-ocr")
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        prefix = tmp_path / "page"
-        result = subprocess.run(
-            ["pdftoppm", "-png", "-f", str(page_num), "-l", str(page_num), "-r", str(OCR_DPI),
-             str(pdf_path), str(prefix)],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"pdftoppm failed on page {page_num}: {result.stderr.strip()}")
-        pngs = sorted(tmp_path.glob("page*.png"))
-        if not pngs:
-            raise RuntimeError(f"pdftoppm produced no image for page {page_num}")
-        result = subprocess.run(
-            ["tesseract", str(pngs[0]), "stdout"],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"tesseract failed on page {page_num}: {result.stderr.strip()}")
-        return result.stdout.strip()
-
-
-def extract_pdf_text(path: Path, ocr: bool = False) -> str:
-    """Join every page's extracted text. Returns "" for a scanned/image-only PDF with no real
-    text layer and ocr=False (pypdf alone has no OCR) -- callers must treat that as "skip, don't
-    index," not an error. With ocr=True (S16c, off by default -- see this file's own 1.4.0 header),
-    any individual page whose native extraction comes back under OCR_MIN_CHARS is rasterized and
-    OCR'd instead, page by page -- a partially-scanned document keeps its real text-layer pages
-    exactly as before and only recovers the scanned ones."""
-    reader = pypdf.PdfReader(str(path))
-    pages = []
-    for i, page in enumerate(reader.pages):
-        native = (page.extract_text() or "").strip()
-        if ocr and len(native) < OCR_MIN_CHARS:
-            try:
-                recovered = ocr_pdf_page(path, i + 1)
-            except Exception as exc:
-                print(f"WARNING: {path.name} page {i + 1}: OCR failed, keeping native "
-                      f"extraction ({len(native)} chars): {exc}", file=sys.stderr)
-                pages.append(native)
-                continue
-            if len(recovered) > len(native):
-                print(f"  {path.name} page {i + 1}: OCR recovered {len(recovered)} chars "
-                      f"(native extraction had {len(native)})", file=sys.stderr)
-                pages.append(recovered)
-                continue
-        pages.append(native)
-    return "\n\n".join(pages).strip()
-
-
-def extract_docx_text(path: Path) -> str:
-    """Join every paragraph's text, blank-line separated so the existing
-    paragraph-boundary chunker (rag.group_blocks()) treats each Word
-    paragraph the same way it already treats a markdown paragraph."""
-    doc = Document(str(path))
-    return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
 
 def extract_epub_text(path: Path) -> str:
     """Walks the book's own spine (reading order, not manifest order) and
     pulls text out of each chapter's block-level tags (paragraphs, list
-    items, headings) as separate blocks -- same paragraph-boundary shape
-    extract_docx_text() already produces, so group_blocks() treats an EPUB
-    chapter the same way it treats a Word document. A chapter with no
-    block tags at all (rare, but real for some converted EPUBs) falls back
-    to that item's whole text as one block rather than silently dropping
-    it, the same "never index nothing silently" discipline the PDF/docx
-    paths already follow."""
+    items, headings) as separate blocks -- paragraph-boundary shape, not
+    markdown (EPUB's own heading tags aren't preserved as "#" markers here,
+    unlike the PDF/DOCX->markdown path), so group_blocks() rather than
+    chunk_file() handles this one. A chapter with no block tags at all
+    (rare, but real for some converted EPUBs) falls back to that item's
+    whole text as one block rather than silently dropping it, the same
+    "never index nothing silently" discipline the PDF/DOCX path follows."""
     book = epub.read_epub(str(path))
     blocks = []
     for idref, _linear in book.spine:
@@ -225,18 +183,28 @@ def discover_files(root: Path):
 def ingest_file(conn, root: Path, path: Path, dry_run: bool, ocr: bool = False) -> int:
     rel = str(path.relative_to(root))
     suffix = path.suffix.lower()
+    is_markdown = suffix in MARKDOWN_EXTENSIONS
 
-    if suffix == ".pdf":
-        text = extract_pdf_text(path, ocr=ocr)
-    elif suffix == ".docx":
-        text = extract_docx_text(path)
+    if suffix in (".pdf", ".docx"):
+        try:
+            text = doc2md.to_markdown(path, ocr=ocr)
+        except Exception as e:
+            # Broad on purpose: pymupdf4llm/python-docx can raise several
+            # distinct exception types on a corrupt/malformed real-world
+            # file (bad zip for .docx, malformed xref for .pdf, ...) --
+            # this file's own docstring commits to naming every skipped
+            # file explicitly rather than crashing the whole batch run on
+            # one bad document, same discipline the empty-text check below
+            # already applies to a scanned PDF with no --ocr.
+            print(f"WARNING: {rel}: could not convert to markdown, skipping: {e}", file=sys.stderr)
+            return 0
     elif suffix == ".epub":
         text = extract_epub_text(path)
     else:
         text = path.read_text(encoding="utf-8", errors="replace")
 
     if not text.strip():
-        hint = "" if (suffix == ".pdf" and ocr) else " (pass --ocr for scanned/image-only PDFs)" if suffix == ".pdf" else ""
+        hint = " (pass --ocr for scanned/image-only PDFs)" if (suffix == ".pdf" and not ocr) else ""
         print(f"WARNING: {rel}: no extractable text — skipping (scanned/image-only PDF, "
               f"empty document, or extraction failure){hint}", file=sys.stderr)
         return 0
@@ -252,11 +220,13 @@ def ingest_file(conn, root: Path, path: Path, dry_run: bool, ocr: bool = False) 
     if row and row[0] == file_hash:
         return 0
 
-    paragraphs = text.split("\n\n")
-    chunk_texts = list(rag.group_blocks(paragraphs, MAX_CHUNK_CHARS))
-    if not chunk_texts:
+    if is_markdown:
+        chunks = list(rag.chunk_file(text, MAX_CHUNK_CHARS))  # [(header, body), ...]
+    else:
+        chunks = [(None, t) for t in rag.group_blocks(text.split("\n\n"), MAX_CHUNK_CHARS)]
+    if not chunks:
         return 0
-    n = len(chunk_texts)
+    n = len(chunks)
 
     if dry_run:
         print(f"[dry-run] {rel}: {n} chunk(s) would be (re)embedded")
@@ -269,13 +239,16 @@ def ingest_file(conn, root: Path, path: Path, dry_run: bool, ocr: bool = False) 
         "(SELECT id FROM chunks WHERE corpus=? AND source_path=?)",
         (CORPUS, rel),
     )
-    for idx, chunk_text in enumerate(chunk_texts):
-        citation = rel if n == 1 else f"{rel} (part {idx + 1}/{n})"
+    for idx, (header, chunk_text) in enumerate(chunks):
+        if header and header not in ("(preamble)", "(no heading)"):
+            citation = f"{rel} — {header}"
+        else:
+            citation = rel if n == 1 else f"{rel} (part {idx + 1}/{n})"
         vec = rag.embed(chunk_text)
         cur = conn.execute(
             "INSERT INTO chunks (corpus, source_path, section, chunk_index, chunk_text, "
             "citation, content_hash, ingested_at) VALUES (?,?,?,?,?,?,?,?)",
-            (CORPUS, rel, None, idx, chunk_text, citation, rag.content_hash(chunk_text), now),
+            (CORPUS, rel, header, idx, chunk_text, citation, rag.content_hash(chunk_text), now),
         )
         conn.execute(
             "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?, ?)",
