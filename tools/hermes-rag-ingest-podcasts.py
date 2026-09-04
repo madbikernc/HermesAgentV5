@@ -1,5 +1,48 @@
 #!/usr/bin/env python3
-# Version: 1.2.1
+# Version: 1.2.3
+#
+# 1.2.3 (2026-09-03) — fixes a real, previously-hidden gap the 1.2.2 fix
+# below uncovered: with the TBRH noise gone, a second batch of "no turns
+# parsed" warnings turned out to be a genuine parser bug, not a false alarm.
+# Episodes im-805 through im-831 (27 of the archive's 81 IntelligentMachines
+# transcripts, one third of the whole show) have sat permanently unindexed
+# since the corpus was first ingested -- confirmed live: episodes 805-831 are
+# the show's first ~7 months right after its rebrand from "This Week in
+# Google", and TWiT's site used an older transcript template for them
+# ("H:MM:SS - Speaker" turn markers) before switching to the current
+# "Speaker [HH:MM:SS]:" style at episode 832, where IM_TURN_RE has matched
+# ever since. parse_intelligent_machines() only ever tried the new pattern.
+# Added IM_TURN_RE_OLD as a fallback tried when the new pattern finds zero
+# matches; factored the shared turn-extraction loop into
+# _im_turns_from_matches(), which both patterns now feed identically since
+# both capture the speaker name as group 1. First fallback attempt only
+# covered 26 of the 27 -- im-818 turned out to be a third sub-variant within
+# the same old-template era (bare "MM:SS" instead of "H:MM:SS", plus a role
+# tag on every speaker like "Leo Laporte (Host)"), found live by dry-running
+# against the real archive before trusting the fix. IM_TURN_RE_OLD's final
+# form covers all three shapes in one pattern: 1-2 timestamp components, and
+# an optional "(Role)" suffix that can never leak into the captured name
+# since the name charset excludes parens. Also made IM_TITLE_RE
+# case-insensitive: im-818's header capitalizes "818 Transcript" where every
+# other sampled episode doesn't, which had been silently dropping this one
+# file's episode number and date (citation fell back to "Intelligent
+# Machines #?") even after its dialogue started parsing. A one-off manual
+# run after deploying both fixes re-ingested all 27 previously-silent
+# episodes with correct citations.
+#
+# 1.2.2 (2026-09-03) — fixes a standing false-alarm bug found while checking
+# daily ingest logs: ~295 TBRH story-links files (bonus/call-in/portfolio-
+# profile episodes going back to 2020) were logging "no turns parsed --
+# skipping (format may have changed)" on *every single run, forever*,
+# because parse_tbrh() correctly returning zero lines for a genuinely empty
+# "links": [] (confirmed live against the real archive -- sampled files are
+# well-formed JSON, not malformed) was never written to ingest_state, so it
+# could never be cached and kept getting re-parsed and re-warned daily. Now
+# tbrh's empty-links case is recognized as expected (episode cited no news
+# stories) and cached like a normal ingest, logged at INFO level with an
+# accurate reason instead of a misleading WARNING; sn/im's empty-parse case
+# is left exactly as before (uncached, still a WARNING) since dialogue-based
+# shows genuinely finding zero turns does mean the format broke.
 #
 # 1.2.1 (2026-08-30) — HermesAgentV5 consolidation: REPO_DIR default repointed from
 # HermesAgentV4 to HermesAgentV5 as part of consolidating the fleet's tools/skills/infra
@@ -93,8 +136,29 @@ SN_HEADER_STOPLIST = {
 }
 SN_TURN_RE = re.compile(r"^([A-Z][A-Z0-9 .&/'-]{0,24}):\s+(.*)$", re.DOTALL)
 
-IM_TITLE_RE = re.compile(r"Intelligent Machines (\d+) transcript")
+# IGNORECASE: im-818's header capitalizes it ("818 Transcript") where every
+# other sampled episode doesn't ("805 transcript") -- found live while
+# verifying the IM_TURN_RE_OLD fix below, which fixed im-818's dialogue but
+# left this title match (and therefore its episode number and date) silently
+# empty until this flag was added.
+IM_TITLE_RE = re.compile(r"Intelligent Machines (\d+) transcript", re.IGNORECASE)
 IM_TURN_RE = re.compile(r"^([A-Za-z][A-Za-z .'-]{1,40}) \[(\d{2}:\d{2}:\d{2})\]:$", re.MULTILINE)
+# Episodes 805-831 -- the show's first ~7 months right after its rebrand from
+# "This Week in Google" -- used TWiT's older transcript template instead:
+# "TIME - Speaker" turn markers (timestamp first, dialogue starting on the
+# next line same as the new format). Confirmed live against the real
+# archive: im-832 onward is exclusively IM_TURN_RE, 805-831 exclusively this
+# one -- a clean cutover, not a mix. Within 805-831 the timestamp itself
+# varies (most are "H:MM:SS", e.g. "0:02:06"; im-818 alone uses bare
+# "MM:SS", e.g. "00:00", and appends a role tag to every speaker, e.g.
+# "Leo Laporte (Host)") -- one pattern covers all of it: 1-2 timestamp
+# components after the leading digits, and an optional "(Role)" suffix
+# stripped from the captured name (the speaker charset excludes parens, so
+# it can never be captured by accident).
+IM_TURN_RE_OLD = re.compile(
+    r"^\d{1,2}(?::\d{2}){1,2} - ([A-Za-z][A-Za-z .'-]{1,40}?)(?:\s*\([A-Za-z]+\))?$",
+    re.MULTILINE,
+)
 
 
 def broker_token():
@@ -160,7 +224,12 @@ def parse_intelligent_machines(text: str):
 
     meta = {"show": "Intelligent Machines", "episode": episode, "date": date, "title": ""}
 
-    matches = list(IM_TURN_RE.finditer(text))
+    matches = list(IM_TURN_RE.finditer(text)) or list(IM_TURN_RE_OLD.finditer(text))
+    return meta, _im_turns_from_matches(text, matches)
+
+
+def _im_turns_from_matches(text: str, matches) -> list[str]:
+    # Both IM_TURN_RE and IM_TURN_RE_OLD capture the speaker name as group 1.
     turns = []
     for i, m in enumerate(matches):
         speaker = m.group(1).strip()
@@ -169,7 +238,7 @@ def parse_intelligent_machines(text: str):
         body = " ".join(text[start:end].split())
         if body:
             turns.append(f"{speaker}: {body}")
-    return meta, turns
+    return turns
 
 
 # ---- Tech Brew Ride Home parsing -------------------------------------------
@@ -259,7 +328,29 @@ def ingest_file(conn, token, show_key, path: Path, archive: Path, dry_run: bool)
 
     meta, turns = PARSERS[show_key](text)
     if not turns:
-        print(f"WARNING: {rel}: no turns parsed — skipping (format may have changed)", file=sys.stderr)
+        if show_key == "tbrh":
+            # TBRH's story-links files are frequently and legitimately empty --
+            # bonus/call-in/portfolio-profile episodes cite no news stories at
+            # all (confirmed against the real archive: every empty-links file
+            # sampled is well-formed JSON with "links": [], not a broken
+            # parse). Cache the hash so it's not re-read and re-logged on
+            # every future run; a real edit to the file still invalidates it
+            # via the file_hash check above.
+            print(f"{rel}: 0 chunk(s) — no story links for this episode")
+            if not dry_run:
+                conn.execute(
+                    "INSERT INTO ingest_state (corpus, source_path, file_hash, last_ingested) "
+                    "VALUES (?,?,?,?) ON CONFLICT(corpus, source_path) DO UPDATE SET "
+                    "file_hash=excluded.file_hash, last_ingested=excluded.last_ingested",
+                    (CORPUS, rel, file_hash,
+                     datetime.datetime.now(datetime.timezone.utc).isoformat()),
+                )
+                conn.commit()
+        else:
+            # SN/IM always have real dialogue -- an empty parse here means the
+            # source format genuinely changed, not "nothing to say." Left
+            # uncached (unlike tbrh above) so it keeps surfacing until fixed.
+            print(f"WARNING: {rel}: no turns parsed — skipping (format may have changed)", file=sys.stderr)
         return 0
 
     base = citation_base(meta)
