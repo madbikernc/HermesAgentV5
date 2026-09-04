@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-09-04) — direct request, found reviewing a real TBRH sample
+# while describing this corpus's integration level: parse_tbrh() indexed
+# every link in a story-links file as if it were a real story citation,
+# including sponsor/ad-read plugs and the recurring "subscribe to the
+# ad-free feed" self-promo line. Added _is_tbrh_sponsor_noise() -- see that
+# function's own comment for how the filter shape was found and quantified
+# against the real archive (2405 files) before shipping. IMPORTANT
+# operational note: file_hash dedup (ingest_state) is computed from the raw
+# JSON text, which this fix doesn't change, so a normal incremental reindex
+# will NOT reprocess any of the 2405 already-indexed TBRH files -- their old,
+# noise-included chunks stay in the index until ingest_state rows for
+# corpus='podcasts' AND source_path LIKE 'TechBrewRideHome/%' are cleared
+# (or dropped entirely), forcing a full re-embed of the whole TBRH set on
+# the next run.
 #
 # 1.4.0 (2026-09-04) — direct request, found during a RAG-ingest coverage
 # audit: two real sources sitting in the archive had been excluded from this
@@ -408,13 +423,42 @@ def _im_turns_from_matches(text: str, matches) -> list[str]:
 
 # ---- Tech Brew Ride Home parsing -------------------------------------------
 
+# Added 1.5.0, direct request, after noticing a real sample TBRH file
+# indexed "Subscribe to the ad-free feed.: https://tech.supercast.com/" as
+# if it were a real story. Quantified against the full real archive (2405
+# files, 15898 links) before writing this: 2913 links have no attributed
+# `source` at all, and within those, 2426 are sponsor/ad-read plugs whose
+# "headline" is really just the sponsor's own URL/brand read aloud --
+# "Metalab.co", "TinyCapital.com", "Mealime", "Shopify.com/ride" -- always a
+# single space-free token, never a sentence. The remaining 487 null-source
+# entries are real content (a full headline sentence or book title TBRH's
+# own show-notes just didn't wrap in a "(Source)" parenthetical) -- sampled
+# across the whole archive, every one of them contains a space. A link WITH
+# a real attributed source is never touched by this filter, regardless of
+# shape (e.g. "Cerebras" attributed to "Pierre Lamond" stays, since `source`
+# is not null for it).
+TBRH_ADFEED_RE = re.compile(r"ad-free feed", re.IGNORECASE)
+
+
+def _is_tbrh_sponsor_noise(headline: str) -> bool:
+    """True for a null-source TBRH link entry that's sponsor/ad-read noise,
+    not a real story. See this section's own comment above for how this
+    shape was found and quantified against the real archive."""
+    if TBRH_ADFEED_RE.search(headline):
+        return True
+    return " " not in headline
+
+
 def parse_tbrh(text: str):
     """TBRH has no transcript -- the archive file is the story-links JSON
     hermes-podcast-retriever.py's fetch_tbrh_remote_listing() already
     extracted from the show's own official RSS feed. Each citation (headline
     + source publication + URL, already just that -- not surrounding show-
     notes prose) becomes one short line; there's no dialogue to chunk by
-    speaker turn the way SN/IM's parsers do."""
+    speaker turn the way SN/IM's parsers do. 1.5.0: sponsor/ad-read links and
+    the recurring "subscribe to the ad-free feed" self-promo line are
+    dropped via _is_tbrh_sponsor_noise() rather than indexed as if they were
+    real story citations."""
     data = json.loads(text)
     meta = {
         "show": "Tech Brew Ride Home",
@@ -429,6 +473,8 @@ def parse_tbrh(text: str):
         if not headline or not url:
             continue
         source = link.get("source")
+        if source is None and _is_tbrh_sponsor_noise(headline):
+            continue
         tag = f" ({source})" if source else ""
         lines.append(f"{headline}{tag}: {url}")
     return meta, lines
