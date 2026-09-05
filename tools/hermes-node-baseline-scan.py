@@ -88,7 +88,7 @@ DEFAULT_CONFIG = {
     "node_name": None,
     "retention_days": 30,
     "severity_threshold": "medium",
-    "aide": {"enabled": False, "config_path": "/etc/aide/aide.conf"},
+    "aide": {"enabled": False, "config_path": "/etc/aide/aide.conf", "check_timeout_seconds": 7200},
     "lynis": {
         "enabled": False,
         "report_path": "/var/log/lynis-report.dat",
@@ -204,14 +204,21 @@ def run_aide(cfg):
     followed by path lines. Exact formatting (leading flags like f++++++++++++++++:) varies by
     aide version/config — the two alternatives in _AIDE_PATH_RE cover "flags: /path" and a bare
     "/path" line; verify against a real run before trusting this on a node with a non-default
-    aide.conf report format."""
+    aide.conf report format.
+
+    check_timeout_seconds defaults to 7200 (2h), not a short default -- found live 2026-09-05:
+    HomeD13's real `aide --init` (381,891 entries) took 43m12s wall-clock, and a `--check` pass
+    does comparably full-database work. The original 600s (10 min) timeout was nowhere close and
+    silently turned every real run into a timeout error, never actually reporting a single aide
+    finding. Tune per-node in node-baseline.json if `aide --init`'s own reported run time (see
+    its output) suggests this node needs more or would be fine with less."""
     if not cfg.get("enabled"):
         return [], "disabled in config"
     if not which("aide"):
         return [], "aide not installed"
 
     out, rc, err = run(["sudo", "-n", "aide", "--check", "--config", cfg.get("config_path", "/etc/aide/aide.conf")],
-                        timeout=600)
+                        timeout=cfg.get("check_timeout_seconds", 7200))
     if rc not in (0, 1):  # aide exits 1 when it finds differences -- that's the normal "findings" case
         return [], f"aide --check failed (exit {rc}): {err.strip()[:300] or '(no stderr)'}"
 

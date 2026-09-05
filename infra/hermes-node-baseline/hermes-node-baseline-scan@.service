@@ -6,6 +6,11 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# No start timeout: a real aide --check pass alone can take well over an hour on a large
+# filesystem (confirmed live 2026-09-05 -- HomeD13's aide --init, comparable full-database
+# work, took 43m12s for 381,891 entries; spark's took well over 90 minutes). systemd's own
+# default TimeoutStartSec would otherwise silently kill this mid-scan long before that.
+TimeoutStartSec=0
 User=pmoney
 Group=pmoney
 Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
