@@ -84,6 +84,11 @@ via `GET /turns?task_id=...` that a `static-scan` phase turn appears before the 
 
 ## Known gaps, not attempted here
 
+- **`git` must be on `PATH`** — `run_detect_secrets()` builds a disposable git repo (`git init` +
+  `git add`, no commit) around a copy of the file, because `detect-secrets scan <path>` only scans
+  git-tracked files and silently returns zero results for anything else, `--all-files` included.
+  This was a real bug caught during live verification (v1.0.0 silently found zero secrets on
+  every real run) — see the tool's own 1.0.1 changelog entry.
 - **No dependency/CVE scanning** (`pip-audit`) — needs a real project with pinned versions against
   a vulnerability database; a bare function string has neither. A natural extension if this tool is
   ever pointed at whole files/repos instead of one generated function.
@@ -96,4 +101,5 @@ via `GET /turns?task_id=...` that a `static-scan` phase turn appears before the 
 
 | Version | Date | Change |
 |---|---|---|
+| 1.0.1 | 2026-09-05 | Fixed a real bug found in live verification: `detect-secrets` was silently finding zero secrets on every run because it only scans git-tracked files. `run_detect_secrets()` now scans inside a disposable throwaway git repo. Also added `--no-verify` to stop it making a live network call to check credential validity. |
 | 1.0.0 | 2026-09-05 | Initial version — direct operator request for a comprehensive, consistent security-review capability for `coder`/`coder2`. |

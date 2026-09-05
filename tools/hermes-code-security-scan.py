@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
 """
 hermes-code-security-scan.py — deterministic static-analysis pass for a single Python
 function/snippet (a plain string, never a file the caller already has on disk, never executed
@@ -73,11 +73,27 @@ venv exists (`--help` on each), don't assume across a future `pip install --upgr
 "verify against a live run, don't trust the last thing you read" discipline this whole project has
 used everywhere else (e.g. the reranker GGUF and BFCL registry mismatches were both real gaps
 found exactly this way, not assumed away).
+
+Changelog:
+  1.0.1  Fixed a real bug found during live verification (2026-09-05): detect-secrets scan <path>
+         silently scans nothing unless <path> is a git-tracked file -- `--all-files` alone does NOT
+         override this for a bare temp file outside any repo (confirmed live: three different
+         secret shapes, including a plain `--string` test that correctly fired AWSKeyDetector, all
+         came back empty via `scan <path>` against /tmp; the same file inside a throwaway repo with
+         a bare `git add` -- no commit needed -- scanned correctly). Every prior scan_code() call
+         was silently finding zero secrets regardless of content. run_detect_secrets() now builds a
+         disposable git repo around a copy of the file and cleans it up in a finally block. Also
+         added --no-verify: detect-secrets' default behavior makes a live network call to check
+         whether a found credential is currently valid, which both defeats a fake-but-format-correct
+         test secret and is a network side effect this file's own "static only" policy (see above)
+         should not have.
+  1.0.0  Initial version.
 """
 import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -174,12 +190,12 @@ def scan_credential_logging(code):
     return findings
 
 
-def _run_subprocess(cmd, timeout=SUBPROCESS_TIMEOUT):
+def _run_subprocess(cmd, timeout=SUBPROCESS_TIMEOUT, cwd=None):
     """Never raises -- one tool failing to run must not sink the other two (fail-isolated, same
     principle every multi-source check in this fleet already follows, e.g. hermes-status.py's own
     per-source try/except in its STATUS_SOURCES loop)."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
     except subprocess.TimeoutExpired:
         return None
     except FileNotFoundError:
@@ -230,23 +246,45 @@ def run_ruff_unused(path):
 
 
 def run_detect_secrets(path):
-    proc = _run_subprocess([DETECT_SECRETS_BIN, "scan", str(path)])
-    if proc is None:
-        return [], f"{DETECT_SECRETS_BIN} not runnable (missing venv or timed out)"
+    """detect-secrets `scan <path>` only scans git-tracked files -- confirmed live, `--all-files`
+    does not override this for a path outside any repo at all. We build a disposable git repo
+    around a copy of the file (a bare `git add`, no commit needed) so a plain temp file scans
+    correctly, and clean the repo up unconditionally. `--no-verify` disables detect-secrets' own
+    live network call to check whether a found credential is currently valid -- this file is
+    static-only (see module docstring) and that verification call is a network side effect it
+    must not have, on top of it defeating any fake-but-format-correct test secret outright."""
+    tmp_repo = tempfile.mkdtemp(prefix="hermes-codesec-git-")
     try:
-        data = json.loads(proc.stdout or "{}")
-    except (ValueError, json.JSONDecodeError) as exc:
-        return [], f"detect-secrets output not parseable JSON: {exc}"
-    findings = []
-    for _filename, secrets in (data.get("results") or {}).items():
-        for s in secrets:
-            findings.append({
-                "category": "secrets",
-                "line": s.get("line_number"),
-                "description": f"possible {s.get('type', 'secret')} detected",
-                "severity": "critical",
-            })
-    return findings, None
+        repo_path = Path(tmp_repo)
+        target_name = path.name
+        (repo_path / target_name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
+        init = _run_subprocess(["git", "init", "-q"], cwd=str(repo_path))
+        if init is None or init.returncode != 0:
+            return [], "git init failed -- detect-secrets requires a git repo to scan a file"
+        add = _run_subprocess(["git", "add", target_name], cwd=str(repo_path))
+        if add is None or add.returncode != 0:
+            return [], "git add failed -- detect-secrets requires the file to be tracked"
+
+        proc = _run_subprocess([DETECT_SECRETS_BIN, "scan", "--no-verify", target_name], cwd=str(repo_path))
+        if proc is None:
+            return [], f"{DETECT_SECRETS_BIN} not runnable (missing venv or timed out)"
+        try:
+            data = json.loads(proc.stdout or "{}")
+        except (ValueError, json.JSONDecodeError) as exc:
+            return [], f"detect-secrets output not parseable JSON: {exc}"
+        findings = []
+        for _filename, secrets in (data.get("results") or {}).items():
+            for s in secrets:
+                findings.append({
+                    "category": "secrets",
+                    "line": s.get("line_number"),
+                    "description": f"possible {s.get('type', 'secret')} detected",
+                    "severity": "critical",
+                })
+        return findings, None
+    finally:
+        shutil.rmtree(tmp_repo, ignore_errors=True)
 
 
 def scan_code(code):
