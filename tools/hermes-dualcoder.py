@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.0.2
+# Version: 1.0.3
+#
+# 1.0.3 (2026-09-05) — real bug found on the very next live run (task dc-live-test-2) after 1.0.2's
+# budget fix: the run actually converged and completed all four security/meta-review calls
+# successfully, then the final publish_result() call hit a transient 502 that propagated uncaught
+# to main()'s outer catch-all -- stranding the task in `security-meta-review` forever, with the
+# real bundle lost (it existed only in a local variable). Every OTHER logging call in this file
+# (log_round, log_guard_verdict, set_task_state) was already defensive; publish_result, the single
+# most consequential call in the whole file, was not. Now retries once after a 5s backoff, and on a
+# second failure logs the full undelivered bundle to this service's own log (recoverable via
+# journalctl) and makes an isolated best-effort state-transition attempt, so a last-mile delivery
+# failure can never again silently erase a fully-completed task's real result.
 #
 # 1.0.2 (2026-09-05) — first real end-to-end run (task dc-live-test-1, a genuine merge-in-place
 # function) confirmed 1.0.1's budgets were still nowhere near enough: coder2's review of a real
@@ -420,16 +431,46 @@ def build_unresolved_bundle(round_count, code, transcript, judge_verdict):
 def publish_result(task_id, memory_ref, outcome, message):
     """`outcome` is an explicit terminal-state string ('done'/'unresolved'/'error'/'blocked'), not
     the plain ok-bool every other specialist's publish_result() uses -- this workflow has a real
-    three-plus-way terminal outcome, not just success/failure."""
-    turn = _post(f"{MEMORY_URL}/turns", {
-        "task_id": task_id, "agent": "dualcoder", "role": "assistant",
-        "raw": message, "presented": message,
-    }, MEMORY_TOKEN)
-    set_task_state(task_id, outcome)
-    _post(f"{BUZZ_URL}/messages", {
-        "from": "dualcoder", "topic": "results", "task_id": task_id,
-        "memory_ref": f"turn:{turn['id']}",
-    }, BUZZ_TOKEN)
+    three-plus-way terminal outcome, not just success/failure.
+
+    This is the single most consequential call in the whole file -- by the time it runs, every
+    expensive model call for the task has already succeeded, and its only remaining job is to not
+    lose that work. Confirmed live 2026-09-05: a transient 502 from this exact call (after a full,
+    successful run) propagated to main()'s outer catch-all uncaught, leaving the task stranded in
+    its last in-progress state forever -- the real bundle existed only in this function's local
+    `message` variable and was gone the moment the process moved on, even though every round's
+    `log_round()` call had already survived (log_round/log_guard_verdict were already defensive;
+    this, the most important call of all, was not). One retry after a short backoff, then -- if it
+    still fails -- log the full bundle text to this service's own log (recoverable via journalctl)
+    and make a last, isolated attempt at just the state transition, so the task's own state is
+    never left silently wrong even if rich delivery is impossible."""
+    def _do_publish():
+        turn = _post(f"{MEMORY_URL}/turns", {
+            "task_id": task_id, "agent": "dualcoder", "role": "assistant",
+            "raw": message, "presented": message,
+        }, MEMORY_TOKEN)
+        set_task_state(task_id, outcome)
+        _post(f"{BUZZ_URL}/messages", {
+            "from": "dualcoder", "topic": "results", "task_id": task_id,
+            "memory_ref": f"turn:{turn['id']}",
+        }, BUZZ_TOKEN)
+
+    try:
+        _do_publish()
+        return
+    except Exception as exc:
+        log(f"task {task_id!r}: publish_result failed ({exc}), retrying once after 5s")
+        time.sleep(5)
+
+    try:
+        _do_publish()
+        return
+    except Exception as exc:
+        log(f"task {task_id!r}: publish_result failed again after retry ({exc}) -- logging the "
+            f"full result below so it isn't silently lost, and attempting the state transition "
+            f"alone as a last resort")
+        log(f"task {task_id!r} UNDELIVERED RESULT (outcome={outcome}):\n{message}")
+        set_task_state(task_id, outcome)
 
 
 def process_one():
