@@ -1,6 +1,6 @@
 # hermes-node-baseline — S17 recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Daily local-node security baseline (aide file-integrity, lynis hardening audit, syft+grype
 SBOM/CVE), diffed day-over-day, with new medium+ findings written as durable, queryable
@@ -81,10 +81,22 @@ curl -s $MEMORY_URL/turns?task_id=<REC-id> -H "Authorization: Bearer $MEMORY_TOK
 
 ## Known gaps, stated plainly rather than assumed away
 
-- Exact aide report format / lynis `report.dat` field layout / syft CLI source-string syntax
-  were verified against each tool's documented shape and against realistic sample output in
-  unit tests, but never against a real installed binary on a live node — do that first, per the
-  S17 plan's own build order.
+- Verified live against real binaries on all three nodes, 2026-09-05 — several real bugs were
+  found and fixed this way and are not hypothetical: syft has no `dpkg-db:` source scheme (`dir:`
+  against the same path is correct); grype cannot infer OS distro from a bare `dir:` source and
+  silently matched zero OS-package CVEs without an explicit `--distro` override; lynis writes its
+  report 0640 root:root (read via `sudo cat`, not a direct file read); a single lynis test_id can
+  legitimately fire more than once for different issues (finding_id now includes a hash of the
+  description); grype's own stderr WARN broke JSON parsing when naively merged into stdout.
+- `--only-fixed` is applied to every grype call: an unfixed CVE has no real "package-upgrade" to
+  suggest yet. Confirmed live on spark: this cut 51,009 raw medium+ matches down to 2,644
+  genuinely actionable ones on the same SBOM.
+- A node's first-ever run should use `--seed-only` (see `--help`) to persist today's findings as
+  the baseline without writing recommendations or sending a digest — confirmed live: an
+  un-seeded first run on a real, ordinarily-patched Ubuntu system is thousands of medium+
+  findings, which is normal apt-upgrade lag, not something worth a one-time flood.
+- HomeD13 has no persona and was never provisioned to decrypt any email item in Vaultwarden
+  (confirmed live, not assumed) — its digest is Matrix-only, by design, not a silent failure.
 - `service-restart` routing only fires when a finding's `suggested_remediation` explicitly
   names both a `target` unit and a `sintra`/`amy` `identity` — no scan tool emits that today, so
   this path is inert until a future finding type populates it. Everything else routes to
@@ -92,9 +104,13 @@ curl -s $MEMORY_URL/turns?task_id=<REC-id> -H "Authorization: Bearer $MEMORY_TOK
 - Routing to `dualcoder` gets you a reviewed **script**, not an applied fix — dualcoder never
   executes anything (same posture as `hermes-code-security-scan.py`). A human still runs the
   result. Don't oversell this as unattended auto-remediation; it isn't.
+- Changing `tools/hermes-buzz.py`'s `KNOWN_AGENTS` (needed once, to register `node-baseline`)
+  requires restarting `hermes-buzz.service` to take effect — a `git pull` alone does not reload
+  a running Python service. Confirmed and done live on spark 2026-09-05.
 
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-09-05 | Initial version — S17 built (scanner, then authorize-watch + routing) per the approved plan. |
+| 1.1.0 | 2026-09-05 | Live-verified on all three fleet nodes: real tool bugs found and fixed (syft source scheme, grype distro detection, lynis permission/dedup), `--only-fixed` and `--seed-only` added, HomeD13's Matrix-only email limitation documented, `hermes-buzz.service` restart requirement noted. |

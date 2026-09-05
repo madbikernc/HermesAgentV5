@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-05) — email identity is now per-node (spark->email-mercury,
+# spark-2->email-mercury2, homed13->none), not a uniform "always try mercury@" default. Found
+# live: HomeD13 has no persona and was never provisioned to decrypt any email item at all
+# (vault-get-secret.sh's own per-node sealed-credential scoping, working as designed) --
+# calling it anyway cost a full ~40-60s of real retries failing every single day before
+# falling through gracefully. HomeD13 now skips the vault call entirely and gets a
+# Matrix-only digest.
 #
 # systemd ExecStart for hermes-node-baseline-scan@<node>.service. Fetches this scan's secrets
 # from Vaultwarden, exports them as real process environment variables, then `exec`s the
@@ -30,11 +38,27 @@ else
   echo "[hermes-node-baseline-scan-wrapper:$NODE] matrix-fleetops not in vault — FleetOps digest disabled" >&2
 fi
 
-export EMAIL_FROM="${EMAIL_FROM:-mercury@canislupisnc.net}"
-if EMAIL_PASSWORD="$("$VAULT_GET" "email-${EMAIL_FROM%%@*}" password 2>/dev/null)"; then
-  export EMAIL_PASSWORD
+# Per-node email identity -- NOT a uniform "always try mercury@" default. Found live
+# 2026-09-05: HomeD13 has no persona and was never provisioned to decrypt ANY email item
+# (vault-get-secret.sh's own per-node sealed-credential scoping, working as designed, not a
+# bug) -- calling it anyway cost a full ~40-60s of retries failing every single day before
+# falling through. HomeD13 gets Matrix-only digests; that's a real, known limitation (see
+# README), not silently degraded.
+case "$NODE" in
+  spark)    EMAIL_ITEM="email-mercury" ;;
+  spark-2)  EMAIL_ITEM="email-mercury2" ;;
+  *)        EMAIL_ITEM="" ;;
+esac
+
+if [ -n "$EMAIL_ITEM" ]; then
+  export EMAIL_FROM="${EMAIL_FROM:-$([ "$NODE" = spark-2 ] && echo mercury2@canislupisnc.net || echo mercury@canislupisnc.net)}"
+  if EMAIL_PASSWORD="$("$VAULT_GET" "$EMAIL_ITEM" password 2>/dev/null)"; then
+    export EMAIL_PASSWORD
+  else
+    echo "[hermes-node-baseline-scan-wrapper:$NODE] $EMAIL_ITEM not in vault — digest email disabled" >&2
+  fi
 else
-  echo "[hermes-node-baseline-scan-wrapper:$NODE] email-${EMAIL_FROM%%@*} not in vault — digest email disabled" >&2
+  echo "[hermes-node-baseline-scan-wrapper:$NODE] no email identity configured for this node — Matrix-only digest" >&2
 fi
 
 exec /usr/bin/python3 "$REPO_DIR/tools/hermes-node-baseline-scan.py"
