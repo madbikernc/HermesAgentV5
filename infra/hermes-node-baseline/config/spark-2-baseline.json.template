@@ -17,7 +17,7 @@
   "syft_grype": {
     "enabled": true,
     "targets": [
-      {"name": "dpkg", "source": "dpkg-db:/var/lib/dpkg", "kind": "os-packages"}
+      {"name": "dpkg", "source": "dir:/var/lib/dpkg", "kind": "os-packages"}
     ]
   }
 }

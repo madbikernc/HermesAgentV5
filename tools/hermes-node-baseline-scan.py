@@ -98,7 +98,10 @@ DEFAULT_CONFIG = {
     "syft_grype": {
         "enabled": False,
         # Each target: {"name": "...", "source": "<syft source string>", "kind": "os-packages"|"venv"}
-        # e.g. {"name": "dpkg", "source": "dpkg-db:/var/lib/dpkg", "kind": "os-packages"}
+        # e.g. {"name": "dpkg", "source": "dir:/var/lib/dpkg", "kind": "os-packages"} -- syft's
+        #      directory cataloger auto-detects the dpkg status file inside; there is no
+        #      separate "dpkg-db:" scheme in syft 1.x, confirmed live 2026-09-05 (it doesn't
+        #      exist -- "dir:" against the same path is correct and was verified end-to-end).
         #      {"name": "codesec-venv", "source": "dir:/opt/hermes/venvs/codesec", "kind": "venv"}
         "targets": [],
     },
@@ -130,10 +133,16 @@ def log(msg):
 
 
 def run(cmd, timeout=60, shell=False):
-    """Same shape as hermes-node-health.py's run(): argv list preferred, never crashes."""
+    """Argv list preferred, never crashes. Stdout and stderr are merged (stderr appended under
+    a "[stderr]" marker, same convention tools/hermes-security-scan.py's run_nmap() already
+    uses) -- found live 2026-09-05: a plain-stdout-only capture (hermes-node-health.py's own
+    run() shape, which this originally copied) silently discarded syft's actual error message
+    on a real failure, since syft writes errors to stderr -- the caller was left with an empty
+    diagnostic for a real, debuggable failure."""
     try:
         r = subprocess.run(cmd, shell=shell, capture_output=True, text=True, timeout=timeout)
-        return r.stdout, r.returncode
+        out = r.stdout + (f"\n[stderr]\n{r.stderr}" if r.stderr.strip() else "")
+        return out, r.returncode
     except FileNotFoundError:
         return "", 127
     except subprocess.TimeoutExpired:
@@ -279,7 +288,7 @@ _GRYPE_SEVERITY_MAP = {"negligible": "low", "unknown": "low", "low": "low",
 
 def _syft_grype_one_target(target, timeout=600):
     """One syft(source) -> grype(sbom) pass for a single configured target. `target["source"]`
-    is a syft source string (e.g. "dpkg-db:/var/lib/dpkg", "dir:/opt/hermes/venvs/codesec") —
+    is a syft source string (e.g. "dir:/var/lib/dpkg", "dir:/opt/hermes/venvs/codesec") —
     deliberately scoped (a package-DB or one directory), never a bare "dir:/" full-filesystem
     walk, so this stays cheap enough to run daily. Verify the exact source-string syntax against
     the installed syft version (`syft --help` / `syft source --help`) before relying on it."""
