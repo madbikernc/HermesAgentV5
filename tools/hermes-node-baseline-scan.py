@@ -136,22 +136,24 @@ def log(msg):
 
 
 def run(cmd, timeout=60, shell=False):
-    """Argv list preferred, never crashes. Stdout and stderr are merged (stderr appended under
-    a "[stderr]" marker, same convention tools/hermes-security-scan.py's run_nmap() already
-    uses) -- found live 2026-09-05: a plain-stdout-only capture (hermes-node-health.py's own
-    run() shape, which this originally copied) silently discarded syft's actual error message
-    on a real failure, since syft writes errors to stderr -- the caller was left with an empty
-    diagnostic for a real, debuggable failure."""
+    """Argv list preferred, never crashes. Returns (stdout, returncode, stderr) as three
+    separate values -- NOT merged into one string. Found live 2026-09-05, in two steps:
+    hermes-node-health.py's own run() shape (stdout+rc only) silently discarded a real syft
+    error that went to stderr, so a first fix merged stderr into the returned "stdout" string
+    (same convention hermes-security-scan.py's run_nmap() uses) -- which then broke grype's own
+    successful JSON output the very next test, because grype logs a WARN line to stderr even on
+    a clean run, and the merged text was no longer valid JSON for json.loads() to parse. Callers
+    that parse stdout as structured data (grype) need it untouched; callers building a
+    human-readable error message can reference `stderr` explicitly instead."""
     try:
         r = subprocess.run(cmd, shell=shell, capture_output=True, text=True, timeout=timeout)
-        out = r.stdout + (f"\n[stderr]\n{r.stderr}" if r.stderr.strip() else "")
-        return out, r.returncode
+        return r.stdout, r.returncode, r.stderr
     except FileNotFoundError:
-        return "", 127
+        return "", 127, "command not found"
     except subprocess.TimeoutExpired:
-        return "", -1
-    except Exception:
-        return "", -1
+        return "", -1, "timed out"
+    except Exception as e:
+        return "", -1, str(e)
 
 
 def which(name):
@@ -207,10 +209,10 @@ def run_aide(cfg):
     if not which("aide"):
         return [], "aide not installed"
 
-    out, rc = run(["sudo", "-n", "aide", "--check", "--config", cfg.get("config_path", "/etc/aide/aide.conf")],
-                   timeout=600)
+    out, rc, err = run(["sudo", "-n", "aide", "--check", "--config", cfg.get("config_path", "/etc/aide/aide.conf")],
+                        timeout=600)
     if rc not in (0, 1):  # aide exits 1 when it finds differences -- that's the normal "findings" case
-        return [], f"aide --check failed (exit {rc}) — check sudoers entry and aide.conf"
+        return [], f"aide --check failed (exit {rc}): {err.strip()[:300] or '(no stderr)'}"
 
     findings = []
     for change_type, block in _AIDE_SECTION_RE.findall(out):
@@ -247,9 +249,9 @@ def run_lynis(cfg):
         return [], "lynis not installed"
 
     report_path = Path(cfg.get("report_path", "/var/log/lynis-report.dat"))
-    _, rc = run(["sudo", "-n", "lynis", "audit", "system", "--quiet", "--no-colors"], timeout=900)
+    _, rc, err = run(["sudo", "-n", "lynis", "audit", "system", "--quiet", "--no-colors"], timeout=900)
     if rc != 0:
-        return [], f"lynis audit system failed (exit {rc}) — check sudoers entry"
+        return [], f"lynis audit system failed (exit {rc}): {err.strip()[:300] or '(no stderr)'}"
     if not report_path.exists():
         return [], f"lynis reported success but {report_path} was not found"
 
@@ -302,13 +304,14 @@ def _syft_grype_one_target(target, timeout=600):
     with tempfile.NamedTemporaryFile(suffix=".json", prefix=f"sbom-{name}-", delete=False) as f:
         sbom_path = f.name
     try:
-        out, rc = run(["syft", source, "-o", f"json={sbom_path}"], timeout=timeout)
+        out, rc, err = run(["syft", source, "-o", f"json={sbom_path}"], timeout=timeout)
         if rc != 0 or not Path(sbom_path).exists() or Path(sbom_path).stat().st_size == 0:
-            return [], f"syft failed for target {name!r} (exit {rc}): {out[-300:]}"
+            diag = (err.strip() or out.strip())[-300:] or "(no output)"
+            return [], f"syft failed for target {name!r} (exit {rc}): {diag}"
 
-        gout, grc = run(["grype", f"sbom:{sbom_path}", "-o", "json"], timeout=timeout)
+        gout, grc, gerr = run(["grype", f"sbom:{sbom_path}", "-o", "json"], timeout=timeout)
         if grc not in (0, 1):  # grype exits 1 when vulnerabilities are found above its own threshold
-            return [], f"grype failed for target {name!r} (exit {grc})"
+            return [], f"grype failed for target {name!r} (exit {grc}): {gerr.strip()[:300] or '(no stderr)'}"
         try:
             data = json.loads(gout)
         except json.JSONDecodeError as e:
