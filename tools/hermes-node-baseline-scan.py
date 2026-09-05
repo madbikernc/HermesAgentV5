@@ -291,12 +291,41 @@ _GRYPE_SEVERITY_MAP = {"negligible": "low", "unknown": "low", "low": "low",
                         "medium": "medium", "high": "high", "critical": "critical"}
 
 
+def _detect_os_distro():
+    """Reads ID and VERSION_ID from /etc/os-release, e.g. ("ubuntu", "24.04"). Needed because
+    grype cannot infer the OS distro from a bare `dir:` source the way it can from a real
+    container image -- found live 2026-09-05: scanning `dir:/var/lib/dpkg` with no --distro
+    override matched ZERO OS-package vulnerabilities (grype's own stderr WARN said exactly why:
+    "Unable to determine the OS distribution of some packages"), vs. 2,782 real matches on the
+    identical SBOM once `--distro ubuntu:24.04` was supplied by hand. This is not an edge case --
+    it silently zeroed out the OS-package half of every scan until caught."""
+    try:
+        info = {}
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                info[k] = v.strip().strip('"')
+        if info.get("ID") and info.get("VERSION_ID"):
+            return f"{info['ID']}:{info['VERSION_ID']}"
+    except Exception:
+        pass
+    return None
+
+
 def _syft_grype_one_target(target, timeout=600):
     """One syft(source) -> grype(sbom) pass for a single configured target. `target["source"]`
     is a syft source string (e.g. "dir:/var/lib/dpkg", "dir:/opt/hermes/venvs/codesec") —
     deliberately scoped (a package-DB or one directory), never a bare "dir:/" full-filesystem
     walk, so this stays cheap enough to run daily. Verify the exact source-string syntax against
-    the installed syft version (`syft --help` / `syft source --help`) before relying on it."""
+    the installed syft version (`syft --help` / `syft source --help`) before relying on it.
+
+    grype runs with `--only-fixed`: a vulnerability with no released fix has no "package-upgrade"
+    remediation to suggest in the first place (nothing to upgrade to yet), so surfacing one as a
+    recommendation demanding action is actively unhelpful, not just noisy -- confirmed live
+    2026-09-05, spark: --only-fixed cut 51,009 raw medium+ matches (mostly real but currently
+    un-fixable Ubuntu package CVEs) down to 2,644 genuinely actionable ones on the very same SBOM.
+    If a fix is published later, that finding naturally reappears as "new" on the day it does,
+    which is exactly the right day to be told about it."""
     name, source = target.get("name", "?"), target.get("source")
     if not source:
         return [], f"target {name!r} has no 'source' configured"
@@ -309,7 +338,15 @@ def _syft_grype_one_target(target, timeout=600):
             diag = (err.strip() or out.strip())[-300:] or "(no output)"
             return [], f"syft failed for target {name!r} (exit {rc}): {diag}"
 
-        gout, grc, gerr = run(["grype", f"sbom:{sbom_path}", "-o", "json"], timeout=timeout)
+        grype_cmd = ["grype", f"sbom:{sbom_path}", "-o", "json", "--only-fixed"]
+        if target.get("kind") == "os-packages":
+            distro = _detect_os_distro()
+            if distro:
+                grype_cmd += ["--distro", distro]
+            else:
+                log(f"could not detect this node's distro from /etc/os-release — "
+                    f"grype's OS-package matching for target {name!r} may under-report")
+        gout, grc, gerr = run(grype_cmd, timeout=timeout)
         if grc not in (0, 1):  # grype exits 1 when vulnerabilities are found above its own threshold
             return [], f"grype failed for target {name!r} (exit {grc}): {gerr.strip()[:300] or '(no stderr)'}"
         try:
@@ -527,6 +564,16 @@ def main():
     parser = argparse.ArgumentParser(description="Hermes daily node security baseline scan")
     parser.add_argument("--dry-run", action="store_true", help="Scan + normalize + print JSON, no persist/notify/recs")
     parser.add_argument("--no-notify", action="store_true", help="Persist and write recommendations, skip the digest")
+    parser.add_argument("--seed-only", action="store_true",
+                         help="First-run bootstrap for a node with real pre-existing findings "
+                              "(e.g. normal apt-upgrade lag): persist today's findings as the "
+                              "baseline WITHOUT writing any recommendation or sending any "
+                              "digest. Every finding is treated as already-known starting "
+                              "tomorrow's run -- only genuinely new findings from here on "
+                              "generate a REC. Direct operator decision, 2026-09-05: an "
+                              "un-seeded first run on a real node can be thousands of medium+ "
+                              "findings, which is normal backlog, not something worth thousands "
+                              "of one-time recommendation records and a flooded first digest.")
     parser.add_argument("--section", nargs="+", choices=SECTION_NAMES, help="Only run these sections")
     parser.add_argument("--config", help="Override config file path")
     args = parser.parse_args()
@@ -556,22 +603,26 @@ def main():
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     new_recs = []
-    seq = 1
-    for f in new_findings:
-        if not severity_at_least(f["severity"], threshold):
-            continue
-        rec_id = f"REC-{node_name}-{today}-{seq:03d}"
-        seq += 1
-        if write_recommendation(rec_id, node_name, f):
-            rec_ids[f["finding_id"]] = rec_id
-            new_recs.append((rec_id, f))
-        else:
-            log(f"could not record recommendation for finding {f['finding_id']!r} — will retry next run")
+    if args.seed_only:
+        log(f"{node_name}: --seed-only, skipping recommendation-writing for "
+            f"{len(new_findings)} finding(s) -- treated as the baseline as of today")
+    else:
+        seq = 1
+        for f in new_findings:
+            if not severity_at_least(f["severity"], threshold):
+                continue
+            rec_id = f"REC-{node_name}-{today}-{seq:03d}"
+            seq += 1
+            if write_recommendation(rec_id, node_name, f):
+                rec_ids[f["finding_id"]] = rec_id
+                new_recs.append((rec_id, f))
+            else:
+                log(f"could not record recommendation for finding {f['finding_id']!r} — will retry next run")
 
-    for fid in resolved_ids:
-        rec_id = prev_rec_ids.get(fid)
-        if rec_id:
-            resolve_recommendation(rec_id, node_name, fid)
+        for fid in resolved_ids:
+            rec_id = prev_rec_ids.get(fid)
+            if rec_id:
+                resolve_recommendation(rec_id, node_name, fid)
 
     snapshot = {
         "node": node_name,
