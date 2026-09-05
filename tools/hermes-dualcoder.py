@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+#
+# 1.0.1 (2026-09-05) — real finding from coder2's first live coherence test: Muse Glimmer emits a
+# separate `reasoning_content` field and can spend its ENTIRE token budget there before ever
+# writing to `content` (confirmed live: a trivial one-line-function question at max_tokens=60
+# returned empty content, 100% consumed by reasoning; 300 tokens was enough for that one). Every
+# max_tokens budget raised (review 1200->2500, revise 2000->3500, security_review 1200->2500,
+# meta_review 1000->2000) and MODEL_TIMEOUT_SECONDS 600->900 to match the longer generations.
+# call_model() now raises on a truncated-mid-reasoning response (empty content, real
+# reasoning_content, finish_reason='length') instead of returning "" -- an empty string would
+# otherwise be silently read as a real, if content-free, APPROVE/ISSUES verdict.
 #
 # hermes-dualcoder — bounded, auditable dual-agent code review (direct operator request,
 # 2026-09-05, following a real bake-off: coder and coder2/Muse Glimmer turned out asymmetric, not
@@ -87,7 +97,7 @@ GUARD_URL = os.environ.get("GUARD_URL", f"http://{SPARK_IP}:8096").rstrip("/")
 GUARD_TOKEN = os.environ.get("GUARD_TOKEN", "")
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
-MODEL_TIMEOUT_SECONDS = int(os.environ.get("MODEL_TIMEOUT_SECONDS", "600"))
+MODEL_TIMEOUT_SECONDS = int(os.environ.get("MODEL_TIMEOUT_SECONDS", "900"))
 MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "5"))
 JUDGE_MAX_CALLS = int(os.environ.get("JUDGE_MAX_CALLS", "1"))
 JUDGE_MAX_TOKENS = int(os.environ.get("JUDGE_MAX_TOKENS", "800"))
@@ -237,6 +247,13 @@ def log_round(task_id, phase, round_num, actor, content):
 
 
 def call_model(role, system_prompt, user_content, max_tokens=1500):
+    """Raises RuntimeError on a truncated-mid-reasoning response (empty `content` with real
+    `reasoning_content` and finish_reason='length') rather than returning an empty string --
+    confirmed live 2026-09-05 that coder2 (Muse Glimmer) can spend its entire token budget in its
+    own reasoning_content field on a real question, leaving nothing in `content` at all. An empty
+    string here would otherwise be silently read as a real (if content-free) APPROVE/ISSUES
+    verdict by review()'s own `.startswith("APPROVE")` check -- a truncation is a real failure to
+    surface and retry with a larger budget, not a legitimate empty verdict."""
     body = {
         "model": role,
         "messages": [
@@ -246,7 +263,16 @@ def call_model(role, system_prompt, user_content, max_tokens=1500):
         "max_tokens": max_tokens,
     }
     result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=MODEL_TIMEOUT_SECONDS)
-    return result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    choice = result.get("choices", [{}])[0]
+    message = choice.get("message", {})
+    content = (message.get("content") or "").strip()
+    if not content and message.get("reasoning_content") and choice.get("finish_reason") == "length":
+        raise RuntimeError(
+            f"{role} truncated mid-reasoning at max_tokens={max_tokens} with no real answer "
+            f"emitted yet ({len(message['reasoning_content'])} chars of reasoning_content, 0 of "
+            f"content) -- needs a larger token budget for this role, not a silent empty verdict"
+        )
+    return content
 
 
 def draft(task_spec):
@@ -255,22 +281,22 @@ def draft(task_spec):
 
 def review(reviewer, task_spec, code):
     content = f"Task:\n{task_spec}\n\nCandidate implementation:\n{code}"
-    reply = call_model(reviewer, REVIEW_SYSTEM_PROMPT, content, max_tokens=1200)
+    reply = call_model(reviewer, REVIEW_SYSTEM_PROMPT, content, max_tokens=2500)
     return reply.upper().startswith("APPROVE"), reply
 
 
 def revise(writer, task_spec, code, issues):
     content = f"Task:\n{task_spec}\n\nYour previous implementation:\n{code}\n\nReviewer's issues:\n{issues}"
-    return call_model(writer, REVISE_SYSTEM_PROMPT, content, max_tokens=2000)
+    return call_model(writer, REVISE_SYSTEM_PROMPT, content, max_tokens=3500)
 
 
 def security_review(role, code):
-    return call_model(role, SECURITY_SYSTEM_PROMPT, f"Function:\n{code}", max_tokens=1200)
+    return call_model(role, SECURITY_SYSTEM_PROMPT, f"Function:\n{code}", max_tokens=2500)
 
 
 def meta_review(role, other_review, code):
     content = f"Function (for reference):\n{code}\n\nThe other reviewer's security review:\n{other_review}"
-    return call_model(role, META_REVIEW_SYSTEM_PROMPT, content, max_tokens=1000)
+    return call_model(role, META_REVIEW_SYSTEM_PROMPT, content, max_tokens=2000)
 
 
 def ask_judge(task_spec, code, disagreement_text):
