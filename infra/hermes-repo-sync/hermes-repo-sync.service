@@ -1,6 +1,8 @@
 [Unit]
-Description=Propagate pmoney's HermesAgentV5 pull to Sintra's/Amy's checkouts and restart affected services
+Description=Pull this node's own HermesAgentV5 checkout and restart its own services if it moved
 Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-repo-sync/README.md
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot

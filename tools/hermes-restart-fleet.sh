@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
-# Version: 3.0.1
+# Version: 3.1.0
+#
+# 3.1.0 (2026-09-05) — direct request, part of re-imagining hermes-repo-sync.sh (2.0.0) for the
+# current three-peer-node ecosystem (no more Sintra/Amy identities to fan out to; every node
+# already pulls its own checkout directly via hermes-repo-autopull.timer). That redesign needed a
+# way for a node to restart ONLY its own services, locally, right after its own pull moves HEAD --
+# without SSHing to itself or (worse) to a peer node. Added `--node spark|spark2|homed13`: scopes
+# to exactly that node's own service block and runs it locally (plain `sudo systemctl restart`,
+# no SSH) instead of the default full-fleet orchestrated run. Default behavior (no --node) is
+# completely unchanged -- still the same full-fleet, dependency-ordered, SSH-orchestrated restart
+# this script has always done, for manual human use. The homed13 broker-job-in-flight safety check
+# is unaffected either way -- confirmed live (2026-09-05) it's already location-agnostic, since
+# HomeD13's own pmoney account can fetch vault-get-secret.sh secrets and reach $BROKER_URL
+# directly, same as spark can.
 #
 # 3.0.1 (2026-08-30) — HermesAgentV5 consolidation: PMONEY_REPO repointed from
 # HermesAgentV4 to HermesAgentV5.
@@ -38,12 +51,18 @@
 #   still has passwordless root on 8 units, including shared `hermes-router.service`) — closed in
 #   IMPLEMENTATION_PLAN.md S14, not by this script.
 #
-# hermes-restart-fleet.sh — restart the fleet's core service stack, in dependency order, from the
-# pmoney account on spark.
+# hermes-restart-fleet.sh — restart the fleet's core service stack, in dependency order.
+#
+# Two ways to run it:
+#   - No flags (the original design): full-fleet restart, orchestrated from the pmoney account on
+#     spark, reaching spark-2/homed13 over SSH -- a deliberate, manual, human-run step.
+#   - `--node spark|spark2|homed13` (3.1.0): restart ONLY that node's own services, locally, no
+#     SSH. This is what tools/hermes-repo-sync.sh (2.0.0) calls on a node right after that node's
+#     own autopull moves HEAD -- each node restarts itself, never a peer.
 #
 # Scope: the standing daemons the fleet actually depends on — Matrix, both nodes' resident model
 # backends, the broker/wake-worker, Buzz, hermes-memory, hermes-guard, both nodes' routers,
-# hermes-dispatch, hermes-presenter, hermes-media — plus HomeD13's render workers over SSH.
+# hermes-dispatch, hermes-presenter, hermes-media — plus HomeD13's render workers.
 # Deliberately does NOT touch the periodic timers (RAG ingest, news digest, usage/pfsense reports,
 # backups, canary/game-server monitors, etc.) — those are one-shot jobs, not services a restart
 # order matters for.
@@ -75,12 +94,23 @@ HOMED13_SSH="homed13"
 SPARK2_SSH="spark2"
 FORCE=0
 DRY_RUN=0
+NODE_FILTER=""          # "" = full fleet (default, unchanged); spark|spark2|homed13 = that node only
+RUN_LOCAL_SPARK2=0      # 1 when --node spark2: restart spark-2's own services locally, no SSH
+RUN_LOCAL_HOMED13=0     # 1 when --node homed13: restart homed13's own services locally, no SSH
 
-for arg in "$@"; do
-  case "$arg" in
-    --force) FORCE=1 ;;
-    --dry-run) DRY_RUN=1 ;;
-    *) echo "Usage: $0 [--force] [--dry-run]" >&2; exit 2 ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --node)
+      NODE_FILTER="${2:-}"
+      case "$NODE_FILTER" in
+        spark|spark2|homed13) ;;
+        *) echo "ERROR: --node must be one of spark|spark2|homed13 (got '${NODE_FILTER}')" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    *) echo "Usage: $0 [--force] [--dry-run] [--node spark|spark2|homed13]" >&2; exit 2 ;;
   esac
 done
 
@@ -152,6 +182,20 @@ restart_spark2_unit() {
     log "DRY RUN: would restart spark-2:$svc"
     return 0
   fi
+  # RUN_LOCAL_SPARK2=1 (--node spark2, added 3.1.0): invoked ON spark-2 itself, by that node's own
+  # hermes-repo-sync.sh right after ITS OWN pull moved HEAD -- no SSH needed for a node to restart
+  # its own services. Default (0): the original design, invoked FROM spark to restart spark-2 over
+  # SSH -- unchanged, still how a full manual `hermes-restart-fleet.sh` run works.
+  if [ "$RUN_LOCAL_SPARK2" -eq 1 ]; then
+    if sudo systemctl restart "$svc"; then
+      log "restarted $svc (local)"
+    else
+      log "ERROR: restart failed for $svc — check: systemctl status $svc"
+      exit_code=1
+      return 1
+    fi
+    return 0
+  fi
   # pmoney's own passwordless sudo on spark-2 (confirmed live, general, not the narrow
   # amy-repo-sync grant) covers this — no per-unit allowlist to maintain here.
   if ssh "$SPARK2_SSH" "sudo systemctl restart $svc"; then
@@ -184,12 +228,29 @@ broker_job_type_running() {
 
 restart_homed13_unit() {
   local svc="$1" jtype="${2:-}"
+  # broker_job_type_running() itself is location-agnostic -- confirmed live (2026-09-05) that
+  # HomeD13's own pmoney account can fetch vault-get-secret.sh secrets and reach $BROKER_URL
+  # directly, same as spark can -- so the in-flight-job safety check applies identically whether
+  # this runs centrally from spark or locally on homed13 via --node homed13.
   if [ -n "$jtype" ] && [ "$FORCE" -eq 0 ] && broker_job_type_running "$jtype"; then
     log "SKIPPED $svc: a $jtype job is in flight on the broker — rerun with --force to override"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     log "DRY RUN: would restart homed13:$svc"
+    return 0
+  fi
+  # RUN_LOCAL_HOMED13=1 (--node homed13, added 3.1.0): invoked ON homed13 itself, by that node's
+  # own hermes-repo-sync.sh right after ITS OWN pull moved HEAD -- no SSH needed. Default (0):
+  # unchanged, invoked FROM spark over SSH, exactly as a full manual restart-fleet run always has.
+  if [ "$RUN_LOCAL_HOMED13" -eq 1 ]; then
+    if sudo systemctl restart "$svc"; then
+      log "restarted $svc (local)"
+    else
+      log "ERROR: restart failed for $svc — check: systemctl status $svc"
+      exit_code=1
+      return 1
+    fi
     return 0
   fi
   if ssh "$HOMED13_SSH" "sudo systemctl restart $svc"; then
@@ -201,37 +262,74 @@ restart_homed13_unit() {
   fi
 }
 
-log "== Spark: core service stack =="
-check_luks_mount
-for svc in "${SPARK_SERVICES[@]}"; do
-  restart_unit "$svc"
-  sleep "$PAUSE_SECONDS"
-done
-
-# On-demand — restart only if it's actually running right now. A bare `systemctl restart` on a
-# stopped unit starts it, which would wake a model this script has no business waking.
-for svc in llama-super.service llama-coder.service; do
-  if systemctl is-active --quiet "$svc" 2>/dev/null; then
+run_spark_stack() {
+  log "== Spark: core service stack =="
+  check_luks_mount
+  for svc in "${SPARK_SERVICES[@]}"; do
     restart_unit "$svc"
+    sleep "$PAUSE_SECONDS"
+  done
+
+  # On-demand — restart only if it's actually running right now. A bare `systemctl restart` on a
+  # stopped unit starts it, which would wake a model this script has no business waking.
+  for svc in llama-super.service llama-coder.service; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+      restart_unit "$svc"
+    else
+      log "$svc is not active (on-demand, normal) — not restarting/waking it"
+    fi
+  done
+}
+
+run_spark2_stack() {
+  if [ "$RUN_LOCAL_SPARK2" -eq 1 ]; then
+    log "== Spark-2: model backends + router + media (local) =="
   else
-    log "$svc is not active (on-demand, normal) — not restarting/waking it"
+    log "== Spark-2: model backends + router + media (over SSH) =="
   fi
-done
+  for svc in "${SPARK2_SERVICES[@]}"; do
+    restart_spark2_unit "$svc"
+    sleep "$PAUSE_SECONDS"
+  done
+}
 
-log "== Spark-2: model backends + router + media (over SSH) =="
-for svc in "${SPARK2_SERVICES[@]}"; do
-  restart_spark2_unit "$svc"
+run_homed13_stack() {
+  if [ "$RUN_LOCAL_HOMED13" -eq 1 ]; then
+    log "== HomeD13: render workers (local) =="
+  else
+    log "== HomeD13: render workers (over SSH) =="
+  fi
+  # comfyui-homed13.service first -- both render workers declare
+  # After=comfyui-homed13.service in their unit files.
+  restart_homed13_unit comfyui-homed13.service
   sleep "$PAUSE_SECONDS"
-done
+  restart_homed13_unit hermes-render-worker.service render
+  sleep "$PAUSE_SECONDS"
+  restart_homed13_unit hermes-render-worker-video.service video
+}
 
-log "== HomeD13: render workers (over SSH) =="
-# comfyui-homed13.service first -- both render workers declare
-# After=comfyui-homed13.service in their unit files.
-restart_homed13_unit comfyui-homed13.service
-sleep "$PAUSE_SECONDS"
-restart_homed13_unit hermes-render-worker.service render
-sleep "$PAUSE_SECONDS"
-restart_homed13_unit hermes-render-worker-video.service video
+# NODE_FILTER dispatch (added 3.1.0): empty (default) runs the full fleet exactly as this script
+# always has, orchestrated from spark. --node scopes to exactly one node's own services, run
+# locally on that node -- the shape tools/hermes-repo-sync.sh needs (2.0.0) to restart only what
+# ITS OWN pull just changed, without a peer node ever reaching across to another over SSH.
+case "$NODE_FILTER" in
+  "")
+    run_spark_stack
+    run_spark2_stack
+    run_homed13_stack
+    ;;
+  spark)
+    run_spark_stack
+    ;;
+  spark2)
+    RUN_LOCAL_SPARK2=1
+    run_spark2_stack
+    ;;
+  homed13)
+    RUN_LOCAL_HOMED13=1
+    run_homed13_stack
+    ;;
+esac
 
 if [ "$exit_code" -eq 0 ]; then
   log "done — all restarts succeeded (skips from --force checks are not failures)"

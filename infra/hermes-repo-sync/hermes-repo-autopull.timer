@@ -1,10 +1,10 @@
 [Unit]
-Description=Run hermes-repo-autopull every 30 minutes
+Description=Run hermes-repo-sync (pull + restart-if-moved + notify) every 30 minutes
 
 [Timer]
 OnActiveSec=2min
 OnUnitActiveSec=30min
-Unit=hermes-repo-autopull.service
+Unit=hermes-repo-sync.service
 
 [Install]
 WantedBy=timers.target
