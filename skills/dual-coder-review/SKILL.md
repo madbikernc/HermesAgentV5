@@ -1,7 +1,7 @@
 ---
 name: dual-coder-review
 description: "Get a bounded, cross-reviewed function from two independent coding models (coder and coder2) instead of one -- they draft/review/revise until they agree it's bug-free, then each writes and cross-checks a security review. Use for a task that genuinely benefits from two-model rigor, not everyday coding questions."
-version: 1.0.0
+version: 1.1.0
 author: HermesAgentV5
 license: MIT
 platforms: [linux]
@@ -14,7 +14,7 @@ prerequisites:
 
 # Dual-Coder Review
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Two independent coding models, `coder` (Qwen3.8-27B-abliterated) and `coder2` (Meta's Muse Glimmer
 30B), draft and cross-review a function until they agree it's bug-free, then each writes an
@@ -51,9 +51,12 @@ curl -s -X POST "$BUZZ_URL/messages" -H "Authorization: Bearer $BUZZ_TOKEN" \
 
 ## What to expect
 
-- **Realistic worst-case latency: up to ~30-40 minutes.** Up to 5 review rounds (each a router call,
-  each possibly paying a ~150s cold-wake if either backend idled out), plus 4 fixed security/
-  meta-review calls, plus one possible tie-breaking judge call.
+- **Realistic latency: potentially over an hour.** Confirmed live 2026-09-05: `coder2` (Muse
+  Glimmer) reasons heavily even on real tasks, and a single review/revise/security call can burn
+  8,000-10,000 tokens at its observed ~11.6 tok/s — 10-15 minutes for *one* call, before counting
+  cold-wake time. A 5-round loop plus the fixed security/meta-review tail can reasonably take over
+  an hour end to end. This is the real cost of using a heavy-reasoning model as a reviewer, not a
+  bug — budget your expectations accordingly, and don't assume a quiet task is stuck.
 - **Check progress via `tasks.state`** (`GET $MEMORY_URL/tasks/<task_id>`): `drafting` →
   `review-round-N` → (on a stuck disagreement) `third-party-review` → `security-review` →
   `security-meta-review` → a terminal state.
@@ -78,4 +81,5 @@ curl -s -X POST "$BUZZ_URL/messages" -H "Authorization: Bearer $BUZZ_TOKEN" \
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-09-05 | Latency guidance corrected after the first real end-to-end run: coder2's real reasoning overhead on an actual task made the original ~30-40 min estimate a significant understatement — now "potentially over an hour," with the real numbers behind it. |
 | 1.0.0 | 2026-09-05 | Initial version. |

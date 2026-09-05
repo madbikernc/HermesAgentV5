@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.0.1
+# Version: 1.0.2
+#
+# 1.0.2 (2026-09-05) — first real end-to-end run (task dc-live-test-1, a genuine merge-in-place
+# function) confirmed 1.0.1's budgets were still nowhere near enough: coder2's review of a real
+# (not trivial) candidate hit the 2500-token cap after 6612 chars of reasoning_content and zero
+# real answer -- the new truncation guard correctly turned this into an honest `error` state
+# instead of a fabricated verdict, exactly as designed, but the budget itself needed a much bigger
+# real fix. review/security_review raised to 8000, revise to 10000, meta_review to 6000,
+# MODEL_TIMEOUT_SECONDS to 1500 (10000 tokens at coder2's observed ~11.6 tok/s is ~860s of
+# generation alone). Direct operator confirmation to raise budgets substantially rather than first
+# chasing a reasoning-effort control -- real per-round latency for any coder2-involving call can
+# now be 10+ minutes; a full task can reasonably take over an hour. This is the real cost of using
+# a heavy-reasoning model as a reviewer, not a bug to hide.
 #
 # 1.0.1 (2026-09-05) — real finding from coder2's first live coherence test: Muse Glimmer emits a
 # separate `reasoning_content` field and can spend its ENTIRE token budget there before ever
@@ -97,7 +109,7 @@ GUARD_URL = os.environ.get("GUARD_URL", f"http://{SPARK_IP}:8096").rstrip("/")
 GUARD_TOKEN = os.environ.get("GUARD_TOKEN", "")
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
-MODEL_TIMEOUT_SECONDS = int(os.environ.get("MODEL_TIMEOUT_SECONDS", "900"))
+MODEL_TIMEOUT_SECONDS = int(os.environ.get("MODEL_TIMEOUT_SECONDS", "1500"))
 MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "5"))
 JUDGE_MAX_CALLS = int(os.environ.get("JUDGE_MAX_CALLS", "1"))
 JUDGE_MAX_TOKENS = int(os.environ.get("JUDGE_MAX_TOKENS", "800"))
@@ -281,22 +293,22 @@ def draft(task_spec):
 
 def review(reviewer, task_spec, code):
     content = f"Task:\n{task_spec}\n\nCandidate implementation:\n{code}"
-    reply = call_model(reviewer, REVIEW_SYSTEM_PROMPT, content, max_tokens=2500)
+    reply = call_model(reviewer, REVIEW_SYSTEM_PROMPT, content, max_tokens=8000)
     return reply.upper().startswith("APPROVE"), reply
 
 
 def revise(writer, task_spec, code, issues):
     content = f"Task:\n{task_spec}\n\nYour previous implementation:\n{code}\n\nReviewer's issues:\n{issues}"
-    return call_model(writer, REVISE_SYSTEM_PROMPT, content, max_tokens=3500)
+    return call_model(writer, REVISE_SYSTEM_PROMPT, content, max_tokens=10000)
 
 
 def security_review(role, code):
-    return call_model(role, SECURITY_SYSTEM_PROMPT, f"Function:\n{code}", max_tokens=2500)
+    return call_model(role, SECURITY_SYSTEM_PROMPT, f"Function:\n{code}", max_tokens=8000)
 
 
 def meta_review(role, other_review, code):
     content = f"Function (for reference):\n{code}\n\nThe other reviewer's security review:\n{other_review}"
-    return call_model(role, META_REVIEW_SYSTEM_PROMPT, content, max_tokens=2000)
+    return call_model(role, META_REVIEW_SYSTEM_PROMPT, content, max_tokens=6000)
 
 
 def ask_judge(task_spec, code, disagreement_text):
