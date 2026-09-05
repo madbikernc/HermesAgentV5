@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.6.6
+# Version: 1.6.7
+#
+# 1.6.7 (2026-09-06) — direct operator request: audit HELP_MESSAGE against every topic actually
+# live in VALID_TARGETS/TOPIC_DESCRIPTIONS (tools/hermes-dispatch.py) and every keyword group
+# actually live in STATUS_SOURCES/MODEL_REPORT_KEYWORDS (tools/hermes-status.py), not just trust
+# the last time it was updated. Found two real, live, user-reachable gaps: `dualcoder` (a normal
+# dispatch target since 1.4.5, never added here) had no HELP_MESSAGE line at all, and the
+# `status` bullet never mentioned the "model report" keyword group (live since hermes-status.py
+# 1.3.0). `vision`/`train` are correctly absent -- both are explicitly "reserved, not yet
+# staffed" in TOPIC_DESCRIPTIONS, not real capabilities yet.
 #
 # 1.6.6 (2026-09-02) — removed the `nest` topic entirely: direct operator decision to drop the
 # Google Home/Nest camera integration (NEST_TASK_TIMEOUT_SECONDS, its check_outstanding() branch,
@@ -365,11 +374,16 @@ HELP_MESSAGE = os.environ.get("HELP_MESSAGE", (
     "• System status checks — mention pfsense, generac, wyze, moen flo / water shutoff / leak "
     "detector, minecraft / zomboid / game server, or vivint / security system / alarm status for "
     "a live read-only check. Mention \"botnet\" or \"threat intel\" with an IP address to check it "
-    "against the local threat-intel cache. These are status checks only — none of them can change "
-    "or control anything.\n"
+    "against the local threat-intel cache. Ask for a \"model report\" (or \"which models\"/\"what "
+    "models\") for a live checkpoint/IP/port/abliterated-status readout per role. These are status "
+    "checks only — none of them can change or control anything.\n"
     "• Log/security analysis — \"pfsense log review\" for firewall log analysis, \"canary\" or "
     "\"honeypot\" for honeypot activity, or \"griefing\"/\"cheating\"/\"minecraft logs\"/"
     "\"zomboid logs\" for a Minecraft/Zomboid abuse-pattern review.\n"
+    "• Rigorous code review — ask for a thorough/careful dual-model review of a coding task (not "
+    "a quick one-liner) and I'll run it through a bounded, multi-round coder/coder2 review-and-"
+    "security-check loop. Can take several minutes; I'll ack right away and follow up with the "
+    "result.\n"
     "• Network probe — \"probe <IP address>\" runs a real scan (hostnames, MAC/vendor, OS "
     "fingerprint, all ports) against that address. Takes up to ~30 minutes; I'll ack right away "
     "and send the real report as a follow-up once it finishes. Only one probe runs at a time.\n"
