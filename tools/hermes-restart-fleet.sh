@@ -179,7 +179,11 @@ restart_unit() {
 restart_spark2_unit() {
   local svc="$1"
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "DRY RUN: would restart spark-2:$svc"
+    if [ "$RUN_LOCAL_SPARK2" -eq 1 ]; then
+      log "DRY RUN: would restart $svc (local)"
+    else
+      log "DRY RUN: would restart spark-2:$svc"
+    fi
     return 0
   fi
   # RUN_LOCAL_SPARK2=1 (--node spark2, added 3.1.0): invoked ON spark-2 itself, by that node's own
@@ -237,7 +241,11 @@ restart_homed13_unit() {
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "DRY RUN: would restart homed13:$svc"
+    if [ "$RUN_LOCAL_HOMED13" -eq 1 ]; then
+      log "DRY RUN: would restart $svc (local)"
+    else
+      log "DRY RUN: would restart homed13:$svc"
+    fi
     return 0
   fi
   # RUN_LOCAL_HOMED13=1 (--node homed13, added 3.1.0): invoked ON homed13 itself, by that node's
