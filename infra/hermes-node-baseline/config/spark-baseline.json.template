@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy to $HERMES_HOME/config/node-baseline.json on spark and fill in real paths -- NOT committed to git with real values, same convention as node-health.json (see tools/hermes-node-health.py's own header). DGX Spark GB10 is Ubuntu-based (dpkg) -- verify with `dpkg --version` before trusting the dpkg-db source below.",
+  "node_name": "spark",
+  "retention_days": 30,
+  "severity_threshold": "medium",
+  "aide": {
+    "enabled": true,
+    "config_path": "/etc/aide/aide.conf"
+  },
+  "lynis": {
+    "enabled": true,
+    "report_path": "/var/log/lynis-report.dat",
+    "default_warning_severity": "high",
+    "default_suggestion_severity": "low",
+    "severity_overrides": {}
+  },
+  "syft_grype": {
+    "enabled": true,
+    "targets": [
+      {"name": "dpkg", "source": "dpkg-db:/var/lib/dpkg", "kind": "os-packages"},
+      {"name": "codesec-venv", "source": "dir:/opt/hermes/venvs/codesec", "kind": "venv"}
+    ]
+  }
+}

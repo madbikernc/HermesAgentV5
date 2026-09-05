@@ -1,0 +1,12 @@
+[Unit]
+Description=hermes-node-baseline-scan for %i - daily aide/lynis/syft+grype security baseline
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-node-baseline/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-node-baseline-scan-wrapper.sh %i

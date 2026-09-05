@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 2.0.14
+# Version: 2.0.15
+#
+# 2.0.15 (2026-09-05) — added `node-baseline` to `KNOWN_AGENTS`, proactively, ahead of the new
+# S17 node-security-baseline pipeline's own first publish — same recurring bug class every entry
+# below this one documents. Needed as a `from` value (KNOWN_AGENTS gate on `POST /messages`) so
+# tools/hermes-baseline-authorize-watch.py can route an authorized recommendation to the
+# `dualcoder` topic as a pointer envelope; `node-baseline` itself is not added to KNOWN_TOPICS —
+# nothing publishes *to* it, it only ever publishes *as* itself.
 #
 # 2.0.14 (2026-09-05) — added `dualcoder` to `KNOWN_AGENTS`/`KNOWN_TOPICS`, proactively, ahead of
 # the new dual-coder review orchestrator's own first publish — same recurring bug class every
@@ -172,7 +179,7 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1). Most of
 # these have no subscriber yet — same ahead-of-the-consumer posture as hermes-memory's `tasks`

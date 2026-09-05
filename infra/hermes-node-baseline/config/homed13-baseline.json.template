@@ -1,0 +1,23 @@
+{
+  "_comment": "Copy to $HERMES_HOME/config/node-baseline.json on HomeD13 and fill in real paths -- NOT committed to git with real values. HomeD13 has had no persona or Hermes Agent install of its own since migration Stage 3 (per project memory / tools/hermes-node-health.py's own header) -- HERMES_HOME here should point at the render-worker's own directory, same adaptation node-health.py already makes for this node. Add a syft_grype venv target for ComfyUI's own venv if one exists (e.g. dir:/opt/comfyui/venv) once its real path is confirmed.",
+  "node_name": "homed13",
+  "retention_days": 30,
+  "severity_threshold": "medium",
+  "aide": {
+    "enabled": true,
+    "config_path": "/etc/aide/aide.conf"
+  },
+  "lynis": {
+    "enabled": true,
+    "report_path": "/var/log/lynis-report.dat",
+    "default_warning_severity": "high",
+    "default_suggestion_severity": "low",
+    "severity_overrides": {}
+  },
+  "syft_grype": {
+    "enabled": true,
+    "targets": [
+      {"name": "dpkg", "source": "dpkg-db:/var/lib/dpkg", "kind": "os-packages"}
+    ]
+  }
+}

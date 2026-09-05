@@ -1,0 +1,11 @@
+[Unit]
+Description=Run hermes-node-baseline-scan for %i daily
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=1800
+Unit=hermes-node-baseline-scan@%i.service
+
+[Install]
+WantedBy=timers.target

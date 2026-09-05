@@ -1,0 +1,18 @@
+[Unit]
+Description=hermes-baseline-authorize-watch - routes authorized node-baseline recommendations
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-node-baseline/README.md
+After=network-online.target continuwuity.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment=HERMES_REPO_DIR=/home/pmoney/HermesAgentV5
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-baseline-authorize-watch-wrapper.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
