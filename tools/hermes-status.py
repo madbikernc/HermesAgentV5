@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.4.1
+# Version: 1.5.0
+#
+# 1.5.0 (2026-09-05) — new `crystalwater` source (IMPLEMENTATION_PLAN.md S17): the Crystal Water
+# Monitor pool/hot tub sensor (General Galactic Systems Inc., CWM-PNPTG-002). Unlike every other
+# entry in STATUS_SOURCES this one is unverified against a live device -- hermes-crystal-water.py's
+# own docstring explains why (no Vaultwarden item provisioned yet, no API key issued). Wired in now,
+# same as every other source here, rather than held back, so it activates the moment credentials
+# exist instead of needing a second pass through this file. Uses plain `PY`, not a dedicated venv --
+# it's a stdlib-only `urllib.request` client against a documented REST+JSON API, no special library
+# needed the way aioflo/Playwright/wyze-sdk are for their sources. Timeout of 30s is a guess, not a
+# measured number like every other row's -- correct it against a real run once the vault item exists,
+# the same way moenflo's 30s->90s and vivint's 30s->150s corrections were made from real timing, not
+# assumed up front.
 #
 # 1.4.1 (2026-09-04) — EMBED_INFO's checkpoint label updated to Qwen3-Embedding-8B-Q8_0, matching
 # the fleet-wide embed swap (infra/hermes-rag/start-embed.sh). Display-only change here -- the
@@ -203,6 +215,16 @@ STATUS_SOURCES = {
         ("vivint", "security system", "alarm status", "home security"),
         [PY, str(REPO_DIR / "tools" / "hermes-vivint.py"), "status"],
         150,  # confirmed live: a real run needing re-authentication took ~103s; 30s timed out
+    ),
+    "crystalwater": (
+        ("crystal water", "water monitor", "pool water", "pool chemistry", "hot tub water",
+         "spa water", "water chemistry"),
+        [PY, str(REPO_DIR / "tools" / "hermes-crystal-water.py"), "--detail"],
+        # UNVERIFIED (see 1.5.0 changelog above) -- no real device/API key to time this against yet.
+        # Picked 30s because this is a plain REST+JSON call (no OAuth/browser/SDK login overhead
+        # like generac/moenflo/wyze/vivint pay), same class as pfsense's own 30s. Revisit once a
+        # real run exists.
+        30,
     ),
 }
 

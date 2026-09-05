@@ -1,13 +1,15 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.17.0
+**Version:** 1.18.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
 schedulers still Sintra/Amy-shaped, a security-relevant sudoers leftover, a sync-coverage gap, and a
 live-caught executable-bit regression, all real, all fixed. S16 closed the RAG stack's remaining gaps —
 reranking measured a real +16.7pp recall@5 improvement (0.538→0.705), not an assumed one; optional
-per-page OCR verified against a real, naturally-occurring scanned page, not a staged one. S8
+per-page OCR verified against a real, naturally-occurring scanned page, not a staged one. **S17 (Crystal
+Water Monitor integration) is written but explicitly not live-verified** — no Vaultwarden item or real API
+key exists yet; see S17's own section for what's left. S8
 was the point of no return — Sintra and Amy no longer have live gateways. **2026-08-30: the "later stage"
 this line used to wait on happened — `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` were consolidated
 into this repo and all three nodes (`spark`, `spark-2`, `HomeD13`) were cut over to it. `HermesAgentV4` is
@@ -1529,6 +1531,61 @@ ingest-kb.py` 1.3.0→1.4.0 (`--ocr`, per-page OCR fallback). Real eval history 
 `~/.hermes/state/rag-eval-history.jsonl` on Watch — baseline and with-reranker runs both recorded,
 not just the final number.
 
+### S17 — `hermes-crystal-water.py`, Crystal Water Monitor integration
+
+Added after S16, direct request: can the Crystal Water Monitor (General Galactic Systems Inc., pool/
+hot tub/swim-spa water-chemistry sensor, device model CWM-PNPTG-002) be integrated into the fleet.
+Net-new smart-home source — this device didn't exist in V4/Redo's tool set, so it isn't a
+Category A/B carry-forward item (§6); it's a new capability, same shape as S15's `hermes-logs`.
+
+#### S17 — written 2026-09-05, **not yet live-verified**
+
+Unlike every prior stage in this document, this one cannot claim a live end-to-end run — say so
+plainly rather than gloss over it, per this fleet's own "verify from raw output, never self-report"
+rule (`LESSONS_LEARNED.md` §6). No Vaultwarden item exists for this device yet, and provisioning one
+requires requesting a Crystal Connect API key from Crystal customer support against a real account
+with an active subscription — neither of which this session can do.
+
+**What was confirmed, from primary sources, before writing any code:** the vendor publishes a real,
+documented REST+JSON API (`connect.crystalwatermonitor.app`, `x-api-key` header,
+`/connect/v1/vessels` + `/connect/v1/vessels/{id}`) and an official MIT-licensed Home Assistant
+integration (`github.com/general-galactic/home-assistant-crystal-water-monitor`) whose generated
+client and embedded OpenAPI description were read directly (not the vendor's marketing pages, most
+of which this session's network policy blocks outright) to confirm the base URL, auth header, both
+endpoint shapes, the full reading-type list (pH, ORP, temperature, free/total chlorine, alkalinity,
+hardness, cyanuric acid, bromine, salt, TDS, phosphates, LSI, battery, WiFi RSSI), and the real
+20-minute device upload cadence behind the vendor's 15-minute polling recommendation. This is
+meaningfully better grounding than Moen Flo or Generac had at their own first-write point (both
+were v1 ports of code that had already run against real accounts) — but it is still zero real
+requests against zero real data, and is reported as such.
+
+**Why this device needed no gated-actuation decision, unlike Vivint/Moen Flo/Generac:** it has no
+actuation surface at all. It measures and recommends; it doses nothing itself. There was no feature
+to leave deliberately unported here.
+
+**Deployment shape**, matching every prior smart-home stage: credentials via Vaultwarden (item
+"Hermes Crystal Water Monitor", `api_key` field, `Fleet-Service` collection — item not yet created),
+never a local config file or env var (§2b). Unlike Moen Flo (aioflo)/Generac (Playwright)/Wyze
+(wyze-sdk), no dedicated venv is needed — the API is plain REST+JSON, reachable with stdlib
+`urllib.request` alone, same client shape `hermes_pfsense_common.py`'s `api_get()` already
+established. Wired into `hermes-status.py`'s `STATUS_SOURCES` (`crystalwater` keyword group) so it
+is reachable from chat the same way pfsense/generac/moenflo/wyze/vivint already are — done now
+rather than held back, so it activates the moment the vault item exists instead of requiring a
+second pass through that file. Its 30s timeout there is a placeholder, explicitly flagged as such
+in that file's own 1.5.0 changelog entry — every other row's timeout in that table came from a real
+measured run (moenflo 30s→90s, vivint 30s→150s, wyze 30s→240s, each after a real timeout was hit
+live); this one has no such measurement yet and should be corrected once it does.
+
+**What's still ahead, concretely:** (1) request a Crystal Connect API key and create the Vaultwarden
+item; (2) run `hermes-crystal-water.py --json` once, by hand, against a real vessel and confirm the
+response shape matches what was inferred from the HA integration's generated models rather than
+observed directly; (3) correct `hermes-status.py`'s 30s placeholder timeout against that real run;
+(4) only then consider this stage's live-verification bar met, on the same standard S15/S16 held
+themselves to.
+
+Files: new `tools/hermes-crystal-water.py`; `tools/hermes-status.py` 1.4.1→1.5.0 (`crystalwater`
+source added to `STATUS_SOURCES`).
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -1658,3 +1715,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.15.0 | 2026-08-30 | Repo-level consolidation, separate from the S1-S15 code work above: `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` copied into this repo (~230 files) with every `REPO_DIR`/`ExecStart`/identity path repointed from `HermesAgentV4` to `HermesAgentV5`, while every dated changelog/Revision-History entry narrating a real past event was left untouched (an initial blanket find-replace corrupted several of these — e.g. rewrote "HermesAgentV4 rewrite of HermesAgentRedo's..." to say V5 — caught and redone surgically before anything was committed). Found and captured 16 systemd unit files that were live on spark/spark-2 but had never been committed to either repo's git history (canary health/probe-report, fleet-health, nfs-backup, wiki-sync, and both identities' fabrication-guard/session-cap-guard/session-guardian/remediate-worker). Found and preserved 3 live-only unit customizations a blind copy would have silently dropped (`VAULT_NODE=sintra`/`amy` on each node's router, `BROKER_QUIET_TYPES=embed,wake` on the broker, `MALLOC_ARENA_MAX=1` on the embed server). Found and fixed a genuine regression this same migration introduced: the Windows-side `cp -r` (both repos checked out on the same machine) silently dropped the executable bit on 103 script files, caught live when homed13's render/embed workers crash-looped on first restart — fixed via `git update-index --chmod=+x` and repulled everywhere before it could hit spark-2 or spark. All three nodes (`homed13` → `spark-2` → `spark`, lowest-criticality first) cut over one service at a time, catching and recovering from a Vaultwarden rate-limit incident on spark-2 (two services sharing the `amy` identity restarted within 10s) without losing any in-flight work. `HermesAgentV4` marked superseded to match. |
 | 1.16.0 | 2026-08-31 | S16 planned (not executed): closes the RAG stack's remaining real gaps — an eval harness (recall@k against a hand-curated per-corpus question set, built before the reranker so "it helped" is a measured claim, not an assumption), a reranker (Qwen3-Reranker candidate, port `8093` already reserved for it and unused), and optional OCR for `personal-kb`'s scanned/image-only PDFs (`tesseract`, off by default, triggered only on near-zero native text extraction). This section's own first draft proposed a fourth item — a new retriever agent — before discovering, immediately before committing, that `hermes-retrieve.py` already exists and is already live (built independently since the S15 checkpoint, alongside the broader V4→V5 consolidation in 1.15.0): real per-chunk screening, `dispatch` for synthesis with better reasoning than this draft's own first guess (`super`) would have had, a `NO_ANSWER_FOUND`/`no-match` path feeding a real web-search fallback. Rewritten to document what's actually there instead of proposing a duplicate, and to correct this draft's own mistaken reading of non-negotiable #1 along the way. |
 | 1.17.0 | 2026-08-31 | S16 executed and closed out live on the fleet. Eval harness (`hermes-rag-eval.py`) generated 78 real questions from real indexed chunks (not hand-invented) and measured a real baseline: recall@5 = 0.538, no reranker. Reranker deployment found two real bugs before it worked: a third-party Qwen3-Reranker GGUF conversion producing backwards relevance scores (missing `cls.output.weight` — a known llama.cpp issue, `ggml-org/llama.cpp#16407` — fixed by switching to `ggml-org`'s own correctly-converted upload), then a wide-candidate-pool request 500ing past `llama-server`'s default `--ubatch-size` on 50 of 78 real eval questions (fixed, `--ubatch-size 4096`). With both fixed: recall@5 = 0.705, a measured +16.7pp, `ops` (the weakest corpus) improving the most (0.318→0.636). Both existing RAG callers get reranking automatically via `hermes_rag_common.search()`, no changes needed on either. Optional per-page OCR (`--ocr`, off by default, `tesseract` + `pdftoppm`) added to `hermes-rag-ingest-kb.py`, verified against a real, naturally-occurring image-only page found while testing (not a staged/manufactured case) — recovered real text automatically, logged explicitly, the daily scheduled ingest timer unaffected since it never passes the flag. |
+| 1.18.0 | 2026-09-05 | S17 added and written, direct request: Crystal Water Monitor (General Galactic Systems Inc., CWM-PNPTG-002) pool/hot tub water-chemistry sensor integration. New `tools/hermes-crystal-water.py` — a plain stdlib `urllib.request` REST+JSON client against the vendor's own documented Crystal Connect API (`x-api-key` auth, `/connect/v1/vessels[/…]`), confirmed against the vendor's official MIT-licensed Home Assistant integration source rather than assumed. No actuation surface on this device at all, so no gated-feature decision was needed the way Vivint/Moen Flo/Generac each required one. Wired into `hermes-status.py`'s `STATUS_SOURCES` (1.4.1→1.5.0, `crystalwater` keyword group) so it activates the moment credentials exist. **Explicitly not live-verified**, unlike every prior stage: no Vaultwarden item and no real API key exist yet (provisioning one requires the operator to request a key from Crystal customer support against a real subscription) — flagged plainly in both this document's S17 section and the tool's own docstring rather than reported as done. |
