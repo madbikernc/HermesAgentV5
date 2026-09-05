@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.3.1
+# Version: 1.4.0
+#
+# 1.4.0 (2026-09-04) — MEMORY_EMBED_DIMS default 1024 -> 4096, matching the fleet-wide embed swap
+# to Qwen3-Embedding-8B (infra/hermes-rag/start-embed.sh). New `_migrate_vec_turns_dims()`,
+# same shape as `_migrate_turns_autoincrement()`/`_migrate_turns_conv_id()` above: `vec_turns`' vec0
+# table has its dimension fixed at CREATE time, so the constant change alone does nothing to an
+# already-existing table and the next real turn write would fail outright. Detects the live
+# table's actual dimension from sqlite_master and, on mismatch, rebuilds it and re-embeds every
+# row already in `turns` (raw text, never deleted) — self-contained, no external reindex needed.
+# Cost scales with turn-history size and runs inline at connect(), so the first request after the
+# dimension actually changes on a given node will be slower than normal, once, by design.
 #
 # 1.3.1 (2026-08-30) — fix a real deploy-time crash caught live on spark's restart: the static
 # SCHEMA string's `CREATE INDEX idx_turns_conv` ran via executescript() *before*
@@ -122,7 +132,10 @@ PORT = int(os.environ.get("MEMORY_PORT", "8102"))
 TOKEN = os.environ.get("MEMORY_TOKEN", "")
 
 EMBED_URL = os.environ.get("MEMORY_EMBED_URL", "http://127.0.0.1:8092/v1/embeddings")
-EMBED_DIMS = int(os.environ.get("MEMORY_EMBED_DIMS", "1024"))
+# 4096 as of 2026-09-04 (Qwen3-Embedding-8B, up from the 0.6B model's 1024) -- must match the
+# resident embed backend's actual output size. _migrate_vec_turns_dims() handles the live-table
+# consequence of this changing under an existing database.
+EMBED_DIMS = int(os.environ.get("MEMORY_EMBED_DIMS", "4096"))
 EMBED_TIMEOUT = 30
 
 MAX_BODY = 8 * 1024 * 1024  # 8MB — generous for a turn's text, bounded
@@ -186,7 +199,49 @@ VEC_TABLE_SQL = (
     "USING vec0(turn_id INTEGER PRIMARY KEY, embedding float[{dims}])"
 )
 
+_VEC_DIMS_RE = re.compile(r"embedding float\[(\d+)\]")
+
 _db_lock = threading.Lock()
+
+
+def _migrate_vec_turns_dims(conn):
+    """Same problem and same fix as hermes_rag_common.py 1.7.0's _migrate_vec_chunks_dims(): a
+    vec0 table's dimension is fixed at CREATE time, so bumping MEMORY_EMBED_DIMS (1024 -> 4096,
+    2026-09-04, matching the fleet-wide Qwen3-Embedding-8B swap) does nothing to an
+    already-existing vec_turns table -- CREATE VIRTUAL TABLE IF NOT EXISTS no-ops against it, and
+    the next real turn write fails outright inserting a 4096-dim vector into a float[1024] table.
+
+    Re-embeds every row already in `turns` (raw text, never deleted) rather than needing anything
+    external -- self-contained, same reasoning the RAG-side migration uses. Runs inline at
+    connect() like every other migration in this file; unlike those, this one's cost scales with
+    turn-history size, so the first connect() after the dimension actually changes will take
+    noticeably longer than a normal request -- expected, not a hang, and it only happens once
+    (the table matches on every subsequent connect() and this becomes a single cheap SELECT)."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_turns'"
+    ).fetchone()
+    if row is None:
+        return  # fresh DB -- VEC_TABLE_SQL below creates it at the right dimension directly
+    match = _VEC_DIMS_RE.search(row[0])
+    live_dims = int(match.group(1)) if match else None
+    if live_dims == EMBED_DIMS:
+        return
+    log(f"vec_turns is {live_dims}-dim, EMBED_DIMS is {EMBED_DIMS} -- rebuilding and "
+        f"re-embedding every turn")
+    turns = conn.execute("SELECT id, raw FROM turns").fetchall()
+    conn.execute("DROP TABLE vec_turns")
+    conn.execute(VEC_TABLE_SQL.format(dims=EMBED_DIMS))
+    for i, (turn_id, raw) in enumerate(turns):
+        vec = embed(raw)
+        conn.execute(
+            "INSERT INTO vec_turns (turn_id, embedding) VALUES (?, ?)",
+            (turn_id, json.dumps(vec)),
+        )
+        if (i + 1) % 200 == 0:
+            conn.commit()
+            log(f"re-embedded {i + 1}/{len(turns)} turns")
+    conn.commit()
+    log(f"vec_turns migration done: {len(turns)} turns re-embedded at {EMBED_DIMS} dims")
 
 
 def log(msg):
@@ -271,6 +326,7 @@ def connect(readonly=False):
         conn.executescript(SCHEMA)
         _migrate_turns_autoincrement(conn)
         _migrate_turns_conv_id(conn)
+        _migrate_vec_turns_dims(conn)
         conn.execute(VEC_TABLE_SQL.format(dims=EMBED_DIMS))
         conn.commit()
     conn.row_factory = sqlite3.Row

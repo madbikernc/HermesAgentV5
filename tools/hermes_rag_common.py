@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.7.0
+#
+# 1.7.0 (2026-09-04) — EMBED_DIMS 1024 -> 4096, matching the embed swap to Qwen3-Embedding-8B
+# (infra/hermes-rag/start-embed.sh). New `_migrate_vec_chunks_dims()`: `vec_chunks` is a sqlite-vec
+# vec0 table with its dimension fixed at CREATE time, so changing the constant alone does nothing
+# to the live table -- CREATE VIRTUAL TABLE IF NOT EXISTS no-ops against it, and the next real
+# insert of a 4096-dim vector into a table still declared float[1024] fails outright. Detects the
+# live table's actual dimension from sqlite_master (same idiom hermes-memory.py's own
+# _migrate_turns_autoincrement() already uses for its schema-shape changes) and, on mismatch,
+# rebuilds the table and re-embeds every row already in `chunks` -- self-contained, doesn't need a
+# full rag_reindex of all four corpora first since chunk_text already lives in this database.
 #
 # 1.6.0 (2026-09-04) — moved split_sections()/chunk_file() here from
 # hermes-rag-ingest-docs.py (unchanged in behavior, chunk_file() now takes
@@ -99,7 +109,10 @@ from pathlib import Path
 
 DB_PATH = Path(os.environ.get("HERMES_RAG_DB", "/mnt/hermes-data/rag/vectors.db"))
 EMBED_URL = os.environ.get("HERMES_RAG_EMBED_URL", "http://127.0.0.1:8092/v1/embeddings")
-EMBED_DIMS = 1024
+# 4096 as of 2026-09-04 (Qwen3-Embedding-8B, up from the 0.6B model's 1024) -- see
+# infra/hermes-rag/start-embed.sh's own changelog for why. _migrate_vec_chunks_dims() below
+# handles the live-table consequence of this changing.
+EMBED_DIMS = 4096
 EMBED_TIMEOUT = 30
 RERANK_URL = os.environ.get("HERMES_RAG_RERANK_URL", "http://127.0.0.1:8093/rerank")
 RERANK_TIMEOUT = 15
@@ -130,6 +143,52 @@ CREATE TABLE IF NOT EXISTS ingest_state (
 
 VEC_TABLE_SQL = "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(chunk_id INTEGER PRIMARY KEY, embedding float[{dims}])"
 
+_VEC_DIMS_RE = re.compile(r"embedding float\[(\d+)\]")
+
+
+def _migrate_vec_chunks_dims(conn):
+    """`vec_chunks` is a sqlite-vec vec0 table with a dimension fixed at CREATE time -- changing
+    EMBED_DIMS (2026-09-04, 1024 -> 4096 for the Qwen3-Embedding-8B swap) does nothing to an
+    already-existing table, since VEC_TABLE_SQL uses CREATE VIRTUAL TABLE IF NOT EXISTS. Left
+    alone, the very next insert of a real 4096-dim vector into a table still declared float[1024]
+    fails outright -- not a quality regression, a hard error on every ingester. Detected the same
+    way hermes-memory.py's _migrate_turns_autoincrement() detects its own schema-shape change:
+    read the live table's actual CREATE statement out of sqlite_master rather than trusting
+    EMBED_DIMS matches reality.
+
+    Re-embeds every row already in `chunks` (chunk_text, never deleted by normal ingestion) rather
+    than requiring a full rag_reindex of all four corpora first -- source documents aren't needed
+    for this, only what's already in this database. Safe to run unattended: idempotent (a
+    same-dimension table is a no-op check, not a rebuild), and this file's own `embed()` already
+    raises loudly on a backend failure rather than writing a wrong vector."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_chunks'"
+    ).fetchone()
+    if row is None:
+        return  # fresh DB -- VEC_TABLE_SQL below creates it at the right dimension directly
+    match = _VEC_DIMS_RE.search(row[0])
+    live_dims = int(match.group(1)) if match else None
+    if live_dims == EMBED_DIMS:
+        return  # already migrated, or never needed to be
+    print(f"[hermes_rag_common] vec_chunks is {live_dims}-dim, EMBED_DIMS is {EMBED_DIMS} -- "
+          f"rebuilding and re-embedding every chunk", file=sys.stderr, flush=True)
+    chunks = conn.execute("SELECT id, chunk_text FROM chunks").fetchall()
+    conn.execute("DROP TABLE vec_chunks")
+    conn.execute(VEC_TABLE_SQL.format(dims=EMBED_DIMS))
+    for i, (chunk_id, chunk_text) in enumerate(chunks):
+        vec = embed(chunk_text)
+        conn.execute(
+            "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?, ?)",
+            (chunk_id, json.dumps(vec)),
+        )
+        if (i + 1) % 200 == 0:
+            conn.commit()
+            print(f"[hermes_rag_common] re-embedded {i + 1}/{len(chunks)} chunks",
+                  file=sys.stderr, flush=True)
+    conn.commit()
+    print(f"[hermes_rag_common] vec_chunks migration done: {len(chunks)} chunks re-embedded at "
+          f"{EMBED_DIMS} dims", file=sys.stderr, flush=True)
+
 
 def connect(readonly=False):
     """Open the vector store with the sqlite-vec extension loaded. Raises if
@@ -158,6 +217,7 @@ def connect(readonly=False):
     conn.enable_load_extension(False)
     if not readonly:
         conn.executescript(SCHEMA)
+        _migrate_vec_chunks_dims(conn)
         conn.execute(VEC_TABLE_SQL.format(dims=EMBED_DIMS))
         conn.commit()
     return conn

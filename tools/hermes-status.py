@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.4.1
+#
+# 1.4.1 (2026-09-04) — EMBED_INFO's checkpoint label updated to Qwen3-Embedding-8B-Q8_0, matching
+# the fleet-wide embed swap (infra/hermes-rag/start-embed.sh). Display-only change here -- the
+# report already reads the model name from a constant, not from anywhere live, per this file's own
+# `embed`/`tts` documented-gap treatment.
 #
 # 1.4.0 (2026-09-04) — `run_model_report()` also lists `hermes-tts` (Kokoro-82M via Kokoro-FastAPI,
 # infra/hermes-tts/) on `spark-2` -- same "hardcode a fixed row, document why" treatment `embed`
@@ -137,7 +142,7 @@ ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
 # `embed` and `hermes-tts` are standalone services, never registered in hermes-router.py's `ROLES`
 # -- see this file's 1.3.0/1.4.0 changelog entries above. Fixed values, not derived from anywhere
 # live.
-EMBED_INFO = ("Qwen3-Embedding-0.6B-Q8_0", f"{SPARK_IP}:8092",
+EMBED_INFO = ("Qwen3-Embedding-8B-Q8_0", f"{SPARK_IP}:8092",
               f"http://{SPARK_IP}:8092/v1/embeddings", False)
 TTS_INFO = ("Kokoro-82M (Kokoro-FastAPI)", f"{SPARK2_IP}:8098",
             f"http://{SPARK2_IP}:8098/v1/audio/speech", False)

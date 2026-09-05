@@ -1,6 +1,6 @@
 # hermes-rag — recreate checklist
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 Ordered steps to stand up Phase 30's RAG infrastructure (`IMPLEMENTATION_PLAN.md` §7) from scratch: the
 shared vector store, both embedding backends, all four corpus ingesters, the query tool, hourly source
@@ -19,8 +19,8 @@ LUKS container.
 
 | Component | Host | What it is |
 |---|---|---|
-| `hermes-embed.service` | Spark | Resident llama.cpp server, Qwen3-Embedding-0.6B-Q8_0, `127.0.0.1:8092` — query-time embedding for every reader (query tool, news digest, all ingesters running on the Spark) |
-| `hermes-embed-homed13.service` | HomeD13 | A second, independent instance of the same model, own build (x86_64+CUDA vs. the Spark's aarch64) — bulk-ingestion embedding for the podcast backfill, kept off the Spark's shared bus |
+| `hermes-embed.service` | Spark | Resident llama.cpp server, Qwen3-Embedding-8B-Q8_0 (2026-09-04, up from 0.6B), `127.0.0.1:8092` — query-time embedding for every reader (query tool, news digest, all ingesters running on the Spark) |
+| `hermes-embed-homed13.service` | HomeD13 | A second, independent instance of the **same model** (must track the Spark's choice exactly — see §3), own build (x86_64+CUDA vs. the Spark's aarch64), CPU-only (VRAM conflict with ComfyUI's resident SDXL checkpoint) — bulk-ingestion embedding for the podcast backfill, kept off the Spark's shared bus |
 | `hermes-embed-worker.service` | HomeD13 | Pulls `embed`-typed jobs from the broker, calls the HomeD13 backend above, reports back — the only consumer of `hermes-embed-homed13.service` |
 | `hermes-rag-ingest-docs.{service,timer}` | Spark | 30b — fleet-docs corpus (this repo's own `.md` files) |
 | `hermes-rag-ingest-podcasts.{service,timer}` | Spark | 30c — podcast-archive corpus, broker-routed bulk embedding to HomeD13 |
@@ -78,9 +78,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-embed
 ```
 
-`start-embed.sh` points at `/mnt/hermes-data/models/Qwen3-Embedding-0.6B-Q8_0.gguf` — verify that file
-exists (or re-download; `IMPLEMENTATION_PLAN.md` §7 Phase 30's revision-history entry has the real, verified
-HF source) before enabling.
+`start-embed.sh` points at `/mnt/hermes-data/models/Qwen3-Embedding-8B-Q8_0.gguf` (2026-09-04, up from
+the 0.6B model — see that script's own changelog for the model-review rationale). Verify the file
+exists (real HF source: `Qwen/Qwen3-Embedding-8B-GGUF`) before enabling.
 
 **HomeD13** (bulk-ingestion, its own build, its own port 8092 — no host collision since these are two
 different machines):
@@ -95,8 +95,44 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-embed-worker
 ```
 
-`start-embed-homed13.sh` points at `/opt/llama.cpp/models/Qwen3-Embedding-0.6B-Q8_0.gguf` — a **different
-path** from the Spark's copy above; don't assume they're symlinked or shared.
+`start-embed-homed13.sh` points at `/opt/llama.cpp/models/Qwen3-Embedding-8B-Q8_0.gguf` — a **different
+path** from the Spark's copy above; don't assume they're symlinked or shared. **CPU-only
+(`--n-gpu-layers 0`)** on this node specifically — an 8B model at Q8_0 (~8.5GB) doesn't fit alongside
+ComfyUI's permanently-resident SDXL checkpoint (~6.8GB) on this card's 12GB, and this backend is the
+one with slack to give (offline bulk job, no latency requirement, unlike the Spark's query-time
+instance which stays on GPU).
+
+**Both instances must run the same checkpoint, always.** They embed into the same
+`vectors.db`/`vec_chunks` space — a mismatch between the query-time embedder and the bulk-ingestion
+embedder makes every retrieval a comparison across two different vector spaces, not a subtly-worse
+one. Changing one without the other is a correctness bug, not a partial upgrade.
+
+### 3a. After changing the embedding model — required, not optional
+
+`vec_chunks`/`vec_turns` are sqlite-vec `vec0` tables with their dimension fixed at CREATE time.
+`hermes_rag_common.py` 1.7.0 and `hermes-memory.py` 1.4.0 both detect a live dimension mismatch
+automatically and self-migrate (drop, recreate, re-embed every existing row) the next time each
+connects — no manual reindex trigger needed, and safe to leave alone. Two things worth doing anyway:
+
+1. **Restart both embed backends together first** (`sudo systemctl restart hermes-embed
+   hermes-embed-homed13`), before anything else touches `vectors.db` or `memory.db` — the
+   self-migration re-embeds through *whatever backend is currently answering on :8092*, so if the
+   old 0.6B model is still running when a migration kicks off, it silently re-embeds everything
+   back at the old dimension instead of the new one.
+2. **Smoke-test the new backend before trusting it in production**, not just checking it's up —
+   `ggml-org/llama.cpp#26044` reports Qwen3-Embedding-8B returning all-NaN embeddings on certain
+   CUDA/Volta-generation inputs, permanently wedging the server until restarted. The Spark is
+   GB10 Grace-**Blackwell**, not Volta, so this specific report likely doesn't apply — but that's
+   an architectural inference, not a live test:
+   ```bash
+   curl -s http://127.0.0.1:8092/v1/embeddings -H 'Content-Type: application/json' \
+     -d '{"input": "sanity check"}' | head -c 200
+   # expect a real JSON array of 4096 floats, not an error or a string of "nan"
+   ```
+
+The first real request that hits each self-migration (one on `vectors.db`, one on `memory.db`) will
+be noticeably slower than normal — expected, it's re-embedding every existing chunk/turn inline,
+once, not a hang.
 
 ## 4. Ingesters (four corpora, one pattern each)
 
@@ -282,6 +318,7 @@ ssh <host-alias> /opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/to
 
 | Version | Date | Change |
 |---|---|---|
+| 1.3.0 | 2026-09-04 | §3 rewritten for the embed swap (Qwen3-Embedding-0.6B -> 8B, model-review finding: #1 on a Jan 2026 MTEB English snapshot). New §3a: `hermes_rag_common.py` 1.7.0 / `hermes-memory.py` 1.4.0 self-migrate `vec_chunks`/`vec_turns` on dimension mismatch (drop, recreate, re-embed every existing row) — documented as required-but-automatic, plus the two things worth doing by hand (restart both embed backends together first; smoke-test before trusting it, since `ggml-org/llama.cpp#26044`'s Volta NaN-embedding bug is architecturally unlikely but not live-verified against this fleet's GB10/Blackwell hardware). HomeD13's instance moved to CPU-only — the 8B model doesn't fit alongside ComfyUI's resident SDXL checkpoint in 12GB VRAM. |
 | 1.2.0 | 2026-09-04 | `rag_reindex` rebuilt fire-and-forget plus a new `rag_reindex_progress` tool, direct request ("the mcp should have a 'rag reindex progress' as well") — the original blocking design (1.1.0) could exceed an MCP client's own tool-call timeout on a large podcast catch-up. Job state now on disk under `~/.hermes/state/rag-reindex/`, checkable from a different MCP session or client machine than the one that started the run. Verified live: start/already-running-refusal/poll-to-completion, plus a real (non-dry-run) fleet-docs reindex through the tool itself to pick up this same file's own 1.1.0 edit. |
 | 1.1.0 | 2026-09-04 | Adds §9, `hermes-rag-mcp.py` — MCP server exposing search/reindex over stdio, portable across client machines via SSH (direct request: "the MCP ability needs to be portable enough between at least two machines"). Two-layer injection screening on every returned string per a second direct request ("always do injection protection at every possible interaction"), verified live end-to-end (initialize/tools-list/tools-call handshake, plus a real query that triggered a genuine Layer 1 block). |
 | 1.0.1 | 2026-08-30 | HermesAgentV5 consolidation: Usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
