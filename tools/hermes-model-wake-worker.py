@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-09-05) — `WAKE_TARGETS` split by `HERMES_NODE` (spark vs spark-2), new `coder2` entry
+# on the spark-2 branch (Muse Glimmer 30B, port 8099, llama-coder2 unit) -- spark-2's first-ever
+# on-demand role, for the dual-coder review orchestrator's second reviewer. `claim()` now passes
+# `roles=<this node's own WAKE_TARGETS keys>` to the broker's new filter (hermes-broker.py 1.4.0) so
+# the two nodes' worker instances, polling the same central `type=wake` queue, never race each other
+# for a role only the other can serve.
 #
 # 1.2.0 (2026-08-26) — added `coder` (Qwen3.8-27B-abliterated, port 8094, llama-coder unit) as a
 # real, active WAKE_TARGETS entry -- un-retiring `coder` as on-demand rather than always-resident,
@@ -87,15 +94,33 @@ STATE_DIR = Path(os.environ.get("WAKE_STATE_DIR", str(Path.home() / ".hermes" / 
 # requests `super` in the gap between a crash and systemd's own restart. 25 = 17.2GB byte-verified
 # file size (18,474,983,296 bytes) plus the same margin proportion the 76.9GB->85GiB figure above
 # used, rounded up.
-WAKE_TARGETS = {
-    "super": ("http://127.0.0.1:8095/health", "llama-super", 25),
-    # coder = Huihui-Qwen3.8-27B-abliterated, byte-verified 16,810,714,400 bytes (15.65GiB),
-    # moved here from spark-2's retired Qwen3-Coder-Next after a real execution-verified bake-off
-    # (2026-08-26): Coder-Next crashed on its own generated code, Qwen3.8 passed all correctness
-    # checks. On-demand rather than always-resident since coding tasks tolerate the wake latency.
-    # 23 = 15.65GiB real size * the same ~1.45 margin ratio super's own 17.2GB->25GiB figure used.
-    "coder": ("http://127.0.0.1:8094/health", "llama-coder", 23),
-}
+#
+# 2026-09-05 — split by HERMES_NODE: this same file now also runs on spark-2, for `coder2` (Muse
+# Glimmer 30B, the dual-coder review orchestrator's second reviewer) — spark-2's first-ever
+# on-demand role. Each node's own WAKE_TARGETS only lists what it can actually
+# `sudo systemctl start` locally; claim() also passes `roles=<this node's own WAKE_TARGETS keys>`
+# to the broker (hermes-broker.py 1.4.0's new filter) so the two nodes' instances, polling the same
+# central `type=wake` queue, never race each other for a role only the other one can serve.
+NODE = os.environ.get("HERMES_NODE", "spark")
+if NODE == "spark":
+    WAKE_TARGETS = {
+        "super": ("http://127.0.0.1:8095/health", "llama-super", 25),
+        # coder = Huihui-Qwen3.8-27B-abliterated, byte-verified 16,810,714,400 bytes (15.65GiB),
+        # moved here from spark-2's retired Qwen3-Coder-Next after a real execution-verified
+        # bake-off (2026-08-26): Coder-Next crashed on its own generated code, Qwen3.8 passed all
+        # correctness checks. On-demand rather than always-resident since coding tasks tolerate
+        # the wake latency. 23 = 15.65GiB real size * the same ~1.45 margin ratio super's own
+        # 17.2GB->25GiB figure used.
+        "coder": ("http://127.0.0.1:8094/health", "llama-coder", 23),
+    }
+else:
+    WAKE_TARGETS = {
+        # coder2 = Muse Glimmer 30B (Meta, stock, Apache-2.0), byte-verified 17,306,324,000 bytes
+        # (16.12GiB) via a live HF content-length check before download, same gate every model file
+        # in this fleet goes through. 24 = 16.12GiB * the same ~1.46 margin ratio coder's/super's
+        # own figures used, rounded up.
+        "coder2": ("http://127.0.0.1:8099/health", "llama-coder2", 24),
+    }
 
 
 def log(msg):
@@ -124,7 +149,10 @@ def request(method, path, data=None, headers=None):
 
 def claim():
     try:
-        return request("GET", f"/jobs/claim?type={JOB_TYPE}&worker={WORKER}").get("job")
+        roles_qs = ",".join(WAKE_TARGETS)
+        return request(
+            "GET", f"/jobs/claim?type={JOB_TYPE}&worker={WORKER}&roles={roles_qs}"
+        ).get("job")
     except urllib.error.URLError as exc:
         log(f"broker unreachable ({exc}) — retrying in {POLL}s")
         return None

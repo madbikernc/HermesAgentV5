@@ -1,0 +1,17 @@
+[Unit]
+Description=llama.cpp server - Muse Glimmer 30B (on-demand coder2 backend, spark-2)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-coder2/README.md
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/opt/llama.cpp/start-coder2.sh
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal

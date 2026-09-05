@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 2.9.0
+# Version: 2.10.0
+#
+# 2.10.0 (2026-09-05) — new `coder2` role (Muse Glimmer 30B, Meta, stock/Apache-2.0, port 8099 on
+# spark-2), the dual-coder review orchestrator's second reviewer -- real bake-off findings showed
+# `coder` and Muse Glimmer are asymmetric, not redundant (coder wins ifeval/mmlu_pro, Muse Glimmer
+# wins BFCL function-calling decisively), which is the actual case for a second coder rather than a
+# replace-and-retire swap. Deliberately cross-node (muse/omni's dual-branch shape, not coder's
+# same-node one) so the two coding backends' back-and-forth review traffic never contends for
+# spark's own memory bandwidth or its always-resident dispatch traffic. `ON_DEMAND_ROLES`/`/v1/models`
+# need no changes -- both already generic over `ROLES`.
 #
 # 2.9.0 (2026-09-04) — Direct operator request: chat access to a "model report" (which checkpoint
 # backs each role, where it lives, whether it's abliterated). `ROLES` entries grow two metadata
@@ -220,6 +229,11 @@ if NODE == "spark":
         # and S12's DISPATCH_CHAT_URL standby override in the same pass for a cosmetic port-number
         # match with no functional benefit. Deferred, not forgotten -- see IMPLEMENTATION_PLAN.md S13.
         "dispatch": ("http://127.0.0.1:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
+        # coder2 (dual-coder review's second reviewer) is cross-node like muse/omni, not same-node
+        # like coder -- deliberately on spark-2, not spark, so the two coding backends never
+        # contend for the same node's memory bandwidth (or spark's own dispatch traffic) during a
+        # long back-and-forth review. Muse Glimmer 30B (Meta, stock, Apache-2.0) -- not abliterated.
+        "coder2": (f"http://{SPARK2_IP}:8099", True, "Muse-Glimmer-30B (Meta, stock, Apache-2.0)", False),
     }
 else:
     ROLES = {
@@ -228,6 +242,7 @@ else:
         "muse": ("http://127.0.0.1:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
         "omni": ("http://127.0.0.1:8091", False, "Nemotron-3-Nano-Omni-30B-A3B", False),
         "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
+        "coder2": ("http://127.0.0.1:8099", True, "Muse-Glimmer-30B (Meta, stock, Apache-2.0)", False),
     }
 
 ON_DEMAND_ROLES = {role for role, (_, on_demand, _, _) in ROLES.items() if on_demand}

@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-09-05) — `/jobs/claim` gains an optional `roles` filter (comma-separated), applied as
+# `json_extract(payload,'$.role') IN (...)` — prep for `coder2`'s `hermes-model-wake-worker.py`
+# instance on spark-2, which polls the same central `type=wake` queue as spark's own instance but
+# can only ever serve `coder2`. Without this, a cross-node worker racing for the same queue could
+# claim a job meant for a role it doesn't recognize, report a real failure, and burn a MAX_ATTEMPTS
+# slot plus a full poll cycle of latency for the role that actually needed to wake -- not a
+# guaranteed break (`_result()` already requeues on non-zero-exit-no-artifact rather than
+# dead-lettering immediately) but a real, avoidable tax on unrelated wake latency. Backward
+# compatible: absent/empty `roles` claims exactly as before, so the existing spark worker needs no
+# code change to keep working, though it should also pass its own `WAKE_TARGETS` keys once updated.
 #
 # 1.3.0 (2026-08-30) — new GET /jobs/{id}/artifact route, streaming a completed job's raw
 # artifact bytes. Added for hermes-media.py's own generate->evaluate->regenerate loop (target
@@ -371,10 +382,11 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             jtype = (qs.get("type") or [""])[0]
             worker = (qs.get("worker") or ["unknown"])[0]
+            roles = (qs.get("roles") or [""])[0]
             if not jtype:
                 self._send(400, {"error": "type is required"})
                 return
-            self._send(200, self._claim(jtype, worker))
+            self._send(200, self._claim(jtype, worker, roles))
             return
 
         if parsed.path == "/jobs":
@@ -455,15 +467,35 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- operations -------------------------------------------------------
 
-    def _claim(self, jtype, worker):
+    def _claim(self, jtype, worker, roles=""):
+        """`roles` (optional, comma-separated) restricts the claim to jobs whose
+        `payload.role` is one of these -- added so a second `hermes-model-wake-worker.py`
+        instance on another node, polling the same `type='wake'` queue, only ever claims wake
+        jobs it can actually serve locally. Without this, a worker that claims a job for a role
+        it doesn't recognize reports a real failure (non-zero exit, no artifact), which
+        `_result()` already requeues rather than dead-lettering outright -- but every such
+        mis-claim still burns one of the job's `MAX_ATTEMPTS` and a full poll cycle of latency
+        for whichever role actually needed to wake. Backward compatible: an absent/empty `roles`
+        claims exactly as before (every existing caller, unchanged)."""
         reap_expired_leases()
+        role_list = [r for r in roles.split(",") if r]
         with _db_lock, connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT id,type,payload,attempts FROM jobs "
-                "WHERE state='queued' AND type=? ORDER BY created_at LIMIT 1",
-                (jtype,),
-            ).fetchone()
+            if role_list:
+                placeholders = ",".join("?" * len(role_list))
+                row = conn.execute(
+                    "SELECT id,type,payload,attempts FROM jobs "
+                    "WHERE state='queued' AND type=? "
+                    f"AND json_extract(payload,'$.role') IN ({placeholders}) "
+                    "ORDER BY created_at LIMIT 1",
+                    (jtype, *role_list),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT id,type,payload,attempts FROM jobs "
+                    "WHERE state='queued' AND type=? ORDER BY created_at LIMIT 1",
+                    (jtype,),
+                ).fetchone()
             if not row:
                 conn.execute("COMMIT")
                 return {"job": None}

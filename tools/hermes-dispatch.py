@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.4.4
+# Version: 1.4.5
+#
+# 1.4.5 (2026-09-05) — added `dualcoder` to VALID_TARGETS/TOPIC_DESCRIPTIONS: new Buzz topic for
+# the dual-coder review orchestrator (tools/hermes-dualcoder.py). A normal classifier destination
+# like `status`/`probe`/`reolink`, not presenter-dispatched-only like `websearch`.
 #
 # 1.4.4 (2026-09-04) — TOPIC_DESCRIPTIONS' `status` entry mentions the new model report (which
 # checkpoint backs each role, IP/port/API URL, abliterated or not) so the routing classifier sends
@@ -179,7 +183,7 @@ ROUTING_HISTORY_TURNS = int(os.environ.get("ROUTING_HISTORY_TURNS", "6"))
 
 # Target §4.4's internal topic set, minus `dispatch` itself and `results` (a destination
 # specialists publish completion to, never something the dispatcher routes fresh work into).
-VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe", "reolink"}
+VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe", "reolink", "dualcoder"}
 
 # One-line, accurate descriptions per topic -- added 2026-08-31 after a real, confirmed
 # misroute: "check for griefing on the zomboid server" went to `status` instead of `logs`,
@@ -206,6 +210,13 @@ TOPIC_DESCRIPTIONS = {
               "backs each role, its IP/port/API URL, and whether it's abliterated)",
     "probe": "run a real network scan (nmap) against one specific IP address",
     "reolink": "check the Reolink camera -- pull a live snapshot and describe what's in frame",
+    "dualcoder": "run a bounded, multi-round dual-model code review for one coding task -- coder "
+                 "drafts, coder/coder2 alternate bug-review rounds until they agree or a round cap "
+                 "is hit (a stuck disagreement gets one tie-breaking opinion from the fleet's "
+                 "shared Nous budget before anything reaches a human), then both write independent "
+                 "security reviews and cross-check each other's review -- use for a task that needs "
+                 "more rigor than a quick coding answer, not for one-liners (this can take many "
+                 "minutes)",
 }
 
 ROUTING_SYSTEM_PROMPT = (

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily check for hermes-memory tasks stuck 24h+ in a needs-human state
+
+[Timer]
+OnCalendar=*-*-* 08:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermes attention-reminder - daily nudge for hermes-memory tasks stuck 24h+ in a needs-human state
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-attention-reminder/README.md
+RequiresMountsFor=/mnt/hermes-data
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-attention-reminder.py

@@ -1,0 +1,9 @@
+[Unit]
+Description=Stop llama-coder2 if it has sat idle too long (spark-2 only, triggered by hermes-coder2-idle-sleep.timer)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-router/README.md
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-idle-sleep.sh coder2 llama-coder2 900
