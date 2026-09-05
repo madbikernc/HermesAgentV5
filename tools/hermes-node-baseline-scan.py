@@ -252,18 +252,21 @@ def run_lynis(cfg):
     _, rc, err = run(["sudo", "-n", "lynis", "audit", "system", "--quiet", "--no-colors"], timeout=900)
     if rc != 0:
         return [], f"lynis audit system failed (exit {rc}): {err.strip()[:300] or '(no stderr)'}"
-    if not report_path.exists():
-        return [], f"lynis reported success but {report_path} was not found"
 
     overrides = cfg.get("severity_overrides", {})
     warn_sev = cfg.get("default_warning_severity", "high")
     sugg_sev = cfg.get("default_suggestion_severity", "low")
 
+    # Read via `sudo cat`, not Path.read_text() -- found live 2026-09-05: lynis writes its own
+    # report 0640 root:root, so the unprivileged user running this scanner (which only sudo'd
+    # the `lynis audit system` invocation itself, not the read) got a plain PermissionError here
+    # even though the audit above had just succeeded as root moments earlier.
+    report_text, cat_rc, cat_err = run(["sudo", "-n", "cat", str(report_path)])
+    if cat_rc != 0:
+        return [], f"could not read {report_path} (exit {cat_rc}): {cat_err.strip()[:300] or '(no stderr)'}"
+
     findings = []
-    try:
-        lines = report_path.read_text(errors="replace").splitlines()
-    except Exception as e:
-        return [], f"could not read {report_path}: {e}"
+    lines = report_text.splitlines()
 
     for line in lines:
         for prefix, default_sev, kind in (("warning[]=", warn_sev, "warning"), ("suggestion[]=", sugg_sev, "suggestion")):
