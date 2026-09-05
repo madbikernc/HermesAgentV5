@@ -57,6 +57,7 @@ Usage:
   python3 hermes-node-baseline-scan.py --section aide lynis
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -275,10 +276,21 @@ def run_lynis(cfg):
             fields = line[len(prefix):].split("|")
             test_id = fields[0].strip() if fields else "UNKNOWN"
             description = fields[1].strip() if len(fields) > 1 else line.strip()
-            solution = fields[2].strip() if len(fields) > 2 else ""
+            # lynis writes a literal "-" for an empty solution field, confirmed live 2026-09-05
+            # (most suggestions have no separate solution text -- description is already the
+            # actionable text, e.g. "Install libpam-tmpdir..."), not an empty string.
+            solution_raw = fields[2].strip() if len(fields) > 2 else ""
+            solution = solution_raw if solution_raw and solution_raw != "-" else ""
             severity = overrides.get(test_id, default_sev)
+            # A single test_id can legitimately fire more than once with different findings --
+            # confirmed live 2026-09-05, real report.dat: AUTH-9286 appears twice, once for
+            # minimum and once for maximum password age, two genuinely distinct issues. Keying
+            # finding_id on test_id alone would silently collapse them into one, permanently
+            # losing whichever fired second in findings_by_id. A short hash of the description
+            # disambiguates while staying stable day-to-day for the same underlying condition.
+            dedup = hashlib.sha1(description.encode()).hexdigest()[:8]
             findings.append(finding(
-                finding_id=f"lynis:{test_id}",
+                finding_id=f"lynis:{test_id}:{dedup}",
                 tool="lynis",
                 severity=severity,
                 description=f"[{kind}] {test_id}: {description}",
