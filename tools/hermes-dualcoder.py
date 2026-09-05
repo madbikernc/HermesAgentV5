@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-# Version: 1.0.3
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-05) — comprehensive security-review capability, direct operator request: a new
+# static-analysis pass (tools/hermes-code-security-scan.py -- bandit, ruff unused-variable checks,
+# detect-secrets, plus two new heuristic checks for unauthenticated destructive actions and
+# credential-shaped variables passed to logging) now runs once per security phase, before either
+# model's security_review() call, and its real findings get threaded into both security_review()
+# and meta_review()'s prompts as grounding. This is the actual fix for "consistent" reviews: the
+# same function reviewed twice used to get purely free-form LLM output with no shared factual
+# basis; now both models start from the same real, deterministic findings and the LLM's job is
+# triage/severity/false-positive-judgment plus whatever static analysis structurally can't see
+# (business-logic authorization gaps), not invention from a blank page. New `run_static_scan()`
+# logs its own `static-scan` phase turn (real pipeline step, not a model call, but load-bearing
+# enough to deserve the same one-turn-per-step audit trail everything else here gets) and
+# fail-opens to "static analysis unavailable this run" on a scanner crash, same posture
+# hermes-router.py's own Layer 2 guard already uses when its classifier is unreachable --
+# `security_review()`/`meta_review()` both gain a `static_findings_text` parameter.
 #
 # 1.0.3 (2026-09-05) — real bug found on the very next live run (task dc-live-test-2) after 1.0.2's
 # budget fix: the run actually converged and completed all four security/meta-review calls
@@ -110,6 +126,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_injection_guard  # noqa: E402
 _nous_judge = importlib.import_module("hermes-nous-judge")  # noqa: E402 -- hyphenated filename,
                                                               # same pattern hermes-status.py uses
+_codesec = importlib.import_module("hermes-code-security-scan")  # noqa: E402 -- same pattern
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
@@ -146,16 +163,24 @@ REVISE_SYSTEM_PROMPT = (
 )
 SECURITY_SYSTEM_PROMPT = (
     "You are conducting an independent security review of the function below. Assume you have no "
-    "knowledge of any other review that may exist. List concrete vulnerabilities or unsafe "
-    "patterns (injection, unsafe deserialization, path traversal, resource exhaustion, etc.) if "
-    "any are real and applicable to this function; say plainly if you find none. Be specific, not "
-    "generic."
+    "knowledge of any other review that may exist. You are given real static-analysis findings "
+    "(bandit, ruff, detect-secrets, plus two heuristic checks for destructive actions and "
+    "credential logging) as a starting point, not a final verdict -- static tools produce real "
+    "false positives, so explicitly call out any finding you judge to be one, and explain why. Add "
+    "real severity/exploitability reasoning static analysis can't provide on its own, and "
+    "specifically look for what it structurally cannot see: business-logic authorization gaps, and "
+    "whether a flagged destructive-action or credential-logging heuristic is an actual problem in "
+    "this function's real context. Also list any additional concrete vulnerabilities or unsafe "
+    "patterns the static findings missed. Be specific, not generic; say plainly if you find "
+    "nothing beyond what the static findings already cover."
 )
 META_REVIEW_SYSTEM_PROMPT = (
     "You are cross-checking another reviewer's security review of a function, not re-reviewing "
-    "the function from scratch. Identify any real gaps, false positives, or missed "
-    "vulnerabilities in their review. Be specific about what you'd add, remove, or dispute, or "
-    "say plainly if their review holds up."
+    "the function from scratch. You're given the same real static-analysis findings they were, so "
+    "you can judge whether their review actually engaged with those findings (correctly triaging "
+    "false positives, taking real ones seriously) or just repeated them uncritically. Identify any "
+    "real gaps, false positives, or missed vulnerabilities in their review. Be specific about what "
+    "you'd add, remove, or dispute, or say plainly if their review holds up."
 )
 JUDGE_SYSTEM_PROMPT = (
     "Two engineers have been unable to agree whether the function below is bug-free after "
@@ -313,12 +338,16 @@ def revise(writer, task_spec, code, issues):
     return call_model(writer, REVISE_SYSTEM_PROMPT, content, max_tokens=10000)
 
 
-def security_review(role, code):
-    return call_model(role, SECURITY_SYSTEM_PROMPT, f"Function:\n{code}", max_tokens=8000)
+def security_review(role, code, static_findings_text):
+    content = f"Function:\n{code}\n\nStatic analysis findings:\n{static_findings_text}"
+    return call_model(role, SECURITY_SYSTEM_PROMPT, content, max_tokens=8000)
 
 
-def meta_review(role, other_review, code):
-    content = f"Function (for reference):\n{code}\n\nThe other reviewer's security review:\n{other_review}"
+def meta_review(role, other_review, code, static_findings_text):
+    content = (
+        f"Function (for reference):\n{code}\n\nStatic analysis findings (same ones the other "
+        f"reviewer had):\n{static_findings_text}\n\nThe other reviewer's security review:\n{other_review}"
+    )
     return call_model(role, META_REVIEW_SYSTEM_PROMPT, content, max_tokens=6000)
 
 
@@ -379,17 +408,36 @@ def run_bug_loop(task_id, task_spec):
     return approved, code, transcript, judge_reply
 
 
+def run_static_scan(task_id, code):
+    """Real, deterministic findings (bandit/ruff/detect-secrets plus the two heuristic checks) --
+    computed ONCE, not once per model, since it's the same code and the result doesn't change.
+    Wrapped so a scanner crash degrades to 'static scan unavailable' rather than blocking the
+    security phase entirely -- same fail-open posture hermes-router.py's own Layer 2 guard already
+    uses when its classifier is unreachable."""
+    set_task_state(task_id, "static-scan")
+    try:
+        findings = _codesec.scan_code(code)
+        findings_text = _codesec.render_findings(findings)
+    except Exception as exc:
+        log(f"task {task_id!r}: static scan failed ({exc}) -- security review proceeds without it")
+        findings_text = f"(static analysis unavailable this run: {exc})"
+    log_round(task_id, "static-scan", 0, "hermes-code-security-scan", findings_text)
+    return findings_text
+
+
 def run_security_phase(task_id, code):
+    static_findings_text = run_static_scan(task_id, code)
+
     set_task_state(task_id, "security-review")
-    sec_coder = security_review("coder", code)
+    sec_coder = security_review("coder", code, static_findings_text)
     log_round(task_id, "security-review", 0, "coder", sec_coder)
-    sec_coder2 = security_review("coder2", code)
+    sec_coder2 = security_review("coder2", code, static_findings_text)
     log_round(task_id, "security-review", 0, "coder2", sec_coder2)
 
     set_task_state(task_id, "security-meta-review")
-    meta_on_coder = meta_review("coder2", sec_coder, code)
+    meta_on_coder = meta_review("coder2", sec_coder, code, static_findings_text)
     log_round(task_id, "security-meta-review", 0, "coder2-on-coder", meta_on_coder)
-    meta_on_coder2 = meta_review("coder", sec_coder2, code)
+    meta_on_coder2 = meta_review("coder", sec_coder2, code, static_findings_text)
     log_round(task_id, "security-meta-review", 0, "coder-on-coder2", meta_on_coder2)
 
     return sec_coder, sec_coder2, meta_on_coder, meta_on_coder2

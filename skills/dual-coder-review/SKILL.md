@@ -1,7 +1,7 @@
 ---
 name: dual-coder-review
 description: "Get a bounded, cross-reviewed function from two independent coding models (coder and coder2) instead of one -- they draft/review/revise until they agree it's bug-free, then each writes and cross-checks a security review. Use for a task that genuinely benefits from two-model rigor, not everyday coding questions."
-version: 1.1.0
+version: 1.2.0
 author: HermesAgentV5
 license: MIT
 platforms: [linux]
@@ -14,7 +14,7 @@ prerequisites:
 
 # Dual-Coder Review
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Two independent coding models, `coder` (Qwen3.8-27B-abliterated) and `coder2` (Meta's Muse Glimmer
 30B), draft and cross-review a function until they agree it's bug-free, then each writes an
@@ -68,6 +68,12 @@ curl -s -X POST "$BUZZ_URL/messages" -H "Authorization: Bearer $BUZZ_TOKEN" \
   meta-reviews — published to FleetOps), `unresolved` (the round cap was hit and the judge either
   agreed or was unavailable — **a human decides, nothing was auto-approved**), `error` (a real
   failure, reported honestly), `blocked` (the original task failed screening).
+- **Security reviews are grounded in real static-analysis findings**, not free-form LLM guessing —
+  a `static-scan` phase (`infra/hermes-code-security-scan/`: bandit, ruff unused-variable checks,
+  detect-secrets, plus heuristics for unauthenticated destructive actions and credential-shaped
+  variables passed to logging) runs once before either model's review and feeds its real findings
+  into both prompts. This is what makes reviews consistent run-to-run instead of purely
+  sampling-dependent.
 - If a task sits `unresolved` for 24+ hours, `tools/hermes-attention-reminder.py`'s daily check will
   flag it by email — see `infra/hermes-attention-reminder/README.md`.
 
@@ -81,5 +87,6 @@ curl -s -X POST "$BUZZ_URL/messages" -H "Authorization: Bearer $BUZZ_TOKEN" \
 
 | Version | Date | Change |
 |---|---|---|
+| 1.2.0 | 2026-09-05 | Security reviews now grounded in a real static-analysis pass (`infra/hermes-code-security-scan/`) instead of purely free-form LLM output — see `tools/hermes-dualcoder.py` 1.1.0's own changelog. |
 | 1.1.0 | 2026-09-05 | Latency guidance corrected after the first real end-to-end run: coder2's real reasoning overhead on an actual task made the original ~30-40 min estimate a significant understatement — now "potentially over an hour," with the real numbers behind it. |
 | 1.0.0 | 2026-09-05 | Initial version. |

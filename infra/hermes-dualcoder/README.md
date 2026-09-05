@@ -1,6 +1,6 @@
 # hermes-dualcoder — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Bounded, auditable dual-agent code review (direct operator request, 2026-09-05). `coder` and
 `coder2` (Muse Glimmer 30B, `infra/hermes-coder2/`) alternate bug-review rounds on one coding task
@@ -16,8 +16,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-dualcoder
 ```
 
-Requires `coder2` already deployed and reachable (`infra/hermes-coder2/README.md`), and
-`hermes-broker.py` 1.4.0+ running (the wake-worker claim-scoping fix).
+Requires `coder2` already deployed and reachable (`infra/hermes-coder2/README.md`),
+`hermes-broker.py` 1.4.0+ running (the wake-worker claim-scoping fix), and the `codesec` venv
+installed (`infra/hermes-code-security-scan/README.md`) — the security phase fails open to
+"static analysis unavailable" without it, so the pipeline still runs, but reviews lose the
+consistency the static pass exists to provide.
 
 ## 2. Verify — real task, not a smoke test
 
@@ -41,7 +44,8 @@ watch -n 5 'curl -s http://10.129.1.15:8102/tasks/dc-test-1 -H "Authorization: B
 #   drafting -> review-round-1 -> ... -> security-review -> security-meta-review -> done/unresolved
 
 # 4. Confirm one turns row per actual model call -- a "complete" task with only one or two turns
-#    logged is the fabrication pattern to watch for (LESSONS_LEARNED.md §2g):
+#    logged is the fabrication pattern to watch for (LESSONS_LEARNED.md §2g). This should now
+#    include one `static-scan` phase turn ahead of the two `security-review` turns:
 curl -s "http://10.129.1.15:8102/turns?task_id=dc-test-1" -H "Authorization: Bearer $MEMORY_TOKEN"
 
 # 5. Cross-check hermes-router's own usage log for real role=coder2 entries during the run window --
@@ -74,4 +78,5 @@ behavior that must never happen at the round cap, the judge call, or the judge v
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-09-05 | Security phase now runs a real static-analysis pass (`infra/hermes-code-security-scan/`) before either model's security review, feeding real findings into both prompts as grounding — see `tools/hermes-dualcoder.py` 1.1.0's own changelog. |
 | 1.0.0 | 2026-09-05 | Initial version — dual-coder review orchestrator, direct operator request following the real coder/coder2 bake-off. |
