@@ -122,8 +122,11 @@ AGENT_NAME = "node-baseline"
 
 
 def log(msg):
+    # stderr, not stdout: --dry-run's only stdout output is one final json.dumps(), and a log
+    # line ahead of it would otherwise corrupt that for any caller piping stdout to a JSON
+    # parser -- found live 2026-09-05 testing this exact thing on spark.
     line = f"[hermes-node-baseline-scan] {msg}"
-    print(line, flush=True)
+    print(line, file=sys.stderr, flush=True)
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(LOG_PATH, "a") as f:
