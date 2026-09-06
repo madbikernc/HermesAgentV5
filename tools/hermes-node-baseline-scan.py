@@ -219,7 +219,16 @@ def run_aide(cfg):
 
     out, rc, err = run(["sudo", "-n", "aide", "--check", "--config", cfg.get("config_path", "/etc/aide/aide.conf")],
                         timeout=cfg.get("check_timeout_seconds", 7200))
-    if rc not in (0, 1):  # aide exits 1 when it finds differences -- that's the normal "findings" case
+    # AIDE's --check exit status is a BITMASK, not a plain 0/1/nonzero convention -- confirmed
+    # live 2026-09-05 against `man aide`'s own EXIT STATUS section: 1*(new found) + 2*(removed
+    # found) + 4*(changed found), so 0-7 are all normal "check completed, here's what it found"
+    # outcomes (a real run hit exit 5 = new AND changed found together, which the original
+    # `rc not in (0, 1)` check wrongly treated as a hard failure and discarded every finding
+    # from). Real errors are single distinct codes 14 (writing), 15 (invalid argument), 16
+    # (unimplemented), 17 (config), 18 (I/O), 19 (version mismatch), 20 (exec), 21 (file lock),
+    # 22 (memory), 23 (thread), 24 (database), 25 (signal) -- all >= 8, so >= 8 is the correct
+    # failure boundary, not "!= 0 and != 1".
+    if rc >= 8:
         return [], f"aide --check failed (exit {rc}): {err.strip()[:300] or '(no stderr)'}"
 
     findings = []

@@ -1,6 +1,6 @@
 # hermes-node-baseline — S17 recreate checklist
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Daily local-node security baseline (aide file-integrity, lynis hardening audit, syft+grype
 SBOM/CVE), diffed day-over-day, with new medium+ findings written as durable, queryable
@@ -34,9 +34,12 @@ Full history for any `REC-...` id: `GET {MEMORY_URL}/turns?task_id=REC-...` — 
 
 ## Required manual setup per node (not automated — a privilege change, done deliberately)
 
-`aide --check` and `lynis audit system` need root. Add exactly these two read-only audit
-commands to `pmoney`'s sudoers, narrowly scoped — same precedent as the existing `sudo nmap`
-entry `tools/hermes-security-scan.py` already depends on:
+`aide --check` and `lynis audit system` need root. On this fleet, confirmed live 2026-09-05,
+`pmoney` already has full passwordless sudo on all three nodes (same "already-privileged worker"
+model `infra/hermes-remediate/README.md` documents) — no new sudoers entry is actually needed
+here. If a future node's `pmoney` does NOT have broad sudo already, add exactly these two
+read-only audit commands, narrowly scoped, same precedent as the existing `sudo nmap` entry
+`tools/hermes-security-scan.py` already depends on:
 
 ```
 # /etc/sudoers.d/hermes-node-baseline
@@ -44,10 +47,33 @@ pmoney ALL=(root) NOPASSWD: /usr/bin/aide --check --config /etc/aide/aide.conf
 pmoney ALL=(root) NOPASSWD: /usr/bin/lynis audit system --quiet --no-colors
 ```
 
-Also required, once, before the first scan on a node: `sudo aide --init && sudo cp
-/var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz` to establish the initial file-integrity
-baseline. Re-run `aide --init` (with the operator's sign-off) whenever a legitimate bulk change
-makes the old baseline noisy — this is a manual step, not something the scanner does for you.
+Before the first `aide --init` on a node, exclude the dynamic NFS/RPC pseudo-filesystem —
+confirmed live 2026-09-05 on all three nodes: the distro's own shipped
+`/etc/aide/aide.conf.d/31_aide_nfs` targets the legacy `/var/lib/nfs/rpc_pipefs` path, but this
+fleet actually mounts it at `/run/rpc_pipefs` (a modern systemd convention), so the shipped rule
+never matches and these inherently-unstable virtual files (their reported content never matches
+their own stat size) get tracked and re-flagged as "new"/"changed" on every single run:
+
+```bash
+echo '!/run/rpc_pipefs' | sudo tee /etc/aide/aide.conf.d/90_hermes_exclude_run_rpc_pipefs
+```
+
+Then, once per node, establish the initial file-integrity baseline:
+
+```bash
+sudo aide --init --config /etc/aide/aide.conf
+# aide.conf's own gzip_dbout setting decides the exact output filename -- check which one your
+# node actually produced (confirmed live: this differs per node on this fleet) before copying:
+ls /var/lib/aide/aide.db.new*
+sudo cp /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz   # if gzip_dbout=yes
+sudo cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db         # if not
+```
+
+A real `--init` took 43m12s for 381,891 entries on HomeD13, and well over 90 minutes on spark —
+budget accordingly, and see `check_timeout_seconds` in `node-baseline.json` (default 7200s/2h)
+if a `--check` pass itself needs tuning for a particular node's real database size. Re-run
+`aide --init` (with the operator's sign-off) whenever a legitimate bulk change makes the old
+baseline noisy — this is a manual step, not something the scanner does for you.
 
 ## Install
 
@@ -114,3 +140,4 @@ curl -s $MEMORY_URL/turns?task_id=<REC-id> -H "Authorization: Bearer $MEMORY_TOK
 |---|---|---|
 | 1.0.0 | 2026-09-05 | Initial version — S17 built (scanner, then authorize-watch + routing) per the approved plan. |
 | 1.1.0 | 2026-09-05 | Live-verified on all three fleet nodes: real tool bugs found and fixed (syft source scheme, grype distro detection, lynis permission/dedup), `--only-fixed` and `--seed-only` added, HomeD13's Matrix-only email limitation documented, `hermes-buzz.service` restart requirement noted. |
+| 1.2.0 | 2026-09-05 | Two more real bugs found completing the first live `--seed-only` runs: aide's `--check` timeout (600s) was nowhere near enough for a real database (fixed, now 7200s default, configurable) and its exit status is a bitmask, not a plain 0/1 convention (exit 5 = new+changed both found, was wrongly treated as a hard failure). Also found and fixed a real path mismatch in the distro's own shipped aide NFS ruleset (`/var/lib/nfs/rpc_pipefs` vs. this fleet's actual `/run/rpc_pipefs`) and documented `pmoney`'s already-broad sudo, the gzip-vs-not baseline-activation difference between nodes, and real measured `aide --init` timings. |
