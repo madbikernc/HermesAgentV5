@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.4.5
+# Version: 1.4.6
+#
+# 1.4.6 (2026-09-06) — added `gameadmin` to VALID_TARGETS/TOPIC_DESCRIPTIONS: new Buzz topic for
+# tools/hermes-game-admin.py, direct operator request to make Minecraft/Zomboid admin actions
+# (kick/ban/whitelist/op/restart/etc.) reachable from Matrix chat, reversing the "no side-effecting
+# skill reachable from chat" policy tools/hermes-status.py's own header previously documented (see
+# hermes-game-admin.py's header for the full account). The description below is written to be
+# maximally distinct from both `status` ("a quick, real-time status/reading check") and `logs`
+# ("Minecraft/Zomboid admin/connection/PvP logs for griefing or abuse") specifically because this
+# exact domain already caused one real, confirmed misroute (1.4.0 below, "check for griefing on
+# the zomboid server" -> `status` instead of `logs`) — a third topic sharing the same two keywords
+# needs a description a classifier can actually tell apart, not just another word-association bag.
 #
 # 1.4.5 (2026-09-05) — added `dualcoder` to VALID_TARGETS/TOPIC_DESCRIPTIONS: new Buzz topic for
 # the dual-coder review orchestrator (tools/hermes-dualcoder.py). A normal classifier destination
@@ -183,7 +194,7 @@ ROUTING_HISTORY_TURNS = int(os.environ.get("ROUTING_HISTORY_TURNS", "6"))
 
 # Target §4.4's internal topic set, minus `dispatch` itself and `results` (a destination
 # specialists publish completion to, never something the dispatcher routes fresh work into).
-VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe", "reolink", "dualcoder"}
+VALID_TARGETS = {"retrieve", "screen", "logs", "code", "vision", "media", "train", "status", "probe", "reolink", "dualcoder", "gameadmin"}
 
 # One-line, accurate descriptions per topic -- added 2026-08-31 after a real, confirmed
 # misroute: "check for griefing on the zomboid server" went to `status` instead of `logs`,
@@ -217,6 +228,13 @@ TOPIC_DESCRIPTIONS = {
                  "security reviews and cross-check each other's review -- use for a task that needs "
                  "more rigor than a quick coding answer, not for one-liners (this can take many "
                  "minutes)",
+    "gameadmin": "TAKE AN ADMIN ACTION on the Minecraft or Zomboid game server -- kick, ban, or "
+                 "pardon a player, add/remove someone from the whitelist, grant/revoke Minecraft "
+                 "operator or set a Zomboid access level, start/stop/restart the server, broadcast "
+                 "a message, force-save, change a Zomboid sandbox setting, or reset the Zomboid "
+                 "world. Never for checking status/health/players (that's `status`) or reviewing "
+                 "logs/griefing/abuse history (that's `logs`) -- this is only for a request to "
+                 "actually change something on one of these two servers.",
 }
 
 ROUTING_SYSTEM_PROMPT = (

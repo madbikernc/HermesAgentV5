@@ -1,14 +1,14 @@
 ---
 name: zomboid-admin
 description: "Remote monitor, manage, update, and administer players on the Project Zomboid dedicated server at 192.168.1.221 (zomboid.service, alongside the Minecraft server on the same box)."
-version: 1.11.1
+version: 1.12.0
 author: HermesAgentV5
 license: MIT
 platforms: [linux]
 metadata:
   hermes:
     tags: [Zomboid, Minecraft, Monitoring, Remote, Server]
-    related_skills: [vault-secret]
+    related_skills: [vault-secret, game-server-monitor, minecraft-admin]
 prerequisites:
   commands: [ssh]
   files:
@@ -18,7 +18,21 @@ prerequisites:
 
 # Zomboid Admin Remote Management
 
-**Version:** 1.11.0
+**Version:** 1.12.0
+
+**Now reachable from Matrix chat, not just this CLI.** Direct operator request (2026-09-06):
+[[minecraft-admin]]'s sibling specialist, `tools/hermes-game-admin.py` (Buzz topic `gameadmin`),
+parses admin requests out of chat text and runs `tools/hermes-zomboid-admin-local.sh` on the box
+over SSH as `zomboid-admin` — kick/ban/pardon, whitelist add/remove, `setaccesslevel`, broadcast,
+save, start/stop/restart, `sandboxvar`/`sandboxvars`, `logins`/`auditlog`, and `newworld --confirm`
+(the world-reset command below) are all reachable this way, with **no confirmation step** — an
+explicit, recorded reversal of the "human-operated only" trust model this doc's own Revision
+History (1.11.0) and `hermes-zomboid-admin-local.sh`'s own `cmd_newworld()` comment previously
+described. See `tools/hermes-game-admin.py`'s header for the full account, including why it calls
+this script's local fork rather than `tools/hermes-zomboid-admin.sh` (that one still assumes a
+`muncraft` SSH key that doesn't exist for any identity this fleet runs as — unchanged, still
+broken, see [[game-server-monitor]]'s Rules section). `console <raw command>` is deliberately not
+exposed to chat — see that header for why.
 
 Manages the Project Zomboid dedicated server (`zomboid.service`, v42.20.2) running
 as user `muncraft` on `192.168.1.221` — the same Debian 13 box that hosts the
@@ -289,6 +303,7 @@ increasing either.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.12.0 | 2026-09-06 | Direct operator request: wired into Matrix chat via the new `gameadmin` Buzz topic (`tools/hermes-game-admin.py`), with no confirm gate — reverses this file's own long-standing "human-operated admin CLI, never an LLM's tool surface" framing (see 1.11.0 below and `hermes-zomboid-admin-local.sh`'s updated `cmd_newworld()` comment). `related_skills` gained `game-server-monitor`/`minecraft-admin`. |
 | 1.11.1 | 2026-08-30 | HermesAgentV5 consolidation: author: field and in-body usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
 | 1.0.0 | 2026-08-06 | Initial version — built alongside `tools/hermes-zomboid-admin.sh` and the console-FIFO setup on `zomboid.service`, right after standing up the Zomboid dedicated server itself. All command syntax verified live against the running server rather than assumed from its own `/help` text, which turned out to be wrong in two places (see Pitfalls). |
 | 1.1.0 | 2026-08-06 | Corrected a factual error from 1.0.0: Zomboid does support RCON (`RCONPort=27015` in `zomboid.ini`, same protocol Minecraft uses) — it isn't absent, just disabled here via a blank `RCONPassword`. Found by reading `zomboid.ini` directly while answering a question about player-management mechanics. Also reframed the `ufw deny 27015` rule from "inert/mislabeled" to correctly-targeted defense-in-depth, now that RCON is known to be a real (if currently disabled) feature. |

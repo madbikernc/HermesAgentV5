@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.6.7
+# Version: 1.6.8
+#
+# 1.6.8 (2026-09-06) — HELP_MESSAGE updated for the new `gameadmin` topic
+# (tools/hermes-game-admin.py, tools/hermes-dispatch.py 1.4.6): Minecraft/Zomboid admin actions
+# (kick/ban/whitelist/op/restart/etc.) are now reachable from chat, direct operator request that
+# reverses the "no side-effecting skill reachable from chat" policy tools/hermes-status.py's own
+# header previously documented. No other change here -- the ack/dispatch/poll machinery already
+# handles any topic name generically, same as every prior new-topic entry below.
 #
 # 1.6.7 (2026-09-06) — direct operator request: audit HELP_MESSAGE against every topic actually
 # live in VALID_TARGETS/TOPIC_DESCRIPTIONS (tools/hermes-dispatch.py) and every keyword group
@@ -380,6 +387,11 @@ HELP_MESSAGE = os.environ.get("HELP_MESSAGE", (
     "• Log/security analysis — \"pfsense log review\" for firewall log analysis, \"canary\" or "
     "\"honeypot\" for honeypot activity, or \"griefing\"/\"cheating\"/\"minecraft logs\"/"
     "\"zomboid logs\" for a Minecraft/Zomboid abuse-pattern review.\n"
+    "• Minecraft/Zomboid admin — say which server, then kick/ban/pardon a player, "
+    "\"whitelist add/remove <name>\", \"op\"/\"deop\" (Minecraft) or \"set access level ... to "
+    "...\" (Zomboid), \"say <message>\", save, start/stop/restart, a Zomboid sandbox setting "
+    "change, or resetting the Zomboid world. These actually change the server — unlike the "
+    "status checks above, there's no confirmation step, so say exactly what you mean.\n"
     "• Rigorous code review — ask for a thorough/careful dual-model review of a coding task (not "
     "a quick one-liner) and I'll run it through a bounded, multi-round coder/coder2 review-and-"
     "security-check loop. Can take several minutes; I'll ack right away and follow up with the "

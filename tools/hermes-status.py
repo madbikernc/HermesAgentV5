@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.4.1
+# Version: 1.4.2
+#
+# 1.4.2 (2026-09-06) — comment-only, no code change: this file's own header below (the "hermes-
+# status" doc comment) documents that "No side-effecting skill ... is reachable from chat at all
+# yet ... adding one later requires an explicit confirm-first flow." That's now out of date --
+# direct operator request wired Minecraft/Zomboid admin actions (kick/ban/whitelist/op/restart/
+# etc.) straight into chat with no confirm gate, via the new `gameadmin` Buzz topic
+# (tools/hermes-game-admin.py, tools/hermes-dispatch.py 1.4.6). This file's own `gameservers`
+# source and read-only-only scoping are unaffected -- see hermes-game-admin.py's header for the
+# full account of what changed and why.
 #
 # 1.4.1 (2026-09-04) — EMBED_INFO's checkpoint label updated to Qwen3-Embedding-8B-Q8_0, matching
 # the fleet-wide embed swap (infra/hermes-rag/start-embed.sh). Display-only change here -- the
@@ -79,10 +88,11 @@
 # rounds of scoping questions: (1) a curated allowlist, not the general skills/ tree Sintra/Amy
 # use, and (2) v1 is READ-ONLY ONLY -- every source wired up here is a status check its own
 # SKILL.md already documents as unable to change/control anything. No side-effecting skill
-# (Vivint locks/garage, Zomboid admin actions, model-abliteration, etc.) is reachable from chat at
-# all yet; per the operator's own answer, adding one later requires an explicit confirm-first
-# flow, reusing the offer/confirm pattern hermes-presenter.py 1.4.0 already built for the
-# internet-search fallback -- not silently wiring it up the way the read-only sources below are.
+# (Vivint locks/garage, model-abliteration, etc.) is reachable from chat through THIS file.
+# UPDATE 2026-09-06: Minecraft/Zomboid admin actions specifically are now the one exception --
+# direct operator request wired them into chat with no confirm gate, via a separate new topic
+# (`gameadmin`, tools/hermes-game-admin.py) rather than through this file. See that file's header
+# for the full account of why a separate topic/file, not an extension of `status`.
 #
 # Not a general tool-calling loop -- deliberately, matching hermes-code.py's own precedent and the
 # two real incidents its header cites (an agent using a shared, unscoped-sudo account to install

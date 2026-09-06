@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Version: 1.2.0
+# Version: 1.2.1
+#
+# 1.2.1 (2026-09-06) — comment-only: cmd_newworld()'s "handed to a trusted human, not an LLM
+# persona" note updated -- no longer true for this script specifically, now that
+# tools/hermes-game-admin.py runs it (including `newworld --confirm`) from Matrix chat with no
+# human confirmation step, per direct operator request. See that comment and
+# hermes-game-admin.py's header for the full account.
 #
 # 1.2.0 — mirrors hermes-zomboid-admin.sh 1.6.0's security fix: closed a real
 # command-injection RCE where cmd_sandboxvar()/cmd_sandboxvars() spliced
@@ -249,9 +255,15 @@ cmd_update() {
 #
 # Recorded exception to IMPLEMENTATION_PLAN.md §5 constraint 5 -- see
 # hermes-zomboid-admin.sh's own copy of this note for the full rationale.
-# This account (zomboid-admin) is handed to a trusted human, not to an LLM
-# persona; --confirm is the accepted gate for that trust model, same as
-# hermes-synology-ssh.py's constraint-2 exception.
+# UPDATE 2026-09-06: this claim is no longer true for THIS script specifically -- direct operator
+# request wired Matrix chat straight into this exact command (tools/hermes-game-admin.py's
+# `gameadmin` Buzz topic runs this script as zomboid-admin over SSH, `newworld --confirm` included,
+# parsed deterministically from chat text with no human confirmation step). The --confirm flag is
+# no longer a human-operator gate for this script -- hermes-game-admin.py's own regex parser
+# supplies it automatically whenever it recognizes a world-reset request. It remains a real gate
+# for hermes-zomboid-admin.sh (the separate, still-broken muncraft-key variant) and for this script
+# when run directly by a human. See hermes-game-admin.py's header for the full account of that
+# decision.
 cmd_newworld() {
   if [ "${1:-}" != "--confirm" ]; then
     echo "ERROR: this wipes the current map (terrain, buildings, loot, zombies --" >&2
