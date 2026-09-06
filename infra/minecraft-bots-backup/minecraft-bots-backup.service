@@ -1,0 +1,7 @@
+[Unit]
+Description=Minecraft Bot World Backup
+After=minecraft-bots.service
+
+[Service]
+User=zomboid-admin
+ExecStart=/home/zomboid-admin/minecraft-bots/backup.sh

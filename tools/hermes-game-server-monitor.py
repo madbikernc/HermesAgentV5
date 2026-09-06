@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 — added check_minecraft_bots(): the dedicated offline-mode instance the Firmament's
+# Minecraft bots play on (MINECRAFT_BOTS_DESIGN.md), separate from the human-facing server this
+# file already monitored. Service/process/disk/backup checks, same shape check_zomboid() uses
+# (no RCON on this instance either -- see check_minecraft_bots()'s own docstring). Process
+# identification reads minecraft-bots.service's own MainPID rather than `ps -C java`, since
+# both Minecraft instances on this box run a process literally named `java`. Same live run also
+# found check_minecraft()'s own pre-existing `ps -C java` had the identical problem once a
+# second `java` process existed on the box -- its "Minecraft process" line came back corrupted
+# (two processes' ps output concatenated: "up 28-00:41:18\n1663672 20.5  01:25:23"). Fixed the
+# same way, reading minecraft.service's own MainPID instead.
 #
 # 1.5.0 — security-review fix: vault_get()/vault_get_email_password() now
 # catch subprocess.TimeoutExpired instead of crashing on a complete
@@ -283,13 +294,21 @@ def check_minecraft(client):
     checks.append(check("Minecraft box-local monitor", "ok" if monitor_state == "active" else "warn",
                          monitor_state))
 
-    ps_out, _ = run(client, "ps -C java -o rss,%cpu,etime --no-headers")
+    # `ps -C java` stopped being selective enough once the Minecraft-bots instance (also
+    # `java`) started running on the same box -- confirmed live, not assumed: it returned both
+    # processes' lines concatenated, corrupting this check's own output ("up
+    # 28-00:41:18\n1663672 20.5  01:25:23"). Reads minecraft.service's own MainPID instead,
+    # same fix check_minecraft_bots() uses for exactly the same reason.
+    pid_out, _ = run(client, "systemctl show -p MainPID --value minecraft.service")
+    ps_out = ""
+    if pid_out and pid_out != "0":
+        ps_out, _ = run(client, f"ps -o rss,%cpu,etime --no-headers -p {pid_out}")
     if ps_out:
         rss, cpu, etime = ps_out.split(None, 2)
         checks.append(check("Minecraft process", "ok",
                              f"{int(rss) // 1024}MB RAM, {cpu}% CPU, up {etime}"))
     else:
-        checks.append(check("Minecraft process", "critical", "no java process found"))
+        checks.append(check("Minecraft process", "critical", "no process found"))
 
     disk_out, _ = run(client, "df --output=pcent /opt/minecraft | tail -1")
     pct = int(re.sub(r"\D", "", disk_out) or 0)
@@ -413,6 +432,56 @@ def _source_is_restricted(from_spec: str) -> bool:
                for allowed in UFW_ALLOWED_SOURCE_NETS)
 
 
+def check_minecraft_bots(client):
+    """The dedicated offline-mode instance the Firmament's Minecraft bots play on
+    (MINECRAFT_BOTS_DESIGN.md), separate from the human-facing server this file already
+    monitors. No RCON on this instance (bots connect via the game protocol, not RCON, and RCON
+    was deliberately left off to keep its surface minimal) -- same reason check_zomboid() skips
+    player-count-style checks. Process identification can't use `ps -C java` the way
+    check_minecraft() does: both instances run a process literally named `java`, so this reads
+    minecraft-bots.service's own MainPID instead of pattern-matching by name."""
+    checks = []
+
+    active, _ = run(client, "systemctl is-active minecraft-bots.service")
+    checks.append(check("Minecraft bots service", "ok" if active == "active" else "critical", active))
+
+    pid_out, _ = run(client, "systemctl show -p MainPID --value minecraft-bots.service")
+    ps_out = ""
+    if pid_out and pid_out != "0":
+        ps_out, _ = run(client, f"ps -o rss,%cpu,etime --no-headers -p {pid_out}")
+    if ps_out:
+        rss, cpu, etime = ps_out.split(None, 2)
+        checks.append(check("Minecraft bots process", "ok",
+                             f"{int(rss) // 1024}MB RAM, {cpu}% CPU, up {etime}"))
+    else:
+        checks.append(check("Minecraft bots process", "critical", "no process found"))
+
+    disk_out, _ = run(client, "df --output=pcent /home/zomboid-admin/minecraft-bots | tail -1")
+    pct = int(re.sub(r"\D", "", disk_out) or 0)
+    checks.append(check("Minecraft bots disk usage", "warn" if pct > DISK_WARN_PCT else "ok", f"{pct}%"))
+
+    # infra/minecraft-bots-backup/README.md, styled on minecraft.service's own backup.sh/timer.
+    backups_out, _ = run(client, "ls -t /home/zomboid-admin/minecraft-bots/backups/"
+                                  "firmament-bots_*.tar.gz 2>/dev/null")
+    backup_files = [f for f in backups_out.splitlines() if f]
+    if not backup_files:
+        checks.append(check("Minecraft bots backups", "critical",
+                             "no backup files found — minecraft-bots-backup.timer may not be "
+                             "installed yet (see infra/minecraft-bots-backup/README.md)"))
+    else:
+        mtime_out, _ = run(client, f"stat -c %Y {backup_files[0]}")
+        try:
+            age_hours = (datetime.now(timezone.utc).timestamp() - int(mtime_out)) / 3600
+            status = "warn" if age_hours > BACKUP_STALE_HOURS else "ok"
+            checks.append(check("Minecraft bots backups", status,
+                                 f"{len(backup_files)} file(s), latest {age_hours:.1f}h ago"))
+        except ValueError:
+            checks.append(check("Minecraft bots backups", "unknown",
+                                 f"{len(backup_files)} file(s), could not read latest mtime"))
+
+    return checks
+
+
 def check_firewall(client) -> list:
     """UFW rule review, direct request 2026-08-12: only the game's own
     connect ports may be open to Anywhere; every other ALLOW rule (SSH,
@@ -495,7 +564,7 @@ def check_firewall(client) -> list:
                    "all non-game ALLOW rules restricted to 10.129.1.x/Tailscale")]
 
 
-def build_report(mc_checks, zb_checks, fw_checks):
+def build_report(mc_checks, zb_checks, mcb_checks, fw_checks):
     lines = ["Game Server Monitor — muncraft box (192.168.1.221)", ""]
     lines.append("=== Minecraft ===")
     for c in mc_checks:
@@ -503,6 +572,10 @@ def build_report(mc_checks, zb_checks, fw_checks):
     lines.append("")
     lines.append("=== Project Zomboid ===")
     for c in zb_checks:
+        lines.append(f"  [{c['status'].upper()}] {c['name']}: {c['detail']}")
+    lines.append("")
+    lines.append("=== Minecraft Bots (offline-mode sandbox) ===")
+    for c in mcb_checks:
         lines.append(f"  [{c['status'].upper()}] {c['name']}: {c['detail']}")
     lines.append("")
     lines.append("=== Firewall (box-wide) ===")
@@ -541,7 +614,8 @@ def send_email(subject, body):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Daily game server (Minecraft + Zomboid) health check")
+    parser = argparse.ArgumentParser(
+        description="Daily game server (Minecraft + Zomboid + Minecraft bots) health check")
     parser.add_argument("--dry-run", action="store_true", help="Print instead of emailing")
     args = parser.parse_args()
 
@@ -558,6 +632,7 @@ def main() -> int:
     try:
         mc_checks = check_minecraft(client)
         zb_checks = check_zomboid(client)
+        mcb_checks = check_minecraft_bots(client)
         fw_checks = check_firewall(client)
     finally:
         client.close()
@@ -571,9 +646,9 @@ def main() -> int:
     # detected violation ("critical") still emails immediately. The report
     # text below always shows the current state either way, so it's never
     # silently hidden — just not what wakes up the inbox on its own.
-    issues = [c for c in (mc_checks + zb_checks) if c["status"] in ("warn", "critical")]
+    issues = [c for c in (mc_checks + zb_checks + mcb_checks) if c["status"] in ("warn", "critical")]
     issues += [c for c in fw_checks if c["status"] == "critical"]
-    report = build_report(mc_checks, zb_checks, fw_checks)
+    report = build_report(mc_checks, zb_checks, mcb_checks, fw_checks)
     print(report)
 
     if not issues:

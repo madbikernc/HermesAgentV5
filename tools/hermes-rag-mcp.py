@@ -135,6 +135,12 @@ CORPORA = {
         "description": "Fleet node-health / operations records.",
         "script": "hermes-rag-ingest-ops.py",
     },
+    "minecraft": {
+        "description": ("Long-term memory for the Firmament's Minecraft bots (see "
+                         "MINECRAFT_BOTS_DESIGN.md) -- world/... shared objective facts, "
+                         "bots/<name>/... one bot's own personal/episodic memory."),
+        "script": "hermes-rag-ingest-minecraft.py",
+    },
 }
 
 # ---- Reindex job tracking ---------------------------------------------

@@ -1,7 +1,7 @@
 ---
 name: game-server-monitor
-description: "Check real health status for the Minecraft and Project Zomboid servers on the muncraft box (192.168.1.221) — service/process state, disk, backups, RCON. Also runs automatically once daily, emailing only when something needs attention."
-version: 1.4.1
+description: "Check real health status for the Minecraft, Project Zomboid, and Minecraft-bots servers on the muncraft box (192.168.1.221) — service/process state, disk, backups, RCON. Also runs automatically once daily, emailing only when something needs attention."
+version: 1.5.0
 author: HermesAgentV5
 license: MIT
 platforms: [linux]
@@ -14,13 +14,15 @@ prerequisites:
 
 # Game Server Monitor (muncraft box)
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 
-Real health status for the Minecraft and Project Zomboid servers on `192.168.1.221` — confirmed
-live to be exactly one instance of each (`minecraft.service`, `zomboid.service`), plus a box-local
-`minecraft-monitor.service` companion. Ported from v1's Minecraft-only monitor
-(`../../HermesAgent/scripts/minecraft-monitor.sh`/`minecraft-health-cron.sh`) and extended to cover
-Zomboid, which v1 never had.
+Real health status for the Minecraft, Project Zomboid, and Minecraft-bots servers on
+`192.168.1.221` — confirmed live to be exactly one instance of each (`minecraft.service`,
+`zomboid.service`, `minecraft-bots.service`), plus a box-local `minecraft-monitor.service`
+companion. Ported from v1's Minecraft-only monitor
+(`../../HermesAgent/scripts/minecraft-monitor.sh`/`minecraft-health-cron.sh`), extended to cover
+Zomboid (which v1 never had), and later the dedicated offline-mode bot instance
+(`MINECRAFT_BOTS_DESIGN.md`).
 
 ## How to use it
 
@@ -55,6 +57,11 @@ Credentials come from Vaultwarden (item `Zomboid Admin - muncraft`) via `tools/v
 - Zomboid's own RCON is disabled on this install (blank `RCONPassword`), so this monitor cannot and
   does not report Zomboid player counts — only service/process/disk state, everything actually
   reachable without RCON or sudo (`zomboid-admin` has no passwordless sudo either, confirmed live).
+- **The Minecraft-bots instance also has no RCON** — deliberately, to keep its surface minimal
+  (bots connect via the game protocol, not RCON) — same service/process/disk/backup-only coverage
+  as Zomboid's. Process identification reads `minecraft-bots.service`'s own `MainPID` rather than
+  `ps -C java`, since the human server and the bots' server both run a process literally named
+  `java` on the same box — pattern-matching by name alone would have picked either one at random.
 - If a check fails, report the real error from the tool's own output — don't describe the fleet as
   healthy if the tool's report shows a WARN or CRITICAL line.
 - **UFW firewall rules are checked via a root-owned dump file, not live sudo.** `zomboid-admin` has
@@ -87,6 +94,7 @@ Credentials come from Vaultwarden (item `Zomboid Admin - muncraft`) via `tools/v
 
 | Version | Date | Change |
 |---|---|---|
+| 1.5.0 | 2026-09-06 | Added `check_minecraft_bots()` -- service/process/disk/backup coverage for the new dedicated offline-mode bot instance (`MINECRAFT_BOTS_DESIGN.md`), same no-RCON shape as the Zomboid check. |
 | 1.4.1 | 2026-08-30 | HermesAgentV5 consolidation: author: field and in-body usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
 | 1.0.0 | 2026-08-12 | Initial version. Phase 26 (`IMPLEMENTATION_PLAN.md` §7) built — ported from v1's Minecraft-only monitor, extended to Zomboid, verified live end to end including a real emailed report. |
 | 1.1.0 | 2026-08-12 | Phase 27: Zomboid backup mechanism added (`infra/zomboid-backup/`). The `Zomboid backups` check now reports real freshness/count instead of a standing "none exists" notice. |

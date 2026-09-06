@@ -1,0 +1,17 @@
+[Unit]
+Description=Firmament Minecraft Bot (Babs)
+After=network-online.target hermes-router.service hermes-memory.service hermes-buzz.service continuwuity.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
+Environment=MC_BOT_USERNAME=Babs
+ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
