@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 2.6.0
+**Version:** 2.7.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -62,11 +62,23 @@ Revisit moving it to Vaultwarden later if wanted. All the design doc's originall
 pieces are now built: personalities, per-bot + shared-world memory, Buzz coordination, and
 Matrix.
 
+**Real in-world actions are wired** (`actions.js`): navigate (goto/follow/stop), gather
+(mine), and fight (attack) -- closing the gap between what both personas' Core Directives
+always claimed and what the code could do. `classifyIntent()` (one `dispatch` call, replacing
+the old plain-relevance check) detects an action request alongside ordinary relevance, so this
+didn't cost a second round-trip. Actions run via two more PrismarineJS plugins
+(`mineflayer-collectblock`, `mineflayer-pvp`) in the *background*, outside the `busy` window
+that guards the classify/reply step -- a mine/follow/attack can run up to a minute
+(`ACTION_TIMEOUT_MS`), and blocking chat for that whole span would make the bot go silent
+while she works. Building/structure placement is explicitly out of scope -- a much bigger
+feature (planning, materials, layout) left for its own future pass.
+
 ## Requirements
 
 Node.js 22 LTS (installed on `spark` 2026-09-06 via NodeSource). Run `npm install` in this
-directory once to pull `mineflayer` and `mineflayer-pathfinder` -- not vendored/pinned here
-yet; first `npm install` will create `package-lock.json` against whatever's current.
+directory once to pull `mineflayer`, `mineflayer-pathfinder`, `mineflayer-collectblock`, and
+`mineflayer-pvp` (`package-lock.json` is committed, so this reproduces the exact versions
+this was built and tested against).
 
 ## Running
 
@@ -88,6 +100,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 2.7.0 | 2026-09-06 | Real in-world actions (`actions.js`): navigate/gather/fight via `mineflayer-collectblock`/`mineflayer-pvp`, detected by the same `dispatch` call that already classified relevance. Building explicitly out of scope. |
 | 2.6.0 | 2026-09-06 | Matrix wired (`matrix.js`) -- single shared room, operator + both bots. New accounts `mc-babs`/`mc-amy`; credentials in a local env file (Vaultwarden write was blocked by the session's permission classifier). |
 | 2.5.0 | 2026-09-06 | Bot-to-bot coordination over hermes-buzz.py (`buzz.js`) -- shared `minecraft` topic, relayed into in-game chat. `MC_BOT_USERNAMES` guard added to prevent a bot-relay feedback loop. |
 | 2.4.0 | 2026-09-06 | Long-term memory via a new `minecraft` hermes-rag corpus (`longterm.js` + two new `tools/hermes-rag-*-minecraft.py` scripts). Second bot (Amy) added. `run-babs.sh` renamed `run-bot.sh` (bot-agnostic). |

@@ -1,8 +1,20 @@
-// Version: 2.6.0
+// Version: 2.7.0
 //
 // Firmament Minecraft bot orchestrator. Connects one bot and wires the first real decision
 // loop: chat perception -> cheap relevance classification (dispatch role) -> in-character
 // reply (muse role) -> bot chats back. See ../../MINECRAFT_BOTS_DESIGN.md.
+//
+// 2.7.0 (2026-09-06) -- real in-world actions (actions.js): navigate (goto/follow/stop),
+// gather (mine), and fight (attack) -- closing the gap between what the personas' Core
+// Directives always claimed and what the bots could actually do. classifyIntent() replaces
+// the old plain-YES/NO isRelevant() with one dispatch call that also detects an action
+// request, keeping the "one cheap call" efficiency discipline intact rather than adding a
+// second round-trip. Actions run in the background via runAction(), deliberately outside the
+// `busy` window that guards the classify/reply step -- a mine/follow/attack can run for up to
+// a minute (actions.js's own ACTION_TIMEOUT_MS), and holding that mutex for the whole span
+// would make the bot go silent to chat while she works. Building/structure placement stays
+// explicitly out of scope -- a much bigger feature (planning, materials, layout) that deserves
+// its own pass, not something to half-build alongside navigate/gather/fight.
 //
 // 2.6.0 (2026-09-06) -- Matrix wired (design doc §10, matrix.js): a single shared room
 // (operator's own decision, not one room per bot like the retired Sintra/Amy pattern), both
@@ -67,6 +79,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
+import { loadActionPlugins, performAction } from "./actions.js";
 
 const { pathfinder, Movements } = pathfinderPkg;
 
@@ -136,6 +149,7 @@ const bot = mineflayer.createBot({
 });
 
 bot.loadPlugin(pathfinder);
+loadActionPlugins(bot);
 
 bot.once("spawn", () => {
   console.log(`[${USERNAME}] spawned at`, bot.entity.position);
@@ -144,23 +158,70 @@ bot.once("spawn", () => {
 
 let busy = false;
 
-async function isRelevant(speaker, message) {
+// One dispatch call classifies relevance AND detects an action request together, replacing
+// the old plain YES/NO relevance check -- same "keep it to one cheap call" efficiency
+// discipline the rest of this file already follows (maybeRemember, the old isRelevant this
+// replaces). Real verbs only (actions.js): navigate, gather, fight -- no building/placement,
+// a deliberately separate, much bigger feature not attempted here.
+async function classifyIntent(speaker, message) {
   const reply = await callRole(
     "dispatch",
     [
       {
         role: "system",
         content:
-          `You are a fast relevance classifier for a Minecraft bot named ${USERNAME}. Given ` +
-          `one chat message from another player, answer with exactly one word: YES if the ` +
-          `message is directed at, mentions, or clearly expects a response from ${USERNAME}; ` +
-          `otherwise NO. Never explain, never add punctuation.`,
+          `You are an intent classifier for a Minecraft bot named ${USERNAME}, who has real ` +
+          `in-game abilities: moving, following, mining/gathering blocks, and fighting hostile ` +
+          `mobs. Given one chat message from another player, respond with EXACTLY ONE line, ` +
+          `no explanation, no extra punctuation, in one of these forms:\n` +
+          `NONE - not directed at ${USERNAME}, no response needed\n` +
+          `CHAT - directed at ${USERNAME} but just conversation, not a request to do something\n` +
+          `ACTION GOTO - asks ${USERNAME} to come to the speaker\n` +
+          `ACTION FOLLOW - asks ${USERNAME} to follow the speaker\n` +
+          `ACTION STOP - asks ${USERNAME} to stop what she is doing\n` +
+          `ACTION MINE <block_id> <count> - asks ${USERNAME} to gather/mine a resource. ` +
+          `<block_id> must be the exact modern Minecraft block id (e.g. oak_log, stone, ` +
+          `iron_ore, cobblestone). <count> is a small positive integer, default 4 if unstated.\n` +
+          `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob`,
       },
       { role: "user", content: `<${speaker}> ${message}` },
     ],
-    { maxTokens: 4, temperature: 0 },
+    { maxTokens: 16, temperature: 0 },
   );
-  return reply.trim().toUpperCase().startsWith("YES");
+  const trimmed = reply.trim().toUpperCase();
+  if (trimmed.startsWith("ACTION")) {
+    const parts = trimmed.split(/\s+/);
+    const verb = parts[1];
+    if (verb === "GOTO") return { type: "action", action: { type: "goto" } };
+    if (verb === "FOLLOW") return { type: "action", action: { type: "follow" } };
+    if (verb === "STOP") return { type: "action", action: { type: "stop" } };
+    if (verb === "ATTACK") return { type: "action", action: { type: "attack" } };
+    if (verb === "MINE") {
+      const block = (parts[2] || "").toLowerCase();
+      const count = parseInt(parts[3], 10);
+      if (block) return { type: "action", action: { type: "mine", block, count: count > 0 ? count : 4 } };
+    }
+    return { type: "chat" }; // unparseable ACTION line -- fall back to a normal reply
+  }
+  if (trimmed.startsWith("CHAT")) return { type: "chat" };
+  return { type: "none" };
+}
+
+// Short in-character line for an action's start/outcome -- same persona voice as a normal
+// chat reply, just a much shorter, single-purpose prompt (no history/long-term recall: an
+// action's own result text is already all the context worth having).
+async function narrateAction(text) {
+  const reply = await callRole(
+    "muse",
+    [
+      { role: "system", content: `${persona}\n\n---\n\nYou are chatting in Minecraft's in-game ` +
+          `chat, in character. State the following in one short sentence, in your own voice, ` +
+          `without changing its meaning: "${text}"` },
+      { role: "user", content: text },
+    ],
+    { maxTokens: 40, temperature: 0.9 },
+  );
+  return reply.trim().slice(0, MAX_CHAT_LEN) || text;
 }
 
 const CHAT_INSTRUCTION =
@@ -269,6 +330,32 @@ async function maybeRemember(speaker, message, reply) {
   }
 }
 
+// Runs an action in the background and reports back -- deliberately NOT inside the `busy`
+// window (see handleIncoming): a mine/follow/attack action can take up to ACTION_TIMEOUT_MS
+// (actions.js), and holding the classify/reply mutex for that whole span would make the bot
+// go unresponsive to chat while she works. `busy` only ever guards the fast classify step.
+async function runAction(action, speaker, send) {
+  try {
+    const startLine = {
+      goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
+      mine: `off to gather some ${action.block}.`, attack: "engaging.",
+    }[action.type];
+    if (startLine) send(await narrateAction(startLine));
+
+    const result = await performAction(bot, action, speaker);
+    send(await narrateAction(result));
+
+    // Actions are conversational events too -- worth the same continuity as a chat exchange.
+    const conv = convId(speaker);
+    await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "user",
+                        raw: `<${speaker}> [requested action: ${action.type}]` });
+    await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "assistant", raw: result });
+  } catch (err) {
+    console.error(`[${USERNAME}] action '${action.type}' failed:`, err.message);
+    send(`something went wrong trying to do that.`);
+  }
+}
+
 function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   if (speaker === bot.username || speaker === MATRIX_USER_ID) return;
   if (isAnotherBot(speaker)) return; // another bot's own chat/Matrix message -- coordinate over Buzz, not here
@@ -279,10 +366,17 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   busy = true;
   (async () => {
     try {
-      // A whisper is already directed at her by construction -- no need to spend a dispatch
-      // call asking whether it's relevant, unlike public chat where most lines aren't about her.
-      const relevant = alreadyAddressed || (await isRelevant(speaker, message));
-      if (!relevant) return;
+      const intent = await classifyIntent(speaker, message);
+      // A whisper is already directed at her by construction -- a whisper classified as not
+      // relevant at all still deserves *some* reply, unlike an unaddressed line in public chat.
+      const type = alreadyAddressed && intent.type === "none" ? "chat" : intent.type;
+      if (type === "none") return;
+
+      if (type === "action") {
+        runAction(intent.action, speaker, send); // fire-and-forget, not awaited -- see runAction
+        return;
+      }
+
       const reply = await generateReply(speaker, message);
       if (reply) {
         send(reply);
