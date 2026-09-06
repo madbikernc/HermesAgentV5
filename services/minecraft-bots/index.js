@@ -156,6 +156,19 @@ bot.once("spawn", () => {
   bot.pathfinder.setMovements(new Movements(bot));
 });
 
+// TEMPORARY diagnostic (2026-09-06): both bots hit V8's heap limit and crashed twice in a row,
+// at a steady ~4-5 MB/s from very early in the process's life -- not obviously tied to any one
+// action. Logging memory + loaded-chunk-column count every 15s to find which subsystem is
+// actually leaking before changing anything else. Remove once root-caused.
+setInterval(() => {
+  const mem = process.memoryUsage();
+  const columns = bot.world?.getColumns ? bot.world.getColumns().length : "n/a";
+  console.log(`[${USERNAME}] mem rss=${(mem.rss / 1048576).toFixed(1)}MB ` +
+              `heap=${(mem.heapUsed / 1048576).toFixed(1)}/${(mem.heapTotal / 1048576).toFixed(1)}MB ` +
+              `external=${(mem.external / 1048576).toFixed(1)}MB arrayBuffers=` +
+              `${(mem.arrayBuffers / 1048576).toFixed(1)}MB chunks=${columns}`);
+}, 15_000);
+
 let busy = false;
 
 // One dispatch call classifies relevance AND detects an action request together, replacing
@@ -163,7 +176,21 @@ let busy = false;
 // discipline the rest of this file already follows (maybeRemember, the old isRelevant this
 // replaces). Real verbs only (actions.js): navigate, gather, fight -- no building/placement,
 // a deliberately separate, much bigger feature not attempted here.
+//
+// Real bug found live (2026-09-06): a message addressed to Babs by name also made Amy start
+// mining -- each bot's own classifier only ever knew about itself, with no way to recognize
+// "this names a DIFFERENT bot" and stand down. OTHER_BOTS below fixes that. Same incident also
+// surfaced a second bug: both bots mined "stone" despite neither being asked for it -- with no
+// instruction covering "no specific block was actually named," the classifier had to invent
+// *something* for ACTION MINE's required <block_id> rather than falling back to CHAT.
+const OTHER_BOTS = [...BOT_USERNAMES].filter((n) => n !== USERNAME);
+
 async function classifyIntent(speaker, message) {
+  const otherBotsNote = OTHER_BOTS.length
+    ? ` Other bots who may also be in this chat: ${OTHER_BOTS.join(", ")} -- if the message ` +
+      `clearly names one of them instead of ${USERNAME}, respond NONE even if it looks like an ` +
+      `action request.`
+    : "";
   const reply = await callRole(
     "dispatch",
     [
@@ -172,16 +199,18 @@ async function classifyIntent(speaker, message) {
         content:
           `You are an intent classifier for a Minecraft bot named ${USERNAME}, who has real ` +
           `in-game abilities: moving, following, mining/gathering blocks, and fighting hostile ` +
-          `mobs. Given one chat message from another player, respond with EXACTLY ONE line, ` +
-          `no explanation, no extra punctuation, in one of these forms:\n` +
+          `mobs.${otherBotsNote} Given one chat message from another player, respond with ` +
+          `EXACTLY ONE line, no explanation, no extra punctuation, in one of these forms:\n` +
           `NONE - not directed at ${USERNAME}, no response needed\n` +
           `CHAT - directed at ${USERNAME} but just conversation, not a request to do something\n` +
           `ACTION GOTO - asks ${USERNAME} to come to the speaker\n` +
           `ACTION FOLLOW - asks ${USERNAME} to follow the speaker\n` +
           `ACTION STOP - asks ${USERNAME} to stop what she is doing\n` +
-          `ACTION MINE <block_id> <count> - asks ${USERNAME} to gather/mine a resource. ` +
-          `<block_id> must be the exact modern Minecraft block id (e.g. oak_log, stone, ` +
-          `iron_ore, cobblestone). <count> is a small positive integer, default 4 if unstated.\n` +
+          `ACTION MINE <block_id> <count> - asks ${USERNAME} to gather/mine a resource, ONLY ` +
+          `if a specific resource/block was actually named or clearly implied. <block_id> must ` +
+          `be the exact modern Minecraft block id (e.g. oak_log, stone, iron_ore, cobblestone). ` +
+          `<count> is a small positive integer, default 4 if unstated. If no specific block is ` +
+          `named, respond CHAT instead -- never invent a block.\n` +
           `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob`,
       },
       { role: "user", content: `<${speaker}> ${message}` },
@@ -334,7 +363,13 @@ async function maybeRemember(speaker, message, reply) {
 // window (see handleIncoming): a mine/follow/attack action can take up to ACTION_TIMEOUT_MS
 // (actions.js), and holding the classify/reply mutex for that whole span would make the bot
 // go unresponsive to chat while she works. `busy` only ever guards the fast classify step.
-async function runAction(action, speaker, send) {
+async function runAction(action, speaker, message, send) {
+  // Real bug found live (2026-09-06): this used to record a generic "[requested action:
+  // mine]" label, discarding the actual message text and parsed params (block/count) -- when
+  // a mining request went to the wrong block, there was no way to tell from memory alone
+  // whether the classifier misheard the request or the player's own message was ambiguous.
+  // Recording the full parsed action alongside the original text fixes that for next time.
+  const actionDesc = action.type === "mine" ? `mine ${action.block} x${action.count}` : action.type;
   try {
     const startLine = {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
@@ -348,7 +383,7 @@ async function runAction(action, speaker, send) {
     // Actions are conversational events too -- worth the same continuity as a chat exchange.
     const conv = convId(speaker);
     await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "user",
-                        raw: `<${speaker}> [requested action: ${action.type}]` });
+                        raw: `<${speaker}> ${message} [parsed as: ${actionDesc}]` });
     await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "assistant", raw: result });
   } catch (err) {
     console.error(`[${USERNAME}] action '${action.type}' failed:`, err.message);
@@ -373,7 +408,7 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
       if (type === "none") return;
 
       if (type === "action") {
-        runAction(intent.action, speaker, send); // fire-and-forget, not awaited -- see runAction
+        runAction(intent.action, speaker, message, send); // fire-and-forget, not awaited -- see runAction
         return;
       }
 

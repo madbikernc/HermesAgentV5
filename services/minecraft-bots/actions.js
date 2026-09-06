@@ -1,4 +1,9 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-09-06) -- withTimeout() now takes a required onTimeout callback that actually
+// cancels the underlying pathfinder/collectBlock/pvp operation -- see its own updated comment
+// for the real incident this fixes (a stuck mine action ran unbounded for ~11 minutes and
+// crashed the process via OOM, which is what actually disconnected the bot, not a network drop).
 //
 // Real in-world actions -- the piece the design doc's personas always claimed ("mining,
 // building, fighting, gathering, navigating" -- see agents/minecraft-*/PROMPT.md's Core
@@ -31,14 +36,28 @@ export function loadActionPlugins(bot) {
   bot.loadPlugin(pvpPkg.plugin);
 }
 
-// Rejects after ACTION_TIMEOUT_MS rather than letting a bad path/target hang an action (and the
-// busy-tracking below) forever -- a real risk with pathfinder/collectBlock/pvp promises that
-// have no built-in timeout of their own.
-function withTimeout(promise, ms = ACTION_TIMEOUT_MS) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), ms)),
-  ]);
+// Rejects after `ms` rather than letting a bad path/target hang an action forever -- a real
+// risk with pathfinder/collectBlock/pvp promises that have no built-in timeout of their own.
+//
+// Real bug found live (2026-09-06): the first version of this only raced the promise --
+// Promise.race abandons the *loser*, it does not cancel it. A bot sent to mine terracotta
+// (which generates naturally in badlands biomes, often behind cliffs/lava -- a genuinely
+// hard-to-path target, not a bad block name) hit this: withTimeout gave up and reported
+// failure after 120s, but the real bot.collectBlock.collect() call kept running underneath,
+// unbounded, for another ~11 minutes until the process hit V8's heap limit and crashed --
+// which is what actually disconnected the bot from the game, not a network drop. `onTimeout`
+// is required now specifically so every call site cancels the real underlying work (pathfinder
+// goal, collectBlock task, or pvp target) the moment the timeout fires, not just how this
+// function's own caller interprets the result.
+function withTimeout(promise, ms, onTimeout) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      onTimeout();
+      reject(new Error("timed out"));
+    }, ms);
+  });
+  return Promise.race([promise.finally(() => clearTimeout(timer)), timeout]);
 }
 
 let cancelToken = { cancelled: false };
@@ -63,7 +82,8 @@ export async function performAction(bot, action, speaker) {
       const target = bot.players[speaker]?.entity;
       if (!target) return `I can't see ${speaker} nearby.`;
       try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(target, 2)));
+        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(target, 2)), ACTION_TIMEOUT_MS,
+                           () => bot.pathfinder.setGoal(null));
       } catch (err) {
         if (token.cancelled) return "stopped on the way.";
         return `couldn't reach ${speaker}: ${err.message}`;
@@ -87,7 +107,8 @@ export async function performAction(bot, action, speaker) {
       if (!positions.length) return `couldn't find any ${action.block} nearby.`;
       const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
       try {
-        await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), 120_000);
+        await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
+                           () => bot.collectBlock.cancelTask());
       } catch (err) {
         if (token.cancelled) return "stopped mining early.";
         return `had trouble mining ${action.block}: ${err.message}`;
@@ -101,10 +122,9 @@ export async function performAction(bot, action, speaker) {
       // bot.pvp.attack() resolves its own promise once the target is dead or lost -- no need
       // for a manually-wired event listener (confirmed against mineflayer-pvp's own .d.ts).
       try {
-        await withTimeout(bot.pvp.attack(target));
+        await withTimeout(bot.pvp.attack(target), ACTION_TIMEOUT_MS, () => bot.pvp.stop());
       } catch (err) {
         if (token.cancelled) return "broke off the fight.";
-        await bot.pvp.stop();
         return "gave up on the fight -- took too long.";
       }
       return token.cancelled ? "broke off the fight." : "took care of it.";

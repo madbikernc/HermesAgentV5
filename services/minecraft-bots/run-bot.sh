@@ -1,5 +1,14 @@
 #!/bin/bash
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 -- caps the Node heap at 768MB (--max-old-space-size). Real incident (2026-09-06): a
+# stuck mining action (actions.js's withTimeout not actually cancelling the underlying
+# operation on timeout, since fixed) ran unbounded for ~11 minutes and grew the heap past 4GB
+# before V8's own OOM killer took the process down -- on spark, a shared control-plane node
+# also running hermes-router/hermes-memory/hermes-buzz/Continuwuity. The real fix is the
+# actions.js cancellation bug; this is defense in depth so any *future* runaway (a library bug,
+# not just this one) fails fast via a bounded crash+systemd-restart instead of slowly
+# consuming shared node memory for minutes.
 #
 # 1.3.0 -- also sources this bot's Matrix access token from ~/.hermes/minecraft-matrix.env
 # (design doc §10). Not Vaultwarden, unlike MEMORY_TOKEN/BUZZ_TOKEN -- the write path for a new
@@ -48,4 +57,4 @@ if [ -f "$MATRIX_CREDS" ]; then
   fi
 fi
 
-exec node index.js
+exec node --max-old-space-size=768 index.js
