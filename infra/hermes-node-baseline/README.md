@@ -1,6 +1,6 @@
 # hermes-node-baseline — S17 recreate checklist
 
-**Version:** 1.3.1
+**Version:** 1.3.2
 
 Daily local-node security baseline (aide file-integrity, lynis hardening audit, syft+grype
 SBOM/CVE), diffed day-over-day, with new medium+ findings written as durable, queryable
@@ -58,26 +58,28 @@ their own stat size) get tracked and re-flagged as "new"/"changed" on every sing
 echo '!/run/rpc_pipefs' | sudo tee /etc/aide/aide.conf.d/90_hermes_exclude_run_rpc_pipefs
 ```
 
-Also exclude large, non-system data assets before the first `--init` — found live 2026-09-05:
-`/opt/hermes-data.img` (a 2.1TB live database image) AND its own mounted view at
-`/mnt/hermes-data` (a *separate filesystem* — `du -x`/`--one-file-system` correctly shows it as
-4.0K from the root filesystem's own perspective, but aide isn't scoped by `-x` and happily
-crosses into it) together turned a real `aide --init` into a 6+ hour run on both spark and
-spark-2 -- excluding only the backing image file the first time round was NOT enough, the second
-kill-and-restart was needed to catch the mounted path too. spark-2's `/opt/hermes-models` (194GB
-of AI model checkpoints) would have added roughly another 2 hours on top of that. Direct operator
-decision: exclude all of it. A live, constantly-written database is never a meaningful integrity
-target regardless of which path exposes it (it will show as "changed" every day regardless of
-anything actually wrong), and model-checkpoint tampering is a different threat model that
-syft/grype's CVE scanning doesn't address but aide's daily-practicality budget can't absorb
-either — check each node's own `sudo du -xh --max-depth=1 /` (root filesystem only) AND
-`findmnt` (every other mounted filesystem, which `-x` hides) for anything comparable before its
-first `--init`; don't assume these three paths are the only ones on a future node:
+**Exclude `/mnt` entirely, and any large local data-store files, before the first `--init`.**
+Found live 2026-09-05/06, the hard way, three rounds in a row: `/opt/hermes-data.img` (a 2.1TB
+live database image), its own mounted view at `/mnt/hermes-data` (a *separate filesystem* —
+`du -x`/`--one-file-system` correctly hides it from a root-filesystem size check, but aide isn't
+scoped by `-x` and happily crosses into it anyway), and — the one that actually took three
+kill-and-restart cycles to find — an NFS-mounted NAS backup share at `/mnt/nas2-hermes-backup`
+that aide traversed in full over the network, unrelated to this fleet at all (someone's old game
+mod archives sitting in the NAS's own recycle bin). Together these turned a real `aide --init`
+into 6+ hours on both spark and spark-2. None of this is a meaningful integrity target: a live
+database always shows as "changed" regardless of anything wrong, and nothing under `/mnt` on this
+fleet is a local system file aide is meant to be watching in the first place — it's all NAS/data
+mounts. The lesson that generalizes: exclude `/mnt` wholesale rather than chase individual
+sub-paths one discovery at a time, and separately check the *local root filesystem* itself (`sudo
+du -xh --max-depth=1 /`) for any large non-system data file like `hermes-data.img` before the
+first `--init` on a future node — `findmnt` will show you every other mounted filesystem if `/mnt`
+ever stops being a safe catch-all exclude:
 
 ```bash
-echo '!/opt/hermes-data.img' | sudo tee /etc/aide/aide.conf.d/91_hermes_exclude_data_image
-echo '!/mnt/hermes-data' | sudo tee -a /etc/aide/aide.conf.d/91_hermes_exclude_data_image
-# on spark-2 only, add a line for its model checkpoint store:
+echo '!/mnt' | sudo tee /etc/aide/aide.conf.d/91_hermes_exclude_data_image
+# plus any large local (non-mounted) data file `du -xh --max-depth=1 /` turns up, e.g.:
+echo '!/opt/hermes-data.img' | sudo tee -a /etc/aide/aide.conf.d/91_hermes_exclude_data_image
+# on spark-2 only, its model checkpoint store is also local, not mounted:
 echo '!/opt/hermes-models' | sudo tee -a /etc/aide/aide.conf.d/91_hermes_exclude_data_image
 ```
 
@@ -167,5 +169,5 @@ curl -s $MEMORY_URL/turns?task_id=<REC-id> -H "Authorization: Bearer $MEMORY_TOK
 | 1.0.0 | 2026-09-05 | Initial version — S17 built (scanner, then authorize-watch + routing) per the approved plan. |
 | 1.1.0 | 2026-09-05 | Live-verified on all three fleet nodes: real tool bugs found and fixed (syft source scheme, grype distro detection, lynis permission/dedup), `--only-fixed` and `--seed-only` added, HomeD13's Matrix-only email limitation documented, `hermes-buzz.service` restart requirement noted. |
 | 1.2.0 | 2026-09-05 | Two more real bugs found completing the first live `--seed-only` runs: aide's `--check` timeout (600s) was nowhere near enough for a real database (fixed, now 7200s default, configurable) and its exit status is a bitmask, not a plain 0/1 convention (exit 5 = new+changed both found, was wrongly treated as a hard failure). Also found and fixed a real path mismatch in the distro's own shipped aide NFS ruleset (`/var/lib/nfs/rpc_pipefs` vs. this fleet's actual `/run/rpc_pipefs`) and documented `pmoney`'s already-broad sudo, the gzip-vs-not baseline-activation difference between nodes, and real measured `aide --init` timings. |
-| 1.3.0 | 2026-09-06 | Found live: spark and spark-2's `aide --init` ran 6+ hours because both read a full 2.1TB live database image (`/opt/hermes-data.img`) end to end, and spark-2 also had 194GB of model checkpoints (`/opt/hermes-models`) in scope. Direct operator decision: exclude both from aide's scope (a live, constantly-written DB image is never a meaningful integrity target regardless; model-checkpoint tampering is syft/grype's problem, not aide's, at this data volume). Documented as required per-node setup, alongside a reminder to check for comparable large data assets on any future node before its first `--init`. |
-| 1.3.1 | 2026-09-06 | Excluding the backing image file alone wasn't enough: `/mnt/hermes-data`, the same data's *mounted* view, is a separate filesystem `du -x` hides but aide still crosses into — found live when a supposedly-fixed re-run still read 128GB+ in its first hour. Added the exclude, corrected the setup instructions to check `findmnt` in addition to `du -x` for any future node. |
+| 1.3.0 | 2026-09-06 | Found live, three kill-and-restart rounds in a row: spark and spark-2's `aide --init` ran 6+ hours because it was reading a 2.1TB live database image (`/opt/hermes-data.img`), that same data's separately-mounted view (`/mnt/hermes-data` — a distinct filesystem `du -x` hides but aide still crosses into), and an NFS-mounted NAS backup share (`/mnt/nas2-hermes-backup`, unrelated personal data) over the network. Direct operator decision: exclude `/mnt` wholesale rather than chase individual mounts one discovery at a time, plus any large local (non-mounted) data file like `hermes-data.img` and, on spark-2, `hermes-models`. None of it was a meaningful integrity target — a live database always shows as "changed" regardless, and nothing under `/mnt` on this fleet is a local system file aide is meant to be watching. |
+| 1.3.2 | 2026-09-06 | Consolidated the 1.3.0/1.3.1 setup instructions (originally written mid-investigation, one mount at a time) into the single final `!/mnt`-wholesale guidance above, once all three rounds were actually complete — no new findings, just cleaner instructions for a future node. |
