@@ -1,6 +1,6 @@
 # hermes-node-baseline — S17 recreate checklist
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 Daily local-node security baseline (aide file-integrity, lynis hardening audit, syft+grype
 SBOM/CVE), diffed day-over-day, with new medium+ findings written as durable, queryable
@@ -58,6 +58,24 @@ their own stat size) get tracked and re-flagged as "new"/"changed" on every sing
 echo '!/run/rpc_pipefs' | sudo tee /etc/aide/aide.conf.d/90_hermes_exclude_run_rpc_pipefs
 ```
 
+Also exclude large, non-system data assets before the first `--init` — found live 2026-09-05:
+`/opt/hermes-data.img` (a 2.1TB live database image backing `/mnt/hermes-data`) turned a real
+`aide --init` into a 6+ hour run on both spark and spark-2, and spark-2's `/opt/hermes-models`
+(194GB of AI model checkpoints) would have added roughly another 2 hours to every single daily
+check on top of that. Direct operator decision: exclude both. A live, constantly-written
+database image is never a meaningful integrity target anyway (it will show as "changed" every
+day regardless of anything actually wrong), and model-checkpoint tampering is a different threat
+model that syft/grype's CVE scanning doesn't address but aide's daily-practicality budget can't
+absorb either — check each node's own `du -sh /opt/*` (or wherever the node's own large data
+volumes live) for anything comparable before its first `--init`, don't assume these two paths
+are the only ones on a future node:
+
+```bash
+echo '!/opt/hermes-data.img' | sudo tee /etc/aide/aide.conf.d/91_hermes_exclude_data_image
+# on spark-2 only, add a second line for its model checkpoint store:
+echo '!/opt/hermes-models' | sudo tee -a /etc/aide/aide.conf.d/91_hermes_exclude_data_image
+```
+
 Then, once per node, establish the initial file-integrity baseline:
 
 ```bash
@@ -69,10 +87,13 @@ sudo cp /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz   # if gzip_dbout=
 sudo cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db         # if not
 ```
 
-A real `--init` took 43m12s for 381,891 entries on HomeD13, and well over 90 minutes on spark —
-budget accordingly, and see `check_timeout_seconds` in `node-baseline.json` (default 7200s/2h)
-if a `--check` pass itself needs tuning for a particular node's real database size. Re-run
-`aide --init` (with the operator's sign-off) whenever a legitimate bulk change makes the old
+A real `--init` took 43m12s for 381,891 entries on HomeD13. spark and spark-2 took over 6 hours
+*before* the large-data-asset excludes above were found and applied (they were reading the full
+2.1TB `hermes-data.img` end to end) — with those excluded, budget for something much closer to
+HomeD13's number, but confirm live on first setup rather than assume. See
+`check_timeout_seconds` in `node-baseline.json` (default 7200s/2h) if a `--check` pass itself
+needs tuning for a particular node's real database size. Re-run `aide --init` (with the
+operator's sign-off) whenever a legitimate bulk change makes the old
 baseline noisy — this is a manual step, not something the scanner does for you.
 
 ## Install
@@ -141,3 +162,4 @@ curl -s $MEMORY_URL/turns?task_id=<REC-id> -H "Authorization: Bearer $MEMORY_TOK
 | 1.0.0 | 2026-09-05 | Initial version — S17 built (scanner, then authorize-watch + routing) per the approved plan. |
 | 1.1.0 | 2026-09-05 | Live-verified on all three fleet nodes: real tool bugs found and fixed (syft source scheme, grype distro detection, lynis permission/dedup), `--only-fixed` and `--seed-only` added, HomeD13's Matrix-only email limitation documented, `hermes-buzz.service` restart requirement noted. |
 | 1.2.0 | 2026-09-05 | Two more real bugs found completing the first live `--seed-only` runs: aide's `--check` timeout (600s) was nowhere near enough for a real database (fixed, now 7200s default, configurable) and its exit status is a bitmask, not a plain 0/1 convention (exit 5 = new+changed both found, was wrongly treated as a hard failure). Also found and fixed a real path mismatch in the distro's own shipped aide NFS ruleset (`/var/lib/nfs/rpc_pipefs` vs. this fleet's actual `/run/rpc_pipefs`) and documented `pmoney`'s already-broad sudo, the gzip-vs-not baseline-activation difference between nodes, and real measured `aide --init` timings. |
+| 1.3.0 | 2026-09-06 | Found live: spark and spark-2's `aide --init` ran 6+ hours because both read a full 2.1TB live database image (`/opt/hermes-data.img`) end to end, and spark-2 also had 194GB of model checkpoints (`/opt/hermes-models`) in scope. Direct operator decision: exclude both from aide's scope (a live, constantly-written DB image is never a meaningful integrity target regardless; model-checkpoint tampering is syft/grype's problem, not aide's, at this data volume). Documented as required per-node setup, alongside a reminder to check for comparable large data assets on any future node before its first `--init`. |
