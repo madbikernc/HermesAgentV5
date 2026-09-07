@@ -1,4 +1,12 @@
-// Version: 2.12.1
+// Version: 2.12.2
+//
+// 2.12.2 (2026-09-07) -- two real gaps found live minutes after smelting shipped: (1) planNextStep
+// never told the planner SMELT needs fuel, or what to do about it -- a bot with raw copper but no
+// coal/charcoal/logs just kept retrying the same smelt attempt and gave up 3/3. Prompt now says
+// to mine a log (valid fuel) if smelting fails for lack of fuel, same "mine the missing raw
+// material" pattern already taught for crafting. (2) actions.js 1.10.1 fixes the matching root
+// cause: SMELT's <item_id> is supposed to be the OUTPUT, but the planner sometimes named the
+// INPUT raw material instead and got a confusing rejection -- now accepts either.
 //
 // 2.12.1 (2026-09-07) -- direct request: "they can't seem to find the furnaces." Most of
 // tonight's goal-loop failures were bots correctly reasoning they needed an ingot and having no
@@ -661,9 +669,11 @@ async function planNextStep(goal) {
           `gold_ingot, glass, stone from cobblestone) needs raw material first (raw_iron, ` +
           `raw_copper, raw_gold, sand, cobblestone -- mine it if she doesn't have any), THEN ` +
           `ACTION SMELT, not ACTION CRAFT -- crafting-table recipes can never produce a smelted ` +
-          `item. Only fall back to ACTION LOOT for one of these if she has the raw material and ` +
-          `fuel (coal, charcoal, or any log/planks) but SMELT still fails, or has no furnace ` +
-          `reachable at all.\n` +
+          `item. SMELT also needs FUEL (coal, charcoal, or any log/planks) -- if it fails for ` +
+          `lack of fuel and she has no coal/charcoal, mine a log (ACTION MINE oak_log or ` +
+          `whatever log is nearby) rather than repeating the same smelt attempt; any log works ` +
+          `as furnace fuel. Only fall back to ACTION LOOT for one of these if she has the raw ` +
+          `material and fuel but SMELT still fails, or has no furnace reachable at all.\n` +
           `Common material chain: sticks and a crafting table both need planks; planks come from ` +
           `logs. If a craft fails for missing ingredients, check whether she's missing the raw ` +
           `material (e.g. no logs at all) rather than the item itself -- mine the raw material ` +

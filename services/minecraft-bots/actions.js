@@ -1,4 +1,11 @@
-// Version: 1.10.0
+// Version: 1.10.1
+//
+// 1.10.1 (2026-09-07) -- real gap found live minutes after smelting shipped: the prompt says
+// ACTION SMELT's <item_id> is the OUTPUT (e.g. "copper_ingot"), but the planner named the INPUT
+// raw material instead ("raw_copper") and got "don't know how to smelt" for a perfectly sensible
+// request. Now accepts either -- if the named item isn't a known output, checks whether it's a
+// known input for one and uses that recipe instead. Cheap and always-safe to normalize in code
+// rather than keep tightening prompt wording for something this easy to just accept.
 //
 // 1.10.0 (2026-09-07) -- direct request: "they can't seem to find the furnaces." A huge fraction
 // of tonight's goal-loop failures were bots correctly reasoning they needed an ingot (iron/
@@ -582,10 +589,21 @@ export async function performAction(bot, action, speaker) {
       // goal failures were bots correctly reasoning they needed an ingot and having no way to
       // get one beyond hoping a chest had it (craft/mine alone were never enough; see index.js's
       // planNextStep comments). Built on mineflayer's own openFurnace() (core, no extra plugin).
-      const inputCandidates = SMELT_RECIPES[action.item];
+      //
+      // Real gap found live minutes after shipping: the prompt says <item_id> is the OUTPUT
+      // (e.g. "copper_ingot"), but the planner sometimes names the INPUT raw material instead
+      // ("raw_copper"). Cheap and always-safe to just accept either rather than keep tightening
+      // prompt wording for something this easy to normalize -- if the named item isn't a known
+      // output, check whether it's actually a known input for one and use that recipe instead.
+      let outputItem = action.item;
+      if (!SMELT_RECIPES[outputItem]) {
+        const matched = Object.entries(SMELT_RECIPES).find(([, inputs]) => inputs.includes(outputItem));
+        if (matched) outputItem = matched[0];
+      }
+      const inputCandidates = SMELT_RECIPES[outputItem];
       if (!inputCandidates) return fail(`don't know how to smelt "${action.item}".`);
       const inputItem = bot.inventory.items().find((i) => inputCandidates.includes(i.name));
-      if (!inputItem) return fail(`don't have anything to smelt into ${action.item}.`);
+      if (!inputItem) return fail(`don't have anything to smelt into ${outputItem}.`);
       const smeltCount = Math.min(action.count, inputItem.count);
 
       const fuelItem = pickFuel(bot);
@@ -652,7 +670,7 @@ export async function performAction(bot, action, speaker) {
           await furnace.close();
           if (!smelted) return fail("waited at the furnace but nothing came out -- may be out of fuel.");
           await refreshGear(bot); // a freshly-smelted ingot might feed straight into new gear
-          return ok(`smelted ${smelted} ${action.item}.`);
+          return ok(`smelted ${smelted} ${outputItem}.`);
         } catch (err) {
           try { await furnace.close(); } catch { /* already closed or never opened cleanly */ }
           console.log(`[smelt] furnace at ${furnaceBlock.position} failed: ${err.message}`);
