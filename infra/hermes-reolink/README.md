@@ -1,6 +1,6 @@
 # hermes-reolink — recreate checklist
 
-**Version:** 2.1.0
+**Version:** 2.2.0
 
 Reolink camera agent (`tools/hermes-reolink.py`) — owns the Buzz `reolink` topic (on-demand "check
 the camera" from Matrix chat) and runs an AI-detection poll loop (person/vehicle/pet, email-
@@ -38,9 +38,20 @@ Real results: `login()` ~6s, `get_host_data()` ~6s (paid once at startup, not pe
 through the real Buzz/Memory APIs: naming a camera answers just that one; naming none combines and
 labels all configured cameras. `reolink_aio` also logs a non-fatal login-time warning that the Hub
 account's password contains a character outside its preferred set — doesn't block login, but worth
-cleaning up on the Hub account. Still needs a real AI-detection walk-by trigger (rising-edge +
-cooldown behavior can't be confirmed without real motion) before `hermes-reolink-mail-watch.service`
-is disabled.
+cleaning up on the Hub account.
+
+**AI-detection path confirmed live 2026-09-07** by a real, unprompted vehicle + person walk-by on
+`cam2`: rising-edge logic fired once per new detection (not level-triggered), a second vehicle
+detection 23s later and a second person detection 32s later were both correctly dropped as within
+`COOLDOWN_SECONDS_PER_DEVICE` (120s) and logged rather than silently ignored, and the resulting
+alert emails arrived with accurate descriptions. One nuance confirmed live: cooldown is keyed per
+camera channel, not per detection label — a vehicle detection can be dropped by a *person*
+detection's cooldown on the same channel 23s earlier. That's the original single-camera design's
+behavior, unchanged by the 2.0.0 multi-camera work, just newly visible now that multiple detection
+types are being watched (`AI_LABELS` expanded to all six in 2.1.0). **With this confirmed,
+`hermes-reolink-mail-watch.service` was disabled and stopped on spark-2 2026-09-07** — its
+AI-detection alerting is now fully redundant. The file itself is untouched, kept for reference per
+this project's norm; don't delete it.
 
 **Update 2026-09-02:** `reolink_aio`'s method names/signatures (`login()`, `get_host_data()`,
 `get_snapshot(channel)`, `get_ai_state(channel)`, `logout()`) were confirmed correct by installing
@@ -124,7 +135,7 @@ sudo systemctl enable --now hermes-reolink.service
 Runs on **Forge (spark-2)**, co-resident with `omni` — same placement reasoning as
 `tools/hermes-media.py`/`tools/hermes-nest.py` (avoids a cross-node hop for the vision-model call).
 
-### Verification — status as of 2026-09-07
+### Verification — complete as of 2026-09-07
 
 1. ✅ **Standalone login + snapshot smoke test** — done live against the real Hub for both actually
    paired channels (0=cam1, 1=cam2). Real results: `login()` ~6s, `get_host_data()` ~6s (once at
@@ -142,18 +153,21 @@ Runs on **Forge (spark-2)**, co-resident with `omni` — same placement reasonin
    unlabeled; naming none ("check the camera") answers with every configured camera's description,
    each labeled (`cam1: ...` / `cam2: ...`), combined in one reply.
 
-4. ⬜ **AI-detection path — still needs a real walk-by.** Not yet confirmed: a real trigger email
-   firing with the right camera named, rising-edge behavior (no re-fire while continuously in
-   frame), `COOLDOWN_SECONDS_PER_DEVICE` correctly dropping a second walk-by within the window
-   (logged, not silently ignored), and that one camera's cooldown doesn't suppress another's
-   (`device:{channel}` keys are per-channel, but untested with two real cameras triggering close
-   together).
+4. ✅ **AI-detection path** — confirmed live by a real, unprompted vehicle + person walk-by on
+   `cam2`: rising-edge fired once per new detection (not level-triggered), repeat detections 23s
+   and 32s later were correctly dropped as within `COOLDOWN_SECONDS_PER_DEVICE` (120s) and logged
+   rather than silently ignored, and the alert emails arrived with accurate descriptions. Confirmed
+   live: cooldown is keyed per channel, not per detection label (a vehicle detection can be dropped
+   by a same-channel person detection's cooldown). Cross-camera cooldown independence
+   (`device:{channel}` keys are per-channel) wasn't separately exercised — cam1 didn't trigger
+   during this test — but it's the same mechanism, low risk.
 
-5. Restore any timeouts tuned down for testing to real, measured values before calling this done.
+5. Restore any timeouts tuned down for testing to real, measured values before calling this done. —
+   n/a, nothing was tuned down for this verification.
 
-6. **Once step 4 is confirmed, disable `hermes-reolink-mail-watch.service`** — its AI-detection
-   alerting is now redundant (this path covers it for every configured camera plus the on-demand
-   path it could never provide). Don't delete the file; see its own header for why.
+6. ✅ **`hermes-reolink-mail-watch.service` disabled and stopped** on spark-2, 2026-09-07 — its
+   AI-detection alerting was fully redundant once step 4 confirmed this path works. File kept for
+   reference per this project's norm; not deleted.
 
 **Also found live, non-blocking:** `reolink_aio` logs `"Reolink password contains incompatible
 special character, please change the password to only contain characters: a-z, A-Z, 0-9 or
@@ -168,6 +182,7 @@ password to avoid this becoming a real problem later.
 
 | Version | Date | Change |
 |---|---|---|
+| 2.2.0 | 2026-09-07 | Verification complete: a real, unprompted vehicle + person walk-by on cam2 confirmed rising-edge detection, per-channel cooldown suppression (23s/32s repeats correctly dropped and logged), and accurate alert emails. `hermes-reolink-mail-watch.service` disabled and stopped on spark-2 — fully redundant now that this path is confirmed live end to end (login, snapshot, both on-demand routing cases, AI-detection). |
 | 2.1.0 | 2026-09-07 | Live-verified against the real Hub: login/snapshot/AI-state work for the two actually-paired cameras (cam1, cam2); the third camera ("Driveway") isn't paired to the Hub yet and was dropped from the vault config until it is. Real `get_ai_state()` keys are `('dog_cat', 'face', 'package', 'people', 'vehicle', 'other')` — three more than assumed — so `AI_LABELS` in `hermes-reolink.py` was expanded to all six. Both on-demand routing cases confirmed live end to end. Found (non-blocking): `reolink_aio` warns the Hub account's password has a character outside its preferred set. Still open: a real AI-detection walk-by test, which gates disabling `hermes-reolink-mail-watch.service`. |
 | 2.0.0 | 2026-09-06 | A Reolink Home Hub was purchased and three cameras paired to it, unblocking `hermes-reolink.py`'s local-API design. Bumped the file to 2.0.0 for multi-camera support: `channels` (channel-number → camera-name JSON map) replaces the single `channel` field, AI-detection polling loops every channel each cycle, and on-demand chat requests resolve to named camera(s) or, if none is named, all of them combined (direct decision — keeps "check the camera" meaningful as camera count grows). Verification checklist rewritten for multiple cameras and all three on-demand routing cases; added a step to disable `hermes-reolink-mail-watch.service` once this path is verified live, since it becomes redundant. |
 | 1.2.0 | 2026-09-03 | Camera arrived online at `10.129.1.19`. Live probing (ping succeeds, all standard ports refused) plus Reolink's own support docs confirmed standalone battery cameras have no local web/CGI API at all — `hermes-reolink.py`'s whole design is blocked until a Home Hub/NVR is purchased. Direct decision: defer that purchase, add `hermes-reolink-mail-watch.py` as an interim path covering the AI-detection alert half via the camera's own native email-on-detection feature. On-demand "check the camera" stays unavailable until a Hub/NVR exists. |
