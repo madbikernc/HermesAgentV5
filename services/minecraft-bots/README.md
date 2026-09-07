@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 2.9.0
+**Version:** 2.10.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -103,6 +103,16 @@ string -- English-parsing "did that work?" from result text would have been frag
 disables the whole goal loop (both player-assigned and self-proposed); `MC_SELF_PROPOSE_GOALS=false`
 keeps player-assigned goals but turns off self-proposing.
 
+**Bots sleep at night** -- a deterministic 30s check (`checkSleep()`, `MC_SLEEP_CHECK_MS`),
+deliberately separate from the model-driven goal loop since "is it night" needs no reasoning,
+just `bot.time.timeOfDay`. The real per-bed logic (find a bed, try it, wait for morning) is a new
+`"sleep"` action built entirely on mineflayer's own `bed.js` plugin (core, no extra plugin load)
+-- `bot.sleep()` already enforces the real vanilla rules (night/thunderstorm window, occupied
+bed, monsters nearby, reach) and throws a specific reason for each. Tries up to 3 candidate beds
+before giving up, same reasoning as loot's multi-candidate fix. A live command always interrupts
+a night's sleep (`stopCurrent()` forces a wake). Also directly triggerable via chat (`ACTION
+SLEEP`), same as every other action.
+
 ## Requirements
 
 Node.js 22 LTS (installed on `spark` 2026-09-06 via NodeSource). Run `npm install` in this
@@ -130,6 +140,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 2.10.0 | 2026-09-07 | Bots sleep at night: deterministic `checkSleep()` on its own timer plus a new `"sleep"` action (`actions.js` 1.9.0) built on mineflayer's own `bed.js` plugin. Also directly triggerable via `ACTION SLEEP`. |
 | 2.9.0 | 2026-09-07 | Autonomy (`goals.js`): standing goals, player-assigned or self-proposed while idle, worked step-by-step via the existing `performAction()` pipeline on their own timer. `actions.js` 1.8.0's `performAction()` now returns `{ ok, text }` instead of a bare string so goal progress can be judged structurally, not by parsing English. |
 | 2.8.0 | 2026-09-06 | Equipment management (`equipment.js`): new `loot` action, auto-equip best armor/weapon after mine/attack/loot and at spawn. Fixed a real gap: `mineflayer-tool` was never loaded, so `collectBlock`'s own internal task-specific tool selection had nothing to call. |
 | 2.7.0 | 2026-09-06 | Real in-world actions (`actions.js`): navigate/gather/fight via `mineflayer-collectblock`/`mineflayer-pvp`, detected by the same `dispatch` call that already classified relevance. Building explicitly out of scope. |
