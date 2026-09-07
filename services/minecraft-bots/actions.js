@@ -1,4 +1,13 @@
-// Version: 1.7.0
+// Version: 1.8.0
+//
+// 1.8.0 (2026-09-07) -- autonomy (standing goals, direct request "give her more autonomy to
+// work towards longer goals"): performAction() now returns { ok, text } instead of a bare
+// string. The goal loop (index.js/goals.js) needs to know whether a step actually made progress
+// to decide when to keep trying vs. give up -- English-parsing the old free-text result
+// ("couldn't...", "had trouble...") for that would be fragile and silently break the moment a
+// message wording changes. `ok` is the real, structural signal; `text` is unchanged and still
+// exactly what gets narrated/chatted, so every existing call site only needed `result` ->
+// `result.text`.
 //
 // 1.7.0 (2026-09-06) -- direct request: "pre-teach the most common recipes." minecraft-data
 // already knows every vanilla recipe correctly (Recipe.ingredients/requiresTable, confirmed
@@ -216,54 +225,56 @@ function stopCurrent(bot) {
 
 export async function performAction(bot, action, speaker) {
   const token = stopCurrent(bot);
+  const ok = (text) => ({ ok: true, text });
+  const fail = (text) => ({ ok: false, text });
 
   switch (action.type) {
     case "stop":
-      return "stopped.";
+      return ok("stopped.");
 
     case "goto": {
       const target = bot.players[speaker]?.entity;
-      if (!target) return `I can't see ${speaker} nearby.`;
+      if (!target) return fail(`I can't see ${speaker} nearby.`);
       try {
         await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(target, 2)), ACTION_TIMEOUT_MS,
                            () => bot.pathfinder.setGoal(null));
       } catch (err) {
-        if (token.cancelled) return "stopped on the way.";
-        return `couldn't reach ${speaker}: ${err.message}`;
+        if (token.cancelled) return ok("stopped on the way.");
+        return fail(`couldn't reach ${speaker}: ${err.message}`);
       } finally {
         bot.pathfinder.setGoal(null);
       }
-      return token.cancelled ? "stopped on the way." : `reached ${speaker}.`;
+      return token.cancelled ? ok("stopped on the way.") : ok(`reached ${speaker}.`);
     }
 
     case "follow": {
       const target = bot.players[speaker]?.entity;
-      if (!target) return `I can't see ${speaker} nearby.`;
+      if (!target) return fail(`I can't see ${speaker} nearby.`);
       bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true); // dynamic: keeps tracking
-      return `following ${speaker} now.`;
+      return ok(`following ${speaker} now.`);
     }
 
     case "mine": {
       const blockType = bot.registry.blocksByName[action.block];
-      if (!blockType) return `I don't recognize the block "${action.block}".`;
+      if (!blockType) return fail(`I don't recognize the block "${action.block}".`);
       const positions = bot.findBlocks({ matching: blockType.id, maxDistance: 32, count: action.count });
-      if (!positions.length) return `couldn't find any ${action.block} nearby.`;
+      if (!positions.length) return fail(`couldn't find any ${action.block} nearby.`);
       const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
       try {
         await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
                            () => bot.collectBlock.cancelTask());
       } catch (err) {
-        if (token.cancelled) return "stopped mining early.";
-        return `had trouble mining ${action.block}: ${err.message}`;
+        if (token.cancelled) return ok("stopped mining early.");
+        return fail(`had trouble mining ${action.block}: ${err.message}`);
       } finally {
         await refreshGear(bot); // may have picked up something worth wearing/wielding
       }
-      return token.cancelled ? "stopped mining early." : `collected some ${action.block}.`;
+      return token.cancelled ? ok("stopped mining early.") : ok(`collected some ${action.block}.`);
     }
 
     case "craft": {
       const itemDef = bot.registry.itemsByName[action.item];
-      if (!itemDef) return `I don't recognize the item "${action.item}".`;
+      if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
 
       // Does this need a table? `true` satisfies recipesFor()'s own requiresTable check
       // without needing a real Block reference yet -- confirmed against mineflayer's own
@@ -274,38 +285,38 @@ export async function performAction(bot, action, speaker) {
       if (tableWouldHelp) {
         const tableType = bot.registry.blocksByName.crafting_table;
         const positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
-        if (!positions.length) return `need a crafting table nearby for ${action.item}.`;
+        if (!positions.length) return fail(`need a crafting table nearby for ${action.item}.`);
         tableBlock = bot.blockAt(positions[0]);
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(tableBlock.position.x,
             tableBlock.position.y, tableBlock.position.z, 2)), ACTION_TIMEOUT_MS,
             () => bot.pathfinder.setGoal(null));
         } catch (err) {
-          if (token.cancelled) return "stopped on the way to a crafting table.";
-          return `couldn't reach a crafting table: ${err.message}`;
+          if (token.cancelled) return ok("stopped on the way to a crafting table.");
+          return fail(`couldn't reach a crafting table: ${err.message}`);
         } finally {
           bot.pathfinder.setGoal(null);
         }
-        if (token.cancelled) return "stopped on the way to a crafting table.";
+        if (token.cancelled) return ok("stopped on the way to a crafting table.");
       }
 
       try {
         await craftItem(bot, action.item, action.count, tableBlock);
       } catch (err) {
-        return `couldn't craft ${action.item}: ${err.message}`;
+        return fail(`couldn't craft ${action.item}: ${err.message}`);
       } finally {
         await refreshGear(bot); // a freshly-crafted tool/weapon/armor piece should get equipped
       }
-      return `crafted ${action.count} ${action.item}.`;
+      return ok(`crafted ${action.count} ${action.item}.`);
     }
 
     case "loot": {
       const chestType = bot.registry.blocksByName.chest;
       const trappedType = bot.registry.blocksByName.trapped_chest;
       const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
-      if (!matchIds.length) return "don't know how to recognize a chest here.";
+      if (!matchIds.length) return fail("don't know how to recognize a chest here.");
       const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: 1 });
-      if (!positions.length) return "couldn't find any chests nearby.";
+      if (!positions.length) return fail("couldn't find any chests nearby.");
       const chestBlock = bot.blockAt(positions[0]);
       // Real error found live (2026-09-06): openChest() waited its own internal 20s timeout
       // ("Event windowOpen did not fire") against a chest that vanilla Minecraft will never
@@ -331,7 +342,7 @@ export async function performAction(bot, action, speaker) {
       for (const half of chestHalves) {
         const above = bot.blockAt(half.position.offset(0, 1, 0));
         if (above?.boundingBox === "block") {
-          return "found a chest, but there's something on top of it blocking the lid.";
+          return fail("found a chest, but there's something on top of it blocking the lid.");
         }
       }
       try {
@@ -339,12 +350,12 @@ export async function performAction(bot, action, speaker) {
           chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
           () => bot.pathfinder.setGoal(null));
       } catch (err) {
-        if (token.cancelled) return "stopped on the way to a chest.";
-        return `couldn't reach a chest: ${err.message}`;
+        if (token.cancelled) return ok("stopped on the way to a chest.");
+        return fail(`couldn't reach a chest: ${err.message}`);
       } finally {
         bot.pathfinder.setGoal(null);
       }
-      if (token.cancelled) return "stopped on the way to a chest.";
+      if (token.cancelled) return ok("stopped on the way to a chest.");
 
       let taken = [];
       try {
@@ -369,29 +380,31 @@ export async function performAction(bot, action, speaker) {
         }
         await chest.close();
       } catch (err) {
-        return `found a chest but couldn't open it: ${err.message}`;
+        return fail(`found a chest but couldn't open it: ${err.message}`);
       }
       await refreshGear(bot);
-      return taken.length ? `found ${taken.join(", ")} in a chest.` : "checked a chest, nothing worth taking.";
+      // Finding nothing worth taking is a completed check, not a failed one -- an empty/
+      // already-looted chest is a legitimate outcome, not the bot getting stuck.
+      return ok(taken.length ? `found ${taken.join(", ")} in a chest.` : "checked a chest, nothing worth taking.");
     }
 
     case "attack": {
       const target = bot.nearestEntity((e) => e.type === "mob" && HOSTILE_MOBS.has(e.name));
-      if (!target) return "no hostile mobs nearby.";
+      if (!target) return fail("no hostile mobs nearby.");
       // bot.pvp.attack() resolves its own promise once the target is dead or lost -- no need
       // for a manually-wired event listener (confirmed against mineflayer-pvp's own .d.ts).
       try {
         await withTimeout(bot.pvp.attack(target), ACTION_TIMEOUT_MS, () => bot.pvp.stop());
       } catch (err) {
-        if (token.cancelled) return "broke off the fight.";
-        return "gave up on the fight -- took too long.";
+        if (token.cancelled) return ok("broke off the fight.");
+        return fail("gave up on the fight -- took too long.");
       } finally {
         await refreshGear(bot); // mob drops may include something worth wearing/wielding
       }
-      return token.cancelled ? "broke off the fight." : "took care of it.";
+      return token.cancelled ? ok("broke off the fight.") : ok("took care of it.");
     }
 
     default:
-      return "not sure how to do that yet.";
+      return fail("not sure how to do that yet.");
   }
 }

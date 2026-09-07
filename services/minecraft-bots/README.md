@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 2.8.0
+**Version:** 2.9.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -84,6 +84,25 @@ but the plugin was never loaded, so it silently had nothing to call. Crafting an
 still explicitly out of scope -- this covers "use or loot what already exists," not "make what
 doesn't."
 
+**Autonomy is wired** (`goals.js` + index.js's goal loop): a standing goal -- something worked on
+over many steps/ticks, not one atomic request -- can come from a player ("Babs, your goal is to
+get full iron armor," via the same one-call `classifyIntent`, new `ACTION GOAL <description>`
+verb) or, per the operator's own choice between the two designs offered, from the bot herself:
+once she's had no active goal and heard from no one for `MC_IDLE_SELF_GOAL_MS` (10 min default),
+she proposes one in character (`muse`, grounded in her real gear via `equipment.js`'s new
+`describeGear()` -- never invented) and starts working it. Either way, a goal persists as a small
+JSON file (survives restart, same as inventory) and gets worked one step at a time on its own
+`MC_GOAL_TICK_MS` timer (45s default) through the exact same `performAction()` pipeline a direct
+chat command already uses -- never a separate, less-tested way of moving/mining/fighting/
+crafting/looting. The tick only ever fires when nothing else has the bot's attention (`busy`/new
+`acting` flag), so a live player command always wins immediately and the goal loop simply resumes
+on its own next tick once that command finishes -- no separate interrupt/resume logic, it falls
+out of the existing mutex. `ACTION STOP` now also abandons any active goal. This needed
+`performAction()` to return a real `{ ok, text }` signal (`actions.js` 1.8.0) instead of a bare
+string -- English-parsing "did that work?" from result text would have been fragile. `MC_AUTONOMY_ENABLED=false`
+disables the whole goal loop (both player-assigned and self-proposed); `MC_SELF_PROPOSE_GOALS=false`
+keeps player-assigned goals but turns off self-proposing.
+
 ## Requirements
 
 Node.js 22 LTS (installed on `spark` 2026-09-06 via NodeSource). Run `npm install` in this
@@ -111,6 +130,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 2.9.0 | 2026-09-07 | Autonomy (`goals.js`): standing goals, player-assigned or self-proposed while idle, worked step-by-step via the existing `performAction()` pipeline on their own timer. `actions.js` 1.8.0's `performAction()` now returns `{ ok, text }` instead of a bare string so goal progress can be judged structurally, not by parsing English. |
 | 2.8.0 | 2026-09-06 | Equipment management (`equipment.js`): new `loot` action, auto-equip best armor/weapon after mine/attack/loot and at spawn. Fixed a real gap: `mineflayer-tool` was never loaded, so `collectBlock`'s own internal task-specific tool selection had nothing to call. |
 | 2.7.0 | 2026-09-06 | Real in-world actions (`actions.js`): navigate/gather/fight via `mineflayer-collectblock`/`mineflayer-pvp`, detected by the same `dispatch` call that already classified relevance. Building explicitly out of scope. |
 | 2.6.0 | 2026-09-06 | Matrix wired (`matrix.js`) -- single shared room, operator + both bots. New accounts `mc-babs`/`mc-amy`; credentials in a local env file (Vaultwarden write was blocked by the session's permission classifier). |

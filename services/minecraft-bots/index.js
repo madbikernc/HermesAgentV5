@@ -1,8 +1,25 @@
-// Version: 2.10.0
+// Version: 2.11.0
 //
 // Firmament Minecraft bot orchestrator. Connects one bot and wires the first real decision
 // loop: chat perception -> cheap relevance classification (dispatch role) -> in-character
 // reply (muse role) -> bot chats back. See ../../MINECRAFT_BOTS_DESIGN.md.
+//
+// 2.11.0 (2026-09-07) -- direct request: "give her more autonomy to work towards longer goals,"
+// with a real fork resolved by direct instruction: goals can come from a player (new "ACTION
+// GOAL <description>" verb, classifyIntent's existing one-call vocabulary) OR the bot can
+// propose her own once she's had no active goal and heard from no one for a while. Either way,
+// a goal persists (goals.js, survives restart the same way inventory does) and gets worked one
+// step at a time on its own timer (goalTick, MC_GOAL_TICK_MS) through the *same* performAction()
+// pipeline a direct chat command already uses -- a standing goal is never a separate, less-
+// tested way of moving/mining/fighting/crafting/looting. The tick only ever fires when nothing
+// else has the bot's attention (`busy`/new `acting` flag), so a live player command always wins
+// immediately and the goal loop just resumes on its own next tick once that command's action
+// finishes -- no separate interrupt/resume logic needed, it falls out of the existing mutex.
+// `ACTION STOP` now also abandons any active goal (matches the plain-English expectation that
+// "stop" means stop everything, not just the current physical motion). performAction() needed a
+// structural success/failure signal for this (actions.js 1.8.0, { ok, text } instead of a bare
+// string) rather than regex-guessing "ok" from English result text, which would silently break
+// the moment a message's wording changed.
 //
 // 2.10.0 (2026-09-07) -- direct report: navigation is unreliable around doors/ladders/stairs.
 // mineflayer-pathfinder defaults canOpenDoors to false with its own comment ("Causes issues.
@@ -100,7 +117,8 @@ import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
 import { loadActionPlugins, performAction } from "./actions.js";
-import { equipBestArmor, equipBestWeapon } from "./equipment.js";
+import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
+import { loadGoal, saveGoal, clearGoal, newGoal, logStep } from "./goals.js";
 
 const { pathfinder, Movements } = pathfinderPkg;
 
@@ -136,6 +154,17 @@ const BOT_USERNAMES = new Set(
 function isAnotherBot(speaker) {
   return BOT_USERNAMES.has(speaker) || speaker.startsWith("@mc-"); // Matrix bot identities
 }
+
+// Autonomy (standing goals): a whole-bot kill switch, an idle-before-self-proposing-a-goal
+// window (real chat/whisper/Matrix/goal-setting all count as "not idle" -- see lastActivityAt),
+// and a tick interval for actually working a goal. Since everything here runs on local compute
+// with no per-call cost (direct instruction, 2026-09-06), 45s errs toward checking in often and
+// reasoning carefully each time rather than stretching the interval to save calls.
+const AUTONOMY_ENABLED = (process.env.MC_AUTONOMY_ENABLED ?? "true") !== "false";
+const SELF_PROPOSE_GOALS = (process.env.MC_SELF_PROPOSE_GOALS ?? "true") !== "false";
+const GOAL_TICK_MS = parseInt(process.env.MC_GOAL_TICK_MS || "45000", 10);
+const IDLE_BEFORE_SELF_GOAL_MS = parseInt(process.env.MC_IDLE_SELF_GOAL_MS || "600000", 10); // 10 min
+const MAX_CONSECUTIVE_FAILURES = 3;
 
 // Matrix (design doc §10): a single shared room, operator + all bots -- the operator's own
 // decision, a deliberate deviation from the retired Sintra/Amy per-agent-room pattern. Talks
@@ -219,6 +248,19 @@ setInterval(() => {
 }, 15_000);
 
 let busy = false;
+// True for the whole span of a directly-requested action (runAction), not just the fast
+// classify step `busy` already guards -- the goal loop must never issue its own step while a
+// player-requested mine/craft/loot/attack/goto/follow is actually running underneath it.
+let acting = false;
+let currentGoal = null;
+// Updated on every real chat/whisper/Matrix line and every goal set by a player -- the goal
+// loop only ever proposes her own goal after this has been quiet a while (IDLE_BEFORE_SELF_GOAL_MS).
+let lastActivityAt = Date.now();
+
+loadGoal(PERSONA_NAME).then((g) => {
+  currentGoal = g;
+  if (g) console.log(`[${USERNAME}] resumed goal: ${g.description} (${g.steps} steps so far)`);
+}).catch((err) => console.error(`[${USERNAME}] failed to load saved goal:`, err.message));
 
 // One dispatch call classifies relevance AND detects an action request together, replacing
 // the old plain YES/NO relevance check -- same "keep it to one cheap call" efficiency
@@ -267,7 +309,11 @@ async function classifyIntent(speaker, message) {
           `specific item was actually named or clearly implied. <item_id> must be the exact ` +
           `modern Minecraft item id (e.g. stick, oak_planks, wooden_pickaxe, crafting_table). ` +
           `<count> is a small positive integer, default 1 if unstated. If no specific item is ` +
-          `named, respond CHAT instead -- never invent one.`,
+          `named, respond CHAT instead -- never invent one.\n` +
+          `ACTION GOAL <description> - gives ${USERNAME} a standing objective to keep working ` +
+          `on by herself over time (not a single one-off task), e.g. "get full iron armor" or ` +
+          `"stock up on wood". Only use this if the speaker is clearly assigning an ongoing ` +
+          `objective, not just asking for one immediate thing. <description> is a short phrase.`,
       },
       { role: "user", content: `<${speaker}> ${message}` },
     ],
@@ -291,6 +337,13 @@ async function classifyIntent(speaker, message) {
       const block = (parts[2] || "").toLowerCase();
       const count = parseInt(parts[3], 10);
       if (block) return { type: "action", action: { type: "mine", block, count: count > 0 ? count : 4 } };
+    }
+    if (verb === "GOAL") {
+      // Re-extracted from the original (non-uppercased) reply so the description keeps its
+      // natural casing/spacing rather than the all-caps, single-spaced tokens `parts` has.
+      const match = reply.trim().match(/^ACTION\s+GOAL\s+(.+)$/i);
+      const description = match ? match[1].trim() : "";
+      if (description) return { type: "action", action: { type: "goal", description } };
     }
     return { type: "chat" }; // unparseable ACTION line -- fall back to a normal reply
   }
@@ -433,6 +486,7 @@ async function runAction(action, speaker, message, send) {
   // Recording the full parsed action alongside the original text fixes that for next time.
   const actionDesc = action.type === "mine" ? `mine ${action.block} x${action.count}`
     : action.type === "craft" ? `craft ${action.item} x${action.count}` : action.type;
+  acting = true; // blocks the goal loop from stepping until this direct command is done
   try {
     const startLine = {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
@@ -442,22 +496,217 @@ async function runAction(action, speaker, message, send) {
     if (startLine) send(await narrateAction(startLine));
 
     const result = await performAction(bot, action, speaker);
-    send(await narrateAction(result));
+    send(await narrateAction(result.text));
 
     // Actions are conversational events too -- worth the same continuity as a chat exchange.
     const conv = convId(speaker);
     await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "user",
                         raw: `<${speaker}> ${message} [parsed as: ${actionDesc}]` });
-    await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "assistant", raw: result });
+    await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "assistant", raw: result.text });
   } catch (err) {
     console.error(`[${USERNAME}] action '${action.type}' failed:`, err.message);
     send(`something went wrong trying to do that.`);
+  } finally {
+    acting = false;
   }
+}
+
+// Parses the goal planner's one-line verdict -- deliberately separate from classifyIntent's own
+// ACTION-line parser above, even though they overlap: the goal loop's vocabulary is narrower
+// (no goto/follow/stop, which are speaker-relative and don't mean anything for a standing goal
+// pursued alone) and has two extra terminal states classifyIntent has no use for (DONE/BLOCKED).
+function parseGoalStep(line) {
+  const trimmed = line.trim().toUpperCase();
+  if (trimmed.startsWith("DONE")) return { type: "done" };
+  if (trimmed.startsWith("BLOCKED")) return { type: "blocked", reason: line.trim().slice(7).trim() || "stuck" };
+  if (trimmed.startsWith("ACTION")) {
+    const parts = trimmed.split(/\s+/);
+    const verb = parts[1];
+    if (verb === "LOOT") return { type: "step", action: { type: "loot" } };
+    if (verb === "ATTACK") return { type: "step", action: { type: "attack" } };
+    if (verb === "CRAFT") {
+      const item = (parts[2] || "").toLowerCase();
+      const count = parseInt(parts[3], 10);
+      if (item) return { type: "step", action: { type: "craft", item, count: count > 0 ? count : 1 } };
+    }
+    if (verb === "MINE") {
+      const block = (parts[2] || "").toLowerCase();
+      const count = parseInt(parts[3], 10);
+      if (block) return { type: "step", action: { type: "mine", block, count: count > 0 ? count : 4 } };
+    }
+  }
+  return { type: "blocked", reason: "couldn't decide what to do next" };
+}
+
+// One dispatch call per tick, grounded in real state (describeGear -- never guessed) and the
+// goal's own recent log, not just the description -- so a repeated failure actually steers the
+// next choice instead of retrying the same dead end forever (MAX_CONSECUTIVE_FAILURES is the
+// hard backstop if reasoning alone doesn't catch it).
+async function planNextStep(goal) {
+  const gearNote = describeGear(bot);
+  const recentLog = goal.log.length ? goal.log.slice(-6).join("\n") : "(nothing done yet)";
+  const reply = await callRole(
+    "dispatch",
+    [
+      {
+        role: "system",
+        content:
+          `You are the planner for a Minecraft bot named ${USERNAME} working toward a standing ` +
+          `goal on her own, unprompted by anyone right now. Given the goal, her current gear/` +
+          `inventory, and what she's already tried, respond with EXACTLY ONE line, no ` +
+          `explanation, in one of these forms:\n` +
+          `DONE - the goal is already fully achieved given her current gear/inventory\n` +
+          `BLOCKED <short reason> - she cannot make progress right now and should give up\n` +
+          `ACTION MINE <block_id> <count> - gather a resource. <block_id> must be the exact ` +
+          `modern Minecraft block id -- never invent one.\n` +
+          `ACTION CRAFT <item_id> <count> - craft an item. <item_id> must be the exact modern ` +
+          `Minecraft item id -- never invent one.\n` +
+          `ACTION LOOT - check the nearest chest for gear\n` +
+          `ACTION ATTACK - fight a nearby hostile mob\n` +
+          `Pick the single most useful next step toward the goal. If the same step already ` +
+          `failed more than once in a row (see recent progress below), try something different ` +
+          `instead of repeating it, or respond BLOCKED.`,
+      },
+      { role: "user", content: `Goal: ${goal.description}\n${gearNote}\nRecent progress:\n${recentLog}` },
+    ],
+    { maxTokens: 24, temperature: 0 },
+  );
+  return reply.trim();
+}
+
+// Fires once a bot has had no active goal and heard from no one (chat/whisper/Matrix/a goal
+// being set) for IDLE_BEFORE_SELF_GOAL_MS -- the "self-proposed" half of the operator's chosen
+// autonomy design (the alternative, user-assigned-only, was explicitly not chosen). Uses `muse`,
+// not `dispatch`: this is the one place autonomy calls for personality/creativity rather than
+// mechanical classification -- what a bot chooses to do with idle time should sound like her,
+// grounded in her real gear (never invented) and whatever long-term memory might suggest
+// something worth pursuing.
+async function proposeOwnGoal() {
+  const gearNote = describeGear(bot);
+  let memoryNote = "";
+  try {
+    const hits = await searchMemory("goals, plans, things worth doing or building", { topK: 3 });
+    if (hits.length) {
+      memoryNote = "\n\nThings you remember that might matter:\n" + hits.map((h) => `- ${h.text}`).join("\n");
+    }
+  } catch (err) {
+    console.error(`[${USERNAME}] memory recall for self-goal failed:`, err.message);
+  }
+
+  const text = await callRole(
+    "muse",
+    [
+      {
+        role: "system",
+        content:
+          `${persona}\n\n---\n\nNo one has talked to you in a while and you have no standing ` +
+          `goal right now. Given your own gear/inventory below, decide on ONE concrete, ` +
+          `achievable objective to work on by yourself for a while (gearing up, gathering a ` +
+          `resource, crafting something useful). Respond with ONLY a short phrase naming the ` +
+          `goal, in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}`,
+      },
+      { role: "user", content: "What's your goal?" },
+    ],
+    { maxTokens: 30, temperature: 0.9 },
+  );
+  const description = text.trim().replace(/^["']|["']$/g, "").slice(0, 120);
+  if (!description) return;
+
+  currentGoal = newGoal({ description, source: "self" });
+  await saveGoal(PERSONA_NAME, currentGoal);
+  console.log(`[${USERNAME}] self-proposed goal: ${description}`);
+  bot.chat(await narrateAction(`new goal, on my own: ${description}.`));
+}
+
+// Runs on its own timer, entirely separate from handleIncoming's chat-driven busy window --
+// only steps when nothing else has the bot's attention (busy/acting), so a live player command
+// always wins immediately and this simply resumes on its own next tick once that command's
+// action finishes. Reuses `busy`/`acting` themselves (rather than a third flag) so there is
+// exactly one place goal-loop-vs-live-command precedence is decided, not two that could drift
+// out of sync.
+async function goalTick() {
+  if (!AUTONOMY_ENABLED || busy || acting) return;
+
+  if (!currentGoal) {
+    if (!SELF_PROPOSE_GOALS || Date.now() - lastActivityAt < IDLE_BEFORE_SELF_GOAL_MS) return;
+    busy = true;
+    try {
+      await proposeOwnGoal();
+    } catch (err) {
+      console.error(`[${USERNAME}] failed to self-propose a goal:`, err.message);
+    } finally {
+      busy = false;
+    }
+    return;
+  }
+
+  busy = true;
+  acting = true;
+  try {
+    const parsed = parseGoalStep(await planNextStep(currentGoal));
+
+    if (parsed.type === "done") {
+      bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
+      currentGoal = null;
+      await clearGoal(PERSONA_NAME);
+      return;
+    }
+
+    if (parsed.type === "blocked") {
+      logStep(currentGoal, `blocked: ${parsed.reason}`);
+      currentGoal.consecutiveFailures += 1;
+      if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${parsed.reason}.`));
+        currentGoal = null;
+        await clearGoal(PERSONA_NAME);
+      } else {
+        await saveGoal(PERSONA_NAME, currentGoal);
+      }
+      return;
+    }
+
+    const result = await performAction(bot, parsed.action, currentGoal.setBy || USERNAME);
+    logStep(currentGoal, `${parsed.action.type}: ${result.text}`);
+    currentGoal.consecutiveFailures = result.ok ? 0 : currentGoal.consecutiveFailures + 1;
+
+    if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${result.text}`));
+      currentGoal = null;
+      await clearGoal(PERSONA_NAME);
+      return;
+    }
+
+    await saveGoal(PERSONA_NAME, currentGoal);
+    // A check-in every few steps, not every step -- otherwise gearing up would spam chat once
+    // per GOAL_TICK_MS the whole time she works.
+    if (currentGoal.steps % 3 === 0) {
+      bot.chat(await narrateAction(`still working on ${currentGoal.description}: ${result.text}`));
+    }
+  } catch (err) {
+    console.error(`[${USERNAME}] goal tick failed:`, err.message);
+  } finally {
+    busy = false;
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  goalTick().catch((err) => console.error(`[${USERNAME}] goalTick error:`, err.message));
+}, GOAL_TICK_MS);
+
+// Setting a goal is a fast, synchronous-feeling operation (a disk write, not a physical
+// action) -- it runs inline inside handleIncoming's busy window rather than through runAction's
+// fire-and-forget/`acting` path.
+async function setNewGoal(description, speaker) {
+  currentGoal = newGoal({ description, source: "user", setBy: speaker });
+  await saveGoal(PERSONA_NAME, currentGoal);
+  return currentGoal;
 }
 
 function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   if (speaker === bot.username || speaker === MATRIX_USER_ID) return;
   if (isAnotherBot(speaker)) return; // another bot's own chat/Matrix message -- coordinate over Buzz, not here
+  lastActivityAt = Date.now(); // a real player is here -- the self-propose-a-goal idle clock resets
   if (busy) {
     console.log(`[${USERNAME}] busy, dropping: <${speaker}> ${message}`);
     return;
@@ -472,6 +721,17 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
       if (type === "none") return;
 
       if (type === "action") {
+        if (intent.action.type === "goal") {
+          await setNewGoal(intent.action.description, speaker);
+          send(await narrateAction(`new goal: ${intent.action.description}. I'll work on it.`));
+          return;
+        }
+        // "stop" means stop everything, not just the current physical motion -- a standing
+        // goal she was working on shouldn't silently keep going after being told to stop.
+        if (intent.action.type === "stop" && currentGoal) {
+          currentGoal = null;
+          await clearGoal(PERSONA_NAME);
+        }
         runAction(intent.action, speaker, message, send); // fire-and-forget, not awaited -- see runAction
         return;
       }

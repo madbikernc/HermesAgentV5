@@ -1,4 +1,11 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-09-07) -- autonomy (standing goals, index.js/goals.js): describeGear() gives the
+// goal planner a compact, honest snapshot of what the bot actually has -- armor worn (raw slot
+// indices 5-8, the standard vanilla player-inventory window layout; bot.inventory.items() alone
+// excludes armor/offhand, same reason equipBestArmor can't use it either), held item
+// (bot.heldItem), and inventory contents grouped/counted by name. Never guessed at from the
+// goal description -- the planner reasons from real state every tick.
 //
 // Equipment management: wear the best armor available, hold the best weapon by default, and
 // switch to the right task-specific tool for mining (mineflayer-tool, via
@@ -72,4 +79,21 @@ export async function equipBestWeapon(bot) {
   } catch (err) {
     console.error(`equipBestWeapon: failed to equip ${candidates[0].name}:`, err.message);
   }
+}
+
+// Slots 5-8 are the standard vanilla player-inventory window layout (head/chest/legs/feet) --
+// bot.inventory.items() deliberately excludes these (and offhand), same reason equipBestArmor
+// above can't rely on it for reading worn armor either.
+export function describeGear(bot) {
+  const name = (item) => item?.name ?? "none";
+  const [head, torso, legs, feet] = [5, 6, 7, 8].map((slot) => bot.inventory.slots[slot]);
+
+  const counts = new Map();
+  for (const item of bot.inventory.items()) {
+    counts.set(item.name, (counts.get(item.name) ?? 0) + item.count);
+  }
+  const invList = [...counts.entries()].map(([n, count]) => `${count}x ${n}`).join(", ") || "empty";
+
+  return `Wearing: head=${name(head)}, chest=${name(torso)}, legs=${name(legs)}, feet=${name(feet)}. ` +
+         `Holding: ${name(bot.heldItem)}. Inventory: ${invList}.`;
 }

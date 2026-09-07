@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots — Design
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Status:** Design only — nothing in this document is built. Status legend (same convention as
 `firmament-fleet-target-architecture.md`): `[DECIDED]` — operator made an explicit choice · `[PROPOSED]` —
 design recommendation, not yet ratified · `[UNKNOWN]` — needs discovery before build · `[RISK]` — flagged
@@ -179,7 +179,35 @@ existing pattern, chosen for this use case.
 - hermes-router: **no new roles needed for v1** — reuses `dispatch`/`coder`/`muse`/`guard`/`embed`/`super`
   as-is (§6).
 
-## 12. Open questions before building
+## 12. Autonomy — standing goals (added 2026-09-07, after everything through §11 was built)
+
+`[DECIDED]` Direct request: "give her more autonomy to work towards longer goals." A real fork was
+put to the operator rather than assumed: should a standing goal only ever come from a player, or
+can a bot also propose her own when idle? **Decided: both.** A goal is a persistent objective
+(`services/minecraft-bots/goals.js`) worked one step at a time on its own timer, through the same
+action pipeline (§5) a direct chat command already uses — never a separate, less-tested way of
+moving/mining/fighting/crafting/looting.
+
+- **Source.** A player assigns one in chat/Matrix ("Babs, get full iron armor") via the same
+  one-call classifier (§6) that already detects every other action verb — no second model call.
+  Or, if a bot has no active goal and has heard from no one for a configurable idle window, she
+  proposes her own, in character, grounded in her actual gear/inventory (never invented) and
+  whatever long-term memory (§7) suggests might be worth pursuing.
+- **Persistence.** A small JSON file per bot, survives a restart the same way inventory does (it's
+  tied to the world/player, not the process) — resuming a goal after a restart is the same code
+  path as continuing one that was never interrupted.
+- **Precedence.** The goal-loop tick only ever fires when nothing else has the bot's attention —
+  it reuses the exact same `busy` flag a live chat message sets, plus a new `acting` flag that
+  now spans a direct action's *entire* run (previously nothing tracked that). A live player
+  command always wins immediately; the goal loop simply resumes on its own next tick once that
+  command's action finishes. `ACTION STOP` now also abandons any active goal, matching the plain-
+  English expectation that "stop" means stop everything, not just cancel the current motion.
+- **Judging progress.** Needed a real structural signal for "did that step work," not English-
+  parsing a result string that was only ever written for a human to read in chat — `performAction`
+  (§5) now returns `{ ok, text }`. A consecutive-failure counter is the hard backstop if the
+  planner's own reasoning doesn't catch a dead end first.
+
+## 13. Open questions before building
 
 - `[UNKNOWN]` Does the pre-provisioned `25566/tcp` "Minecraft Paper" UFW slot get repurposed for this bot
   instance, or does it get a fresh port? (§3)
@@ -195,3 +223,4 @@ existing pattern, chosen for this use case.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-09-06 | Initial design, incorporating operator decisions: dedicated offline-mode instance, Zomboid out of scope, single shared Matrix room. |
+| 1.1.0 | 2026-09-07 | §12 added: autonomy/standing goals, player-assigned or self-proposed (operator decided both, not just one), built on top of the already-built system §1-§11 describe. |
