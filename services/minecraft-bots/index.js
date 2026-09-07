@@ -519,28 +519,44 @@ async function runAction(action, speaker, message, send) {
   }
 }
 
-// Parses the goal planner's one-line verdict -- deliberately separate from classifyIntent's own
+// Parses the goal planner's verdict -- deliberately separate from classifyIntent's own
 // ACTION-line parser above, even though they overlap: the goal loop's vocabulary is narrower
 // (no goto/follow/stop, which are speaker-relative and don't mean anything for a standing goal
 // pursued alone) and has two extra terminal states classifyIntent has no use for (DONE/BLOCKED).
-function parseGoalStep(line) {
-  const trimmed = line.trim().toUpperCase();
-  if (trimmed.startsWith("DONE")) return { type: "done" };
-  if (trimmed.startsWith("BLOCKED")) return { type: "blocked", reason: line.trim().slice(7).trim() || "stuck" };
-  if (trimmed.startsWith("ACTION")) {
-    const parts = trimmed.split(/\s+/);
-    const verb = parts[1];
-    if (verb === "LOOT") return { type: "step", action: { type: "loot" } };
-    if (verb === "ATTACK") return { type: "step", action: { type: "attack" } };
-    if (verb === "CRAFT") {
-      const item = (parts[2] || "").toLowerCase();
-      const count = parseInt(parts[3], 10);
-      if (item) return { type: "step", action: { type: "craft", item, count: count > 0 ? count : 1 } };
-    }
-    if (verb === "MINE") {
-      const block = (parts[2] || "").toLowerCase();
-      const count = parseInt(parts[3], 10);
-      if (block) return { type: "step", action: { type: "mine", block, count: count > 0 ? count : 4 } };
+//
+// Real gap found live (2026-09-07): the first version required the WHOLE reply to start with a
+// known keyword, forcing a bare one-line answer with no room to reason -- dispatch is actually a
+// full 35B model (same family as muse, just the stock quant, confirmed against hermes-router.py's
+// own ROLES table), not a tiny classifier, but a one-line-only format meant it never connected
+// "craft failed, no ingredients" back to "mine the raw material first": a live goal ("get a chest
+// and some armor") burned all 3 retries on different CRAFT targets that all failed for the same
+// underlying reason (no logs at all) and gave up, when mining logs first would have worked.
+// Scanning from the LAST non-empty line for a known keyword lets the model reason for a
+// sentence first (planNextStep's prompt now explicitly invites that) while still parsing
+// reliably -- direct instruction: correctness/reasoning over minimizing tokens, since this all
+// runs on local compute with no per-call cost.
+function parseGoalStep(text) {
+  const lines = text.trim().split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    const trimmed = line.toUpperCase();
+    if (trimmed.startsWith("DONE")) return { type: "done" };
+    if (trimmed.startsWith("BLOCKED")) return { type: "blocked", reason: line.slice(7).trim() || "stuck" };
+    if (trimmed.startsWith("ACTION")) {
+      const parts = trimmed.split(/\s+/);
+      const verb = parts[1];
+      if (verb === "LOOT") return { type: "step", action: { type: "loot" } };
+      if (verb === "ATTACK") return { type: "step", action: { type: "attack" } };
+      if (verb === "CRAFT") {
+        const item = (parts[2] || "").toLowerCase();
+        const count = parseInt(parts[3], 10);
+        if (item) return { type: "step", action: { type: "craft", item, count: count > 0 ? count : 1 } };
+      }
+      if (verb === "MINE") {
+        const block = (parts[2] || "").toLowerCase();
+        const count = parseInt(parts[3], 10);
+        if (block) return { type: "step", action: { type: "mine", block, count: count > 0 ? count : 4 } };
+      }
     }
   }
   return { type: "blocked", reason: "couldn't decide what to do next" };
@@ -549,7 +565,8 @@ function parseGoalStep(line) {
 // One dispatch call per tick, grounded in real state (describeGear -- never guessed) and the
 // goal's own recent log, not just the description -- so a repeated failure actually steers the
 // next choice instead of retrying the same dead end forever (MAX_CONSECUTIVE_FAILURES is the
-// hard backstop if reasoning alone doesn't catch it).
+// hard backstop if reasoning alone doesn't catch it). maxTokens is deliberately generous (not
+// the old 24) -- see parseGoalStep's comment on why a one-line-only format was the real problem.
 async function planNextStep(goal) {
   const gearNote = describeGear(bot);
   const recentLog = goal.log.length ? goal.log.slice(-6).join("\n") : "(nothing done yet)";
@@ -560,24 +577,35 @@ async function planNextStep(goal) {
         role: "system",
         content:
           `You are the planner for a Minecraft bot named ${USERNAME} working toward a standing ` +
-          `goal on her own, unprompted by anyone right now. Given the goal, her current gear/` +
-          `inventory, and what she's already tried, respond with EXACTLY ONE line, no ` +
-          `explanation, in one of these forms:\n` +
+          `goal on her own, unprompted by anyone right now.\n\n` +
+          `Real limits on what she can do: she can only craft via a crafting-table/hand-crafting ` +
+          `grid recipe (bot.craft) -- she has NO furnace/smelting capability at all. Any item ` +
+          `normally obtained by smelting (iron_ingot, copper_ingot, gold_ingot, glass, etc.) can ` +
+          `only come from looting a chest (ACTION LOOT), never from crafting or mining alone -- ` +
+          `if the goal needs one and she has none and no LOOT has helped, that's a dead end, not ` +
+          `something to keep retrying as a craft.\n` +
+          `Common material chain: sticks and a crafting table both need planks; planks come from ` +
+          `logs. If a craft fails for missing ingredients, check whether she's missing the raw ` +
+          `material (e.g. no logs at all) rather than the item itself -- mine the raw material ` +
+          `first instead of retrying the same craft.\n\n` +
+          `Given the goal, her current gear/inventory, and what she's already tried below, you ` +
+          `may reason briefly first (one short sentence about what's actually missing and why), ` +
+          `then on its own final line respond with EXACTLY ONE of these forms:\n` +
           `DONE - the goal is already fully achieved given her current gear/inventory\n` +
           `BLOCKED <short reason> - she cannot make progress right now and should give up\n` +
           `ACTION MINE <block_id> <count> - gather a resource. <block_id> must be the exact ` +
           `modern Minecraft block id -- never invent one.\n` +
-          `ACTION CRAFT <item_id> <count> - craft an item. <item_id> must be the exact modern ` +
-          `Minecraft item id -- never invent one.\n` +
+          `ACTION CRAFT <item_id> <count> - craft an item via a crafting-table/grid recipe only. ` +
+          `<item_id> must be the exact modern Minecraft item id -- never invent one.\n` +
           `ACTION LOOT - check the nearest chest for gear\n` +
           `ACTION ATTACK - fight a nearby hostile mob\n` +
           `Pick the single most useful next step toward the goal. If the same step already ` +
-          `failed more than once in a row (see recent progress below), try something different ` +
-          `instead of repeating it, or respond BLOCKED.`,
+          `failed more than once in a row (see recent progress below), you must try a genuinely ` +
+          `different step that addresses the actual missing ingredient, or respond BLOCKED.`,
       },
       { role: "user", content: `Goal: ${goal.description}\n${gearNote}\nRecent progress:\n${recentLog}` },
     ],
-    { maxTokens: 24, temperature: 0 },
+    { maxTokens: 120, temperature: 0 },
   );
   return reply.trim();
 }
