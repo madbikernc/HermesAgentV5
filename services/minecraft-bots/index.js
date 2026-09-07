@@ -1,8 +1,13 @@
-// Version: 2.8.0
+// Version: 2.9.0
 //
 // Firmament Minecraft bot orchestrator. Connects one bot and wires the first real decision
 // loop: chat perception -> cheap relevance classification (dispatch role) -> in-character
 // reply (muse role) -> bot chats back. See ../../MINECRAFT_BOTS_DESIGN.md.
+//
+// 2.9.0 (2026-09-06) -- direct request: "pre-teach the most common recipes." New "craft"
+// action (classifyIntent detects it the same one-call way as every other action; the real
+// implementation is actions.js's craftItem(), which uses minecraft-data's own built-in recipe
+// knowledge rather than anything taught here).
 //
 // 2.8.0 (2026-09-06) -- direct request: bots should look in chests for gear, wear the best
 // armor they find, and hold the best weapon unless a task needs a specific tool. New "loot"
@@ -210,9 +215,9 @@ async function classifyIntent(speaker, message) {
         content:
           `You are an intent classifier for a Minecraft bot named ${USERNAME}, who has real ` +
           `in-game abilities: moving, following, mining/gathering blocks, fighting hostile ` +
-          `mobs, and checking chests for gear.${otherBotsNote} Given one chat message from ` +
-          `another player, respond with EXACTLY ONE line, no explanation, no extra ` +
-          `punctuation, in one of these forms:\n` +
+          `mobs, checking chests for gear, and crafting items.${otherBotsNote} Given one chat ` +
+          `message from another player, respond with EXACTLY ONE line, no explanation, no ` +
+          `extra punctuation, in one of these forms:\n` +
           `NONE - not directed at ${USERNAME}, no response needed\n` +
           `CHAT - directed at ${USERNAME} but just conversation, not a request to do something\n` +
           `ACTION GOTO - asks ${USERNAME} to come to the speaker\n` +
@@ -224,7 +229,12 @@ async function classifyIntent(speaker, message) {
           `<count> is a small positive integer, default 4 if unstated. If no specific block is ` +
           `named, respond CHAT instead -- never invent a block.\n` +
           `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob\n` +
-          `ACTION LOOT - asks ${USERNAME} to check a nearby chest for equipment/gear`,
+          `ACTION LOOT - asks ${USERNAME} to check a nearby chest for equipment/gear\n` +
+          `ACTION CRAFT <item_id> <count> - asks ${USERNAME} to craft/make an item, ONLY if a ` +
+          `specific item was actually named or clearly implied. <item_id> must be the exact ` +
+          `modern Minecraft item id (e.g. stick, oak_planks, wooden_pickaxe, crafting_table). ` +
+          `<count> is a small positive integer, default 1 if unstated. If no specific item is ` +
+          `named, respond CHAT instead -- never invent one.`,
       },
       { role: "user", content: `<${speaker}> ${message}` },
     ],
@@ -239,6 +249,11 @@ async function classifyIntent(speaker, message) {
     if (verb === "STOP") return { type: "action", action: { type: "stop" } };
     if (verb === "ATTACK") return { type: "action", action: { type: "attack" } };
     if (verb === "LOOT") return { type: "action", action: { type: "loot" } };
+    if (verb === "CRAFT") {
+      const item = (parts[2] || "").toLowerCase();
+      const count = parseInt(parts[3], 10);
+      if (item) return { type: "action", action: { type: "craft", item, count: count > 0 ? count : 1 } };
+    }
     if (verb === "MINE") {
       const block = (parts[2] || "").toLowerCase();
       const count = parseInt(parts[3], 10);
@@ -383,12 +398,13 @@ async function runAction(action, speaker, message, send) {
   // a mining request went to the wrong block, there was no way to tell from memory alone
   // whether the classifier misheard the request or the player's own message was ambiguous.
   // Recording the full parsed action alongside the original text fixes that for next time.
-  const actionDesc = action.type === "mine" ? `mine ${action.block} x${action.count}` : action.type;
+  const actionDesc = action.type === "mine" ? `mine ${action.block} x${action.count}`
+    : action.type === "craft" ? `craft ${action.item} x${action.count}` : action.type;
   try {
     const startLine = {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
       mine: `off to gather some ${action.block}.`, attack: "engaging.",
-      loot: "checking a nearby chest.",
+      loot: "checking a nearby chest.", craft: `let's see about crafting ${action.item}.`,
     }[action.type];
     if (startLine) send(await narrateAction(startLine));
 

@@ -1,4 +1,14 @@
-// Version: 1.6.2
+// Version: 1.7.0
+//
+// 1.7.0 (2026-09-06) -- direct request: "pre-teach the most common recipes." minecraft-data
+// already knows every vanilla recipe correctly (Recipe.ingredients/requiresTable, confirmed
+// against prismarine-recipe's own types) -- there's no external recipe data to teach it. New
+// "craft" action (craftItem()) uses bot.recipesFor()/bot.recipesAll() (confirmed against
+// mineflayer's own craft.js source: recipesFor already filters to what's affordable *right
+// now*) and auto-resolves the two most common shallow shortfalls (no planks but has logs, no
+// sticks but has planks) before giving up -- covers the overwhelming majority of real
+// "craft X" requests starting from raw gathered resources, without attempting a general
+// recursive planner.
 //
 // 1.6.2 (2026-09-06) -- actual root cause of the "(empty)" chest, after 1.6.1's timing-delay
 // guess was ruled out by direct testing: Window.items() returns the PLAYER'S OWN inventory
@@ -141,6 +151,58 @@ function withTimeout(promise, ms, onTimeout) {
   return Promise.race([promise.finally(() => clearTimeout(timer)), timeout]);
 }
 
+// Common shallow crafting chains: the overwhelming majority of "craft X" requests that start
+// from raw gathered resources bottleneck on one of these two conversions. Deliberately narrow
+// and hard-coded, not a general recursive planner (see this file's own header on why building
+// stays out of scope) -- covers "pre-teach the most common recipes" as a real capability
+// without attempting to solve arbitrary multi-tier crafting trees.
+function simpleSourceFor(bot, itemName) {
+  if (itemName === "stick" || itemName === "crafting_table") {
+    return bot.inventory.items().find((i) => i.name.endsWith("_planks"));
+  }
+  if (itemName.endsWith("_planks")) {
+    return bot.inventory.items().find((i) => i.name.endsWith("_log") || i.name.endsWith("_stem"));
+  }
+  return null;
+}
+
+// minecraft-data already knows every vanilla recipe correctly (Recipe.ingredients,
+// Recipe.requiresTable, etc., confirmed against prismarine-recipe's own types) -- there is no
+// external recipe data to "teach" it. What's actually missing is this: given a target item and
+// current inventory, find a recipe that's affordable *right now* (bot.recipesFor() already
+// filters to exactly that -- confirmed against mineflayer's own craft.js source), and if none
+// is, check whether the shortfall is one of the common intermediates above and, if so, craft
+// that first before retrying. depth guards against a pathological cycle; the known chains above
+// are acyclic in practice (stick/table <- planks <- log) so this rarely recurses past 1.
+async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
+  const itemDef = bot.registry.itemsByName[itemName];
+  if (!itemDef) throw new Error(`unknown item "${itemName}"`);
+
+  let recipes = bot.recipesFor(itemDef.id, null, count, tableBlock ?? null);
+  if (!recipes.length && depth < 3) {
+    // `true` (not a real Block) is enough to satisfy recipesAll()'s own requiresTable check --
+    // confirmed against mineflayer's craft.js source -- this is only inspecting what a recipe
+    // *would* need, not actually crafting with it.
+    const candidateRecipes = bot.recipesAll(itemDef.id, null, tableBlock ?? true);
+    for (const recipe of candidateRecipes) {
+      for (const ing of recipe.ingredients) {
+        const ingName = bot.registry.items[ing.id]?.name;
+        if (!ingName) continue;
+        const have = bot.inventory.count(ingName, null);
+        if (have >= ing.count) continue;
+        if (simpleSourceFor(bot, ingName)) {
+          await craftItem(bot, ingName, ing.count - have, tableBlock, depth + 1);
+        }
+      }
+    }
+    recipes = bot.recipesFor(itemDef.id, null, count, tableBlock ?? null);
+  }
+  if (!recipes.length) {
+    throw new Error(`don't have the ingredients${tableBlock ? "" : " (might need a crafting table)"}`);
+  }
+  await bot.craft(recipes[0], count, tableBlock ?? undefined);
+}
+
 let cancelToken = { cancelled: false };
 
 function stopCurrent(bot) {
@@ -197,6 +259,44 @@ export async function performAction(bot, action, speaker) {
         await refreshGear(bot); // may have picked up something worth wearing/wielding
       }
       return token.cancelled ? "stopped mining early." : `collected some ${action.block}.`;
+    }
+
+    case "craft": {
+      const itemDef = bot.registry.itemsByName[action.item];
+      if (!itemDef) return `I don't recognize the item "${action.item}".`;
+
+      // Does this need a table? `true` satisfies recipesFor()'s own requiresTable check
+      // without needing a real Block reference yet -- confirmed against mineflayer's own
+      // craft.js source -- this is only checking whether a table would help, not using one.
+      const noTableRecipes = bot.recipesFor(itemDef.id, null, 1, null);
+      const tableWouldHelp = !noTableRecipes.length && bot.recipesFor(itemDef.id, null, 1, true).length > 0;
+      let tableBlock = null;
+      if (tableWouldHelp) {
+        const tableType = bot.registry.blocksByName.crafting_table;
+        const positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
+        if (!positions.length) return `need a crafting table nearby for ${action.item}.`;
+        tableBlock = bot.blockAt(positions[0]);
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(tableBlock.position.x,
+            tableBlock.position.y, tableBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+            () => bot.pathfinder.setGoal(null));
+        } catch (err) {
+          if (token.cancelled) return "stopped on the way to a crafting table.";
+          return `couldn't reach a crafting table: ${err.message}`;
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) return "stopped on the way to a crafting table.";
+      }
+
+      try {
+        await craftItem(bot, action.item, action.count, tableBlock);
+      } catch (err) {
+        return `couldn't craft ${action.item}: ${err.message}`;
+      } finally {
+        await refreshGear(bot); // a freshly-crafted tool/weapon/armor piece should get equipped
+      }
+      return `crafted ${action.count} ${action.item}.`;
     }
 
     case "loot": {
