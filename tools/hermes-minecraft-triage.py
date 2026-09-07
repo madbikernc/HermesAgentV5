@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.0.1
+# Version: 1.0.2
+#
+# 1.0.2 (2026-09-07) — 500 tokens (1.0.1's fix) still wasn't enough: EVERY real incident after
+# that deploy still showed an empty coder2 result. Direct evidence (a manual curl replicating
+# the actual triage prompt) confirmed why -- coder2/Muse-Glimmer used 460 of that 500-token
+# budget on reasoning_content alone before writing its ~40-token final answer, so it was
+# genuinely on the edge, not comfortably fixed; the real prompt (slightly longer than the test
+# that "passed" at 500) consistently tipped it over. 900 tokens gives real margin instead of
+# another guess at a number just barely bigger than the last one.
 #
 # 1.0.1 (2026-09-07) — real gap found live on this service's very first real incident: coder2
 # (backed by Muse-Glimmer-30B, per hermes-router.py's own history -- the originally-planned model
@@ -135,7 +143,7 @@ def call_role(role, log_line, timeout=60):
     body = json.dumps({
         "model": role,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500,
+        "max_tokens": 900,
         "temperature": 0,
     }).encode()
     req = urllib.request.Request(ROUTER_URL, data=body, method="POST",
