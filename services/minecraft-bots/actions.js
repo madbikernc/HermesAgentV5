@@ -1,4 +1,15 @@
-// Version: 1.9.1
+// Version: 1.10.0
+//
+// 1.10.0 (2026-09-07) -- direct request: "they can't seem to find the furnaces." A huge fraction
+// of tonight's goal-loop failures were bots correctly reasoning they needed an ingot (iron/
+// copper/gold) and having no way to get one beyond hoping a chest happened to have it -- craft
+// (crafting-table only) and mine (raw ore, not the smelted product) alone were never enough.
+// New "smelt" action, built on mineflayer's own openFurnace() (core, no extra plugin) -- finds a
+// furnace (up to 3 candidates, same pattern as loot/sleep), puts in fuel + raw material, and
+// waits for real output via furnace.js's own 'update' event rather than guessing a duration.
+// minecraft-data has no dedicated smelting-recipe data (checked: no equivalent of recipes.json
+// for furnace input->output), so SMELT_RECIPES is a small, deliberately hand-picked map covering
+// what actually matters for gearing up, not an attempt at full smelting-recipe coverage.
 //
 // 1.9.1 (2026-09-07) -- real gap found live on the very first real sleep attempt: every
 // per-candidate bed failure was silently swallowed (`continue` with no logging), so when all 3
@@ -145,6 +156,10 @@ const ACTION_TIMEOUT_MS = 60_000;
 // normal night's sleep as a "failure." This is a safety backstop for something going genuinely
 // wrong (a stuck day/night cycle, a disabled gamerule), not the expected case.
 const SLEEP_TIMEOUT_MS = 15 * 60_000;
+// Vanilla smelts one item per 10 real-world seconds with normal fuel/speed -- generous headroom
+// per item rather than a tight bound, consistent with this being local compute with no per-call
+// cost to economize on.
+const SMELT_TIMEOUT_MS = 3 * 60_000;
 
 const HOSTILE_MOBS = new Set([
   "zombie", "husk", "drowned", "zombie_villager", "skeleton", "stray", "spider", "cave_spider",
@@ -158,6 +173,34 @@ const HOSTILE_MOBS = new Set([
 const GEAR_SUFFIXES = [
   "_helmet", "_chestplate", "_leggings", "_boots", "_sword", "_axe", "_pickaxe", "_shovel", "_hoe",
 ];
+
+// minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
+// for furnace input->output) -- unlike bot.craft()'s crafting-table recipes, there's no real data
+// to defer to here, so this is a small, deliberately hand-picked map of the smelting outcomes
+// that actually matter for gearing up (direct request, 2026-09-07: "they can't seem to find the
+// furnaces" -- most of a night's worth of goal failures were bots correctly identifying they
+// needed an ingot and having no way to get one beyond hoping a chest had it). Keyed by the
+// item the bot names (the OUTPUT, same convention as ACTION CRAFT), each mapping to the raw
+// materials that smelt into it, checked against her inventory in order.
+const SMELT_RECIPES = {
+  iron_ingot: ["raw_iron", "iron_ore", "deepslate_iron_ore"],
+  copper_ingot: ["raw_copper", "copper_ore", "deepslate_copper_ore"],
+  gold_ingot: ["raw_gold", "gold_ore", "deepslate_gold_ore", "nether_gold_ore"],
+  glass: ["sand", "red_sand"],
+  stone: ["cobblestone"],
+};
+
+// Preferred fuels in order; coal/charcoal burn far longer per item than planks/logs (which are
+// still valid fuel and a reasonable fallback since they're often what's actually on hand).
+const FUEL_PREFERENCE = ["coal", "charcoal", "coal_block", "lava_bucket", "blaze_rod"];
+
+function pickFuel(bot) {
+  for (const name of FUEL_PREFERENCE) {
+    const item = bot.inventory.items().find((i) => i.name === name);
+    if (item) return item;
+  }
+  return bot.inventory.items().find((i) => i.name.endsWith("_planks") || i.name.endsWith("_log"));
+}
 
 export function loadActionPlugins(bot) {
   bot.loadPlugin(collectBlockPkg.plugin);
@@ -532,6 +575,91 @@ export async function performAction(bot, action, speaker) {
         return ok("slept through the night.");
       }
       return fail("found beds nearby, but couldn't use any of them.");
+    }
+
+    case "smelt": {
+      // Direct request, 2026-09-07: "they can't seem to find the furnaces" -- most of tonight's
+      // goal failures were bots correctly reasoning they needed an ingot and having no way to
+      // get one beyond hoping a chest had it (craft/mine alone were never enough; see index.js's
+      // planNextStep comments). Built on mineflayer's own openFurnace() (core, no extra plugin).
+      const inputCandidates = SMELT_RECIPES[action.item];
+      if (!inputCandidates) return fail(`don't know how to smelt "${action.item}".`);
+      const inputItem = bot.inventory.items().find((i) => inputCandidates.includes(i.name));
+      if (!inputItem) return fail(`don't have anything to smelt into ${action.item}.`);
+      const smeltCount = Math.min(action.count, inputItem.count);
+
+      const fuelItem = pickFuel(bot);
+      if (!fuelItem) return fail("don't have any fuel to smelt with.");
+
+      const furnaceNames = ["furnace", "blast_furnace", "smoker"];
+      const matchIds = furnaceNames.map((n) => bot.registry.blocksByName[n]?.id)
+        .filter((id) => id !== undefined);
+      if (!matchIds.length) return fail("don't know how to recognize a furnace here.");
+      const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: 3 });
+      if (!positions.length) return fail("couldn't find a furnace nearby.");
+
+      for (const pos of positions) {
+        if (token.cancelled) return ok("stopped on the way to a furnace.");
+        const furnaceBlock = bot.blockAt(pos);
+        if (!furnaceBlock) continue;
+
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(furnaceBlock.position.x,
+            furnaceBlock.position.y, furnaceBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+            () => bot.pathfinder.setGoal(null));
+        } catch (err) {
+          if (token.cancelled) return ok("stopped on the way to a furnace.");
+          console.log(`[smelt] couldn't reach furnace at ${furnaceBlock.position}: ${err.message}`);
+          continue; // couldn't reach this furnace -- try the next candidate
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) return ok("stopped on the way to a furnace.");
+
+        let furnace;
+        try {
+          furnace = await bot.openFurnace(furnaceBlock);
+        } catch (err) {
+          console.log(`[smelt] couldn't open furnace at ${furnaceBlock.position}: ${err.message}`);
+          continue; // couldn't open this one -- try the next candidate
+        }
+
+        try {
+          // One fuel item per item smelted is a generous overestimate for any fuel type (coal
+          // alone smelts 8 per item) -- errs toward "definitely enough fuel" over precision.
+          await furnace.putFuel(fuelItem.type, null, Math.min(fuelItem.count, smeltCount));
+          await furnace.putInput(inputItem.type, null, smeltCount);
+
+          // furnace.js has no built-in "wait until done" -- poll its own 'update' event (fired
+          // on every server progress packet) for a non-empty output, with a safety timeout.
+          const outputReady = await new Promise((resolve) => {
+            let settled = false;
+            const check = () => {
+              const out = furnace.outputItem();
+              if (out && out.count > 0 && !settled) { settled = true; resolve(true); }
+            };
+            furnace.on("update", check);
+            check();
+            setTimeout(() => { if (!settled) resolve(false); }, SMELT_TIMEOUT_MS);
+          });
+          furnace.removeAllListeners("update");
+
+          let smelted = 0;
+          if (outputReady) {
+            const out = await furnace.takeOutput();
+            smelted = out?.count ?? 0;
+          }
+          await furnace.close();
+          if (!smelted) return fail("waited at the furnace but nothing came out -- may be out of fuel.");
+          await refreshGear(bot); // a freshly-smelted ingot might feed straight into new gear
+          return ok(`smelted ${smelted} ${action.item}.`);
+        } catch (err) {
+          try { await furnace.close(); } catch { /* already closed or never opened cleanly */ }
+          console.log(`[smelt] furnace at ${furnaceBlock.position} failed: ${err.message}`);
+          continue; // this furnace didn't work out -- try the next candidate
+        }
+      }
+      return fail("found furnaces nearby, but couldn't use any of them.");
     }
 
     default:

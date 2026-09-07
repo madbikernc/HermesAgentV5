@@ -1,4 +1,15 @@
-// Version: 2.12.0
+// Version: 2.12.1
+//
+// 2.12.1 (2026-09-07) -- direct request: "they can't seem to find the furnaces." Most of
+// tonight's goal-loop failures were bots correctly reasoning they needed an ingot and having no
+// way to get one beyond hoping a chest had it -- real gap, not a bug: nothing here ever taught
+// them furnaces exist. New "smelt" action (actions.js 1.10.0) wired in throughout: classifyIntent
+// gets "ACTION SMELT" (a player can ask directly, same as every other action), planNextStep's
+// prompt now teaches SMELT as the primary path for a smelted item (raw material -> furnace, not
+// a crafting-table recipe, which can never produce one) with LOOT as the fallback rather than
+// the only option, and proposeOwnGoal no longer tells a bot she has no furnace at all -- all
+// three previously said "NO furnace/smelting capability," which was true when written and is
+// simply no longer accurate now.
 //
 // 2.12.0 (2026-09-07) -- direct request: "the bots need to know to go to sleep at night." New
 // checkSleep(), on its own 30s timer, entirely separate from goalTick's model-driven loop --
@@ -367,6 +378,10 @@ async function classifyIntent(speaker, message) {
           `modern Minecraft item id (e.g. stick, oak_planks, wooden_pickaxe, crafting_table). ` +
           `<count> is a small positive integer, default 1 if unstated. If no specific item is ` +
           `named, respond CHAT instead -- never invent one.\n` +
+          `ACTION SMELT <item_id> <count> - asks ${USERNAME} to smelt ore into an ingot (or ` +
+          `similar) at a furnace, ONLY if a specific output was actually named or clearly ` +
+          `implied (e.g. iron_ingot, copper_ingot, gold_ingot, glass, stone). <count> is a small ` +
+          `positive integer, default 1 if unstated.\n` +
           `ACTION GOAL <description> - gives ${USERNAME} a standing objective to keep working ` +
           `on by herself over time (not a single one-off task), e.g. "get full iron armor" or ` +
           `"stock up on wood". Only use this if the speaker is clearly assigning an ongoing ` +
@@ -390,6 +405,11 @@ async function classifyIntent(speaker, message) {
       const item = (parts[2] || "").toLowerCase();
       const count = parseInt(parts[3], 10);
       if (item) return { type: "action", action: { type: "craft", item, count: count > 0 ? count : 1 } };
+    }
+    if (verb === "SMELT") {
+      const item = (parts[2] || "").toLowerCase();
+      const count = parseInt(parts[3], 10);
+      if (item) return { type: "action", action: { type: "smelt", item, count: count > 0 ? count : 1 } };
     }
     if (verb === "MINE") {
       const block = (parts[2] || "").toLowerCase();
@@ -543,14 +563,15 @@ async function runAction(action, speaker, message, send) {
   // whether the classifier misheard the request or the player's own message was ambiguous.
   // Recording the full parsed action alongside the original text fixes that for next time.
   const actionDesc = action.type === "mine" ? `mine ${action.block} x${action.count}`
-    : action.type === "craft" ? `craft ${action.item} x${action.count}` : action.type;
+    : action.type === "craft" ? `craft ${action.item} x${action.count}`
+    : action.type === "smelt" ? `smelt ${action.item} x${action.count}` : action.type;
   acting = true; // blocks the goal loop from stepping until this direct command is done
   try {
     const startLine = {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
       mine: `off to gather some ${action.block}.`, attack: "engaging.",
       loot: "checking a nearby chest.", craft: `let's see about crafting ${action.item}.`,
-      sleep: "heading to bed.",
+      sleep: "heading to bed.", smelt: `time to smelt some ${action.item}.`,
     }[action.type];
     if (startLine) send(await narrateAction(startLine));
 
@@ -603,6 +624,11 @@ function parseGoalStep(text) {
         const count = parseInt(parts[3], 10);
         if (item) return { type: "step", action: { type: "craft", item, count: count > 0 ? count : 1 } };
       }
+      if (verb === "SMELT") {
+        const item = (parts[2] || "").toLowerCase();
+        const count = parseInt(parts[3], 10);
+        if (item) return { type: "step", action: { type: "smelt", item, count: count > 0 ? count : 1 } };
+      }
       if (verb === "MINE") {
         const block = (parts[2] || "").toLowerCase();
         const count = parseInt(parts[3], 10);
@@ -629,14 +655,15 @@ async function planNextStep(goal) {
         content:
           `You are the planner for a Minecraft bot named ${USERNAME} working toward a standing ` +
           `goal on her own, unprompted by anyone right now.\n\n` +
-          `Real limits on what she can do: she can only craft via a crafting-table/hand-crafting ` +
-          `grid recipe (bot.craft) -- she has NO furnace/smelting capability at all. Any item ` +
-          `normally obtained by smelting (iron_ingot, copper_ingot, gold_ingot, glass, etc.) can ` +
-          `only come from looting a chest (ACTION LOOT), never from crafting or mining alone. ` +
-          `Before concluding BLOCKED for this reason, check Recent progress below for whether ` +
-          `she has already tried ACTION LOOT during this goal -- if not, try that first, since a ` +
-          `chest might actually have what's needed. Only go BLOCKED for this reason once a LOOT ` +
-          `attempt is visible in Recent progress and didn't provide it (or found no chest at all).\n` +
+          `Real limits on what she can do: she can craft via a crafting-table/hand-crafting grid ` +
+          `recipe (bot.craft), AND she can smelt at a furnace (ACTION SMELT) -- she is NOT stuck ` +
+          `without ingots. An item normally obtained by smelting (iron_ingot, copper_ingot, ` +
+          `gold_ingot, glass, stone from cobblestone) needs raw material first (raw_iron, ` +
+          `raw_copper, raw_gold, sand, cobblestone -- mine it if she doesn't have any), THEN ` +
+          `ACTION SMELT, not ACTION CRAFT -- crafting-table recipes can never produce a smelted ` +
+          `item. Only fall back to ACTION LOOT for one of these if she has the raw material and ` +
+          `fuel (coal, charcoal, or any log/planks) but SMELT still fails, or has no furnace ` +
+          `reachable at all.\n` +
           `Common material chain: sticks and a crafting table both need planks; planks come from ` +
           `logs. If a craft fails for missing ingredients, check whether she's missing the raw ` +
           `material (e.g. no logs at all) rather than the item itself -- mine the raw material ` +
@@ -656,6 +683,9 @@ async function planNextStep(goal) {
           `modern Minecraft block id -- never invent one.\n` +
           `ACTION CRAFT <item_id> <count> - craft an item via a crafting-table/grid recipe only. ` +
           `<item_id> must be the exact modern Minecraft item id -- never invent one.\n` +
+          `ACTION SMELT <item_id> <count> - smelt raw material into an ingot (or similar) at a ` +
+          `furnace. <item_id> is the OUTPUT (e.g. iron_ingot), the exact modern Minecraft item ` +
+          `id -- never invent one.\n` +
           `ACTION LOOT - check the nearest chest for gear\n` +
           `ACTION ATTACK - fight a nearby hostile mob\n` +
           `Pick the single most useful next step toward the goal. If the same step already ` +
@@ -706,17 +736,17 @@ async function proposeOwnGoal() {
           `${persona}\n\n---\n\nNo one has talked to you in a while and you have no standing ` +
           `goal right now. Given your own gear/inventory below, decide on ONE concrete, ` +
           `achievable objective to work on by yourself for a while (gearing up, gathering a ` +
-          `resource, crafting something useful). Stay correctly grounded in real Minecraft ` +
-          `mechanics -- e.g. planks/sticks/a table come from logs (never stone), tools/armor ` +
-          `come from ingots or logs+stone, ingots only come from smelting ore in a furnace (you ` +
-          `have none). You also have NO ability to build or place structures at all -- never ` +
-          `propose a goal about building/placing something (a house, a base, a wall); stick to ` +
-          `gearing up, gathering a resource, or crafting a portable item. Phrase the goal around ` +
-          `the OUTCOME you want (e.g. "get some copper armor," "stock up on iron"), never around ` +
-          `a specific method you can't perform yourself (never say "smelt X" or "build X") -- an ` +
-          `outcome-phrased goal leaves room to get there by looting instead, a method-phrased one ` +
-          `doesn't. Respond with ONLY a short phrase naming the goal, in your own words -- ` +
-          `nothing else, no quotes.\n\n${gearNote}${memoryNote}`,
+          `resource, crafting or smelting something useful). Stay correctly grounded in real ` +
+          `Minecraft mechanics -- e.g. planks/sticks/a table come from logs (never stone); ` +
+          `ingots (iron/copper/gold) come from smelting raw ore at a furnace, which you CAN do, ` +
+          `never from a crafting-table recipe. You have NO ability to build or place structures ` +
+          `at all -- never propose a goal about building/placing something (a house, a base, a ` +
+          `wall); stick to gearing up, gathering a resource, or crafting/smelting a portable ` +
+          `item. Phrase the goal around the OUTCOME you want (e.g. "get some copper armor," ` +
+          `"stock up on iron") rather than one specific method, since more than one way to get ` +
+          `there might work -- but naming smelting/crafting as part of it is fine now, unlike ` +
+          `building, which is never possible. Respond with ONLY a short phrase naming the goal, ` +
+          `in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}`,
       },
       { role: "user", content: "What's your goal?" },
     ],
@@ -767,6 +797,9 @@ async function goalTick() {
     // This particular condition is simple and mechanically checkable (has "loot:" appeared in
     // this goal's own log yet?), so it's enforced in code here instead of trusted to a written
     // instruction a second time -- prompt guidance plus a code guard, not prompt guidance alone.
+    // Still a valid last-resort fallback now that ACTION SMELT exists (2.12.1): the prompt teaches
+    // SMELT as the primary path for a smelted item, but if she's genuinely stuck (no furnace
+    // reachable, out of fuel) LOOT remains a legitimate alternate source worth forcing once.
     if (parsed.type === "blocked" && /smelt|furnace|ingot/i.test(parsed.reason) &&
         !currentGoal.log.some((l) => l.startsWith("loot:"))) {
       console.log(`[${USERNAME}] overriding BLOCKED (${parsed.reason}) -- no LOOT attempt yet, forcing one`);
