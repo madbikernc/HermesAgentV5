@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 2.7.0
+**Version:** 2.8.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -73,6 +73,17 @@ that guards the classify/reply step -- a mine/follow/attack can run up to a minu
 while she works. Building/structure placement is explicitly out of scope -- a much bigger
 feature (planning, materials, layout) left for its own future pass.
 
+**Equipment management is wired** (`equipment.js`): a new `loot` action opens the nearest
+chest and takes any armor/weapon/tool it finds. Gear is rechecked automatically after
+mine/attack/loot and once at spawn (inventory persists across restarts -- it's tied to the
+player's UUID in the world save, not the bot process) -- the best armor available is worn per
+slot, and the best weapon is held by default. Mining now correctly switches to a
+task-specific tool via `mineflayer-tool`'s `bot.tool.equipForBlock()` (real dig-time math, not
+a guess) -- a real gap found live: `mineflayer-collectblock` already calls this internally,
+but the plugin was never loaded, so it silently had nothing to call. Crafting and building are
+still explicitly out of scope -- this covers "use or loot what already exists," not "make what
+doesn't."
+
 ## Requirements
 
 Node.js 22 LTS (installed on `spark` 2026-09-06 via NodeSource). Run `npm install` in this
@@ -100,6 +111,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 2.8.0 | 2026-09-06 | Equipment management (`equipment.js`): new `loot` action, auto-equip best armor/weapon after mine/attack/loot and at spawn. Fixed a real gap: `mineflayer-tool` was never loaded, so `collectBlock`'s own internal task-specific tool selection had nothing to call. |
 | 2.7.0 | 2026-09-06 | Real in-world actions (`actions.js`): navigate/gather/fight via `mineflayer-collectblock`/`mineflayer-pvp`, detected by the same `dispatch` call that already classified relevance. Building explicitly out of scope. |
 | 2.6.0 | 2026-09-06 | Matrix wired (`matrix.js`) -- single shared room, operator + both bots. New accounts `mc-babs`/`mc-amy`; credentials in a local env file (Vaultwarden write was blocked by the session's permission classifier). |
 | 2.5.0 | 2026-09-06 | Bot-to-bot coordination over hermes-buzz.py (`buzz.js`) -- shared `minecraft` topic, relayed into in-game chat. `MC_BOT_USERNAMES` guard added to prevent a bot-relay feedback loop. |

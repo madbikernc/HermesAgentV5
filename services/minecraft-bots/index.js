@@ -1,8 +1,14 @@
-// Version: 2.7.0
+// Version: 2.8.0
 //
 // Firmament Minecraft bot orchestrator. Connects one bot and wires the first real decision
 // loop: chat perception -> cheap relevance classification (dispatch role) -> in-character
 // reply (muse role) -> bot chats back. See ../../MINECRAFT_BOTS_DESIGN.md.
+//
+// 2.8.0 (2026-09-06) -- direct request: bots should look in chests for gear, wear the best
+// armor they find, and hold the best weapon unless a task needs a specific tool. New "loot"
+// action (equipment.js + actions.js); gear is rechecked automatically after mine/attack/loot
+// and once at spawn (inventory persists across restarts -- it's tied to the player's UUID in
+// the world save). Crafting and building are still explicitly out of scope for this pass.
 //
 // 2.7.0 (2026-09-06) -- real in-world actions (actions.js): navigate (goto/follow/stop),
 // gather (mine), and fight (attack) -- closing the gap between what the personas' Core
@@ -80,6 +86,7 @@ import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
 import { loadActionPlugins, performAction } from "./actions.js";
+import { equipBestArmor, equipBestWeapon } from "./equipment.js";
 
 const { pathfinder, Movements } = pathfinderPkg;
 
@@ -154,6 +161,10 @@ loadActionPlugins(bot);
 bot.once("spawn", () => {
   console.log(`[${USERNAME}] spawned at`, bot.entity.position);
   bot.pathfinder.setMovements(new Movements(bot));
+  // Inventory persists across restarts (it's tied to the player's UUID in the world save, not
+  // this process) -- worth checking gear right away, not only after an action changes it.
+  equipBestArmor(bot).then(() => equipBestWeapon(bot)).catch((err) =>
+    console.error(`[${USERNAME}] initial gear check failed:`, err.message));
 });
 
 // TEMPORARY diagnostic (2026-09-06): both bots hit V8's heap limit and crashed twice in a row,
@@ -198,9 +209,10 @@ async function classifyIntent(speaker, message) {
         role: "system",
         content:
           `You are an intent classifier for a Minecraft bot named ${USERNAME}, who has real ` +
-          `in-game abilities: moving, following, mining/gathering blocks, and fighting hostile ` +
-          `mobs.${otherBotsNote} Given one chat message from another player, respond with ` +
-          `EXACTLY ONE line, no explanation, no extra punctuation, in one of these forms:\n` +
+          `in-game abilities: moving, following, mining/gathering blocks, fighting hostile ` +
+          `mobs, and checking chests for gear.${otherBotsNote} Given one chat message from ` +
+          `another player, respond with EXACTLY ONE line, no explanation, no extra ` +
+          `punctuation, in one of these forms:\n` +
           `NONE - not directed at ${USERNAME}, no response needed\n` +
           `CHAT - directed at ${USERNAME} but just conversation, not a request to do something\n` +
           `ACTION GOTO - asks ${USERNAME} to come to the speaker\n` +
@@ -211,7 +223,8 @@ async function classifyIntent(speaker, message) {
           `be the exact modern Minecraft block id (e.g. oak_log, stone, iron_ore, cobblestone). ` +
           `<count> is a small positive integer, default 4 if unstated. If no specific block is ` +
           `named, respond CHAT instead -- never invent a block.\n` +
-          `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob`,
+          `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob\n` +
+          `ACTION LOOT - asks ${USERNAME} to check a nearby chest for equipment/gear`,
       },
       { role: "user", content: `<${speaker}> ${message}` },
     ],
@@ -225,6 +238,7 @@ async function classifyIntent(speaker, message) {
     if (verb === "FOLLOW") return { type: "action", action: { type: "follow" } };
     if (verb === "STOP") return { type: "action", action: { type: "stop" } };
     if (verb === "ATTACK") return { type: "action", action: { type: "attack" } };
+    if (verb === "LOOT") return { type: "action", action: { type: "loot" } };
     if (verb === "MINE") {
       const block = (parts[2] || "").toLowerCase();
       const count = parseInt(parts[3], 10);
@@ -374,6 +388,7 @@ async function runAction(action, speaker, message, send) {
     const startLine = {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
       mine: `off to gather some ${action.block}.`, attack: "engaging.",
+      loot: "checking a nearby chest.",
     }[action.type];
     if (startLine) send(await narrateAction(startLine));
 

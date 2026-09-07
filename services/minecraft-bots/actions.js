@@ -1,4 +1,16 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-09-06) -- direct request: bots should look in chests for equipment, wear the
+// best armor they find, and hold the best weapon unless a task needs a specific tool. New
+// "loot" action opens the nearest chest and takes any armor/weapon/tool it finds (equipment.js
+// decides what's actually worth wearing once it's in inventory). mineflayer-tool's plugin is
+// now loaded (equipment.js's loadEquipmentPlugins) -- real gap found while investigating a
+// mining timeout: mineflayer-collectblock already calls bot.tool.equipForBlock() internally
+// for task-specific tool selection, but that silently had nothing to call since the plugin
+// was never loaded. Every action that can change inventory (mine, attack, loot) now re-runs
+// equipBestArmor/equipBestWeapon afterward so gear stays current without a separate request.
+// Crafting and building are still explicitly out of scope -- this covers "use what you already
+// have or can loot," not "make what you don't have yet."
 //
 // 1.1.0 (2026-09-06) -- withTimeout() now takes a required onTimeout callback that actually
 // cancels the underlying pathfinder/collectBlock/pvp operation -- see its own updated comment
@@ -19,6 +31,7 @@
 import pathfinderPkg from "mineflayer-pathfinder";
 import collectBlockPkg from "mineflayer-collectblock";
 import pvpPkg from "mineflayer-pvp";
+import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipment.js";
 
 const { goals } = pathfinderPkg;
 
@@ -31,9 +44,28 @@ const HOSTILE_MOBS = new Set([
   "ravager", "hoglin", "zoglin", "piglin_brute", "warden",
 ]);
 
+// Suffix-matched, same convention as equipment.js -- what's worth pulling out of a chest.
+// Food/blocks/misc items are left behind; this is specifically about gearing up.
+const GEAR_SUFFIXES = [
+  "_helmet", "_chestplate", "_leggings", "_boots", "_sword", "_axe", "_pickaxe", "_shovel", "_hoe",
+];
+
 export function loadActionPlugins(bot) {
   bot.loadPlugin(collectBlockPkg.plugin);
   bot.loadPlugin(pvpPkg.plugin);
+  loadEquipmentPlugins(bot);
+}
+
+// Best-effort, deliberately swallows its own errors: called after any action that might have
+// changed the inventory (mine, attack, loot) so gear stays current without a separate request
+// -- a failure here should never turn a successful action into a reported failure.
+async function refreshGear(bot) {
+  try {
+    await equipBestArmor(bot);
+    await equipBestWeapon(bot);
+  } catch (err) {
+    console.error("refreshGear failed:", err.message);
+  }
 }
 
 // Rejects after `ms` rather than letting a bad path/target hang an action forever -- a real
@@ -112,8 +144,50 @@ export async function performAction(bot, action, speaker) {
       } catch (err) {
         if (token.cancelled) return "stopped mining early.";
         return `had trouble mining ${action.block}: ${err.message}`;
+      } finally {
+        await refreshGear(bot); // may have picked up something worth wearing/wielding
       }
       return token.cancelled ? "stopped mining early." : `collected some ${action.block}.`;
+    }
+
+    case "loot": {
+      const chestType = bot.registry.blocksByName.chest;
+      const trappedType = bot.registry.blocksByName.trapped_chest;
+      const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
+      if (!matchIds.length) return "don't know how to recognize a chest here.";
+      const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: 1 });
+      if (!positions.length) return "couldn't find any chests nearby.";
+      const chestBlock = bot.blockAt(positions[0]);
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
+          chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+          () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return "stopped on the way to a chest.";
+        return `couldn't reach a chest: ${err.message}`;
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return "stopped on the way to a chest.";
+
+      let taken = [];
+      try {
+        const chest = await bot.openChest(chestBlock);
+        const gear = chest.items().filter((i) => GEAR_SUFFIXES.some((s) => i.name.endsWith(s)));
+        for (const item of gear) {
+          try {
+            await chest.withdraw(item.type, null, item.count);
+            taken.push(item.name);
+          } catch (err) {
+            console.error(`loot: failed to withdraw ${item.name}:`, err.message);
+          }
+        }
+        await chest.close();
+      } catch (err) {
+        return `found a chest but couldn't open it: ${err.message}`;
+      }
+      await refreshGear(bot);
+      return taken.length ? `found ${taken.join(", ")} in a chest.` : "checked a chest, nothing worth taking.";
     }
 
     case "attack": {
@@ -126,6 +200,8 @@ export async function performAction(bot, action, speaker) {
       } catch (err) {
         if (token.cancelled) return "broke off the fight.";
         return "gave up on the fight -- took too long.";
+      } finally {
+        await refreshGear(bot); // mob drops may include something worth wearing/wielding
       }
       return token.cancelled ? "broke off the fight." : "took care of it.";
     }
