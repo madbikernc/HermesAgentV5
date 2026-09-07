@@ -1,4 +1,19 @@
-// Version: 1.16.0
+// Version: 1.17.0
+//
+// 1.17.0 (2026-09-07) -- direct request "next set of autonomy" -> "do all four" (goal-planner
+// vocabulary gap was purely an index.js change, see its own 2.19.0 changelog):
+// (1) shield use in combat: "attack" now equips a shield to off-hand (if she's carrying one)
+//     before bot.pvp.attack(). Real gap found by reading mineflayer-pvp's own source (PVP.js):
+//     it ALREADY fully automates shield blocking (a creeper's explosion) and an active-block-
+//     then-attack cadence on every swing, entirely conditional on hasShield() -- a shield already
+//     sitting in the off-hand slot. Nothing in this codebase ever put one there; equipping one is
+//     the entire fix, everything downstream was already built.
+// (2) XP-aware enchanting: "enchant" now picks the first AFFORDABLE option (checked against
+//     bot.experience.level) instead of always the cheapest/first slot. Real gap found by reading
+//     enchantment_table.js's own source: .level IS the real XP-level cost the server charges, and
+//     enchant() has no affordability check of its own -- it just sends the packet and awaits an
+//     inventory update that may never arrive if the server silently rejects an unaffordable
+//     choice, which would have hung the action rather than failing it cleanly.
 //
 // 1.16.0 (2026-09-07) -- direct request "do 1-3" then "and 4" on the next round of autonomy
 // ideas, itself prompted by tonight's live drowning-loop incident (see index.js's own 2.17.1/
@@ -711,6 +726,22 @@ export async function performAction(bot, action, speaker) {
     case "attack": {
       const target = nearestHostile(bot);
       if (!target) return fail("no hostile mobs nearby.");
+      // Real gap found by reading mineflayer-pvp's own source (PVP.js), 2026-09-07: it already
+      // fully automates shield use during combat -- blocking a creeper's explosion, and an
+      // active-block-then-attack cadence on every swing (hasShield()/checkExplosion()/
+      // attemptAttack()) -- but ALL of it is conditional on a shield already sitting in the
+      // off-hand slot, which nothing in this codebase ever put there. Equipping one here (if
+      // she's carrying one) is the entire fix; everything downstream is already handled
+      // internally with no further changes needed.
+      const shield = bot.inventory.items().find((i) => i.name.includes("shield"));
+      const offHandSlot = bot.getEquipmentDestSlot("off-hand");
+      if (shield && bot.inventory.slots[offHandSlot]?.name !== shield.name) {
+        try {
+          await bot.equip(shield, "off-hand");
+        } catch (err) {
+          console.error("attack: failed to equip shield:", err.message);
+        }
+      }
       // bot.pvp.attack() resolves its own promise once the target is dead or lost -- no need
       // for a manually-wired event listener (confirmed against mineflayer-pvp's own .d.ts).
       try {
@@ -1283,8 +1314,8 @@ export async function performAction(bot, action, speaker) {
       // Direct request, 2026-09-07 ("what else can we add" -> enchanting, a real mechanic
       // untouched until now). Built on mineflayer's own openEnchantmentTable() (core) --
       // confirmed against its source: putTargetItem()/putLapis() move items in, enchant(choice)
-      // picks one of the 3 offered options. Picks index 0 (the cheapest/first slot) rather than
-      // attempting real XP-affordability logic -- the safest default, not necessarily optimal.
+      // picks one of the 3 offered options. Picks the first AFFORDABLE option by real XP level
+      // (see the affordability check further down) rather than always the cheapest slot.
       const itemDef = bot.registry.itemsByName[action.item];
       if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
       const targetItem = bot.inventory.items().find((i) => i.type === itemDef.id);
@@ -1320,11 +1351,23 @@ export async function performAction(bot, action, speaker) {
         if (!table.enchantments.some((e) => e.level > -1)) {
           await withTimeout(new Promise((resolve) => table.once("ready", resolve)), 5000, () => {});
         }
-        const optionIndex = table.enchantments.findIndex((e) => e.level > -1);
+        // Real gap found by reading enchantment_table.js's own source, 2026-09-07: .level on
+        // each slot IS the real XP-level cost the server will charge (confirmed: it's populated
+        // directly from the same window-property packet vanilla uses to show that number to a
+        // real player), and enchant() has no affordability check of its own -- it just sends the
+        // packet and awaits an inventory update that may never come if the server silently
+        // rejects an unaffordable choice, hanging this action instead of failing it. Picking the
+        // first AFFORDABLE option (mineflayer's own anvil.js uses the identical bot.experience.
+        // level comparison for repair costs) avoids both problems at once.
+        const available = table.enchantments.filter((e) => e.level > -1);
+        const optionIndex = table.enchantments.findIndex((e) => e.level > -1 && e.level <= bot.experience.level);
         if (optionIndex < 0) {
           await table.takeTargetItem().catch(() => {});
           await table.close();
-          return fail("no enchantments available right now (maybe needs more bookshelves or levels).");
+          return fail(available.length
+            ? `can't afford any enchantment offered (cheapest needs level ` +
+              `${Math.min(...available.map((e) => e.level))}, only have ${bot.experience.level}).`
+            : "no enchantments available right now (maybe needs more bookshelves or levels).");
         }
         await table.enchant(optionIndex);
         await table.takeTargetItem();

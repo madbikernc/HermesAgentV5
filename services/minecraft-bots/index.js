@@ -1,4 +1,30 @@
-// Version: 2.18.0
+// Version: 2.19.0
+//
+// 2.19.0 (2026-09-07) -- direct request "next set of autonomy" -> "do all four, and set a limit
+// on the number of times a bot will try to recover its gear from dying":
+// (1) goal-planner vocabulary gap: harvest/breed/enchant/fish existed since the last two rounds
+//     but were only ever reachable via a direct player command -- planNextStep's own vocabulary
+//     (confirmed by reading it) still only offered MINE/CRAFT/SMELT/PLACE/LOOT/ATTACK/REQUEST, so
+//     a self-proposed standing goal could never actually choose to farm, breed, enchant, or fish.
+//     Added all four to planNextStep's prompt and parseGoalStep's parser, same shape as every
+//     other verb.
+// (2) gear durability awareness: equipment.js's own change (effectiveTier(), see its 1.2.0
+//     changelog) -- nothing needed here.
+// (3) shield use in combat: actions.js's own change (equip a shield into off-hand before
+//     bot.pvp.attack(), see its 1.17.0 changelog) -- nothing needed here either; checkSelfDefense
+//     already calls the same "attack" action, so it benefits automatically.
+// (4) XP-aware enchanting: actions.js's own change (affordability check before enchant(), see its
+//     1.17.0 changelog) -- nothing needed here.
+// (5) recovery attempt limit: new MAX_RECOVERY_ATTEMPTS (default 3) on top of the existing
+//     `recovering` guard from tonight's drowning-loop fix -- that guard only stops chasing the
+//     SAME lethal spot twice. First version of this cap reset on any recover() call reporting
+//     ok=true, and broke within minutes of shipping: a hostile mob camping the base at spawn kept
+//     killing both bots again seconds after each recovery, and recover() genuinely DID succeed
+//     every time (she made it back and picked items up, she just didn't survive standing there
+//     afterward) -- a cap keyed to the action's own success never engaged. Rewritten to count
+//     real deaths by how close together they land in time (RAPID_DEATH_WINDOW_MS, 60s) instead --
+//     any death within that window of the last one extends the same incident regardless of what
+//     recover() reports, a longer gap starts a fresh count.
 //
 // 2.18.0 (2026-09-07) -- direct request "do 1-3" then "and 4" on the next round of autonomy
 // ideas, itself prompted by tonight's live drowning-loop incident (2.17.1/2.17.2 below):
@@ -901,6 +927,21 @@ function parseGoalStep(text) {
         const count = parseInt(parts[3], 10);
         if (block) return { type: "step", action: { type: "mine", block, count: count > 0 ? count : 4 } };
       }
+      // Direct request, 2026-09-07 ("next set of autonomy" -> goal-planner vocabulary gap):
+      // harvest/breed/enchant/fish existed since the last two rounds but were only ever reachable
+      // via a direct player command -- classifyIntent had them, this parser (a standing goal
+      // reasoning on her own) never did, so a self-proposed goal could never actually choose to
+      // farm, breed, enchant, or fish. Same parsing shape as every verb above.
+      if (verb === "HARVEST") return { type: "step", action: { type: "harvest" } };
+      if (verb === "BREED") {
+        const species = (parts[2] || "").toLowerCase();
+        if (species) return { type: "step", action: { type: "breed", species } };
+      }
+      if (verb === "ENCHANT") {
+        const item = (parts[2] || "").toLowerCase();
+        if (item) return { type: "step", action: { type: "enchant", item } };
+      }
+      if (verb === "FISH") return { type: "step", action: { type: "fish" } };
       // Not a "step" like the others above -- REQUEST never touches the game world, only Buzz,
       // so goalTick handles it as its own sibling type rather than routing it through
       // performAction (direct follow-up, 2026-09-07: "look for more ways to improve their
@@ -996,6 +1037,14 @@ async function planNextStep(goal) {
           `right next to herself, when SMELT/CRAFT needs one and none is reachable.\n` +
           `ACTION LOOT - check the nearest chest for gear\n` +
           `ACTION ATTACK - fight a nearby hostile mob\n` +
+          `ACTION HARVEST - pick a ripe crop nearby and replant it, if the goal is about food or ` +
+          `farming\n` +
+          `ACTION BREED <species> - breed two nearby animals of the same kind (cow, sheep, pig, ` +
+          `or chicken) using the right food, if the goal is about animals or farming\n` +
+          `ACTION ENCHANT <item_id> - enchant an item she's carrying at a nearby enchanting table ` +
+          `(needs lapis lazuli and enough XP levels), if the goal is about gear upgrades\n` +
+          `ACTION FISH - fish at nearby water with a fishing rod, if the goal is about food and ` +
+          `no crops/animals are a better fit\n` +
           `ACTION REQUEST <item_id> <count> - ask the other bot (over Buzz) for an item she might ` +
           `already have. Only after LOOT has already failed for the same need, or the item is ` +
           `also fine to just ask for directly (e.g. borrowing fuel/food rather than gathering ` +
@@ -1666,18 +1715,40 @@ let deathPosition = null;
 let hasSpawnedOnce = false;
 let recovering = false;
 
+// Direct request, 2026-09-07 ("set a limit on the number of times a bot will try to recover its
+// gear from dying"): the `recovering` guard above only stops chasing the SAME lethal spot twice
+// in a row -- it does nothing for a run of deaths in quick succession at nearby spots. Real gap
+// found within minutes of shipping the first version of this cap (which reset on any recover()
+// call reporting ok=true): a hostile mob camping the base kept killing both bots again seconds
+// after each recovery, and recover() genuinely DID succeed every time -- she made it back and
+// picked items up, she just didn't survive standing there afterward. A cap keyed to the recover
+// action's own success never engaged at all. Counting real deaths by how close together they
+// land in time, instead, catches this: any death within RAPID_DEATH_WINDOW_MS of the last one
+// extends the same incident; a longer gap starts a fresh count. MAX_RECOVERY_ATTEMPTS is how
+// many deaths in one such incident she'll still try to recover from before just accepting the
+// loss and moving on -- which also means no longer walking back into whatever keeps killing her.
+let recoveryAttempts = 0;
+let lastDeathAt = 0;
+const MAX_RECOVERY_ATTEMPTS = parseInt(process.env.MC_MAX_RECOVERY_ATTEMPTS || "3", 10);
+const RAPID_DEATH_WINDOW_MS = 60_000;
+
 bot.on("death", () => {
+  const now = Date.now();
+  recoveryAttempts = (now - lastDeathAt <= RAPID_DEATH_WINDOW_MS) ? recoveryAttempts + 1 : 1;
+  lastDeathAt = now;
+
   if (recovering) {
     // Died again on the way to a previous death spot -- observed live tonight as an infinite
     // drowning loop (the spot itself was underwater, so every recovery attempt was itself fatal,
     // creating a fresh deathPosition each time and repeating every ~40-80s). recover()'s GoalNear
     // has no hazard-awareness; the cheap, safe fix is not to chase the same lethal spot twice.
     deathPosition = null;
-    console.log(`[${USERNAME}] died again heading back for her gear -- giving up on that spot.`);
+    console.log(`[${USERNAME}] died again heading back for her gear (${recoveryAttempts} deaths ` +
+      `in quick succession) -- giving up on that spot.`);
     return;
   }
   deathPosition = bot.entity.position.clone();
-  console.log(`[${USERNAME}] died at ${deathPosition}`);
+  console.log(`[${USERNAME}] died at ${deathPosition} (${recoveryAttempts} deaths in quick succession)`);
 });
 
 bot.on("spawn", () => {
@@ -1707,7 +1778,15 @@ bot.on("spawn", () => {
     }
     const recoverAt = deathPosition;
     deathPosition = null;
-    if (recoverAt && AUTONOMY_ENABLED) {
+    if (recoverAt && AUTONOMY_ENABLED && recoveryAttempts > MAX_RECOVERY_ATTEMPTS) {
+      // Whatever's out there is still there -- recover() has no combat awareness of its own, so
+      // walking back for gear right now would almost certainly just be death #(recoveryAttempts+1)
+      // in the same streak. Skipping means she stops walking back into it; self-defense and the
+      // rest of the idle-tick checks (which recover() itself was blocking via busy/acting for its
+      // whole duration) get a real chance to run again on her next tick instead.
+      console.log(`[${USERNAME}] skipping gear recovery -- ${recoveryAttempts} deaths in quick ` +
+        `succession, accepting the loss for now.`);
+    } else if (recoverAt && AUTONOMY_ENABLED) {
       busy = true;
       acting = true;
       recovering = true;
