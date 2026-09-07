@@ -1,4 +1,13 @@
-// Version: 1.8.1
+// Version: 1.8.2
+//
+// 1.8.2 (2026-09-07) -- real gap found live repeatedly during autonomy goal loop testing: the
+// loot action fetched only the single NEAREST chest (findBlocks count:1). Once that one chest
+// turned out to be permanently obstructed or unopenable, every subsequent loot attempt
+// deterministically re-found the exact same bad chest and failed the same way -- both bots
+// racked up 6+ identical "couldn't open"/"obstructed" failures across many separate goals,
+// never trying anywhere else even though other chests existed within range. Now tries up to 3
+// candidates in distance order, skipping to the next on any per-chest failure instead of giving
+// up after the first.
 //
 // 1.8.1 (2026-09-07) -- real crash found live within minutes of the autonomy goal loop
 // shipping: both bots' very first self-proposed crafting step (copper_ingot, furnace) crashed
@@ -335,77 +344,91 @@ export async function performAction(bot, action, speaker) {
       const trappedType = bot.registry.blocksByName.trapped_chest;
       const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
       if (!matchIds.length) return fail("don't know how to recognize a chest here.");
-      const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: 1 });
+      // Real gap found live (2026-09-07): this used to fetch only the single NEAREST chest --
+      // if that one chest is permanently obstructed or otherwise unopenable, findBlocks(count:1)
+      // deterministically returns the exact same bad chest on every future attempt, and the bot
+      // can never loot ANYTHING again even with dozens of other chests nearby. Now tries up to
+      // MAX_CANDIDATES in distance order, skipping to the next on any per-chest failure
+      // (obstructed, unreachable, won't open) instead of giving up after the first one.
+      const MAX_CANDIDATES = 3;
+      const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: MAX_CANDIDATES });
       if (!positions.length) return fail("couldn't find any chests nearby.");
-      const chestBlock = bot.blockAt(positions[0]);
-      // Real error found live (2026-09-06): openChest() waited its own internal 20s timeout
-      // ("Event windowOpen did not fire") against a chest that vanilla Minecraft will never
-      // actually open -- any solid block directly above EITHER half of a double chest blocks
-      // the whole thing, a real, common world-state issue, not a bug in this code. First
-      // version of this check only looked above the single block findBlocks happened to
-      // return; real evidence from a live failure (getProperties() showed {type: "right",
-      // facing: "east"}) confirmed this chest is one half of a double chest, and the *other*
-      // half's obstruction was never checked. Scanning cardinal neighbors for the matching
-      // paired half (rather than trusting a memorized left/right-to-offset convention) is more
-      // robust than computing it from facing+type directly.
-      const chestHalves = [chestBlock];
-      if (chestBlock.getProperties?.().type !== undefined) {
-        const facing = chestBlock.getProperties().facing;
-        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const neighbor = bot.blockAt(chestBlock.position.offset(dx, 0, dz));
-          if (neighbor?.name === chestBlock.name && neighbor.getProperties?.().facing === facing) {
-            chestHalves.push(neighbor);
-            break;
-          }
-        }
-      }
-      for (const half of chestHalves) {
-        const above = bot.blockAt(half.position.offset(0, 1, 0));
-        if (above?.boundingBox === "block") {
-          return fail("found a chest, but there's something on top of it blocking the lid.");
-        }
-      }
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
-          chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
-          () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to a chest.");
-        return fail(`couldn't reach a chest: ${err.message}`);
-      } finally {
-        bot.pathfinder.setGoal(null);
-      }
-      if (token.cancelled) return ok("stopped on the way to a chest.");
 
-      let taken = [];
-      try {
-        const chest = await bot.openChest(chestBlock);
-        // Real bug found live (2026-09-06), the actual root cause after two wrong guesses
-        // (a timing delay, then a "wrong chest" theory -- both ruled out by direct testing):
-        // Window.items() returns itemsRange(inventoryStart, inventoryEnd) -- the PLAYER'S OWN
-        // inventory slots within the combined window, not the container's. A chest confirmed
-        // (by a human, in-game) to hold two netherite pickaxes correctly logged as "(empty)"
-        // every time because Babs' own inventory was empty, not the chest. containerItems()
-        // (itemsRange(0, inventoryStart)) is the actual container-only view.
-        const contents = chest.containerItems();
-        console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
-        const gear = contents.filter((i) => GEAR_SUFFIXES.some((s) => i.name.endsWith(s)));
-        for (const item of gear) {
-          try {
-            await chest.withdraw(item.type, null, item.count);
-            taken.push(item.name);
-          } catch (err) {
-            console.error(`loot: failed to withdraw ${item.name}:`, err.message);
+      let sawObstruction = false;
+      for (const pos of positions) {
+        if (token.cancelled) return ok("stopped on the way to a chest.");
+        const chestBlock = bot.blockAt(pos);
+        if (!chestBlock) continue;
+
+        // Real error found live (2026-09-06): openChest() waited its own internal 20s timeout
+        // ("Event windowOpen did not fire") against a chest that vanilla Minecraft will never
+        // actually open -- any solid block directly above EITHER half of a double chest blocks
+        // the whole thing, a real, common world-state issue, not a bug in this code. Scanning
+        // cardinal neighbors for the matching paired half (rather than trusting a memorized
+        // left/right-to-offset convention) is more robust than computing it from facing+type.
+        const chestHalves = [chestBlock];
+        if (chestBlock.getProperties?.().type !== undefined) {
+          const facing = chestBlock.getProperties().facing;
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const neighbor = bot.blockAt(chestBlock.position.offset(dx, 0, dz));
+            if (neighbor?.name === chestBlock.name && neighbor.getProperties?.().facing === facing) {
+              chestHalves.push(neighbor);
+              break;
+            }
           }
         }
-        await chest.close();
-      } catch (err) {
-        return fail(`found a chest but couldn't open it: ${err.message}`);
+        const obstructed = chestHalves.some(
+          (half) => bot.blockAt(half.position.offset(0, 1, 0))?.boundingBox === "block");
+        if (obstructed) {
+          sawObstruction = true;
+          continue; // try the next candidate instead of giving up entirely
+        }
+
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
+            chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+            () => bot.pathfinder.setGoal(null));
+        } catch (err) {
+          if (token.cancelled) return ok("stopped on the way to a chest.");
+          continue; // couldn't reach this one -- try the next candidate
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) return ok("stopped on the way to a chest.");
+
+        let taken = [];
+        try {
+          const chest = await bot.openChest(chestBlock);
+          // Real bug found live (2026-09-06), the actual root cause after two wrong guesses
+          // (a timing delay, then a "wrong chest" theory -- both ruled out by direct testing):
+          // Window.items() returns itemsRange(inventoryStart, inventoryEnd) -- the PLAYER'S OWN
+          // inventory slots within the combined window, not the container's. A chest confirmed
+          // (by a human, in-game) to hold two netherite pickaxes correctly logged as "(empty)"
+          // every time because Babs' own inventory was empty, not the chest. containerItems()
+          // (itemsRange(0, inventoryStart)) is the actual container-only view.
+          const contents = chest.containerItems();
+          console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
+          const gear = contents.filter((i) => GEAR_SUFFIXES.some((s) => i.name.endsWith(s)));
+          for (const item of gear) {
+            try {
+              await chest.withdraw(item.type, null, item.count);
+              taken.push(item.name);
+            } catch (err) {
+              console.error(`loot: failed to withdraw ${item.name}:`, err.message);
+            }
+          }
+          await chest.close();
+        } catch (err) {
+          continue; // couldn't open this one (e.g. windowOpen timeout) -- try the next candidate
+        }
+        await refreshGear(bot);
+        // Finding nothing worth taking is a completed check, not a failed one -- an empty/
+        // already-looted chest is a legitimate outcome, not the bot getting stuck.
+        return ok(taken.length ? `found ${taken.join(", ")} in a chest.` : "checked a chest, nothing worth taking.");
       }
-      await refreshGear(bot);
-      // Finding nothing worth taking is a completed check, not a failed one -- an empty/
-      // already-looted chest is a legitimate outcome, not the bot getting stuck.
-      return ok(taken.length ? `found ${taken.join(", ")} in a chest.` : "checked a chest, nothing worth taking.");
+      return fail(sawObstruction
+        ? "found chests nearby, but they're all obstructed."
+        : "found chests nearby, but couldn't reach or open any of them.");
     }
 
     case "attack": {
