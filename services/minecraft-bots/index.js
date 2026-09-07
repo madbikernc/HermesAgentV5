@@ -1,4 +1,16 @@
-// Version: 2.11.2
+// Version: 2.11.3
+//
+// 2.11.3 (2026-09-07) -- two more real gaps found live within minutes of 2.11.2 shipping: (1) a
+// factually-confused self-proposed goal ("smashing cobblestone into planks" -- planks come from
+// logs, not stone) made the planner ramble past its one-sentence reasoning budget and get cut
+// off by maxTokens before reaching its required final decision line -- parseGoalStep's fallback
+// then counted as a real strike for a goal that was never fairly evaluated. Fixed at both ends:
+// proposeOwnGoal's prompt now states the same real crafting facts planNextStep already knew, and
+// planNextStep's own budget went from 120 to 220 tokens plus an explicit "reinterpret charitably,
+// always end with a decision line" instruction. (2) a bot self-proposed "build a warm little
+// house" -- building/placing was explicitly out of scope from this system's first design pass
+// (MINECRAFT_BOTS_DESIGN.md §5) and no such action exists at all, so she'd have mined materials
+// forever with no way to ever finish. Both prompts now say so explicitly.
 //
 // 2.11.2 (2026-09-07) -- real gap found live minutes after 2.11.1's reasoning fix shipped: Amy
 // correctly reasoned, three separate times, that an ingot she needed could only come from
@@ -595,10 +607,16 @@ async function planNextStep(goal) {
           `Common material chain: sticks and a crafting table both need planks; planks come from ` +
           `logs. If a craft fails for missing ingredients, check whether she's missing the raw ` +
           `material (e.g. no logs at all) rather than the item itself -- mine the raw material ` +
-          `first instead of retrying the same craft.\n\n` +
+          `first instead of retrying the same craft.\n` +
+          `She also has NO ability to build or place structures at all. If the goal is actually ` +
+          `about building/placing something (a house, a base, a wall) rather than gearing up/` +
+          `gathering/crafting a portable item, respond BLOCKED immediately -- don't gather ` +
+          `materials for a structure that can never actually get built.\n\n` +
           `Given the goal, her current gear/inventory, and what she's already tried below, you ` +
-          `may reason briefly first (one short sentence about what's actually missing and why), ` +
-          `then on its own final line respond with EXACTLY ONE of these forms:\n` +
+          `may reason briefly first -- AT MOST one short sentence, no matter how confusing or ` +
+          `factually off the goal description sounds (reinterpret it charitably as the closest ` +
+          `realistic Minecraft objective rather than dwelling on why it's worded oddly) -- then ` +
+          `on its own final line you MUST respond with EXACTLY ONE of these forms, no exceptions:\n` +
           `DONE - the goal is already fully achieved given her current gear/inventory\n` +
           `BLOCKED <short reason> - she cannot make progress right now and should give up\n` +
           `ACTION MINE <block_id> <count> - gather a resource. <block_id> must be the exact ` +
@@ -613,7 +631,14 @@ async function planNextStep(goal) {
       },
       { role: "user", content: `Goal: ${goal.description}\n${gearNote}\nRecent progress:\n${recentLog}` },
     ],
-    { maxTokens: 120, temperature: 0 },
+    // Real bug found live (2026-09-07): a confusing/factually-impossible goal description (from
+    // a bad self-propose -- since fixed above) made the model ramble well past a one-sentence
+    // reasoning aside, and 120 tokens cut it off before it ever reached its required final
+    // decision line -- parseGoalStep's fallback ("couldn't decide what to do next") then counted
+    // as a real strike toward MAX_CONSECUTIVE_FAILURES for a goal that was never actually given a
+    // fair evaluation. More headroom is the honest fix, not a shorter, more failure-prone budget
+    // -- this all runs on local compute with no per-call cost.
+    { maxTokens: 220, temperature: 0 },
   );
   return reply.trim();
 }
@@ -646,8 +671,14 @@ async function proposeOwnGoal() {
           `${persona}\n\n---\n\nNo one has talked to you in a while and you have no standing ` +
           `goal right now. Given your own gear/inventory below, decide on ONE concrete, ` +
           `achievable objective to work on by yourself for a while (gearing up, gathering a ` +
-          `resource, crafting something useful). Respond with ONLY a short phrase naming the ` +
-          `goal, in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}`,
+          `resource, crafting something useful). Stay correctly grounded in real Minecraft ` +
+          `mechanics -- e.g. planks/sticks/a table come from logs (never stone), tools/armor ` +
+          `come from ingots or logs+stone, ingots only come from smelting ore in a furnace (you ` +
+          `have none). You also have NO ability to build or place structures at all -- never ` +
+          `propose a goal about building/placing something (a house, a base, a wall); stick to ` +
+          `gearing up, gathering a resource, or crafting a portable item. Respond with ONLY a ` +
+          `short phrase naming the goal, in your own words -- nothing else, no quotes.\n\n` +
+          `${gearNote}${memoryNote}`,
       },
       { role: "user", content: "What's your goal?" },
     ],
