@@ -1,4 +1,21 @@
-// Version: 1.15.0
+// Version: 1.16.0
+//
+// 1.16.0 (2026-09-07) -- direct request "do 1-3" then "and 4" on the next round of autonomy
+// ideas, itself prompted by tonight's live drowning-loop incident (see index.js's own 2.17.1/
+// 2.17.2 changelog for the reactive half of that fix):
+// (1) bed safety: new bedNearHazard() scans a box around a candidate bed for water/lava before
+//     she ever commits to sleeping in it -- addresses the actual root cause (a bed bonded next to
+//     open water) rather than just recovering better after the fact. Reuses "sleep"'s existing
+//     multi-candidate loop (same pattern as loot) so one bad bed just falls through to the next.
+// (2) general hazard-aware pathing: liquidCost bumped in index.js's Movements setup (see its own
+//     changelog) -- actions.js needed no changes for this half.
+// (3) torch placement: no actions.js changes needed -- index.js's new checkLighting() reuses the
+//     existing "place" action (already generic over any held block) rather than a new case.
+// (4) fishing: new "fish" action, built on mineflayer's own core fish() (confirmed against
+//     fishing.js source -- casts via activateItem(), resolves on a real bobber-splash particle
+//     event, reels in itself). fish() has no built-in timeout, so it's wrapped in withTimeout
+//     like every other open-ended wait here; onTimeout calls activateItem() a second time to
+//     reel in and cancel cleanly rather than leaving a cast hanging.
 //
 // 1.15.0 (2026-09-07) -- direct request "do the first 3" (of four further autonomy ideas):
 // (1) farming: new "harvest" action -- picks a ripe crop and replants, simpler than farming from
@@ -244,6 +261,11 @@ const ACTION_TIMEOUT_MS = 60_000;
 // normal night's sleep as a "failure." This is a safety backstop for something going genuinely
 // wrong (a stuck day/night cycle, a disabled gamerule), not the expected case.
 const SLEEP_TIMEOUT_MS = 15 * 60_000;
+// Vanilla's bite timer is randomized per cast (roughly 5-30s unenchanted, longer is possible) --
+// generous headroom over the realistic range rather than a tight bound, same reasoning as
+// SLEEP_TIMEOUT_MS above. A cast that genuinely never bites (bad water, e.g. too shallow/enclosed)
+// should time out and get reported as a real failure, not hang the action loop indefinitely.
+const FISH_TIMEOUT_MS = 90_000;
 // Vanilla smelts one item per 10 real-world seconds with normal fuel/speed -- generous headroom
 // per item rather than a tight bound, consistent with this being local compute with no per-call
 // cost to economize on.
@@ -485,6 +507,24 @@ function chestObstructed(bot, chestBlock) {
   return halves.some((half) => bot.blockAt(half.position.offset(0, 1, 0))?.boundingBox === "block");
 }
 
+// Real incident found live (2026-09-07): Amy's bed sat right at the edge of open water, so every
+// death near it turned "recover" into a repeated drowning loop -- the bed itself was never the
+// bug, but sleeping in one next to a hazard is what put her in harm's way in the first place.
+// Vanilla doesn't stop a player from using a bed next to water/lava, so this is a check nothing
+// upstream enforces. Scans a generous box around the bed rather than just the block it's on,
+// since the actual sleeping/wake-up position can land a block or two off the bed block itself.
+function bedNearHazard(bot, bedPos) {
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        const block = bot.blockAt(bedPos.offset(dx, dy, dz));
+        if (block?.name === "water" || block?.name === "lava") return true;
+      }
+    }
+  }
+  return false;
+}
+
 let cancelToken = { cancelled: false };
 
 function stopCurrent(bot) {
@@ -723,6 +763,51 @@ export async function performAction(bot, action, speaker) {
       return ok(`ate some ${foodItem.name}.`);
     }
 
+    case "fish": {
+      // Direct request, 2026-09-07 ("do 1-3" -> "and 4"): a passive, low-risk food source for
+      // when there's no food on hand and no crops/animals nearby to harvest/breed. Built on
+      // mineflayer's own core fish() (confirmed against fishing.js source: casts via
+      // activateItem(), waits for the real bobber-splash particle event, then reels in itself --
+      // no dedicated timing guess needed). fish() only resolves on an actual bite; it has no
+      // built-in timeout of its own, so like every other open-ended wait in this file it's
+      // wrapped in withTimeout, whose onTimeout calls activateItem() a second time to reel in
+      // and cancel cleanly (confirmed: this is exactly how a real player aborts a cast, and the
+      // plugin's own entity_destroy handler treats it as a clean cancellation, not an error).
+      const rod = bot.inventory.items().find((i) => i.name === "fishing_rod");
+      if (!rod) return fail("don't have a fishing rod.");
+
+      const waterType = bot.registry.blocksByName.water;
+      if (!waterType) return fail("don't know how to recognize water here.");
+      let positions = bot.findBlocks({ matching: waterType.id, maxDistance: 32, count: 5 });
+      if (!positions.length) positions = await wanderAndRetryFind(bot, token,
+        { matching: waterType.id, maxDistance: 32, count: 5 });
+      if (!positions.length) return fail("couldn't find any water nearby, even after looking around.");
+      const waterPos = positions[0];
+
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(waterPos.x, waterPos.y, waterPos.z, 3)),
+          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way to the water.");
+        return fail(`couldn't reach the water: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped on the way to the water.");
+
+      try {
+        await bot.equip(rod, "hand");
+        await bot.lookAt(waterPos.offset(0.5, 1, 0.5));
+        await withTimeout(bot.fish(), FISH_TIMEOUT_MS, () => bot.activateItem());
+      } catch (err) {
+        if (token.cancelled) return ok("stopped fishing.");
+        return fail(`fishing didn't pan out: ${err.message}`);
+      } finally {
+        await refreshGear(bot); // fish() leaves the rod held -- get a real weapon back
+      }
+      return ok("caught something.");
+    }
+
     case "give": {
       // Direct request, 2026-09-07: bot-to-bot help. General enough to also work for a human
       // asking directly ("give me some bread") -- classifyIntent resolves the target to the
@@ -775,6 +860,10 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way to bed.");
         const bedBlock = bot.blockAt(pos);
         if (!bedBlock) continue;
+        if (bedNearHazard(bot, bedBlock.position)) {
+          console.log(`[sleep] skipping bed at ${bedBlock.position}: water/lava nearby.`);
+          continue; // a bad bed to bond her respawn point to -- try the next candidate
+        }
 
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(bedBlock.position.x,

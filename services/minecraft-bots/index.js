@@ -1,4 +1,25 @@
-// Version: 2.17.2
+// Version: 2.18.0
+//
+// 2.18.0 (2026-09-07) -- direct request "do 1-3" then "and 4" on the next round of autonomy
+// ideas, itself prompted by tonight's live drowning-loop incident (2.17.1/2.17.2 below):
+// (1) general hazard-aware pathing: Movements.liquidCost raised from its default of 1 (barely
+//     more than a normal step, confirmed against mineflayer-pathfinder's own astar.js) to 20 in
+//     the spawn handler's existing Movements setup, so pathfinder strongly prefers dry land over
+//     wading through water when a route exists, without banning water crossings outright.
+// (2) auto-equip best gear: already fully implemented (equipment.js's equipBestArmor/
+//     equipBestWeapon, wired into refreshGear after every craft/mine/loot) from earlier tonight
+//     -- nothing new needed here, confirmed by reading the existing code rather than assuming.
+// (3) torch placement: new checkLighting() on its own 20s timer, same idle-tick/busy-acting
+//     pattern as checkHunger -- reuses the existing generic "place" action (actions.js, already
+//     works for any held block) rather than a new case. block.light < 8 (confirmed against
+//     prismarine-block source as the real per-position 0-15 light value) is the trigger, the
+//     same threshold most mineflayer bots use for "mobs could spawn here."
+// (4) fishing: new "fish" action (actions.js 1.16.0) wired into classifyIntent ("ACTION FISH")
+//     for direct-command parity, AND into checkHunger as a fallback -- when "eat" fails (no food
+//     on hand) and she's holding a fishing_rod, she now tries fishing instead of just waiting
+//     for food to show up on its own.
+// Bed safety (screening a candidate bed for nearby water/lava before sleeping in it) is entirely
+// an actions.js change (bedNearHazard(), see its own 1.16.0 changelog) -- nothing needed here.
 //
 // 2.17.2 (2026-09-07) -- second hotfix from the same live check: the very next respawn after
 // 2.17.1 shipped hit a fresh, unrelated bug in the same handler. bot.chat(await narrateAction(...))
@@ -409,6 +430,15 @@ bot.once("spawn", () => {
   // vintage -- if it turns out to genuinely misbehave here, that's diagnosable from the
   // path_update logging below, not a reason to leave it off untested.
   movements.canOpenDoors = true;
+  // Real incident tonight: Amy drowned repeatedly because her death spot (and separately, a bed
+  // she'd used) sat right at open water, and every path back to either simply waded straight
+  // through. Confirmed against mineflayer-pathfinder's own astar.js: liquidCost (default 1, the
+  // same as a normal step) adds to a node's cost when it's inside a liquid -- barely a
+  // deterrent. Raised well above a typical land route's cost so pathfinder strongly prefers dry
+  // ground when one exists within its search radius, while still leaving water crossable (just
+  // deprioritized) when it's genuinely the only way through -- not banned outright, since that
+  // would strand her at any water-crossed goal with no alternative route.
+  movements.liquidCost = 20;
   bot.pathfinder.setMovements(movements);
 
   // Direct follow-up to "what other logic enhancements are available" -> cave-pathfinding cap:
@@ -548,6 +578,7 @@ async function classifyIntent(speaker, message) {
           `ACTION SLEEP - asks ${USERNAME} to go find a bed and sleep (only makes sense at ` +
           `night or during a thunderstorm)\n` +
           `ACTION EAT - asks ${USERNAME} to eat some food from her inventory\n` +
+          `ACTION FISH - asks ${USERNAME} to fish at nearby water with a fishing rod\n` +
           `ACTION GIVE <item_id> <count> - asks ${USERNAME} to give the speaker some of an item ` +
           `she's carrying (e.g. "give me some bread"). <count> is a small positive integer, ` +
           `default 1 if unstated.\n` +
@@ -592,6 +623,7 @@ async function classifyIntent(speaker, message) {
     if (verb === "ATTACK") return { type: "action", action: { type: "attack" } };
     if (verb === "FLEE") return { type: "action", action: { type: "flee" } };
     if (verb === "EAT") return { type: "action", action: { type: "eat" } };
+    if (verb === "FISH") return { type: "action", action: { type: "fish" } };
     if (verb === "LOOT") return { type: "action", action: { type: "loot" } };
     if (verb === "SLEEP") return { type: "action", action: { type: "sleep" } };
     if (verb === "CRAFT") {
@@ -799,7 +831,7 @@ async function runAction(action, speaker, message, send) {
       mine: `off to gather some ${action.block}.`, attack: "engaging.", flee: "getting out of here!",
       loot: "checking a nearby chest.", craft: `let's see about crafting ${action.item}.`,
       sleep: "heading to bed.", smelt: `time to smelt some ${action.item}.`,
-      place: `let's set up a ${action.item} here.`, eat: "grabbing a bite.",
+      place: `let's set up a ${action.item} here.`, eat: "grabbing a bite.", fish: "let's try fishing.",
       give: `bringing you some ${action.item}.`, store: `putting away some ${action.item}.`,
       trade: "let's see what the villager has.", harvest: "checking on the crops.",
       breed: `let's get some ${action.species}s together.`, enchant: `let's enchant this ${action.item}.`,
@@ -1323,7 +1355,18 @@ async function checkHunger() {
   acting = true;
   try {
     const result = await performAction(bot, { type: "eat" }, USERNAME);
-    if (result.ok) console.log(`[${USERNAME}] hunger: ${result.text} (food was ${bot.food})`);
+    if (result.ok) {
+      console.log(`[${USERNAME}] hunger: ${result.text} (food was ${bot.food})`);
+      return;
+    }
+    // Real gap: "eat" failing (almost always "don't have anything to eat") used to just get
+    // silently ignored every 15s until food showed up on its own -- no attempt to actually GET
+    // any. A held fishing rod turns hunger into something she can act on herself: a passive,
+    // low-risk food source for when there's nothing to harvest/breed nearby either.
+    if (bot.inventory.items().some((i) => i.name === "fishing_rod")) {
+      const fishResult = await performAction(bot, { type: "fish" }, USERNAME);
+      console.log(`[${USERNAME}] hunger (fishing): ${fishResult.text} (ok=${fishResult.ok})`);
+    }
   } catch (err) {
     console.error(`[${USERNAME}] hunger check failed:`, err.message);
   } finally {
@@ -1404,6 +1447,41 @@ async function checkInventoryFull() {
 setInterval(() => {
   checkInventoryFull().catch((err) => console.error(`[${USERNAME}] checkInventoryFull error:`, err.message));
 }, INVENTORY_CHECK_MS);
+
+// Direct request, 2026-09-07 ("do 1-3" + "and 4" -> torch placement). Same idle-tick/busy-acting
+// pattern as everything else -- fires between discrete actions rather than interrupting an
+// in-flight bot.collectBlock.collect() mid-dig (which already handles its own tool/hand equip
+// internally; swapping to a torch mid-collect would fight that). Reuses the EXISTING "place"
+// action (already generic over any held block, see actions.js's own comment on it) rather than a
+// new performAction case -- placing a torch is mechanically identical to placing a furnace.
+// block.light (confirmed against prismarine-block source) is the real per-position light value,
+// 0-15; under 8 is the common threshold below which hostile mobs can spawn, the same heuristic
+// most mineflayer bots use since there's no simpler "is this dark" signal exposed directly.
+const LIGHTING_CHECK_MS = parseInt(process.env.MC_LIGHTING_CHECK_MS || "20000", 10);
+const DARK_LIGHT_LEVEL = 8;
+
+async function checkLighting() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping || !bot.entity) return;
+  if (!bot.inventory.items().some((i) => i.name === "torch")) return;
+  const block = bot.blockAt(bot.entity.position);
+  if (!block || block.light >= DARK_LIGHT_LEVEL) return;
+
+  busy = true;
+  acting = true;
+  try {
+    const result = await performAction(bot, { type: "place", item: "torch" }, USERNAME);
+    if (result.ok) console.log(`[${USERNAME}] lighting: ${result.text} (light was ${block.light})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] lighting check failed:`, err.message);
+  } finally {
+    busy = false;
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkLighting().catch((err) => console.error(`[${USERNAME}] checkLighting error:`, err.message));
+}, LIGHTING_CHECK_MS);
 
 // Direct request, 2026-09-07 ("what else can we add" -> stuck-detection): robustness, not new
 // capability -- a periodic check for "hasn't moved at all in a long time," regardless of
