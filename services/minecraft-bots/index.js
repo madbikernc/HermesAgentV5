@@ -1,4 +1,21 @@
-// Version: 2.17.0
+// Version: 2.17.2
+//
+// 2.17.2 (2026-09-07) -- second hotfix from the same live check: the very next respawn after
+// 2.17.1 shipped hit a fresh, unrelated bug in the same handler. bot.chat(await narrateAction(...))
+// is awaited BEFORE the goal-abandon/recover logic below it; narrateAction's "muse" call returned
+// 503 "Loading model" right after that respawn, and since nothing caught it there, the outer
+// .catch() swallowed the entire async function -- goal-abandon and gear recovery were silently
+// skipped because of a flaky chat-flavor-text call that has nothing to do with either. Wrapped in
+// its own try/catch so a narration failure can no longer take the real recovery logic with it.
+//
+// 2.17.1 (2026-09-07) -- hotfix, caught live via "check to see if they are stuck or not behaving
+// to spec": Amy was stuck drowning in an infinite loop (server log confirmed repeated "Amy
+// drowned" every ~40-80s starting 17:11:49) because recover() paths straight back to the death
+// coordinate with zero hazard-awareness -- when the death itself was caused by that location
+// (submerged), every recovery attempt re-triggered the same fatal drowning, minting a fresh
+// deathPosition each time and repeating forever. New `recovering` flag: bot.on("death") now
+// checks whether a recovery was already in flight when the new death landed, and if so gives up
+// on that spot instead of chasing it again.
 //
 // 2.17.0 (2026-09-07) -- direct request "do the frist 3" on a further four autonomy ideas
 // (explicitly excluding the 4th, Nether access -- flagged as a separate, larger decision and not
@@ -1569,8 +1586,18 @@ bot.once("spawn", () => {
 // nothing extra) from "a real respawn after dying" (the only time this block should act).
 let deathPosition = null;
 let hasSpawnedOnce = false;
+let recovering = false;
 
 bot.on("death", () => {
+  if (recovering) {
+    // Died again on the way to a previous death spot -- observed live tonight as an infinite
+    // drowning loop (the spot itself was underwater, so every recovery attempt was itself fatal,
+    // creating a fresh deathPosition each time and repeating every ~40-80s). recover()'s GoalNear
+    // has no hazard-awareness; the cheap, safe fix is not to chase the same lethal spot twice.
+    deathPosition = null;
+    console.log(`[${USERNAME}] died again heading back for her gear -- giving up on that spot.`);
+    return;
+  }
   deathPosition = bot.entity.position.clone();
   console.log(`[${USERNAME}] died at ${deathPosition}`);
 });
@@ -1582,7 +1609,15 @@ bot.on("spawn", () => {
   }
   (async () => {
     console.log(`[${USERNAME}] respawned after dying`);
-    bot.chat(await narrateAction("ouch, I died! let me get myself back together."));
+    try {
+      bot.chat(await narrateAction("ouch, I died! let me get myself back together."));
+    } catch (err) {
+      // Caught live tonight: narrateAction's "muse" call returned 503 "Loading model" right after
+      // a respawn, and since this line was awaited before the goal-abandon/recover logic below,
+      // the outer .catch() swallowed the whole function -- a transient chat-flavor-text failure
+      // was silently skipping the actual gear recovery. Isolated so it can't do that again.
+      console.error(`[${USERNAME}] death narration failed:`, err.message);
+    }
     // Vanilla drops everything at the death location and she respawns empty-handed -- whatever
     // her standing goal assumed about her gear/inventory is now stale, so it doesn't make sense
     // to just keep going as if nothing happened.
@@ -1597,12 +1632,14 @@ bot.on("spawn", () => {
     if (recoverAt && AUTONOMY_ENABLED) {
       busy = true;
       acting = true;
+      recovering = true;
       try {
         const result = await performAction(bot, { type: "recover", position: recoverAt }, USERNAME);
         console.log(`[${USERNAME}] recovery: ${result.text} (ok=${result.ok})`);
       } catch (err) {
         console.error(`[${USERNAME}] recovery failed:`, err.message);
       } finally {
+        recovering = false;
         busy = false;
         acting = false;
       }
