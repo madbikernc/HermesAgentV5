@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+#
+# 1.0.1 (2026-09-07) — real gap found live on this service's very first real incident: coder2
+# (backed by Muse-Glimmer-30B, per hermes-router.py's own history -- the originally-planned model
+# failed to load) emits extended "reasoning_content" before its final answer, and the original
+# 150-token budget let that consume the whole allowance, leaving an empty CAUSE/NEXT and a
+# spurious coder-vs-coder2 "disagreement" that was really just coder2 never finishing. Bumped to
+# 500 tokens -- the same truncation shape already found and fixed for the bots' own goal planner
+# hours earlier tonight, no per-call cost pressure on local compute either.
 #
 # hermes-minecraft-triage.py — direct request (2026-09-07): "I want the Firmament to do this
 # monitoring, and engage coder/coder2 loop to do initial triage." Built after a long live
@@ -117,10 +125,17 @@ def call_role(role, log_line, timeout=60):
         "NEXT: <one sentence, concrete suggested next step, or \"none -- self-resolves\">\n\n"
         f"Log line(s):\n{log_line}"
     )
+    # max_tokens is deliberately generous, not a tight 150 -- real evidence found live minutes
+    # after this shipped: coder2 is backed by Muse-Glimmer-30B (hermes-router.py's own history:
+    # the originally-planned model failed to load on this build), which emits extended
+    # "reasoning_content" before its final answer. A tight budget let the reasoning consume the
+    # whole allowance and leave nothing for the actual SEVERITY/CAUSE/NEXT answer -- the exact
+    # same truncation shape found and fixed for the bots' own goal planner hours earlier tonight.
+    # No per-call cost pressure on local compute, so there's no reason to economize here either.
     body = json.dumps({
         "model": role,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 150,
+        "max_tokens": 500,
         "temperature": 0,
     }).encode()
     req = urllib.request.Request(ROUTER_URL, data=body, method="POST",
