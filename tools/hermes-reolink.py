@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 2.0.0
 #
-# BLOCKED as of 2026-09-03: the real camera (online at 10.129.1.19) is a standalone battery/solar
-# model with no Reolink Home Hub or NVR. Reolink's own support docs confirm standalone battery
-# cameras have no local web/CGI API at all -- this file's whole reolink_aio Host(ip, user, pass)
-# design cannot reach it until a Home Hub/NVR is purchased and the camera re-paired to it. Direct
-# decision: defer that purchase, kept this file exactly as-is for when it's unblocked. Interim
-# AI-detection alerting lives in tools/hermes-reolink-mail-watch.py instead (no local API needed).
-# Do not enable hermes-reolink.service against this camera -- see infra/hermes-reolink/README.md.
+# UNBLOCKED 2026-09-06: a Reolink Home Hub was purchased and the fleet now has three cameras paired
+# to it. This file's local-API design is reachable again -- re-point the 'Hermes Reolink' vault
+# item's `host` at the Hub's LAN IP (not any camera's own IP), and see the `channels` field below.
+# Interim mail-based alerting (tools/hermes-reolink-mail-watch.py) covered the single standalone
+# camera while blocked; once this file is verified live per infra/hermes-reolink/README.md, that
+# service becomes redundant for AI-detection alerting and should be disabled (not deleted).
+#
+# 2.0.0 (2026-09-06) — multi-camera support: three cameras now share one Hub/one login session
+# instead of one standalone camera. Config's `channel` (single int) replaced by `channels` (JSON
+# object mapping channel number -> camera name, e.g. {"0": "front-door", "1": "backyard"}).
+# AI-detection polling now loops every configured channel each cycle (cheap -- same session, no
+# extra logins) instead of watching one. On-demand chat requests ("check the camera") now resolve
+# to a camera list: a request naming one or more configured camera names (matched case-insensitively
+# against the name with '-'/'_' normalized to spaces) is answered for just those; a request naming
+# none is answered for all configured cameras, combined into one multi-camera description -- this
+# was a direct decision (not the alternative of requiring a name, or defaulting to one camera),
+# because in Matrix chat "check the camera" should stay meaningful even as camera count grows.
 #
 # 1.1.0 (2026-09-02) — real bug found by installing reolink_aio and reading its actual source on
 # spark-2, before any camera hardware existed: login()/get_snapshot()/get_ai_state() method names
@@ -47,6 +57,12 @@ actually uses the key names this file assumes (`AI_LABELS = ("people", "vehicle"
 and the real latency of a snapshot/login call. See infra/hermes-reolink/README.md's Verification
 section.
 
+**2026-09-06 update: a Home Hub was purchased and three cameras are now paired to it**, unblocking
+this design (see the header comment's 2.0.0 entry). Still genuinely unverified until the README's
+Verification steps are run against the real Hub: `AI_LABELS` key names, per-channel snapshot/login
+latency, and now also whether `get_host_data()` reliably enumerates all three channels behind one
+Hub login the same way it did for the single-camera design this was built and bug-fixed against.
+
 Async bridging (the one real structural difference from every other specialist in this fleet):
 every existing specialist here is a synchronous `while True: ... time.sleep()` loop using
 `urllib`. `reolink_aio` is `async def` throughout, built on one persistent `aiohttp` session per
@@ -65,6 +81,11 @@ Config, all from the environment (injected by hermes-reolink-wrapper.sh):
                           unreliable for AI events, polling is the accepted approach)
   COOLDOWN_SECONDS_PER_DEVICE default 120
   CLAIMANT                default "hermes-reolink"
+
+Vault item 'Hermes Reolink' (Hub credentials, shared by all channels): host, port (default 443),
+username, password, and `channels` — a JSON object mapping channel number (string) -> camera name,
+e.g. {"0": "front-door", "1": "backyard", "2": "garage"}. `host` is the Hub/NVR's LAN IP, not any
+individual camera's own IP (see the header comment's 2026-09-06 note for why).
 """
 
 import asyncio
@@ -135,10 +156,27 @@ def load_camera_config():
     port = _vault_get(REOLINK_ITEM, "port") or "443"
     username = _vault_get(REOLINK_ITEM, "username")
     password = _vault_get(REOLINK_ITEM, "password")
-    channel = int(_vault_get(REOLINK_ITEM, "channel") or "0")
-    if not all([host, username, password]):
-        sys.exit(f"ERROR: incomplete config in vault item '{REOLINK_ITEM}' (need host, username, password)")
-    return host, int(port), username, password, channel
+    channels_raw = _vault_get(REOLINK_ITEM, "channels")
+    if not all([host, username, password, channels_raw]):
+        sys.exit(f"ERROR: incomplete config in vault item '{REOLINK_ITEM}' "
+                  f"(need host, username, password, channels)")
+    try:
+        channels = {int(k): v for k, v in json.loads(channels_raw).items()}
+    except (json.JSONDecodeError, ValueError, AttributeError) as exc:
+        sys.exit(f"ERROR: vault item '{REOLINK_ITEM}' field 'channels' isn't valid JSON "
+                  f"(want e.g. {{\"0\": \"front-door\"}}): {exc}")
+    if not channels:
+        sys.exit(f"ERROR: vault item '{REOLINK_ITEM}' field 'channels' is an empty mapping")
+    return host, int(port), username, password, channels
+
+
+def match_channels(channels, request_text):
+    """Which configured cameras a chat request refers to, by name -- '-'/'_' normalized to spaces,
+    case-insensitive substring match. Empty result means no camera was named (caller falls back to
+    all channels), not an error."""
+    norm_text = request_text.lower().replace("-", " ").replace("_", " ")
+    return {ch: name for ch, name in channels.items()
+            if name.lower().replace("-", " ").replace("_", " ") in norm_text}
 
 
 # ── plain HTTP helpers (unchanged copies of hermes-nest.py's own — kept sync deliberately, see
@@ -329,7 +367,19 @@ async def camera_ai_state(host_obj, channel):
 
 # ── on-demand (Buzz claim) trigger path ──────────────────────────────────────
 
-async def process_new_claim(host_obj, channel):
+async def describe_channel(host_obj, channel, name):
+    """One camera's snapshot+description, as (name, text) -- text is an error message on failure
+    rather than raising, so one bad camera doesn't sink a multi-camera combined result."""
+    try:
+        image_bytes = await camera_snapshot(host_obj, channel)
+        description = await asyncio.to_thread(describe_frame, image_bytes)
+        return name, description
+    except Exception as exc:
+        log(f"snapshot/describe failed for channel {channel} ({name}): {exc}")
+        return name, f"Couldn't pull a snapshot from this camera: {exc}"
+
+
+async def process_new_claim(host_obj, channels):
     claim = await asyncio.to_thread(claim_next, "reolink")
     if not claim:
         return False
@@ -359,14 +409,18 @@ async def process_new_claim(host_obj, channel):
 
     await asyncio.to_thread(ack_claim, claim_id)  # ack immediately, real work follows
 
-    try:
-        image_bytes = await camera_snapshot(host_obj, channel)
-        description = await asyncio.to_thread(describe_frame, image_bytes)
-        await asyncio.to_thread(publish_result, task_id, memory_ref, True, description)
-    except Exception as exc:
-        log(f"claim {claim_id}: snapshot/describe failed: {exc}")
-        await asyncio.to_thread(publish_result, task_id, memory_ref, False,
-                                 f"Couldn't pull a snapshot from the camera: {exc}")
+    # No camera named in the request -> all of them (direct decision, see header comment's 2.0.0
+    # entry: "check the camera" should stay meaningful as camera count grows, not require a name).
+    targets = await asyncio.to_thread(match_channels, channels, request_text) or channels
+
+    results = await asyncio.gather(*(
+        describe_channel(host_obj, ch, name) for ch, name in targets.items()
+    ))
+    if len(results) == 1:
+        combined = results[0][1]
+    else:
+        combined = "\n\n".join(f"{name}: {text}" for name, text in results)
+    await asyncio.to_thread(publish_result, task_id, memory_ref, True, combined)
     return True
 
 
@@ -375,17 +429,17 @@ async def process_new_claim(host_obj, channel):
 _last_ai_state = {}
 
 
-async def check_ai_detection(host_obj, channel):
+async def check_ai_detection(host_obj, channel, name):
     try:
         state = await camera_ai_state(host_obj, channel)
     except Exception as exc:
-        log(f"AI-state poll failed: {exc}")
+        log(f"AI-state poll failed for channel {channel} ({name}): {exc}")
         return
     if state is None:
         # get_host_data() should have registered this channel at startup (see camera_login()) --
-        # a None here past that point means the configured `channel` doesn't exist on this camera.
-        log(f"AI-state poll returned None for channel {channel} -- check the 'channel' field on "
-            f"the '{REOLINK_ITEM}' vault item")
+        # a None here past that point means this channel doesn't actually exist on the Hub.
+        log(f"AI-state poll returned None for channel {channel} ({name}) -- check the 'channels' "
+            f"field on the '{REOLINK_ITEM}' vault item")
         return
 
     prev = _last_ai_state.get(channel, {})
@@ -396,24 +450,24 @@ async def check_ai_detection(host_obj, channel):
 
     since_last = time.time() - await asyncio.to_thread(get_last_capture, channel)
     if since_last < COOLDOWN_SECONDS_PER_DEVICE:
-        log(f"detection ({', '.join(rising)}) dropped — within cooldown "
+        log(f"{name}: detection ({', '.join(rising)}) dropped — within cooldown "
             f"({since_last:.0f}s < {COOLDOWN_SECONDS_PER_DEVICE}s)")
         return
 
     await asyncio.to_thread(set_last_capture, channel, time.time())
     reason = ", ".join(rising)
-    log(f"detection rising edge: {reason} — capturing")
+    log(f"{name}: detection rising edge: {reason} — capturing")
     try:
         image_bytes = await camera_snapshot(host_obj, channel)
         description = await asyncio.to_thread(describe_frame, image_bytes)
-        body = f"Trigger: {reason}\n\n{description}"
+        body = f"Camera: {name}\nTrigger: {reason}\n\n{description}"
     except Exception as exc:
-        log(f"detection capture failed: {exc}")
-        body = f"Trigger: {reason}\n\nCapture failed: {exc}"
+        log(f"{name}: detection capture failed: {exc}")
+        body = f"Camera: {name}\nTrigger: {reason}\n\nCapture failed: {exc}"
 
-    ok = await asyncio.to_thread(send_email, f"Reolink camera alert — {reason}", body)
+    ok = await asyncio.to_thread(send_email, f"Reolink camera alert — {name} — {reason}", body)
     if not ok:
-        log("detection email delivery failed — result not lost, just not delivered")
+        log(f"{name}: detection email delivery failed — result not lost, just not delivered")
 
 
 async def async_main():
@@ -424,17 +478,19 @@ async def async_main():
 
     from reolink_aio.api import Host
 
-    cam_host, cam_port, cam_user, cam_pass, channel = await asyncio.to_thread(load_camera_config)
+    cam_host, cam_port, cam_user, cam_pass, channels = await asyncio.to_thread(load_camera_config)
     host_obj = Host(cam_host, cam_user, cam_pass, port=cam_port)
     await camera_login(host_obj)
-    log(f"logged into Reolink camera at {cam_host}:{cam_port} (channel {channel}), "
+    channel_desc = ", ".join(f"{ch}={name}" for ch, name in sorted(channels.items()))
+    log(f"logged into Reolink Hub at {cam_host}:{cam_port} (channels: {channel_desc}), "
         f"watching Buzz topic 'reolink', AI-poll every {POLL_SECONDS}s")
 
     try:
         while True:
             try:
-                await check_ai_detection(host_obj, channel)
-                claimed = await process_new_claim(host_obj, channel)
+                for ch, name in channels.items():
+                    await check_ai_detection(host_obj, ch, name)
+                claimed = await process_new_claim(host_obj, channels)
             except Exception as exc:
                 log(f"unhandled error this cycle, continuing: {exc}")
                 claimed = False

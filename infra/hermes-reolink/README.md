@@ -1,6 +1,6 @@
 # hermes-reolink — recreate checklist
 
-**Version:** 1.2.0
+**Version:** 2.0.0
 
 Reolink camera agent (`tools/hermes-reolink.py`) — owns the Buzz `reolink` topic (on-demand "check
 the camera" from Matrix chat) and runs an AI-detection poll loop (person/vehicle/pet, email-
@@ -13,31 +13,30 @@ battery-capable model) and over Wyze/Nest (both already built this session, both
 for this specific need). See `IMPLEMENTATION_PLAN.md`-adjacent context in
 `tools/hermes-reolink.py`'s own module docstring for the full reasoning.
 
-**BLOCKED as of 2026-09-03 — real hardware arrived and this design cannot reach it.** The camera is
-online at `10.129.1.19` (confirmed setup complete in the Reolink app, battery/solar model, no Home
-Hub or NVR owned). Live probing found: `ping` answers instantly and repeatedly, but ports
-80/443/9000/8000/554 all give an immediate connection refused, not a timeout. Reolink's own support
-documentation confirms this is expected, permanent behavior, not a misconfiguration: **standalone
-battery-powered cameras do not support local web/CGI API access at all** — a hardware/firmware
-limitation, not a setting. The only officially supported way to get programmatic local access to a
-battery camera is a **Reolink Home Hub or NVR**, which exposes its own local API and proxies to the
-paired camera. `reolink_aio`'s `Host(ip, user, pass)` approach this whole file is built on is
-LAN-only and has no cloud/P2P fallback (confirmed against the library's own docs) — so nothing here
-can be fixed by more timeout tuning or a settings change; it needs a Home Hub/NVR purchase and the
-camera re-paired to it. **Direct decision 2026-09-03: defer that purchase, ship an interim path
-instead** — see `hermes-reolink-mail-watch.py` below, which covers the AI-detection alert half of
-this design without needing any camera API at all. The on-demand "check the camera right now" chat
-path has no equivalent workaround and stays unavailable until a Hub/NVR exists.
+**UNBLOCKED 2026-09-06 — a Reolink Home Hub was purchased and three cameras are now paired to it.**
+(Historical record of the original blocker, since it's the reason the design looks the way it does:
+the first camera, a standalone battery/solar model at `10.129.1.19`, had no Home Hub/NVR — live
+probing found `ping` answering but every standard port connection-refused, and Reolink's own support
+docs confirmed standalone battery cameras have no local web/CGI API at all, full stop. A Home
+Hub/NVR was the only officially supported way to get local API access, so the purchase was deferred
+2026-09-03 and `hermes-reolink-mail-watch.py` below shipped as an interim, no-local-API-needed path
+instead.) With the Hub now owned and cameras paired to it, `hermes-reolink.py`'s original design
+(1.x) is reachable — and as of `hermes-reolink.py` 2.0.0 it's also **multi-camera**: one Hub login
+session serves all three channels, both for AI-detection polling and for on-demand "check the
+camera" chat requests (which now resolve to whichever camera(s) are named in the request, or to all
+three combined if none is named). See the file's own header comment and module docstring for the
+full design.
 
-**Update 2026-09-02 (still true, applies once a Hub/NVR makes this file reachable):**
+**Update 2026-09-02 (still true, now directly actionable with the Hub in hand):**
 `reolink_aio`'s method names/signatures (`login()`, `get_host_data()`, `get_snapshot(channel)`,
 `get_ai_state(channel)`, `logout()`) are confirmed correct by installing the library on spark-2 and
 reading its actual source — including a real bug this caught before any hardware existed:
 `get_ai_state()` silently returns `None` forever unless `get_host_data()` is called once after
 `login()` to populate the channel list (fixed in `hermes-reolink.py` 1.1.0). What's still genuinely
-unverifiable without going through a Hub/NVR: whether `get_ai_state()`'s real dict keys actually
-match `AI_LABELS = ("people", "vehicle", "dog_cat")`, and real call latency. Steps 2-3 below are
-what confirm those, once this path is unblocked.
+unverifiable without the real Hub in front of you: whether `get_ai_state()`'s real dict keys
+actually match `AI_LABELS = ("people", "vehicle", "dog_cat")`, real call latency, and (new as of
+2.0.0) whether `get_host_data()` enumerates all three paired channels from one login. The
+Verification section below is what confirms all of that.
 
 ## Interim path — `hermes-reolink-mail-watch.py` (active today, no Hub/NVR needed)
 
@@ -79,18 +78,20 @@ Runs on **Forge (spark-2)**, co-resident with `omni` — same placement reasonin
    it, and sent the cleaner alert to the fleet notification address.
 3. Confirm the source message is marked read in the mailbox afterward (not reprocessed next poll).
 
-## Original local-API path — `hermes-reolink.py` (blocked, needs a Home Hub/NVR — see above)
-
-Everything below this point is the original design, kept in full for when a Home Hub/NVR is
-purchased and this path is unblocked — not deleted, not currently actionable.
+## Local-API path — `hermes-reolink.py` (unblocked 2026-09-06, multi-camera as of 2.0.0)
 
 ### One-time setup
 
-1. On the camera itself (Reolink app or web UI): enable AI detection (person/vehicle/pet, whichever
-   are relevant) and note the camera's LAN IP, HTTPS port (default 443), and a local
-   username/password (a dedicated non-admin account is fine and preferable).
-2. In Vaultwarden, create item **`Hermes Reolink`** with fields: `host`, `port` (default `443`),
-   `username`, `password`, `channel` (default `0` — a single camera is always channel 0).
+1. On the Hub itself (Reolink app or web UI): pair all cameras to it, enable AI detection
+   (person/vehicle/pet, whichever are relevant) on each, and note the Hub's LAN IP, HTTPS port
+   (default 443), a local username/password (a dedicated non-admin account is fine and preferable),
+   and each camera's channel number on the Hub.
+2. In Vaultwarden, create item **`Hermes Reolink`** with fields: `host` (the **Hub's** LAN IP, not
+   any camera's own IP), `port` (default `443`), `username`, `password`, and `channels` — a JSON
+   object mapping channel number (as a string) to a camera name, e.g.
+   `{"0": "front-door", "1": "backyard", "2": "garage"}`. Camera names are what on-demand chat
+   requests match against (case-insensitively, `-`/`_` treated as spaces) to pick which camera(s) to
+   answer for — pick names people would actually type in Matrix chat.
 
 ### Python venv
 
@@ -111,54 +112,65 @@ sudo systemctl enable --now hermes-reolink.service
 
 Runs on **Forge (spark-2)**, co-resident with `omni` — same placement reasoning as
 `tools/hermes-media.py`/`tools/hermes-nest.py` (avoids a cross-node hop for the vision-model call).
-**Do not enable this yet against the current camera** — `async_main()`'s `camera_login()` call isn't
-wrapped in a try/except, so it will raise and crash-loop forever against a camera with no local API,
-accomplishing nothing but log noise and repeated Vaultwarden fetches.
 
-### Verification — run in this order once a Home Hub/NVR exists and this path is unblocked
+### Verification — run in this order, against the real Hub and all three cameras
 
-1. **Standalone login + snapshot smoke test**, no Buzz involved yet:
+1. **Standalone login + snapshot smoke test**, no Buzz involved yet — repeat the snapshot/AI-state
+   calls for every channel in your `channels` mapping, not just channel 0:
    ```python
    import asyncio
    from reolink_aio.api import Host
 
    async def test():
-       host = Host("<camera-ip>", "<username>", "<password>", port=443)
+       host = Host("<hub-ip>", "<username>", "<password>", port=443)
        await host.login()
        await host.get_host_data()  # required -- populates the channel list get_snapshot()/
-                                    # get_ai_state() both gate on; see hermes-reolink.py 1.1.0
-       data = await host.get_snapshot(0)
-       open("/tmp/reolink-test.jpg", "wb").write(data)
-       print(f"got {len(data)} bytes")
-       state = await host.get_ai_state(0)
-       print("AI state:", state)  # confirm real keys match AI_LABELS = ("people", "vehicle", "dog_cat")
+                                    # get_ai_state() both gate on; see hermes-reolink.py 1.1.0.
+                                    # Confirm this enumerates all three paired cameras, not just one
+                                    # (unverified as of 2.0.0 -- see module docstring).
+       for channel in (0, 1, 2):  # match your real channels vault field
+           data = await host.get_snapshot(channel)
+           open(f"/tmp/reolink-test-{channel}.jpg", "wb").write(data)
+           print(f"channel {channel}: got {len(data)} bytes")
+           state = await host.get_ai_state(channel)
+           print(f"channel {channel} AI state:", state)  # confirm real keys match
+                                                           # AI_LABELS = ("people", "vehicle", "dog_cat")
        await host.logout()
 
    asyncio.run(test())
    ```
-   Confirm a real JPEG is written, note the actual wall-clock time (this fleet's own discipline is
-   to measure real timeouts, never guess them — see `PROBE_TIMEOUT_SECONDS`/`NEST_TIMEOUT_SECONDS`
-   in the other camera agents for the precedent), and confirm `get_ai_state()`'s real dict keys
-   actually match `AI_LABELS` in `hermes-reolink.py` — correct the constant if not.
+   Confirm a real JPEG is written for each channel, note the actual wall-clock time (this fleet's
+   own discipline is to measure real timeouts, never guess them — see
+   `PROBE_TIMEOUT_SECONDS`/`NEST_TIMEOUT_SECONDS` in the other camera agents for the precedent), and
+   confirm `get_ai_state()`'s real dict keys actually match `AI_LABELS` in `hermes-reolink.py` —
+   correct the constant if not.
 
 2. **Buzz/dispatch registration**: restart `hermes-buzz.service`, confirm a manual
    `POST /messages` with `from=reolink`/`topic=reolink` is accepted.
 
-3. **On-demand path, end to end**: ask "check the camera" (or similar) in the Matrix room, confirm
-   routing lands on `reolink`, confirm a real, accurate description of the actual current camera
-   view arrives.
+3. **On-demand path, end to end** — test all three routing cases:
+   - Name one camera ("check the front door") — confirm only that camera's description comes back.
+   - Name two cameras — confirm both come back, labeled.
+   - Name none ("check the camera") — confirm all three come back, labeled, combined into one reply.
 
-4. **AI-detection path**: walk in front of the camera with person detection enabled, confirm a real
-   email arrives with an accurate description. Then stand in frame continuously and confirm it does
-   **not** re-fire every poll cycle (rising-edge logic, not level-triggered) — and confirm a second
-   walk-by inside `COOLDOWN_SECONDS_PER_DEVICE` is correctly dropped (logged, not silently ignored).
+4. **AI-detection path**: walk in front of each camera in turn with person detection enabled,
+   confirm a real email arrives naming the correct camera with an accurate description. Then stand
+   in frame continuously and confirm it does **not** re-fire every poll cycle (rising-edge logic,
+   not level-triggered) — and confirm a second walk-by inside `COOLDOWN_SECONDS_PER_DEVICE` is
+   correctly dropped (logged, not silently ignored). Also confirm one camera's cooldown doesn't
+   suppress another's (`device:{channel}` cooldown keys are per-channel).
 
 5. Restore any timeouts tuned down for testing to real, measured values before calling this done.
+
+6. Once this path is verified live, disable `hermes-reolink-mail-watch.service` — its AI-detection
+   alerting is now redundant (this path covers it for all three cameras plus the on-demand path it
+   could never provide). Don't delete the file; see its own header for why.
 
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 2.0.0 | 2026-09-06 | A Reolink Home Hub was purchased and three cameras paired to it, unblocking `hermes-reolink.py`'s local-API design. Bumped the file to 2.0.0 for multi-camera support: `channels` (channel-number → camera-name JSON map) replaces the single `channel` field, AI-detection polling loops every channel each cycle, and on-demand chat requests resolve to named camera(s) or, if none is named, all of them combined (direct decision — keeps "check the camera" meaningful as camera count grows). Verification checklist rewritten for multiple cameras and all three on-demand routing cases; added a step to disable `hermes-reolink-mail-watch.service` once this path is verified live, since it becomes redundant. |
 | 1.2.0 | 2026-09-03 | Camera arrived online at `10.129.1.19`. Live probing (ping succeeds, all standard ports refused) plus Reolink's own support docs confirmed standalone battery cameras have no local web/CGI API at all — `hermes-reolink.py`'s whole design is blocked until a Home Hub/NVR is purchased. Direct decision: defer that purchase, add `hermes-reolink-mail-watch.py` as an interim path covering the AI-detection alert half via the camera's own native email-on-detection feature. On-demand "check the camera" stays unavailable until a Hub/NVR exists. |
 | 1.1.0 | 2026-09-02 | Installed `reolink_aio` on spark-2 and read its actual source before any camera hardware existed — confirmed every method name/signature `hermes-reolink.py` calls, and found a real bug in the process: `get_ai_state()` needs `get_host_data()` called once after `login()` to populate the channel list, or it silently returns `None` forever. Fixed in `hermes-reolink.py` 1.1.0. Verification steps renumbered/updated to match. |
 | 1.0.0 | 2026-09-02 | Initial version — built after researching and recommending Reolink's solar/battery outdoor line for the requested "image pull and ID" skill, and confirming `reolink_aio` (Reolink-backed, actively maintained, what Home Assistant's own integration uses) as a stronger foundation than Wyze's reverse-engineered API or Nest's snapshot-trait-free SDM API. |
