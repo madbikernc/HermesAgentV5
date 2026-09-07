@@ -1,4 +1,12 @@
-// Version: 2.13.1
+// Version: 2.14.0
+//
+// 2.14.0 (2026-09-07) -- fourth of five scoped enhancements: self-defense. New checkSelfDefense()
+// on its own short timer (7s -- more time-sensitive than sleep's 30s), same idle-tick/busy-acting
+// pattern as checkSleep() -- flees (actions.js 1.12.0's new "flee") below half health with a
+// threat nearby, otherwise fights via the existing "attack." Deliberately the idle-tick version
+// scoped up front, not a true mid-action interrupt (see actions.js's own comment on why that's a
+// bigger design decision). "ACTION FLEE" also added to classifyIntent for direct-command parity
+// with every other action.
 //
 // 2.13.1 (2026-09-07) -- third of five scoped enhancements: cave-pathfinding cap. Real evidence
 // from tonight's own OOM crashes (hermes-minecraft-triage.py's log) traced to
@@ -215,7 +223,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile } from "./actions.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep } from "./goals.js";
 
@@ -426,6 +434,7 @@ async function classifyIntent(speaker, message) {
           `<count> is a small positive integer, default 4 if unstated. If no specific block is ` +
           `named, respond CHAT instead -- never invent a block.\n` +
           `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob\n` +
+          `ACTION FLEE - asks ${USERNAME} to run away from a nearby hostile mob instead of fighting it\n` +
           `ACTION LOOT - asks ${USERNAME} to check a nearby chest for equipment/gear\n` +
           `ACTION SLEEP - asks ${USERNAME} to go find a bed and sleep (only makes sense at ` +
           `night or during a thunderstorm)\n` +
@@ -458,6 +467,7 @@ async function classifyIntent(speaker, message) {
     if (verb === "FOLLOW") return { type: "action", action: { type: "follow" } };
     if (verb === "STOP") return { type: "action", action: { type: "stop" } };
     if (verb === "ATTACK") return { type: "action", action: { type: "attack" } };
+    if (verb === "FLEE") return { type: "action", action: { type: "flee" } };
     if (verb === "LOOT") return { type: "action", action: { type: "loot" } };
     if (verb === "SLEEP") return { type: "action", action: { type: "sleep" } };
     if (verb === "CRAFT") {
@@ -633,7 +643,7 @@ async function runAction(action, speaker, message, send) {
   try {
     const startLine = {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
-      mine: `off to gather some ${action.block}.`, attack: "engaging.",
+      mine: `off to gather some ${action.block}.`, attack: "engaging.", flee: "getting out of here!",
       loot: "checking a nearby chest.", craft: `let's see about crafting ${action.item}.`,
       sleep: "heading to bed.", smelt: `time to smelt some ${action.item}.`,
       place: `let's set up a ${action.item} here.`,
@@ -999,6 +1009,43 @@ async function checkSleep() {
 setInterval(() => {
   checkSleep().catch((err) => console.error(`[${USERNAME}] checkSleep error:`, err.message));
 }, SLEEP_CHECK_MS);
+
+// Fourth of five scoped enhancements, direct follow-up to "what other logic enhancements are
+// available" -> self-defense. A shorter interval than sleep's 30s since a nearby hostile is more
+// time-sensitive than the day/night cycle. Deliberately the idle-tick version: only fires when
+// nothing else has her attention (same busy/acting mutex everything else uses), not a true
+// mid-action interrupt -- see actions.js 1.12.0's own comment on why that's a bigger design
+// decision left for later rather than folded in here.
+const SELF_DEFENSE_CHECK_MS = parseInt(process.env.MC_SELF_DEFENSE_CHECK_MS || "7000", 10);
+// Out of a max of 20 -- flee rather than fight once she's below half health with a threat
+// actually nearby, same "correctness over guessing" reasoning as everywhere else tonight: an
+// exact threshold beats a vague "if hurt."
+const SELF_DEFENSE_FLEE_HEALTH = 10;
+const SELF_DEFENSE_RANGE = 12;
+
+async function checkSelfDefense() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
+  if (!threat) return;
+
+  busy = true;
+  acting = true;
+  try {
+    const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
+    console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
+    const result = await performAction(bot, { type }, USERNAME);
+    console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] self-defense check failed:`, err.message);
+  } finally {
+    busy = false;
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkSelfDefense().catch((err) => console.error(`[${USERNAME}] checkSelfDefense error:`, err.message));
+}, SELF_DEFENSE_CHECK_MS);
 
 // Setting a goal is a fast, synchronous-feeling operation (a disk write, not a physical
 // action) -- it runs inline inside handleIncoming's busy window rather than through runAction's

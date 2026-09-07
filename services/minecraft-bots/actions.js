@@ -1,4 +1,14 @@
-// Version: 1.11.0
+// Version: 1.12.0
+//
+// 1.12.0 (2026-09-07) -- fourth of five scoped enhancements: self-defense. New "flee" action
+// (GoalInvert wrapping a GoalFollow, confirmed against mineflayer-pathfinder's own goals.js --
+// negates the heuristic so pathfinder maximizes distance from the threat instead of closing it,
+// self-terminating once genuinely outside the wrapped radius rather than a guessed duration).
+// New exported nearestHostile() so HOSTILE_MOBS has one definition, shared with index.js's new
+// checkSelfDefense() rather than copied. Deliberately the idle-tick version scoped up front, not
+// true mid-action interrupt -- that would need a real exception to the `acting` flag that
+// currently exists specifically to prevent interruptions, a bigger design decision than this
+// pass's scope.
 //
 // 1.11.0 (2026-09-07) -- direct follow-up to "what other logic enhancements are available,"
 // first two of five scoped and built in order:
@@ -199,6 +209,14 @@ const HOSTILE_MOBS = new Set([
   "ghast", "guardian", "elder_guardian", "shulker", "vex", "vindicator", "evoker", "pillager",
   "ravager", "hoglin", "zoglin", "piglin_brute", "warden",
 ]);
+
+// Shared between the "attack"/"flee" actions here and index.js's checkSelfDefense() (fourth of
+// five scoped enhancements, direct follow-up to "what other logic enhancements are available")
+// so HOSTILE_MOBS has exactly one definition instead of two copies drifting apart.
+export function nearestHostile(bot, maxDistance = 16) {
+  return bot.nearestEntity((e) => e.type === "mob" && HOSTILE_MOBS.has(e.name) &&
+    e.position.distanceTo(bot.entity.position) <= maxDistance);
+}
 
 // Suffix-matched, same convention as equipment.js -- what's worth pulling out of a chest.
 // Food/blocks/misc items are left behind; this is specifically about gearing up.
@@ -577,7 +595,7 @@ export async function performAction(bot, action, speaker) {
     }
 
     case "attack": {
-      const target = bot.nearestEntity((e) => e.type === "mob" && HOSTILE_MOBS.has(e.name));
+      const target = nearestHostile(bot);
       if (!target) return fail("no hostile mobs nearby.");
       // bot.pvp.attack() resolves its own promise once the target is dead or lost -- no need
       // for a manually-wired event listener (confirmed against mineflayer-pvp's own .d.ts).
@@ -590,6 +608,27 @@ export async function performAction(bot, action, speaker) {
         await refreshGear(bot); // mob drops may include something worth wearing/wielding
       }
       return token.cancelled ? ok("broke off the fight.") : ok("took care of it.");
+    }
+
+    case "flee": {
+      // Fourth of five scoped enhancements ("what other logic enhancements are available" ->
+      // self-defense). GoalInvert negates the wrapped goal's heuristic, so pathfinder actively
+      // maximizes distance from the threat instead of closing it -- confirmed against
+      // mineflayer-pathfinder's own goals.js (heuristic() returns -goal.heuristic(); isEnd()
+      // returns !goal.isEnd(), so the flee goal is "reached" once genuinely outside the wrapped
+      // GoalFollow's own radius, not an arbitrary duration this code has to guess at).
+      const target = nearestHostile(bot);
+      if (!target) return ok("nothing to flee from.");
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalInvert(new goals.GoalFollow(target, 16))),
+          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped fleeing.");
+        return fail(`couldn't get away: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      return token.cancelled ? ok("stopped fleeing.") : ok("got some distance from it.");
     }
 
     case "sleep": {
