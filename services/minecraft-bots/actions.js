@@ -1,4 +1,11 @@
-// Version: 1.18.0
+// Version: 1.18.1
+//
+// 1.18.1 (2026-09-07) -- real gap found live minutes after standing up Mark/Luke (see index.js
+// 2.21.0's own changelog): the goal planner reasoned its way to "mine raw_iron" -- raw_iron is
+// the ITEM a player gets, never a real block id, so "mine" failed outright on exactly the first
+// real step of the "arm up" priority these two bots exist for. GENERIC_BLOCK_ALIASES now also
+// covers every raw_* ore item plus a few other common drop-vs-block mixups (coal, diamond,
+// emerald, lapis_lazuli, redstone), aliasing each to the block that actually drops it.
 //
 // 1.18.0 (2026-09-07) -- direct request: "the build attempts are too narrow. they should
 // understand classes of things. wood can be any form of wood, not just oak or spruce."
@@ -424,9 +431,18 @@ const BLOCK_FAMILY_GROUPS = [
   { match: ["_stained_glass_pane"] }, { match: ["_stained_glass"] },
   { match: ["_carpet"] },
 ];
+// Real gap found live, 2026-09-07, standing up Mark/Luke (military bots whose whole standing
+// goal is "arm up"): the goal planner reasoned its way to "mine raw_iron" -- raw_iron is the
+// ITEM a player gets, never a real block id, so this failed outright ("I don't recognize the
+// block") on exactly the step this build exists to make reliable. Same shape as the smelt
+// action's existing input/output normalization (accept either name); here every raw_* ore item
+// and a few other common drop-vs-block mixups alias to the block that actually drops them.
 const GENERIC_BLOCK_ALIASES = {
   log: "oak_log", logs: "oak_log", wood: "oak_log", planks: "oak_planks", plank: "oak_planks",
   wool: "white_wool", carpet: "white_carpet", concrete: "white_concrete", ore: "iron_ore",
+  raw_iron: "iron_ore", raw_copper: "copper_ore", raw_gold: "gold_ore",
+  coal: "coal_ore", diamond: "diamond_ore", emerald: "emerald_ore",
+  lapis_lazuli: "lapis_ore", redstone: "redstone_ore",
 };
 
 function resolveBlockFamily(bot, requestedName) {

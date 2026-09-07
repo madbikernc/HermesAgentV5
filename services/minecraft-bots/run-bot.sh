@@ -1,5 +1,16 @@
 #!/bin/bash
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-09-07) -- real bug found live standing up Mark/Luke (direct request: "ask Muse to
+# spawn two more bots"), the first bots ever run WITHOUT a matching entry in
+# minecraft-matrix.env: `grep` finding no match exits 1, and under `set -euo pipefail` a failed
+# command substitution inside `MATRIX_ACCESS_TOKEN="$(grep ... | cut ...)"` aborts the entire
+# script before node ever starts -- with zero output, since it dies before any echo/log line.
+# This path was always reachable in principle (a bot with no token is exactly what the `if
+# [ -n "$MATRIX_ACCESS_TOKEN" ]` check below exists to handle gracefully) but had literally never
+# been exercised, since Babs and Amy both happened to have real tokens from day one. `|| true`
+# neutralizes the grep pipeline's exit code on a genuine no-match, which is the actual intended
+# case here, not an error.
 #
 # 1.4.0 -- caps the Node heap at 768MB (--max-old-space-size). Real incident (2026-09-06): a
 # stuck mining action (actions.js's withTimeout not actually cancelling the underlying
@@ -48,7 +59,7 @@ MC_BOT_USERNAME="${MC_BOT_USERNAME:-Babs}"
 MATRIX_CREDS="$HOME/.hermes/minecraft-matrix.env"
 if [ -f "$MATRIX_CREDS" ]; then
   VAR_NAME="MC_MATRIX_$(echo "$MC_BOT_USERNAME" | tr '[:lower:]' '[:upper:]')_TOKEN"
-  MATRIX_ACCESS_TOKEN="$(grep "^${VAR_NAME}=" "$MATRIX_CREDS" | cut -d= -f2-)"
+  MATRIX_ACCESS_TOKEN="$(grep "^${VAR_NAME}=" "$MATRIX_CREDS" | cut -d= -f2- || true)"
   if [ -n "$MATRIX_ACCESS_TOKEN" ]; then
     export MATRIX_ACCESS_TOKEN
     export MATRIX_HOMESERVER="${MATRIX_HOMESERVER:-http://10.129.1.15:6167}"

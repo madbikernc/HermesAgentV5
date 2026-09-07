@@ -1,4 +1,34 @@
-// Version: 2.20.0
+// Version: 2.21.0
+//
+// 2.21.0 (2026-09-07) -- direct request: "ask Muse to spawn two more bots, named Mark and Luke,
+// with military oriented profiles, and priority towards arming themselves and defending the
+// spawn point." Persona content (agents/minecraft-mark, agents/minecraft-luke) was drafted by
+// the fleet's own "muse" model per the request's own wording, then fit into the standard
+// template with concrete priority directives -- see those files' own Revision History. Three
+// code changes here to actually support a 3rd/4th bot correctly, not just add two more entries
+// to a 2-bot-shaped system:
+// (1) BOT_USERNAMES default extended to "Babs,Amy,Mark,Luke" -- otherwise Mark/Luke's own chat
+//     would loop back through Babs/Amy's normal human-reply pipeline (see isAnotherBot()'s own
+//     comment on why that's the exact bug this list exists to prevent).
+// (2) Real gap found while reviewing the coordination code for 4-bot readiness: `otherBotGoal`
+//     was a single `let`, correct only for exactly two bots -- a 3rd/4th bot's Buzz broadcast
+//     would just overwrite it, silently losing track of whichever other bot posted first. Now
+//     `otherBotGoals`, a Map keyed by from_agent, with a shared otherGoalsNote() helper replacing
+//     two near-identical inline blocks in planNextStep/proposeOwnGoal.
+// (3) SELF_DEFENSE_FLEE_HEALTH/SELF_DEFENSE_RANGE are now env-configurable
+//     (MC_SELF_DEFENSE_FLEE_HEALTH/MC_SELF_DEFENSE_RANGE) rather than hardcoded constants, so
+//     Mark/Luke's own systemd units can run a lower flee threshold and wider detection range for
+//     an actually more combat-postured "defend the spawn point" behavior, without a second code
+//     path -- Babs/Amy are unaffected since they don't set these.
+// hermes-buzz.py 2.0.19 adds mc-mark/mc-luke to KNOWN_AGENTS (same convention as mc-babs/mc-amy).
+// infra/minecraft-bots/ gets minecraft-bot-mark.service and minecraft-bot-luke.service, same
+// shape as the existing babs/amy units.
+//
+// Known, deliberate gap: Mark and Luke do NOT have Matrix access tokens (~/.hermes/
+// minecraft-matrix.env has no MC_MATRIX_MARK_TOKEN/MC_MATRIX_LUKE_TOKEN entries -- creating new
+// Matrix accounts on Continuwuity is a separate provisioning step outside this request's scope).
+// This is the same best-effort fallback every bot already has -- see MATRIX_ACCESS_TOKEN's own
+// comment -- Buzz/in-game chat both work normally regardless.
 //
 // 2.20.0 (2026-09-07) -- direct request: "the build attempts are too narrow. they should
 // understand classes of things. wood can be any form of wood, not just oak or spruce." Purely a
@@ -399,7 +429,7 @@ function isBoss(speaker) {
 // bot-reacts-to-bot loop. Known bot identities are excluded from that pipeline entirely;
 // coordination between them happens over Buzz, not the in-game chat relevance/reply loop.
 const BOT_USERNAMES = new Set(
-  (process.env.MC_BOT_USERNAMES || "Babs,Amy").split(",").map((s) => s.trim()).filter(Boolean),
+  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke").split(",").map((s) => s.trim()).filter(Boolean),
 );
 
 function isAnotherBot(speaker) {
@@ -543,8 +573,23 @@ function recordGoalOutcome(description, outcome, reason) {
 // Cross-bot coordination (direct follow-up, 2026-09-07: "look for more ways to improve their
 // autonomy"), kept current by the "minecraft-coordination" Buzz subscription set up alongside
 // the existing "minecraft" one, near the bottom of this file.
-let otherBotGoal = null; // the other bot's last-known active goal description, or null if idle
+//
+// Real gap found live, 2026-09-07 ("ask Muse to spawn two more bots, named Mark and Luke"): this
+// was a single `let otherBotGoal`, correct only for exactly two bots -- with a 3rd/4th bot on the
+// roster, each new Buzz message would just overwrite it, silently losing track of every OTHER
+// bot's goal except whichever one posted most recently. Keyed by from_agent instead, so it
+// scales to however many bots are actually running.
+const otherBotGoals = new Map(); // from_agent -> last-known active goal description
 let pendingGiveRequest = null; // {forPlayer, item, count} she's agreed to fulfill, or null
+
+// Shared by planNextStep and proposeOwnGoal (previously two near-identical inline blocks, one
+// per singular `otherBotGoal` -- now one function over the Map, listing every other bot with an
+// active goal instead of assuming there's only ever one).
+function otherGoalsNote(intro) {
+  if (!otherBotGoals.size) return "";
+  const lines = [...otherBotGoals.entries()].map(([agent, desc]) => `- ${agent}: ${desc}`).join("\n");
+  return `\n\n${intro}\n${lines}`;
+}
 
 // Deliberately a separate topic from "minecraft" -- see hermes-buzz.py 2.0.18's own comment on
 // why (both bots relay everything they hear on "minecraft" into in-game chat; a raw JSON
@@ -991,11 +1036,10 @@ async function planNextStep(goal) {
     console.error(`[${USERNAME}] memory recall for planning failed:`, err.message);
   }
 
-  const otherGoalNote = otherBotGoal
-    ? `\n\nThe other bot is currently working on: "${otherBotGoal}" -- if your goal would mean ` +
-      `competing for the same scarce thing, consider whether ACTION REQUEST (ask her directly, ` +
-      `she may already have some) beats duplicating her work.`
-    : "";
+  const otherGoalNote = otherGoalsNote(
+    "Other bots currently working on something (if your goal would mean competing for the " +
+    "same scarce thing, consider whether ACTION REQUEST -- ask one of them directly, she may " +
+    "already have some -- beats duplicating her work):");
 
   const reply = await callRole(
     "dispatch",
@@ -1117,12 +1161,10 @@ async function proposeOwnGoal() {
   // Cross-bot goal coordination (direct follow-up, 2026-09-07: "look for more ways to improve
   // their autonomy"). Real collision observed live: both bots picked "get copper armor" at the
   // same time and both burned attempts on the same occupied furnaces -- duplicated effort neither
-  // needed. otherBotGoal is kept current by the "minecraft-coordination" Buzz subscription below.
-  const otherGoalNote = otherBotGoal
-    ? `\n\nThe other bot is currently working on: "${otherBotGoal}" -- avoid picking something ` +
-      `that duplicates or competes with that for the same scarce resource unless you have a ` +
-      `good reason to.`
-    : "";
+  // needed. otherBotGoals is kept current by the "minecraft-coordination" Buzz subscription below.
+  const otherGoalNote = otherGoalsNote(
+    "Other bots currently working on something (avoid picking something that duplicates or " +
+    "competes with one of these for the same scarce resource unless you have a good reason to):");
 
   const text = await callRole(
     "muse",
@@ -1373,9 +1415,13 @@ setInterval(() => {
 const SELF_DEFENSE_CHECK_MS = parseInt(process.env.MC_SELF_DEFENSE_CHECK_MS || "7000", 10);
 // Out of a max of 20 -- flee rather than fight once she's below half health with a threat
 // actually nearby, same "correctness over guessing" reasoning as everywhere else tonight: an
-// exact threshold beats a vague "if hurt."
-const SELF_DEFENSE_FLEE_HEALTH = 10;
-const SELF_DEFENSE_RANGE = 12;
+// exact threshold beats a vague "if hurt." Now env-configurable (direct request, 2026-09-07:
+// "ask Muse to spawn two more bots... military oriented profiles, priority towards arming
+// themselves and defending the spawn point") so a combat-postured bot (Mark/Luke) can run a
+// lower flee threshold and a wider detection range than the default -- same code, per-bot tuning
+// via each unit's own Environment= lines, no behavior change for Babs/Amy who don't set these.
+const SELF_DEFENSE_FLEE_HEALTH = parseInt(process.env.MC_SELF_DEFENSE_FLEE_HEALTH || "10", 10);
+const SELF_DEFENSE_RANGE = parseInt(process.env.MC_SELF_DEFENSE_RANGE || "12", 10);
 
 async function checkSelfDefense() {
   if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
@@ -1698,8 +1744,9 @@ bot.once("spawn", () => {
         return; // not a real coordination payload -- ignore rather than crash on it
       }
       if (payload.type === "goal") {
-        otherBotGoal = payload.status === "active" ? payload.description : null;
-        console.log(`[${USERNAME}] heard ${msg.from_agent}'s goal: ${otherBotGoal ?? "(idle)"}`);
+        if (payload.status === "active") otherBotGoals.set(msg.from_agent, payload.description);
+        else otherBotGoals.delete(msg.from_agent);
+        console.log(`[${USERNAME}] heard ${msg.from_agent}'s goal: ${payload.status === "active" ? payload.description : "(idle)"}`);
       } else if (payload.type === "request" && !pendingGiveRequest) {
         // Only agrees to fulfill one request at a time (first-come-first-served) -- simple and
         // sufficient at 2-bot scale, avoids overcommitting inventory she doesn't actually have

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 2.0.18
+# Version: 2.0.19
+#
+# 2.0.19 (2026-09-07) — added `mc-mark`, `mc-luke` to `KNOWN_AGENTS`, ahead of the two new
+# military-themed Minecraft bots' own first publish (direct request: "ask Muse to spawn two more
+# bots, named Mark and Luke... priority towards arming themselves and defending the spawn
+# point"). Same convention as `mc-babs`/`mc-amy` (2.0.16) — no new topics needed, they reuse
+# `minecraft`/`minecraft-coordination`, already a 2+ bot design.
 #
 # 2.0.18 (2026-09-07) — added `minecraft-coordination` to `KNOWN_TOPICS`, ahead of the Minecraft
 # bots' own first publish to it (direct request: "look for more ways to improve their autonomy")
@@ -203,7 +209,7 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "minecraft-triage"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "mc-mark", "mc-luke", "minecraft-triage"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1) plus
 # `minecraft` (shared broadcast topic for the bot coordination traffic KNOWN_AGENTS' mc-babs/
