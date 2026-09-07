@@ -1,4 +1,28 @@
-// Version: 2.16.0
+// Version: 2.17.0
+//
+// 2.17.0 (2026-09-07) -- direct request "do the frist 3" on a further four autonomy ideas
+// (explicitly excluding the 4th, Nether access -- flagged as a separate, larger decision and not
+// requested):
+// (1) Stuck detection: new checkStuck() on its own 30s timer, deliberately NOT gated by the
+//     busy/acting mutex like every other idle-tick check -- a jump nudge is harmless and
+//     compatible with any in-progress action, unlike the mutually-exclusive actions those checks
+//     guard. Tracks position once per interval; 5 straight minutes with under 0.1 blocks of
+//     movement triggers a half-second jump via bot.setControlState("jump", ...) (confirmed
+//     against mineflayer's physics.js source).
+// (2) Farming: new "harvest" action (actions.js 1.15.0) finds the nearest mature crop via
+//     bot.findBlocks + real block-state age checks (minecraft-data confirms wheat/carrots/
+//     potatoes mature at age 7, beetroots at age 3 -- no separate "ready" flag exists), digs it,
+//     and replants from the harvested drop when one's held. "ACTION HARVEST" added to
+//     classifyIntent for direct-command parity with every other action.
+// (3) Animal breeding: new "breed" action (actions.js 1.15.0) finds two same-species animals
+//     within 24 blocks, equips the right feed per species, and bot.activateEntity()s each in turn
+//     (confirmed as the real feed-to-breed mechanic against mineflayer's inventory.js source --
+//     no dedicated "breed" API exists). "ACTION BREED <species>" added to classifyIntent.
+// (4) Enchanting: new "enchant" action (actions.js 1.15.0) opens an enchanting table with the
+//     target item plus lapis, waits for the real options to populate, and takes the
+//     cheapest/first available enchantment (confirmed against mineflayer's
+//     enchantment_table.js -- .enchantments exposes real .level/.expected per slot, not a fixed
+//     three-slot table). "ACTION ENCHANT <item_id>" added to classifyIntent.
 //
 // 2.16.0 (2026-09-07) -- direct request "do all" on a further four autonomy ideas:
 // (1) death/respawn handling: new bot.on("death")/second bot.on("spawn") pair (confirmed against
@@ -515,6 +539,11 @@ async function classifyIntent(speaker, message) {
           `if unstated.\n` +
           `ACTION TRADE <item_id> - asks ${USERNAME} to trade with a nearby villager for a ` +
           `specific item she wants\n` +
+          `ACTION HARVEST - asks ${USERNAME} to pick a ripe crop nearby and replant it\n` +
+          `ACTION BREED <species> - asks ${USERNAME} to breed two nearby animals of the same ` +
+          `kind (e.g. cow, sheep, pig, chicken) using the right food\n` +
+          `ACTION ENCHANT <item_id> - asks ${USERNAME} to enchant an item she's carrying at a ` +
+          `nearby enchanting table (needs lapis lazuli)\n` +
           `ACTION CRAFT <item_id> <count> - asks ${USERNAME} to craft/make an item, ONLY if a ` +
           `specific item was actually named or clearly implied. <item_id> must be the exact ` +
           `modern Minecraft item id (e.g. stick, oak_planks, wooden_pickaxe, crafting_table). ` +
@@ -577,6 +606,15 @@ async function classifyIntent(speaker, message) {
     if (verb === "TRADE") {
       const item = (parts[2] || "").toLowerCase();
       if (item) return { type: "action", action: { type: "trade", item } };
+    }
+    if (verb === "HARVEST") return { type: "action", action: { type: "harvest" } };
+    if (verb === "BREED") {
+      const species = (parts[2] || "").toLowerCase();
+      if (species) return { type: "action", action: { type: "breed", species } };
+    }
+    if (verb === "ENCHANT") {
+      const item = (parts[2] || "").toLowerCase();
+      if (item) return { type: "action", action: { type: "enchant", item } };
     }
     if (verb === "MINE") {
       const block = (parts[2] || "").toLowerCase();
@@ -734,7 +772,9 @@ async function runAction(action, speaker, message, send) {
     : action.type === "smelt" ? `smelt ${action.item} x${action.count}`
     : action.type === "place" ? `place ${action.item}`
     : action.type === "give" ? `give ${action.player} ${action.item} x${action.count}`
-    : action.type === "store" ? `store ${action.item}` : action.type;
+    : action.type === "store" ? `store ${action.item}`
+    : action.type === "breed" ? `breed ${action.species}`
+    : action.type === "enchant" ? `enchant ${action.item}` : action.type;
   acting = true; // blocks the goal loop from stepping until this direct command is done
   try {
     const startLine = {
@@ -744,7 +784,8 @@ async function runAction(action, speaker, message, send) {
       sleep: "heading to bed.", smelt: `time to smelt some ${action.item}.`,
       place: `let's set up a ${action.item} here.`, eat: "grabbing a bite.",
       give: `bringing you some ${action.item}.`, store: `putting away some ${action.item}.`,
-      trade: "let's see what the villager has.",
+      trade: "let's see what the villager has.", harvest: "checking on the crops.",
+      breed: `let's get some ${action.species}s together.`, enchant: `let's enchant this ${action.item}.`,
     }[action.type];
     if (startLine) send(await narrateAction(startLine));
 
@@ -1346,6 +1387,40 @@ async function checkInventoryFull() {
 setInterval(() => {
   checkInventoryFull().catch((err) => console.error(`[${USERNAME}] checkInventoryFull error:`, err.message));
 }, INVENTORY_CHECK_MS);
+
+// Direct request, 2026-09-07 ("what else can we add" -> stuck-detection): robustness, not new
+// capability -- a periodic check for "hasn't moved at all in a long time," regardless of
+// busy/acting (deliberately NOT gated the same way as everything else: the whole point is to
+// catch a bot that's wedged mid-action, and a jump doesn't cancel or conflict with whatever's
+// actually running, unlike every other check here). A long threshold (5 minutes of literally
+// zero movement) rather than a short one -- she can legitimately stand still for a while
+// (idle, waiting to self-propose; sleeping; crafting/trading/enchanting at a fixed spot), and a
+// jump nudge is harmless even in a false-positive case, so there's no need to be clever about
+// distinguishing "genuinely idle" from "actually stuck," just patient about the threshold.
+const STUCK_CHECK_MS = parseInt(process.env.MC_STUCK_CHECK_MS || "30000", 10);
+const STUCK_THRESHOLD_MS = 5 * 60_000;
+
+let lastPosition = null;
+let lastMovedAt = Date.now();
+
+function checkStuck() {
+  if (!AUTONOMY_ENABLED || bot.isSleeping || !bot.entity) return;
+  const pos = bot.entity.position;
+  if (!lastPosition || pos.distanceTo(lastPosition) > 0.1) {
+    lastPosition = pos.clone();
+    lastMovedAt = Date.now();
+    return;
+  }
+  if (Date.now() - lastMovedAt < STUCK_THRESHOLD_MS) return;
+
+  console.log(`[${USERNAME}] possibly stuck -- no movement in ` +
+              `${Math.round((Date.now() - lastMovedAt) / 1000)}s, nudging`);
+  bot.setControlState("jump", true);
+  setTimeout(() => bot.setControlState("jump", false), 500);
+  lastMovedAt = Date.now(); // reset so this doesn't spam-nudge every 30s while still stuck
+}
+
+setInterval(checkStuck, STUCK_CHECK_MS);
 
 // Setting a goal is a fast, synchronous-feeling operation (a disk write, not a physical
 // action) -- it runs inline inside handleIncoming's busy window rather than through runAction's

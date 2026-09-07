@@ -1,4 +1,18 @@
-// Version: 1.14.0
+// Version: 1.15.0
+//
+// 1.15.0 (2026-09-07) -- direct request "do the first 3" (of four further autonomy ideas):
+// (1) farming: new "harvest" action -- picks a ripe crop and replants, simpler than farming from
+//     scratch since it needs no bare-dirt placement logic. Ages/replant items confirmed against
+//     minecraft-data's own block-state definitions. Deliberately searches broadly by block TYPE
+//     first (the proven-reliable pattern) and checks maturity via direct bot.blockAt() calls
+//     afterward, rather than trusting findBlocks' own function-matcher path to populate real
+//     block-state properties during the search itself -- never confirmed, not worth the risk.
+// (2) animal breeding: new "breed" action, built on mineflayer's own activateEntity() (core --
+//     the real feed-to-breed mechanic, no dedicated breeding API needed).
+// (3) enchanting: new "enchant" action, built on mineflayer's own openEnchantmentTable() (core).
+//     Picks the cheapest/first of the 3 offered options rather than real XP-affordability logic.
+// Stuck-detection (the third of the original four ideas) needed no actions.js changes -- it's
+// pure index.js logic (bot.setControlState(), no performAction case required).
 //
 // 1.14.0 (2026-09-07) -- direct request "do all" on a further four autonomy ideas:
 // (1) base/chest storage: new "store" action (bot.craft-adjacent inverse of "loot" -- deposit
@@ -1070,6 +1084,168 @@ export async function performAction(bot, action, speaker) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
       await refreshGear(bot);
       return ok("made it back to recover what I could.");
+    }
+
+    case "harvest": {
+      // Direct request, 2026-09-07 ("what else can we add" -> farming, a sustainable food
+      // source instead of always depending on looted/found food). Simpler than farming from
+      // scratch: harvest a crop that's already ripe and replant, rather than placing on bare
+      // dirt. Ages/replant items confirmed against minecraft-data's own block-state definitions
+      // (wheat/carrots/potatoes: age 0-7, mature at 7; beetroots: age 0-3, mature at 3).
+      const CROP_MAX_AGE = { wheat: 7, carrots: 7, potatoes: 7, beetroots: 3 };
+      const CROP_REPLANT = { wheat: "wheat_seeds", carrots: "carrot", potatoes: "potato", beetroots: "beetroot_seeds" };
+      const cropIds = Object.keys(CROP_MAX_AGE).map((n) => bot.registry.blocksByName[n]?.id)
+        .filter((id) => id !== undefined);
+      if (!cropIds.length) return fail("don't know how to recognize any crops here.");
+
+      // Real gap avoided here, not found live: findBlocks' own function-matcher path (used for
+      // beds/sleep elsewhere in this file) was never confirmed to populate real block-state
+      // properties DURING the search itself -- rather than assume, this searches broadly by
+      // block TYPE (the proven-reliable pattern, same as loot/smelt/store) and checks maturity
+      // afterward via direct bot.blockAt() calls, the exact pattern already confirmed working
+      // for the double-chest obstruction check.
+      const positions = bot.findBlocks({ matching: cropIds, maxDistance: 32, count: 15 });
+      const matureBlocks = positions.map((pos) => bot.blockAt(pos))
+        .filter((block) => block && Number(block.getProperties?.().age) === CROP_MAX_AGE[block.name]);
+      if (!matureBlocks.length) return fail("couldn't find any ripe crops nearby.");
+      const cropBlock = matureBlocks[0];
+
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(cropBlock.position.x,
+          cropBlock.position.y, cropBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+          () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way to the crop.");
+        return fail(`couldn't reach the crop: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped on the way to the crop.");
+
+      const farmlandPos = cropBlock.position.offset(0, -1, 0); // the crop sits on this block
+      try {
+        await bot.dig(cropBlock);
+      } catch (err) {
+        return fail(`couldn't harvest the ${cropBlock.name}: ${err.message}`);
+      }
+
+      const seedName = CROP_REPLANT[cropBlock.name];
+      const seedItem = bot.inventory.items().find((i) => i.name === seedName);
+      let replanted = false;
+      if (seedItem) {
+        try {
+          await bot.equip(seedItem, "hand");
+          await bot.placeBlock(bot.blockAt(farmlandPos), new Vec3(0, 1, 0));
+          replanted = true;
+        } catch (err) {
+          console.error(`harvest: replant failed:`, err.message); // harvest itself still succeeded
+        }
+      }
+      await refreshGear(bot);
+      return ok(`harvested some ${cropBlock.name}${replanted ? " and replanted" : ""}.`);
+    }
+
+    case "breed": {
+      // Direct request, 2026-09-07 ("what else can we add" -> animal breeding, the other half
+      // of a sustainable food source). Built on mineflayer's own activateEntity() (core --
+      // confirmed against inventory.js source: right-clicks the entity while holding whatever's
+      // equipped, exactly vanilla's own feed-to-breed mechanic, no dedicated "breed" API needed).
+      const BREEDING_FOOD = {
+        cow: ["wheat"], sheep: ["wheat"], pig: ["carrot", "potato", "beetroot"],
+        chicken: ["wheat_seeds", "pumpkin_seeds", "melon_seeds", "beetroot_seeds"],
+      };
+      const foods = BREEDING_FOOD[action.species];
+      if (!foods) return fail(`don't know how to breed a ${action.species}.`);
+      const foodItem = bot.inventory.items().find((i) => foods.includes(i.name));
+      if (!foodItem) return fail(`don't have the right food to breed a ${action.species} (need ${foods[0]}).`);
+
+      const animals = Object.values(bot.entities)
+        .filter((e) => e.name === action.species && e.position.distanceTo(bot.entity.position) <= 24)
+        .slice(0, 2);
+      if (animals.length < 2) {
+        return fail(`need two ${action.species}s nearby to breed, only found ${animals.length}.`);
+      }
+
+      try {
+        await bot.equip(foodItem, "hand");
+      } catch (err) {
+        return fail(`couldn't hold the ${foodItem.name}: ${err.message}`);
+      }
+
+      let fed = 0;
+      for (const animal of animals) {
+        if (token.cancelled) return ok("stopped breeding.");
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(animal, 2)), ACTION_TIMEOUT_MS,
+            () => bot.pathfinder.setGoal(null));
+          await bot.activateEntity(animal);
+          fed++;
+        } catch (err) {
+          console.error(`breed: couldn't feed one ${action.species}:`, err.message);
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+      }
+      if (!fed) return fail(`couldn't get close enough to feed any ${action.species}s.`);
+      return ok(`fed ${fed} ${action.species}${fed > 1 ? "s" : ""} -- hopefully a baby soon.`);
+    }
+
+    case "enchant": {
+      // Direct request, 2026-09-07 ("what else can we add" -> enchanting, a real mechanic
+      // untouched until now). Built on mineflayer's own openEnchantmentTable() (core) --
+      // confirmed against its source: putTargetItem()/putLapis() move items in, enchant(choice)
+      // picks one of the 3 offered options. Picks index 0 (the cheapest/first slot) rather than
+      // attempting real XP-affordability logic -- the safest default, not necessarily optimal.
+      const itemDef = bot.registry.itemsByName[action.item];
+      if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
+      const targetItem = bot.inventory.items().find((i) => i.type === itemDef.id);
+      if (!targetItem) return fail(`don't have a ${action.item} to enchant.`);
+      const lapisItem = bot.inventory.items().find((i) => i.name === "lapis_lazuli");
+      if (!lapisItem) return fail("don't have any lapis lazuli to enchant with.");
+
+      const tableType = bot.registry.blocksByName.enchanting_table;
+      if (!tableType) return fail("don't know how to recognize an enchanting table here.");
+      const enchFindOptions = { matching: tableType.id, maxDistance: 32, count: 1 };
+      let positions = bot.findBlocks(enchFindOptions);
+      if (!positions.length) positions = await wanderAndRetryFind(bot, token, enchFindOptions);
+      if (!positions.length) return fail("couldn't find an enchanting table nearby, even after looking around.");
+      const tableBlock = bot.blockAt(positions[0]);
+
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(tableBlock.position.x,
+          tableBlock.position.y, tableBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+          () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way to the enchanting table.");
+        return fail(`couldn't reach the enchanting table: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped on the way to the enchanting table.");
+
+      let table;
+      try {
+        table = await bot.openEnchantmentTable(tableBlock);
+        await table.putTargetItem(targetItem);
+        await table.putLapis(lapisItem);
+        if (!table.enchantments.some((e) => e.level > -1)) {
+          await withTimeout(new Promise((resolve) => table.once("ready", resolve)), 5000, () => {});
+        }
+        const optionIndex = table.enchantments.findIndex((e) => e.level > -1);
+        if (optionIndex < 0) {
+          await table.takeTargetItem().catch(() => {});
+          await table.close();
+          return fail("no enchantments available right now (maybe needs more bookshelves or levels).");
+        }
+        await table.enchant(optionIndex);
+        await table.takeTargetItem();
+        await table.close();
+      } catch (err) {
+        try { await table?.close(); } catch { /* already closed or never opened cleanly */ }
+        return fail(`couldn't enchant the ${action.item}: ${err.message}`);
+      }
+      await refreshGear(bot);
+      return ok(`enchanted the ${action.item}.`);
     }
 
     default:
