@@ -1,4 +1,14 @@
-// Version: 2.11.3
+// Version: 2.11.4
+//
+// 2.11.4 (2026-09-07) -- real gap found live minutes after 2.11.3 shipped: even with the
+// loot-before-BLOCKED requirement (2.11.2), a self-proposed goal phrased around an impossible
+// METHOD ("smelt the copper into ingots") made the planner treat the goal as literally requiring
+// that verb and go BLOCKED immediately, reasoning "the goal explicitly asks to smelt" -- never
+// trying LOOT even though Recent progress was empty. The instruction to reinterpret charitably
+// wasn't enough once the goal text itself named an impossible verb. Real fix is upstream:
+// proposeOwnGoal's prompt now requires goals be phrased around the OUTCOME wanted ("get some
+// copper armor"), never a specific method she can't perform ("smelt X", "build X") -- an
+// outcome-phrased goal leaves room for the planner to reach it by looting instead.
 //
 // 2.11.3 (2026-09-07) -- two more real gaps found live within minutes of 2.11.2 shipping: (1) a
 // factually-confused self-proposed goal ("smashing cobblestone into planks" -- planks come from
@@ -676,9 +686,12 @@ async function proposeOwnGoal() {
           `come from ingots or logs+stone, ingots only come from smelting ore in a furnace (you ` +
           `have none). You also have NO ability to build or place structures at all -- never ` +
           `propose a goal about building/placing something (a house, a base, a wall); stick to ` +
-          `gearing up, gathering a resource, or crafting a portable item. Respond with ONLY a ` +
-          `short phrase naming the goal, in your own words -- nothing else, no quotes.\n\n` +
-          `${gearNote}${memoryNote}`,
+          `gearing up, gathering a resource, or crafting a portable item. Phrase the goal around ` +
+          `the OUTCOME you want (e.g. "get some copper armor," "stock up on iron"), never around ` +
+          `a specific method you can't perform yourself (never say "smelt X" or "build X") -- an ` +
+          `outcome-phrased goal leaves room to get there by looting instead, a method-phrased one ` +
+          `doesn't. Respond with ONLY a short phrase naming the goal, in your own words -- ` +
+          `nothing else, no quotes.\n\n${gearNote}${memoryNote}`,
       },
       { role: "user", content: "What's your goal?" },
     ],
