@@ -1,4 +1,12 @@
-// Version: 2.12.2
+// Version: 2.12.3
+//
+// 2.12.3 (2026-09-07) -- real gap found live: both bots kept self-proposing the exact same goal
+// (e.g. "smelt some copper") immediately after giving up on it, since proposeOwnGoal had no
+// memory of what she'd just tried -- an unproductive loop across separate goal cycles, distinct
+// from and not fixed by anything within a single goal's own retry/consecutiveFailures logic. New
+// recentGoalOutcomes (small, capped) records every done/gave-up outcome and gets folded into the
+// self-propose prompt as data to reason about, not a hard blocklist -- sometimes repeating IS
+// right (e.g. she just looted fuel she didn't have before).
 //
 // 2.12.2 (2026-09-07) -- two real gaps found live minutes after smelting shipped: (1) planNextStep
 // never told the planner SMELT needs fuel, or what to do about it -- a bot with raw copper but no
@@ -330,6 +338,18 @@ let currentGoal = null;
 // Updated on every real chat/whisper/Matrix line and every goal set by a player -- the goal
 // loop only ever proposes her own goal after this has been quiet a while (IDLE_BEFORE_SELF_GOAL_MS).
 let lastActivityAt = Date.now();
+// Real gap found live (2026-09-07): with no memory of what she just gave up on, proposeOwnGoal
+// kept re-picking the same goal (e.g. "smelt some copper") immediately after giving up on it for
+// an environmental reason that hadn't changed (no unoccupied furnace nearby) -- an unproductive
+// loop, not a bug in any single step. Capped small (not full history) since only the most recent
+// couple of outcomes are relevant to "should I try this again right now."
+const RECENT_GOAL_OUTCOMES_MAX = 4;
+let recentGoalOutcomes = [];
+
+function recordGoalOutcome(description, outcome, reason) {
+  recentGoalOutcomes.push({ description, outcome, reason });
+  if (recentGoalOutcomes.length > RECENT_GOAL_OUTCOMES_MAX) recentGoalOutcomes.shift();
+}
 
 loadGoal(PERSONA_NAME).then((g) => {
   currentGoal = g;
@@ -737,6 +757,19 @@ async function proposeOwnGoal() {
     console.error(`[${USERNAME}] memory recall for self-goal failed:`, err.message);
   }
 
+  // Real gap found live (2026-09-07): with no memory of what she just gave up on, this kept
+  // re-picking the same goal (e.g. "smelt some copper") immediately after abandoning it for an
+  // environmental reason that hadn't changed (no unoccupied furnace nearby) -- an unproductive
+  // loop across separate goal cycles, distinct from and not fixed by anything within a single
+  // goal's own retry logic. Handed to the model as data to reason about (not a hard blocklist)
+  // since sometimes repeating IS right -- e.g. if she just looted fuel she didn't have before.
+  const recentOutcomesNote = recentGoalOutcomes.length
+    ? "\n\nYour last few goals:\n" + recentGoalOutcomes.map((o) =>
+        `- "${o.description}" -> ${o.outcome}${o.reason ? ` (${o.reason})` : ""}`).join("\n") +
+      "\nIf you gave up on something recently for a reason that hasn't changed (check your " +
+      "gear/inventory below), pick something different instead of immediately repeating it."
+    : "";
+
   const text = await callRole(
     "muse",
     [
@@ -756,7 +789,7 @@ async function proposeOwnGoal() {
           `"stock up on iron") rather than one specific method, since more than one way to get ` +
           `there might work -- but naming smelting/crafting as part of it is fine now, unlike ` +
           `building, which is never possible. Respond with ONLY a short phrase naming the goal, ` +
-          `in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}`,
+          `in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}${recentOutcomesNote}`,
       },
       { role: "user", content: "What's your goal?" },
     ],
@@ -819,6 +852,7 @@ async function goalTick() {
     if (parsed.type === "done") {
       console.log(`[${USERNAME}] goal complete: ${currentGoal.description}`);
       bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
+      recordGoalOutcome(currentGoal.description, "done", null);
       currentGoal = null;
       await clearGoal(PERSONA_NAME);
       return;
@@ -832,6 +866,7 @@ async function goalTick() {
       if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
         bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${parsed.reason}.`));
+        recordGoalOutcome(currentGoal.description, "gave up", parsed.reason);
         currentGoal = null;
         await clearGoal(PERSONA_NAME);
       } else {
@@ -849,6 +884,7 @@ async function goalTick() {
     if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
       console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
       bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${result.text}`));
+      recordGoalOutcome(currentGoal.description, "gave up", result.text);
       currentGoal = null;
       await clearGoal(PERSONA_NAME);
       return;
