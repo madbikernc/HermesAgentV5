@@ -1,4 +1,12 @@
-// Version: 2.11.0
+// Version: 2.11.1
+//
+// 2.11.1 (2026-09-07) -- real gap found live within minutes of 2.11.0 shipping: every goal-loop
+// transition (a step taken, DONE, BLOCKED, giving up) only ever reached the player via bot.chat
+// (in-game) or the goal's own persisted log -- nothing printed to console/journalctl, so a crash
+// inside a step (see actions.js 1.8.1) left no trace to diagnose from except reading goal.json
+// directly after the fact. Added explicit console.log for every one of these transitions --
+// same "correctness/diagnosability over log-volume minimalism" instruction that made 2.10.0's
+// path_update logging permanent.
 //
 // Firmament Minecraft bot orchestrator. Connects one bot and wires the first real decision
 // loop: chat perception -> cheap relevance classification (dispatch role) -> in-character
@@ -643,9 +651,12 @@ async function goalTick() {
   busy = true;
   acting = true;
   try {
-    const parsed = parseGoalStep(await planNextStep(currentGoal));
+    const stepLine = await planNextStep(currentGoal);
+    const parsed = parseGoalStep(stepLine);
+    console.log(`[${USERNAME}] goal plan: ${stepLine}`);
 
     if (parsed.type === "done") {
+      console.log(`[${USERNAME}] goal complete: ${currentGoal.description}`);
       bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
       currentGoal = null;
       await clearGoal(PERSONA_NAME);
@@ -655,7 +666,10 @@ async function goalTick() {
     if (parsed.type === "blocked") {
       logStep(currentGoal, `blocked: ${parsed.reason}`);
       currentGoal.consecutiveFailures += 1;
+      console.log(`[${USERNAME}] goal blocked (${currentGoal.consecutiveFailures}/` +
+                  `${MAX_CONSECUTIVE_FAILURES}): ${parsed.reason}`);
       if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
         bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${parsed.reason}.`));
         currentGoal = null;
         await clearGoal(PERSONA_NAME);
@@ -668,8 +682,11 @@ async function goalTick() {
     const result = await performAction(bot, parsed.action, currentGoal.setBy || USERNAME);
     logStep(currentGoal, `${parsed.action.type}: ${result.text}`);
     currentGoal.consecutiveFailures = result.ok ? 0 : currentGoal.consecutiveFailures + 1;
+    console.log(`[${USERNAME}] goal step: ${parsed.action.type} -> ${result.text} ` +
+                `(ok=${result.ok}, consecutiveFailures=${currentGoal.consecutiveFailures})`);
 
     if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
       bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${result.text}`));
       currentGoal = null;
       await clearGoal(PERSONA_NAME);

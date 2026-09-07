@@ -1,4 +1,13 @@
-// Version: 1.8.0
+// Version: 1.8.1
+//
+// 1.8.1 (2026-09-07) -- real crash found live within minutes of the autonomy goal loop
+// shipping: both bots' very first self-proposed crafting step (copper_ingot, furnace) crashed
+// with "recipe.ingredients is not iterable" -- craftItem()'s shortfall-resolution loop assumed
+// every candidate from recipesAll() has a real ingredients array, which isn't true for an item
+// that's smelting-only (this action has no furnace support at all, only bot.craft()'s crafting-
+// table/grid). Now skips any candidate without one, so an unsupported item fails cleanly instead
+// of crashing the step. Found from goal.json's own persisted log, not a guess -- see index.js
+// 2.11.1's new goal-loop console logging, added for exactly this kind of diagnosis.
 //
 // 1.8.0 (2026-09-07) -- autonomy (standing goals, direct request "give her more autonomy to
 // work towards longer goals"): performAction() now returns { ok, text } instead of a bare
@@ -194,6 +203,17 @@ async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
     // *would* need, not actually crafting with it.
     const candidateRecipes = bot.recipesAll(itemDef.id, null, tableBlock ?? true);
     for (const recipe of candidateRecipes) {
+      // Real crash found live (2026-09-07, autonomy goal loop): recipesAll() for items that are
+      // ONLY ever obtained by smelting (e.g. copper_ingot from raw_copper, furnace itself was a
+      // red herring -- the actual candidate recipe minecraft-data returned here had no usable
+      // ingredients list) returned at least one recipe object without a real, iterable
+      // `ingredients` array -- `for...of` over it threw "is not iterable" and crashed the whole
+      // craft attempt instead of just skipping that one unusable candidate. Smelting isn't
+      // supported by this action at all (bot.craft() is crafting-table/grid only, a furnace is a
+      // separate mineflayer API this doesn't implement) -- skipping non-array ingredients here
+      // means an unsupported smelting-only item now fails cleanly ("don't have the ingredients")
+      // instead of crashing the bot's whole craft/goal step.
+      if (!Array.isArray(recipe.ingredients)) continue;
       for (const ing of recipe.ingredients) {
         const ingName = bot.registry.items[ing.id]?.name;
         if (!ingName) continue;
