@@ -1,4 +1,17 @@
-// Version: 1.10.3
+// Version: 1.11.0
+//
+// 1.11.0 (2026-09-07) -- direct follow-up to "what other logic enhancements are available,"
+// first two of five scoped and built in order:
+// (1) explore/wander: the single biggest recurring blocker across a whole night's live testing
+//     was "couldn't find X nearby" purely because nothing existed within the normal maxDistance
+//     of wherever the bot happened to be standing. New wanderAndRetryFind() -- ONE bounded
+//     wander-then-retry per failed search (mine/loot/smelt), not open-ended exploration, since
+//     long-distance pathfinding is exactly what's been linked to tonight's OOM crashes.
+// (2) place: bots could craft a furnace/crafting table but had no way to actually use one they
+//     made themselves, only ones already in the world -- a real dead end hit live tonight. New
+//     "place" action, built on mineflayer's own placeBlock() (core). Deliberately narrow: one
+//     utility block next to herself, not a general building capability, which stays explicitly
+//     out of scope (see this file's own header, unchanged).
 //
 // 1.10.3 (2026-09-07) -- diagnostic: the same 3 furnaces failed "destination full" across
 // several separate goal attempts tonight -- logging each slot's actual contents on open so a
@@ -164,6 +177,7 @@
 import pathfinderPkg from "mineflayer-pathfinder";
 import collectBlockPkg from "mineflayer-collectblock";
 import pvpPkg from "mineflayer-pvp";
+import { Vec3 } from "vec3";
 import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipment.js";
 
 const { goals } = pathfinderPkg;
@@ -225,6 +239,37 @@ function pickFuel(bot) {
     if (item) return item;
   }
   return bot.inventory.items().find((i) => i.name.endsWith("_planks") || i.name.endsWith("_log"));
+}
+
+// Direct request, 2026-09-07 ("what other logic enhancements are available" -> "explore/
+// wander"): the single biggest recurring blocker across a whole night's live testing was
+// "couldn't find X nearby" (wood, ore, chests) purely because nothing existed within the normal
+// maxDistance of wherever the bot happened to be standing -- with no way to deliberately look
+// further. Deliberately bounded, not open-ended exploration: ONE wander-then-retry per failed
+// search, a fixed modest distance, not a search loop. This runs the same kind of long-distance
+// pathfinding linked to tonight's cave-pathfinding OOM crashes, so it stays conservative
+// (EXPLORE_DISTANCE well under a chunk-loading concern, a real timeout on the wander itself)
+// rather than searching further and further outward.
+const EXPLORE_DISTANCE = 40;
+const EXPLORE_TIMEOUT_MS = 30_000;
+
+async function wanderAndRetryFind(bot, token, findOptions) {
+  if (token.cancelled) return [];
+  const angle = Math.random() * Math.PI * 2;
+  const dx = Math.round(Math.cos(angle) * EXPLORE_DISTANCE);
+  const dz = Math.round(Math.sin(angle) * EXPLORE_DISTANCE);
+  const target = bot.entity.position.offset(dx, 0, dz);
+  try {
+    await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 4)),
+      EXPLORE_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+  } catch {
+    // Couldn't fully reach the wander point (cliff, water, whatever's out there) -- still worth
+    // searching from wherever she actually ended up rather than giving up on wandering entirely.
+  } finally {
+    bot.pathfinder.setGoal(null);
+  }
+  if (token.cancelled) return [];
+  return bot.findBlocks(findOptions);
 }
 
 export function loadActionPlugins(bot) {
@@ -381,8 +426,10 @@ export async function performAction(bot, action, speaker) {
     case "mine": {
       const blockType = bot.registry.blocksByName[action.block];
       if (!blockType) return fail(`I don't recognize the block "${action.block}".`);
-      const positions = bot.findBlocks({ matching: blockType.id, maxDistance: 32, count: action.count });
-      if (!positions.length) return fail(`couldn't find any ${action.block} nearby.`);
+      const findOptions = { matching: blockType.id, maxDistance: 32, count: action.count };
+      let positions = bot.findBlocks(findOptions);
+      if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
+      if (!positions.length) return fail(`couldn't find any ${action.block} nearby, even after looking around.`);
       const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
       try {
         await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
@@ -446,8 +493,10 @@ export async function performAction(bot, action, speaker) {
       // MAX_CANDIDATES in distance order, skipping to the next on any per-chest failure
       // (obstructed, unreachable, won't open) instead of giving up after the first one.
       const MAX_CANDIDATES = 3;
-      const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: MAX_CANDIDATES });
-      if (!positions.length) return fail("couldn't find any chests nearby.");
+      const lootFindOptions = { matching: matchIds, maxDistance: 32, count: MAX_CANDIDATES };
+      let positions = bot.findBlocks(lootFindOptions);
+      if (!positions.length) positions = await wanderAndRetryFind(bot, token, lootFindOptions);
+      if (!positions.length) return fail("couldn't find any chests nearby, even after looking around.");
 
       let sawObstruction = false;
       for (const pos of positions) {
@@ -632,8 +681,10 @@ export async function performAction(bot, action, speaker) {
       const matchIds = furnaceNames.map((n) => bot.registry.blocksByName[n]?.id)
         .filter((id) => id !== undefined);
       if (!matchIds.length) return fail("don't know how to recognize a furnace here.");
-      const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: 3 });
-      if (!positions.length) return fail("couldn't find a furnace nearby.");
+      const furnaceFindOptions = { matching: matchIds, maxDistance: 32, count: 3 };
+      let positions = bot.findBlocks(furnaceFindOptions);
+      if (!positions.length) positions = await wanderAndRetryFind(bot, token, furnaceFindOptions);
+      if (!positions.length) return fail("couldn't find a furnace nearby, even after looking around.");
 
       for (const pos of positions) {
         if (token.cancelled) return ok("stopped on the way to a furnace.");
@@ -704,6 +755,46 @@ export async function performAction(bot, action, speaker) {
         }
       }
       return fail("found furnaces nearby, but couldn't use any of them.");
+    }
+
+    case "place": {
+      // Direct request, 2026-09-07: bots could craft a furnace or crafting table but had no way
+      // to actually use one they made themselves, only ones already sitting in the world -- a
+      // real dead end hit live tonight. Deliberately narrow: ONE utility block, right next to
+      // herself, not a general building capability -- structure placement stays explicitly out
+      // of scope (see this file's own header). Built on mineflayer's own placeBlock() (core, no
+      // extra plugin).
+      const heldCandidate = bot.inventory.items().find((i) => i.name === action.item);
+      if (!heldCandidate) return fail(`don't have a ${action.item} to place.`);
+
+      try {
+        await bot.equip(heldCandidate, "hand");
+      } catch (err) {
+        return fail(`couldn't hold the ${action.item} to place it: ${err.message}`);
+      }
+      if (token.cancelled) return ok("stopped before placing it.");
+
+      // A cardinal-adjacent spot with solid ground and clear air above it -- simpler and more
+      // robust than assuming the block directly below her own feet works, since that's
+      // literally where she's standing.
+      const feet = bot.entity.position.floored();
+      let referenceBlock = null;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const ground = bot.blockAt(feet.offset(dx, -1, dz));
+        const space = bot.blockAt(feet.offset(dx, 0, dz));
+        if (ground?.boundingBox === "block" && space && space.boundingBox !== "block") {
+          referenceBlock = ground;
+          break;
+        }
+      }
+      if (!referenceBlock) return fail("no clear spot nearby to place it.");
+
+      try {
+        await bot.placeBlock(referenceBlock, new Vec3(0, 1, 0));
+      } catch (err) {
+        return fail(`couldn't place the ${action.item}: ${err.message}`);
+      }
+      return ok(`placed a ${action.item}.`);
     }
 
     default:

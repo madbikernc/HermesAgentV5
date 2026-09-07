@@ -1,4 +1,12 @@
-// Version: 2.12.3
+// Version: 2.13.0
+//
+// 2.13.0 (2026-09-07) -- direct follow-up to "what other logic enhancements are available,"
+// first two of five scoped and built in order: "ACTION PLACE <item_id>" wired throughout
+// (classifyIntent so a player can ask directly, planNextStep's vocabulary and SMELT/CRAFT
+// guidance -- placing a spare furnace/table she's carrying is now the preferred fallback over
+// giving up or looting, proposeOwnGoal's own placement claim corrected to match). Explore/wander
+// (actions.js 1.11.0's wanderAndRetryFind()) needed no wiring here -- it's internal to
+// mine/loot/smelt's own existing "not found" handling, not a new verb the planner needs to know.
 //
 // 2.12.3 (2026-09-07) -- real gap found live: both bots kept self-proposing the exact same goal
 // (e.g. "smelt some copper") immediately after giving up on it, since proposeOwnGoal had no
@@ -410,6 +418,9 @@ async function classifyIntent(speaker, message) {
           `similar) at a furnace, ONLY if a specific output was actually named or clearly ` +
           `implied (e.g. iron_ingot, copper_ingot, gold_ingot, glass, stone). <count> is a small ` +
           `positive integer, default 1 if unstated.\n` +
+          `ACTION PLACE <item_id> - asks ${USERNAME} to place a block she's carrying right next ` +
+          `to herself (e.g. a furnace or crafting_table she crafted). ONLY for placing one ` +
+          `utility block for her own use, never for building/constructing anything.\n` +
           `ACTION GOAL <description> - gives ${USERNAME} a standing objective to keep working ` +
           `on by herself over time (not a single one-off task), e.g. "get full iron armor" or ` +
           `"stock up on wood". Only use this if the speaker is clearly assigning an ongoing ` +
@@ -438,6 +449,10 @@ async function classifyIntent(speaker, message) {
       const item = (parts[2] || "").toLowerCase();
       const count = parseInt(parts[3], 10);
       if (item) return { type: "action", action: { type: "smelt", item, count: count > 0 ? count : 1 } };
+    }
+    if (verb === "PLACE") {
+      const item = (parts[2] || "").toLowerCase();
+      if (item) return { type: "action", action: { type: "place", item } };
     }
     if (verb === "MINE") {
       const block = (parts[2] || "").toLowerCase();
@@ -592,7 +607,8 @@ async function runAction(action, speaker, message, send) {
   // Recording the full parsed action alongside the original text fixes that for next time.
   const actionDesc = action.type === "mine" ? `mine ${action.block} x${action.count}`
     : action.type === "craft" ? `craft ${action.item} x${action.count}`
-    : action.type === "smelt" ? `smelt ${action.item} x${action.count}` : action.type;
+    : action.type === "smelt" ? `smelt ${action.item} x${action.count}`
+    : action.type === "place" ? `place ${action.item}` : action.type;
   acting = true; // blocks the goal loop from stepping until this direct command is done
   try {
     const startLine = {
@@ -600,6 +616,7 @@ async function runAction(action, speaker, message, send) {
       mine: `off to gather some ${action.block}.`, attack: "engaging.",
       loot: "checking a nearby chest.", craft: `let's see about crafting ${action.item}.`,
       sleep: "heading to bed.", smelt: `time to smelt some ${action.item}.`,
+      place: `let's set up a ${action.item} here.`,
     }[action.type];
     if (startLine) send(await narrateAction(startLine));
 
@@ -657,6 +674,10 @@ function parseGoalStep(text) {
         const count = parseInt(parts[3], 10);
         if (item) return { type: "step", action: { type: "smelt", item, count: count > 0 ? count : 1 } };
       }
+      if (verb === "PLACE") {
+        const item = (parts[2] || "").toLowerCase();
+        if (item) return { type: "step", action: { type: "place", item } };
+      }
       if (verb === "MINE") {
         const block = (parts[2] || "").toLowerCase();
         const count = parseInt(parts[3], 10);
@@ -692,16 +713,21 @@ async function planNextStep(goal) {
           `item. SMELT also needs FUEL (coal, charcoal, or any log/planks) -- if it fails for ` +
           `lack of fuel and she has no coal/charcoal, mine a log (ACTION MINE oak_log or ` +
           `whatever log is nearby) rather than repeating the same smelt attempt; any log works ` +
-          `as furnace fuel. Only fall back to ACTION LOOT for one of these if she has the raw ` +
-          `material and fuel but SMELT still fails, or has no furnace reachable at all.\n` +
+          `as furnace fuel. If SMELT/CRAFT fails specifically because no furnace/crafting table ` +
+          `is reachable, check her inventory for a spare one first -- ACTION PLACE it rather than ` +
+          `giving up or looting, since placing a utility block she already made is faster and ` +
+          `more reliable than hoping a chest has what she needs. Only fall back to ACTION LOOT if ` +
+          `she has the raw material and fuel but SMELT still fails, or has no furnace reachable ` +
+          `and none to place.\n` +
           `Common material chain: sticks and a crafting table both need planks; planks come from ` +
           `logs. If a craft fails for missing ingredients, check whether she's missing the raw ` +
           `material (e.g. no logs at all) rather than the item itself -- mine the raw material ` +
           `first instead of retrying the same craft.\n` +
-          `She also has NO ability to build or place structures at all. If the goal is actually ` +
-          `about building/placing something (a house, a base, a wall) rather than gearing up/` +
-          `gathering/crafting a portable item, respond BLOCKED immediately -- don't gather ` +
-          `materials for a structure that can never actually get built.\n\n` +
+          `She can place ONE utility block she's carrying (a furnace or crafting table, ACTION ` +
+          `PLACE) for her own use, but has NO ability to build or place actual structures. If the ` +
+          `goal is really about building/placing something bigger (a house, a base, a wall) ` +
+          `rather than gearing up/gathering/crafting a portable item, respond BLOCKED immediately ` +
+          `-- don't gather materials for a structure that can never actually get built.\n\n` +
           `Given the goal, her current gear/inventory, and what she's already tried below, you ` +
           `may reason briefly first -- AT MOST one short sentence, no matter how confusing or ` +
           `factually off the goal description sounds (reinterpret it charitably as the closest ` +
@@ -716,6 +742,8 @@ async function planNextStep(goal) {
           `ACTION SMELT <item_id> <count> - smelt raw material into an ingot (or similar) at a ` +
           `furnace. <item_id> is the OUTPUT (e.g. iron_ingot), the exact modern Minecraft item ` +
           `id -- never invent one.\n` +
+          `ACTION PLACE <item_id> - place a furnace or crafting_table she's already carrying, ` +
+          `right next to herself, when SMELT/CRAFT needs one and none is reachable.\n` +
           `ACTION LOOT - check the nearest chest for gear\n` +
           `ACTION ATTACK - fight a nearby hostile mob\n` +
           `Pick the single most useful next step toward the goal. If the same step already ` +
@@ -782,10 +810,11 @@ async function proposeOwnGoal() {
           `resource, crafting or smelting something useful). Stay correctly grounded in real ` +
           `Minecraft mechanics -- e.g. planks/sticks/a table come from logs (never stone); ` +
           `ingots (iron/copper/gold) come from smelting raw ore at a furnace, which you CAN do, ` +
-          `never from a crafting-table recipe. You have NO ability to build or place structures ` +
-          `at all -- never propose a goal about building/placing something (a house, a base, a ` +
-          `wall); stick to gearing up, gathering a resource, or crafting/smelting a portable ` +
-          `item. Phrase the goal around the OUTCOME you want (e.g. "get some copper armor," ` +
+          `never from a crafting-table recipe. You can place a single utility block you're ` +
+          `carrying (a furnace or crafting table) for your own use, but have NO ability to build ` +
+          `or place actual structures -- never propose a goal about building/placing something ` +
+          `(a house, a base, a wall); stick to gearing up, gathering a resource, or crafting/` +
+          `smelting a portable item. Phrase the goal around the OUTCOME you want (e.g. "get some copper armor," ` +
           `"stock up on iron") rather than one specific method, since more than one way to get ` +
           `there might work -- but naming smelting/crafting as part of it is fine now, unlike ` +
           `building, which is never possible. Respond with ONLY a short phrase naming the goal, ` +
