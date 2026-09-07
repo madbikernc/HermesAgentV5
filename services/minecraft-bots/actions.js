@@ -1,4 +1,10 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-09-06) -- real error found live: "loot" waited openChest()'s own internal 20s
+// timeout ("Event windowOpen did not fire") against a chest that vanilla Minecraft will never
+// open -- any solid block directly above a chest blocks its lid, a real, common world-state
+// issue, not a bug. Checking the block above before attempting to open turns that cryptic 20s
+// hang into an immediate, specific answer.
 //
 // 1.2.0 (2026-09-06) -- direct request: bots should look in chests for equipment, wear the
 // best armor they find, and hold the best weapon unless a task needs a specific tool. New
@@ -158,6 +164,15 @@ export async function performAction(bot, action, speaker) {
       const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: 1 });
       if (!positions.length) return "couldn't find any chests nearby.";
       const chestBlock = bot.blockAt(positions[0]);
+      // Real error found live (2026-09-06): openChest() waited its own internal 20s timeout
+      // ("Event windowOpen did not fire") against a chest that vanilla Minecraft will never
+      // actually open -- any solid block directly above a chest blocks it, a real, common
+      // world-state issue, not a bug in this code. Checking first turns a cryptic 20s hang
+      // into an immediate, specific answer.
+      const above = bot.blockAt(chestBlock.position.offset(0, 1, 0));
+      if (above?.boundingBox === "block") {
+        return "found a chest, but there's something on top of it blocking the lid.";
+      }
       try {
         await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
           chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
