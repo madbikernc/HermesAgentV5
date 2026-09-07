@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.0.3
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-07) — new "suspicious-done" pattern, matching index.js 2.14.1's own DONE-
+# validation flag (fifth of the same "what other logic enhancements are available" pass this
+# triage service itself came from) — a goal reporting complete with no real successful step ever
+# logged behind it now gets triaged like any other incident, not just left for a human to notice
+# by reading the bot's own log directly.
 #
 # 1.0.3 (2026-09-07) — direct, immediate consequence of 1.0.2's own fix: raising coder2's token
 # budget to 900 also raised how long it can legitimately take to generate a full response (~11
@@ -114,6 +120,10 @@ TRIAGE_PATTERNS = [
     ("goal-abandoned", re.compile(r"giving up on goal"), "a standing goal was abandoned"),
     ("router-failure", re.compile(r"hermes-router \w+ call failed"), "model backend call failed"),
     ("action-failed", re.compile(r"action '.*' failed:"), "a direct action failed"),
+    # index.js 2.14.1's own DONE-validation flag: a goal reported complete with no real
+    # successful step ever logged behind it -- fifth of the same "what other logic enhancements
+    # are available" pass this triage service itself came from.
+    ("suspicious-done", re.compile(r"SUSPICIOUS DONE"), "a goal claimed complete with no real success behind it"),
 ]
 
 

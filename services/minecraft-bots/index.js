@@ -1,4 +1,13 @@
-// Version: 2.14.0
+// Version: 2.14.1
+//
+// 2.14.1 (2026-09-07) -- fifth and last of five scoped enhancements: tighter DONE validation.
+// goals.js 1.1.0's new `sawSuccess` field (set whenever any real step logs ok=true) lets goalTick
+// tell a DONE claim backed by real progress from one that isn't -- a real hallucinated DONE was
+// observed live tonight (a goal reporting complete after every logged step had failed). Flagged
+// in the console (SUSPICIOUS DONE), not blocked -- refusing the model's own DONE outright risks a
+// worse failure mode (an endless "are you sure" loop) than the rare cosmetic mislabeling this
+// catches. Matched by hermes-minecraft-triage.py's own patterns so the Firmament's own triage
+// service surfaces it too, not just a human reading this bot's log directly.
 //
 // 2.14.0 (2026-09-07) -- fourth of five scoped enhancements: self-defense. New checkSelfDefense()
 // on its own short timer (7s -- more time-sensitive than sleep's 30s), same idle-tick/busy-acting
@@ -909,6 +918,16 @@ async function goalTick() {
     }
 
     if (parsed.type === "done") {
+      // Fifth of five scoped enhancements: tighter DONE validation. A real hallucinated DONE
+      // was observed live tonight -- a goal reporting complete after every single logged step
+      // had failed, with no evidence anything actually changed. Flagged, not blocked: outright
+      // refusing the model's own DONE risks a worse failure mode (an endless "are you sure"
+      // loop) than the rare cosmetic mislabeling this catches -- visible here for a human, and
+      // matched by hermes-minecraft-triage.py's own TRIAGE_PATTERNS for the Firmament to notice.
+      if (currentGoal.steps > 0 && !currentGoal.sawSuccess) {
+        console.log(`[${USERNAME}] SUSPICIOUS DONE (no successful step ever logged for this ` +
+                    `goal): ${currentGoal.description}`);
+      }
       console.log(`[${USERNAME}] goal complete: ${currentGoal.description}`);
       bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
       recordGoalOutcome(currentGoal.description, "done", null);
@@ -918,7 +937,7 @@ async function goalTick() {
     }
 
     if (parsed.type === "blocked") {
-      logStep(currentGoal, `blocked: ${parsed.reason}`);
+      logStep(currentGoal, `blocked: ${parsed.reason}`, false);
       currentGoal.consecutiveFailures += 1;
       console.log(`[${USERNAME}] goal blocked (${currentGoal.consecutiveFailures}/` +
                   `${MAX_CONSECUTIVE_FAILURES}): ${parsed.reason}`);
@@ -935,7 +954,7 @@ async function goalTick() {
     }
 
     const result = await performAction(bot, parsed.action, currentGoal.setBy || USERNAME);
-    logStep(currentGoal, `${parsed.action.type}: ${result.text}`);
+    logStep(currentGoal, `${parsed.action.type}: ${result.text}`, result.ok);
     currentGoal.consecutiveFailures = result.ok ? 0 : currentGoal.consecutiveFailures + 1;
     console.log(`[${USERNAME}] goal step: ${parsed.action.type} -> ${result.text} ` +
                 `(ok=${result.ok}, consecutiveFailures=${currentGoal.consecutiveFailures})`);

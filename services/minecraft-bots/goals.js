@@ -1,4 +1,9 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-09-07) -- fifth of five scoped enhancements: tighter DONE validation. New
+// `sawSuccess` field (see newGoal's own comment) and a required `ok` argument on logStep() so
+// index.js's goalTick can tell a DONE claim backed by real progress from one that isn't, without
+// regex-guessing success from a step's own English result text after the fact.
 //
 // Persistent per-bot standing goals (direct request: "give her more autonomy to work towards
 // longer goals," 2026-09-07). A goal is a small JSON file, not a hermes-rag note -- it's mutable
@@ -52,15 +57,25 @@ export function newGoal({ description, source, setBy = null }) {
   return {
     description, source, setBy,
     createdAt: now, updatedAt: now,
+    // sawSuccess: fifth of five scoped enhancements ("what other logic enhancements are
+    // available" -> tighter DONE validation). A real hallucinated DONE was observed live
+    // tonight -- a goal reporting complete after every single logged step had failed, with no
+    // evidence anything actually changed. Tracked here (not re-derived from log text later,
+    // which would mean regex-guessing "was this line a success" after the fact) so index.js's
+    // goalTick can flag -- not block, to avoid a worse failure mode (an endless "are you sure"
+    // loop) -- a DONE that arrives with zero real successes behind it.
+    sawSuccess: false,
     steps: 0, consecutiveFailures: 0, log: [],
   };
 }
 
 // Capped so a long-running goal's file (and the prompt built from it) doesn't grow without
-// bound -- only the last dozen step outcomes matter for deciding what to try next.
-export function logStep(goal, line) {
+// bound -- only the last dozen step outcomes matter for deciding what to try next. `ok` is
+// required, not inferred from `line`'s English text later -- see newGoal's own comment on why.
+export function logStep(goal, line, ok) {
   goal.log.push(line);
   if (goal.log.length > MAX_LOG_LINES) goal.log.shift();
   goal.steps += 1;
   goal.updatedAt = Date.now();
+  if (ok) goal.sawSuccess = true;
 }
