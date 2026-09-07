@@ -1,8 +1,17 @@
-// Version: 2.9.0
+// Version: 2.10.0
 //
 // Firmament Minecraft bot orchestrator. Connects one bot and wires the first real decision
 // loop: chat perception -> cheap relevance classification (dispatch role) -> in-character
 // reply (muse role) -> bot chats back. See ../../MINECRAFT_BOTS_DESIGN.md.
+//
+// 2.10.0 (2026-09-07) -- direct report: navigation is unreliable around doors/ladders/stairs.
+// mineflayer-pathfinder defaults canOpenDoors to false with its own comment ("Causes issues.
+// Probably due to none paper servers.") -- enabled now that this fleet runs a mature, fully-
+// supported version (1.21.11) rather than trusting a comment of unknown vintage. Also added
+// permanent path_update/goal_reached/path_reset logging (astar's own real status/cost/visited-
+// node data) so any future navigation failure is diagnosable from real data, not guesswork --
+// kept permanently per direct instruction: correctness/diagnosability over call/log-volume
+// minimalism, since everything here runs on local compute with no per-call cost.
 //
 // 2.9.0 (2026-09-06) -- direct request: "pre-teach the most common recipes." New "craft"
 // action (classifyIntent detects it the same one-call way as every other action; the real
@@ -165,7 +174,31 @@ loadActionPlugins(bot);
 
 bot.once("spawn", () => {
   console.log(`[${USERNAME}] spawned at`, bot.entity.position);
-  bot.pathfinder.setMovements(new Movements(bot));
+  const movements = new Movements(bot);
+  // mineflayer-pathfinder defaults canOpenDoors to false, with its own comment: "Causes
+  // issues. Probably due to none paper servers." Direct report: bots navigate badly around
+  // doors, ladders, and stairs -- doors are the one of those three with a known, named,
+  // library-level default working against them. Worth enabling now that this fleet runs a
+  // mature, well-supported version (1.21.11) rather than trusting a comment of unknown
+  // vintage -- if it turns out to genuinely misbehave here, that's diagnosable from the
+  // path_update logging below, not a reason to leave it off untested.
+  movements.canOpenDoors = true;
+  bot.pathfinder.setMovements(movements);
+
+  // Real-data visibility into navigation, not a guess: astar's own result status
+  // ('success'/'partial'/'noPath'/'timeout') for every path (re)computation, so a bad
+  // goto/follow (doors, ladders, stairs -- direct report, 2026-09-06) can be diagnosed from
+  // what pathfinder itself actually concluded, the same evidence-based approach that found
+  // every other real bug this build. Kept permanently, not stripped after one use --
+  // correctness/diagnosability over minimizing log volume, per direct instruction.
+  bot.on("path_update", (r) => {
+    console.log(`[${USERNAME}] path_update status=${r.status} nodes=${r.path?.length ?? 0} ` +
+                `visited=${r.visitedNodes ?? "?"} cost=${r.cost?.toFixed?.(1) ?? "?"} ` +
+                `time=${r.time?.toFixed?.(0) ?? "?"}ms`);
+  });
+  bot.on("goal_reached", () => console.log(`[${USERNAME}] goal_reached`));
+  bot.on("path_reset", (reason) => console.log(`[${USERNAME}] path_reset: ${reason}`));
+
   // Inventory persists across restarts (it's tied to the player's UUID in the world save, not
   // this process) -- worth checking gear right away, not only after an action changes it.
   equipBestArmor(bot).then(() => equipBestWeapon(bot)).catch((err) =>
