@@ -1,4 +1,11 @@
-// Version: 1.9.0
+// Version: 1.9.1
+//
+// 1.9.1 (2026-09-07) -- real gap found live on the very first real sleep attempt: every
+// per-candidate bed failure was silently swallowed (`continue` with no logging), so when all 3
+// candidates failed the only visible result was "couldn't use any of them" -- no way to tell
+// whether it was an occupied bed, monsters nearby, unreachable, or something else. Logging each
+// candidate's actual rejection reason now (bot.sleep()'s own specific error messages) -- the
+// same lesson already learned once today for the goal loop's own transitions.
 //
 // 1.9.0 (2026-09-07) -- direct request: "the bots need to know to go to sleep at night." New
 // "sleep" action, built entirely on mineflayer's own bed.js plugin (core, always loaded) --
@@ -491,6 +498,11 @@ export async function performAction(bot, action, speaker) {
             () => bot.pathfinder.setGoal(null));
         } catch (err) {
           if (token.cancelled) return ok("stopped on the way to bed.");
+          // Real gap found live (2026-09-07): this used to swallow the reason silently -- when
+          // every candidate failed, the only visible result was "couldn't use any of them,"
+          // giving no way to diagnose why after the fact. Logging each per-candidate reason now,
+          // same lesson already learned once today for the goal loop's own transitions.
+          console.log(`[sleep] couldn't reach bed at ${bedBlock.position}: ${err.message}`);
           continue; // couldn't reach this bed -- try the next candidate
         } finally {
           bot.pathfinder.setGoal(null);
@@ -500,6 +512,7 @@ export async function performAction(bot, action, speaker) {
         try {
           await bot.sleep(bedBlock);
         } catch (err) {
+          console.log(`[sleep] couldn't use bed at ${bedBlock.position}: ${err.message}`);
           continue; // this bed didn't work (occupied, monsters nearby, too far, etc) -- try next
         }
 
