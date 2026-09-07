@@ -1,4 +1,10 @@
-// Version: 2.11.1
+// Version: 2.11.2
+//
+// 2.11.2 (2026-09-07) -- real gap found live minutes after 2.11.1's reasoning fix shipped: Amy
+// correctly reasoned, three separate times, that an ingot she needed could only come from
+// looting a chest -- and then went BLOCKED anyway without ever actually issuing ACTION LOOT to
+// check one. Correct diagnosis, no follow-through. planNextStep's prompt now explicitly requires
+// a LOOT attempt to actually appear in Recent progress before BLOCKED is allowed for that reason.
 //
 // 2.11.1 (2026-09-07) -- real gap found live within minutes of 2.11.0 shipping: every goal-loop
 // transition (a step taken, DONE, BLOCKED, giving up) only ever reached the player via bot.chat
@@ -581,9 +587,11 @@ async function planNextStep(goal) {
           `Real limits on what she can do: she can only craft via a crafting-table/hand-crafting ` +
           `grid recipe (bot.craft) -- she has NO furnace/smelting capability at all. Any item ` +
           `normally obtained by smelting (iron_ingot, copper_ingot, gold_ingot, glass, etc.) can ` +
-          `only come from looting a chest (ACTION LOOT), never from crafting or mining alone -- ` +
-          `if the goal needs one and she has none and no LOOT has helped, that's a dead end, not ` +
-          `something to keep retrying as a craft.\n` +
+          `only come from looting a chest (ACTION LOOT), never from crafting or mining alone. ` +
+          `Before concluding BLOCKED for this reason, check Recent progress below for whether ` +
+          `she has already tried ACTION LOOT during this goal -- if not, try that first, since a ` +
+          `chest might actually have what's needed. Only go BLOCKED for this reason once a LOOT ` +
+          `attempt is visible in Recent progress and didn't provide it (or found no chest at all).\n` +
           `Common material chain: sticks and a crafting table both need planks; planks come from ` +
           `logs. If a craft fails for missing ingredients, check whether she's missing the raw ` +
           `material (e.g. no logs at all) rather than the item itself -- mine the raw material ` +
