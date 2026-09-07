@@ -1,4 +1,15 @@
-// Version: 1.8.2
+// Version: 1.9.0
+//
+// 1.9.0 (2026-09-07) -- direct request: "the bots need to know to go to sleep at night." New
+// "sleep" action, built entirely on mineflayer's own bed.js plugin (core, always loaded) --
+// bot.sleep()/bot.wake()/bot.isSleeping/bot.isABed() already implement the real vanilla rules
+// (the exact night-or-thunderstorm timeOfDay window, occupied-bed/monsters-nearby/reach checks,
+// each with its own thrown reason), so this only needed to find a bed and try it, same multi-
+// candidate pattern loot already uses. stopCurrent() now also forces a wake if a new action
+// comes in mid-sleep (a direct command, or the goal loop wanting to act) -- sleep should never
+// block anything else from happening once something else needs her attention. index.js's
+// checkSleep() decides WHEN to call this (a deterministic time-of-day check, not a model call --
+// unlike the goal loop, "is it night" needs no reasoning).
 //
 // 1.8.2 (2026-09-07) -- real gap found live repeatedly during autonomy goal loop testing: the
 // loot action fetched only the single NEAREST chest (findBlocks count:1). Once that one chest
@@ -122,6 +133,11 @@ import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipme
 const { goals } = pathfinderPkg;
 
 const ACTION_TIMEOUT_MS = 60_000;
+// A real Minecraft night (or the wait for it to naturally pass while sleeping) runs several
+// real-world minutes even at normal speed -- ACTION_TIMEOUT_MS (60s) would abort a perfectly
+// normal night's sleep as a "failure." This is a safety backstop for something going genuinely
+// wrong (a stuck day/night cycle, a disabled gamerule), not the expected case.
+const SLEEP_TIMEOUT_MS = 15 * 60_000;
 
 const HOSTILE_MOBS = new Set([
   "zombie", "husk", "drowned", "zombie_villager", "skeleton", "stray", "spider", "cave_spider",
@@ -249,6 +265,10 @@ function stopCurrent(bot) {
   bot.pathfinder.setGoal(null);
   if (bot.pvp.target) bot.pvp.stop();
   bot.collectBlock.cancelTask(); // real cancellation, not just how we interpret the eventual result
+  // Any new action (a direct command, or the goal loop wanting to do something else) should
+  // interrupt a night's sleep rather than queue up behind it -- every performAction() call
+  // starts here, so this is the one place that's guaranteed to run before anything else happens.
+  if (bot.isSleeping) bot.wake().catch((err) => console.error("stopCurrent: wake failed:", err.message));
   return cancelToken;
 }
 
@@ -445,6 +465,60 @@ export async function performAction(bot, action, speaker) {
         await refreshGear(bot); // mob drops may include something worth wearing/wielding
       }
       return token.cancelled ? ok("broke off the fight.") : ok("took care of it.");
+    }
+
+    case "sleep": {
+      // Direct request, 2026-09-07: bots should know to go to bed at night. Built entirely on
+      // mineflayer's own bed.js plugin (core, no extra plugin load needed) -- bot.sleep()
+      // already handles the real vanilla rules (night-or-thunderstorm window, occupied bed,
+      // monsters nearby, reach distance) and throws a specific reason for each, so this only
+      // needs to find a bed and try it, same multi-candidate pattern as "loot" (1.8.2) since one
+      // bad bed (occupied, monsters nearby right there) shouldn't block trying another.
+      if (bot.isSleeping) return ok("already asleep.");
+      const MAX_CANDIDATES = 3;
+      const positions = bot.findBlocks({ matching: (block) => bot.isABed(block), maxDistance: 32,
+                                          count: MAX_CANDIDATES });
+      if (!positions.length) return fail("couldn't find a bed nearby.");
+
+      for (const pos of positions) {
+        if (token.cancelled) return ok("stopped on the way to bed.");
+        const bedBlock = bot.blockAt(pos);
+        if (!bedBlock) continue;
+
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(bedBlock.position.x,
+            bedBlock.position.y, bedBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+            () => bot.pathfinder.setGoal(null));
+        } catch (err) {
+          if (token.cancelled) return ok("stopped on the way to bed.");
+          continue; // couldn't reach this bed -- try the next candidate
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) return ok("stopped on the way to bed.");
+
+        try {
+          await bot.sleep(bedBlock);
+        } catch (err) {
+          continue; // this bed didn't work (occupied, monsters nearby, too far, etc) -- try next
+        }
+
+        // Asleep now. Wait for the real 'wake' event (fires when day comes, or when everyone
+        // sleeping lets the server skip the night) rather than guessing a duration -- a plain
+        // safety timeout forces a wake only if something has gone genuinely wrong (SLEEP_TIMEOUT_MS
+        // is well beyond a real night's length).
+        await new Promise((resolve) => {
+          let settled = false;
+          const finish = () => { if (!settled) { settled = true; resolve(); } };
+          bot.once("wake", finish);
+          setTimeout(() => {
+            if (!settled && bot.isSleeping) bot.wake().catch(() => {});
+            finish();
+          }, SLEEP_TIMEOUT_MS);
+        });
+        return ok("slept through the night.");
+      }
+      return fail("found beds nearby, but couldn't use any of them.");
     }
 
     default:

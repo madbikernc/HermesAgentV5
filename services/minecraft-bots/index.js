@@ -1,4 +1,14 @@
-// Version: 2.11.6
+// Version: 2.12.0
+//
+// 2.12.0 (2026-09-07) -- direct request: "the bots need to know to go to sleep at night." New
+// checkSleep(), on its own 30s timer, entirely separate from goalTick's model-driven loop --
+// deciding whether it's night needs no reasoning, just bot.time.timeOfDay (mineflayer core,
+// matched to the exact window bed.js's own bot.sleep() enforces). Reuses busy/acting so a live
+// command always takes precedence and interrupts a night's sleep (actions.js 1.9.0's stopCurrent
+// now forces a wake for that). The real per-bed logic (finding one, trying it, waiting for
+// morning) lives in actions.js's new "sleep" action, built on mineflayer's own bed.js plugin.
+// Also added "ACTION SLEEP" to classifyIntent's vocabulary so a player can directly tell her to
+// go to bed too, same as every other action.
 //
 // 2.11.6 (2026-09-07) -- two more fixes minutes after 2.11.5's token-budget bump: (1) the SAME
 // truncation failure as 2.11.3 recurred at the doubled 220-token budget -- the model still
@@ -350,6 +360,8 @@ async function classifyIntent(speaker, message) {
           `named, respond CHAT instead -- never invent a block.\n` +
           `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob\n` +
           `ACTION LOOT - asks ${USERNAME} to check a nearby chest for equipment/gear\n` +
+          `ACTION SLEEP - asks ${USERNAME} to go find a bed and sleep (only makes sense at ` +
+          `night or during a thunderstorm)\n` +
           `ACTION CRAFT <item_id> <count> - asks ${USERNAME} to craft/make an item, ONLY if a ` +
           `specific item was actually named or clearly implied. <item_id> must be the exact ` +
           `modern Minecraft item id (e.g. stick, oak_planks, wooden_pickaxe, crafting_table). ` +
@@ -373,6 +385,7 @@ async function classifyIntent(speaker, message) {
     if (verb === "STOP") return { type: "action", action: { type: "stop" } };
     if (verb === "ATTACK") return { type: "action", action: { type: "attack" } };
     if (verb === "LOOT") return { type: "action", action: { type: "loot" } };
+    if (verb === "SLEEP") return { type: "action", action: { type: "sleep" } };
     if (verb === "CRAFT") {
       const item = (parts[2] || "").toLowerCase();
       const count = parseInt(parts[3], 10);
@@ -537,6 +550,7 @@ async function runAction(action, speaker, message, send) {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
       mine: `off to gather some ${action.block}.`, attack: "engaging.",
       loot: "checking a nearby chest.", craft: `let's see about crafting ${action.item}.`,
+      sleep: "heading to bed.",
     }[action.type];
     if (startLine) send(await narrateAction(startLine));
 
@@ -814,6 +828,49 @@ async function goalTick() {
 setInterval(() => {
   goalTick().catch((err) => console.error(`[${USERNAME}] goalTick error:`, err.message));
 }, GOAL_TICK_MS);
+
+// Direct request (2026-09-07): "the bots need to know to go to sleep at night." Deliberately a
+// plain deterministic check on its own timer, not folded into goalTick's model-driven loop --
+// "is it night" needs no reasoning, just bot.time.timeOfDay (the exact window bed.js's own
+// bot.sleep() already enforces, matched here so this never tries when sleep() would just reject
+// anyway). Uses the same busy/acting mutex as everything else, so it never fires mid-command and
+// a live command always interrupts it (actions.js's stopCurrent() forces a wake for that).
+const SLEEP_CHECK_MS = parseInt(process.env.MC_SLEEP_CHECK_MS || "30000", 10);
+// Tracks whether tonight's sleep has already been tried (successfully or not) so a bed-less
+// bot doesn't retry every 30s and spam chat for the whole ~7-real-minute length of one night --
+// resets the moment it's day again, ready for the next night.
+let sleepAttemptedThisNight = false;
+
+async function checkSleep() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+
+  const thunderstorm = bot.isRaining && bot.thunderState > 0;
+  const isNight = thunderstorm || (bot.time.timeOfDay >= 12541 && bot.time.timeOfDay <= 23458);
+  if (!isNight) {
+    sleepAttemptedThisNight = false;
+    return;
+  }
+  if (sleepAttemptedThisNight) return;
+  sleepAttemptedThisNight = true;
+
+  busy = true;
+  acting = true;
+  try {
+    bot.chat(await narrateAction("getting sleepy -- heading to bed."));
+    const result = await performAction(bot, { type: "sleep" }, USERNAME);
+    console.log(`[${USERNAME}] sleep: ${result.text} (ok=${result.ok})`);
+    bot.chat(await narrateAction(result.ok ? result.text : `couldn't get to sleep: ${result.text}`));
+  } catch (err) {
+    console.error(`[${USERNAME}] sleep check failed:`, err.message);
+  } finally {
+    busy = false;
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkSleep().catch((err) => console.error(`[${USERNAME}] checkSleep error:`, err.message));
+}, SLEEP_CHECK_MS);
 
 // Setting a goal is a fast, synchronous-feeling operation (a disk write, not a physical
 // action) -- it runs inline inside handleIncoming's busy window rather than through runAction's
