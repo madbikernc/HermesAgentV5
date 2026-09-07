@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 2.0.0
+# Version: 2.1.0
+#
+# 2.1.0 (2026-09-07) — live-verified against the real Hub (host/two cameras, cam1/cam2 -- a third,
+# Driveway, isn't actually paired to the Hub yet and was dropped from the vault's `channels` config
+# until it is). Real `get_ai_state()` dict keys confirmed: ('dog_cat', 'face', 'package', 'people',
+# 'vehicle', 'other') -- three more than the `AI_LABELS` this file originally assumed (`face`,
+# `package`, `other`). Direct decision: watch all six, not just the original three -- expanded
+# AI_LABELS to match. Real measured latency: login() ~6s, get_host_data() ~6s (once at startup,
+# not per-poll), snapshot 0.9-2.8s. On-demand routing confirmed live for both cases (named camera
+# -> that camera alone; unnamed -> all cameras combined and labeled). reolink_aio also logs a
+# non-fatal login-time warning about the Hub account's password containing a character outside its
+# preferred set -- doesn't block login, but worth cleaning up on the Hub account.
 #
 # UNBLOCKED 2026-09-06: a Reolink Home Hub was purchased and the fleet now has three cameras paired
 # to it. This file's local-API design is reachable again -- re-point the 'Hermes Reolink' vault
@@ -119,7 +130,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 VAULT_GET = str(REPO_DIR / "tools" / "vault-get-secret.sh")
 REOLINK_ITEM = "Hermes Reolink"
 
-AI_LABELS = ("people", "vehicle", "dog_cat")
+AI_LABELS = ("people", "vehicle", "dog_cat", "face", "package", "other")
 
 DESCRIBE_SYSTEM_PROMPT = (
     "You are looking at one frame from a home security camera. Describe factually what's visible "
