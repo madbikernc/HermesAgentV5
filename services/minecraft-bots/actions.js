@@ -1,4 +1,18 @@
-// Version: 1.17.0
+// Version: 1.18.0
+//
+// 1.18.0 (2026-09-07) -- direct request: "the build attempts are too narrow. they should
+// understand classes of things. wood can be any form of wood, not just oak or spruce."
+// Real gap: "mine" looked up exactly one block id, so "mine oak_log" failed outright wherever
+// the only trees nearby were spruce or birch, even though any log serves the identical purpose.
+// New resolveBlockFamily() expands a single requested block to every id that serves the same
+// real purpose: any log/stem regardless of species, any planks, any wool/carpet/concrete/
+// terracotta/stained-glass color, and ore that generates as either a stone-layer or
+// deepslate-layer block (SMELT_RECIPES already treated ore pairs this way -- "mine" was the one
+// place still checking a single exact id). GENERIC_BLOCK_ALIASES additionally lets a bare class
+// word ("log", "wool", "ore") stand in for a real example, in case the model names the category
+// directly. craft/smelt already handled this correctly (bot.recipesFor() resolves real vanilla
+// tag-based recipes like #minecraft:planks on its own; SMELT_RECIPES already listed ore-pair
+// alternatives) -- this closes the one remaining narrow spot, not a systemic rewrite.
 //
 // 1.17.0 (2026-09-07) -- direct request "next set of autonomy" -> "do all four" (goal-planner
 // vocabulary gap was purely an index.js change, see its own 2.19.0 changelog):
@@ -365,6 +379,82 @@ function pickFuel(bot) {
   return bot.inventory.items().find((i) => i.name.endsWith("_planks") || i.name.endsWith("_log"));
 }
 
+// Direct request, 2026-09-07 ("the build attempts are too narrow -- they should understand
+// classes of things. wood can be any form of wood, not just oak or spruce"). Real gap: "mine"
+// used to look up exactly one block id, so a goal step of "mine oak_log" failed outright
+// wherever the only trees nearby were spruce or birch -- even though any log serves the
+// identical purpose. Minecraft has several of these "any member of the family is equally
+// usable" groups (any log/stem regardless of species, any planks, any wool/carpet/concrete/
+// terracotta/stained-glass color, and ore that generates as either a stone-layer or
+// deepslate-layer block depending on depth -- SMELT_RECIPES above already treats those ore
+// pairs as one thing for exactly this reason). resolveBlockFamily expands a single requested
+// name to every id that serves the same real purpose, so a specific example is only ever a
+// hint at WHICH family to gather, never a hard requirement to find that exact one.
+// GENERIC_BLOCK_ALIASES additionally lets a bare class word ("log", "wool") stand in for a real
+// example of that class, in case the model names the category directly rather than a species.
+const ORE_FAMILIES = [
+  ["iron_ore", "deepslate_iron_ore"],
+  ["copper_ore", "deepslate_copper_ore"],
+  ["gold_ore", "deepslate_gold_ore", "nether_gold_ore"],
+  ["diamond_ore", "deepslate_diamond_ore"],
+  ["emerald_ore", "deepslate_emerald_ore"],
+  ["lapis_ore", "deepslate_lapis_ore"],
+  ["coal_ore", "deepslate_coal_ore"],
+  ["redstone_ore", "deepslate_redstone_ore"],
+];
+// A plain "_stem" suffix was tried and rejected here (verified against the real 1.21.11 block
+// registry, not assumed): it also sweeps up pumpkin_stem/melon_stem/attached_*_stem (crop
+// blocks) and mushroom_stem/big_dripleaf_stem (unrelated plant blocks) -- none of them wood.
+// The only real wood stems are these four Nether ones, listed explicitly instead.
+const NETHER_STEM_NAMES = ["crimson_stem", "warped_stem", "stripped_crimson_stem", "stripped_warped_stem"];
+// Each group's `match` suffix(es) are checked with plain String.endsWith, which is why
+// "_terracotta" needs its own `exclude`: "orange_glazed_terracotta" also, trivially, ends with
+// the substring "_terracotta" (also verified against the real registry, not assumed) even though
+// it's a visually and functionally distinct crafted block, not interchangeable with plain
+// terracotta. concrete/concrete_powder and stained_glass/stained_glass_pane don't have this
+// problem -- their extra suffix text comes AFTER the shared root, not as a prefix word before it.
+// Order matters: resolveBlockFamily picks the FIRST group the requested name matches, so the
+// more specific suffix must be listed first -- a real bug caught in testing had a request for
+// "orange_glazed_terracotta" itself match the broader "_terracotta" group before ever reaching
+// its own, since .find() stops at the first hit regardless of specificity.
+const BLOCK_FAMILY_GROUPS = [
+  { match: ["_planks"] }, { match: ["_wool"] },
+  { match: ["_concrete_powder"] }, { match: ["_concrete"] },
+  { match: ["_glazed_terracotta"] }, { match: ["_terracotta"], exclude: ["_glazed_terracotta"] },
+  { match: ["_stained_glass_pane"] }, { match: ["_stained_glass"] },
+  { match: ["_carpet"] },
+];
+const GENERIC_BLOCK_ALIASES = {
+  log: "oak_log", logs: "oak_log", wood: "oak_log", planks: "oak_planks", plank: "oak_planks",
+  wool: "white_wool", carpet: "white_carpet", concrete: "white_concrete", ore: "iron_ore",
+};
+
+function resolveBlockFamily(bot, requestedName) {
+  const name = GENERIC_BLOCK_ALIASES[requestedName] || requestedName;
+
+  const oreFamily = ORE_FAMILIES.find((family) => family.includes(name));
+  if (oreFamily) {
+    return oreFamily.map((n) => bot.registry.blocksByName[n]?.id).filter((id) => id !== undefined);
+  }
+
+  if (name.endsWith("_log") || NETHER_STEM_NAMES.includes(name)) {
+    const names = Object.keys(bot.registry.blocksByName).filter((n) => n.endsWith("_log"))
+      .concat(NETHER_STEM_NAMES);
+    return names.map((n) => bot.registry.blocksByName[n]?.id).filter((id) => id !== undefined);
+  }
+
+  const group = BLOCK_FAMILY_GROUPS.find((g) => g.match.some((s) => name.endsWith(s)));
+  if (group) {
+    return Object.keys(bot.registry.blocksByName)
+      .filter((n) => group.match.some((s) => n.endsWith(s)) &&
+        !(group.exclude ?? []).some((s) => n.endsWith(s)))
+      .map((n) => bot.registry.blocksByName[n].id);
+  }
+
+  const single = bot.registry.blocksByName[name];
+  return single ? [single.id] : [];
+}
+
 // Direct request, 2026-09-07 ("what other logic enhancements are available" -> "explore/
 // wander"): the single biggest recurring blocker across a whole night's live testing was
 // "couldn't find X nearby" (wood, ore, chests) purely because nothing existed within the normal
@@ -587,23 +677,27 @@ export async function performAction(bot, action, speaker) {
     }
 
     case "mine": {
-      const blockType = bot.registry.blocksByName[action.block];
-      if (!blockType) return fail(`I don't recognize the block "${action.block}".`);
-      const findOptions = { matching: blockType.id, maxDistance: 32, count: action.count };
+      const blockIds = resolveBlockFamily(bot, action.block);
+      if (!blockIds.length) return fail(`I don't recognize the block "${action.block}".`);
+      const findOptions = { matching: blockIds, maxDistance: 32, count: action.count };
       let positions = bot.findBlocks(findOptions);
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
       if (!positions.length) return fail(`couldn't find any ${action.block} nearby, even after looking around.`);
       const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
+      // Report what she actually found/collected, not just the name she was originally given --
+      // asked for "oak_log" but the only trees around were spruce, this should say so rather than
+      // claiming oak_log when resolveBlockFamily is what actually made that substitution work.
+      const collectedNames = [...new Set(blocks.map((b) => b.name))].join(", ");
       try {
         await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
                            () => bot.collectBlock.cancelTask());
       } catch (err) {
         if (token.cancelled) return ok("stopped mining early.");
-        return fail(`had trouble mining ${action.block}: ${err.message}`);
+        return fail(`had trouble mining ${collectedNames}: ${err.message}`);
       } finally {
         await refreshGear(bot); // may have picked up something worth wearing/wielding
       }
-      return token.cancelled ? ok("stopped mining early.") : ok(`collected some ${action.block}.`);
+      return token.cancelled ? ok("stopped mining early.") : ok(`collected some ${collectedNames}.`);
     }
 
     case "craft": {

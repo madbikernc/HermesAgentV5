@@ -1,4 +1,11 @@
-// Version: 2.19.0
+// Version: 2.20.0
+//
+// 2.20.0 (2026-09-07) -- direct request: "the build attempts are too narrow. they should
+// understand classes of things. wood can be any form of wood, not just oak or spruce." Purely a
+// prompt-wording change here -- the real fix is actions.js's new resolveBlockFamily() (see its
+// own 1.18.0 changelog). Both MINE prompts (classifyIntent and planNextStep) now say that naming
+// any real example of a material class is enough; she'll automatically gather whatever matching
+// variant is actually nearby rather than needing the exact species/color present.
 //
 // 2.19.0 (2026-09-07) -- direct request "next set of autonomy" -> "do all four, and set a limit
 // on the number of times a bot will try to recover its gear from dying":
@@ -596,8 +603,11 @@ async function classifyIntent(speaker, message) {
           `ACTION MINE <block_id> <count> - asks ${USERNAME} to gather/mine a resource, ONLY ` +
           `if a specific resource/block was actually named or clearly implied. <block_id> must ` +
           `be the exact modern Minecraft block id (e.g. oak_log, stone, iron_ore, cobblestone). ` +
-          `<count> is a small positive integer, default 4 if unstated. If no specific block is ` +
-          `named, respond CHAT instead -- never invent a block.\n` +
+          `For a general material class rather than one exact species/color (any wood, any ` +
+          `wool, any ore), naming ANY real example of that class is enough -- she'll ` +
+          `automatically gather whatever matching variant is actually nearby, not just that ` +
+          `exact one. <count> is a small positive integer, default 4 if unstated. If no ` +
+          `specific block is named, respond CHAT instead -- never invent a block.\n` +
           `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob\n` +
           `ACTION FLEE - asks ${USERNAME} to run away from a nearby hostile mob instead of fighting it\n` +
           `ACTION LOOT - asks ${USERNAME} to check a nearby chest for equipment/gear\n` +
@@ -1027,7 +1037,9 @@ async function planNextStep(goal) {
           `DONE - the goal is already fully achieved given her current gear/inventory\n` +
           `BLOCKED <short reason> - she cannot make progress right now and should give up\n` +
           `ACTION MINE <block_id> <count> - gather a resource. <block_id> must be the exact ` +
-          `modern Minecraft block id -- never invent one.\n` +
+          `modern Minecraft block id -- never invent one. For a material class rather than one ` +
+          `exact species/color (any wood, any wool, any ore), any real example works -- she'll ` +
+          `automatically gather whatever matching variant is actually nearby.\n` +
           `ACTION CRAFT <item_id> <count> - craft an item via a crafting-table/grid recipe only. ` +
           `<item_id> must be the exact modern Minecraft item id -- never invent one.\n` +
           `ACTION SMELT <item_id> <count> - smelt raw material into an ingot (or similar) at a ` +
