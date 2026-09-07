@@ -1,4 +1,13 @@
-// Version: 2.11.4
+// Version: 2.11.6
+//
+// 2.11.6 (2026-09-07) -- two more fixes minutes after 2.11.5's token-budget bump: (1) the SAME
+// truncation failure as 2.11.3 recurred at the doubled 220-token budget -- the model still
+// doesn't reliably keep its reasoning to one sentence, so the budget went to 500 instead of a
+// third incremental guess. (2) the loot-before-BLOCKED instruction (2.11.2) was ignored a second
+// time -- the model stated its own reasoning ("no prior LOOT attempt...") and went BLOCKED
+// anyway. This specific condition is simple and mechanically checkable (has "loot:" ever
+// appeared in this goal's own log?), so goalTick now enforces it in code as a backstop rather
+// than trusting a written instruction alone a second time.
 //
 // 2.11.4 (2026-09-07) -- real gap found live minutes after 2.11.3 shipped: even with the
 // loot-before-BLOCKED requirement (2.11.2), a self-proposed goal phrased around an impossible
@@ -641,14 +650,16 @@ async function planNextStep(goal) {
       },
       { role: "user", content: `Goal: ${goal.description}\n${gearNote}\nRecent progress:\n${recentLog}` },
     ],
-    // Real bug found live (2026-09-07): a confusing/factually-impossible goal description (from
-    // a bad self-propose -- since fixed above) made the model ramble well past a one-sentence
-    // reasoning aside, and 120 tokens cut it off before it ever reached its required final
-    // decision line -- parseGoalStep's fallback ("couldn't decide what to do next") then counted
+    // Real bug found live (2026-09-07), TWICE -- once at 120 tokens, again at 220: the model
+    // does not reliably obey "at most one short sentence" and sometimes writes a long run-on
+    // reasoning sentence with parenthetical asides, getting cut off before its required final
+    // decision line -- parseGoalStep's fallback ("couldn't decide what to do next") then counts
     // as a real strike toward MAX_CONSECUTIVE_FAILURES for a goal that was never actually given a
-    // fair evaluation. More headroom is the honest fix, not a shorter, more failure-prone budget
-    // -- this all runs on local compute with no per-call cost.
-    { maxTokens: 220, temperature: 0 },
+    // fair evaluation. Fighting the model's verbosity with prompt wording alone hasn't held up
+    // twice in a row -- a genuinely generous budget is the robust fix instead of a third guess at
+    // a slightly bigger number. This runs on local compute with no per-call cost, so there's no
+    // real reason to be stingy here.
+    { maxTokens: 500, temperature: 0 },
   );
   return reply.trim();
 }
@@ -732,8 +743,21 @@ async function goalTick() {
   acting = true;
   try {
     const stepLine = await planNextStep(currentGoal);
-    const parsed = parseGoalStep(stepLine);
+    let parsed = parseGoalStep(stepLine);
     console.log(`[${USERNAME}] goal plan: ${stepLine}`);
+
+    // Real gap found live (2026-09-07), twice: the prompt explicitly says to try ACTION LOOT
+    // before giving up on a smelting-only ingredient, and the model sometimes states that exact
+    // reasoning out loud ("no prior LOOT attempt...") and goes BLOCKED anyway -- correct
+    // diagnosis, no follow-through, the same failure shape as 2.11.2 but surviving a prose fix.
+    // This particular condition is simple and mechanically checkable (has "loot:" appeared in
+    // this goal's own log yet?), so it's enforced in code here instead of trusted to a written
+    // instruction a second time -- prompt guidance plus a code guard, not prompt guidance alone.
+    if (parsed.type === "blocked" && /smelt|furnace|ingot/i.test(parsed.reason) &&
+        !currentGoal.log.some((l) => l.startsWith("loot:"))) {
+      console.log(`[${USERNAME}] overriding BLOCKED (${parsed.reason}) -- no LOOT attempt yet, forcing one`);
+      parsed = { type: "step", action: { type: "loot" } };
+    }
 
     if (parsed.type === "done") {
       console.log(`[${USERNAME}] goal complete: ${currentGoal.description}`);
