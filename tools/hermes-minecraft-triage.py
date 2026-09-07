@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.0.2
+# Version: 1.0.3
+#
+# 1.0.3 (2026-09-07) — direct, immediate consequence of 1.0.2's own fix: raising coder2's token
+# budget to 900 also raised how long it can legitimately take to generate a full response (~11
+# tokens/sec observed, so up to ~85s for 900 tokens) -- past the still-60s HTTP timeout, so the
+# very next real incident after deploying 1.0.2 failed with an honest "timed out" instead of an
+# empty response (itself a sign the exception handling works correctly; this was a new,
+# different failure, not the same bug recurring). call_role's timeout raised to 150s and the
+# join() timeout that wraps both parallel calls to 170s to match.
 #
 # 1.0.2 (2026-09-07) — 500 tokens (1.0.1's fix) still wasn't enough: EVERY real incident after
 # that deploy still showed an empty coder2 result. Direct evidence (a manual curl replicating
@@ -121,7 +129,7 @@ def vault_get(item, field):
         return ""
 
 
-def call_role(role, log_line, timeout=60):
+def call_role(role, log_line, timeout=150):
     """One triage call. Returns (severity, cause, next_step) or None on failure -- a failed
     triage call is itself just logged, never allowed to crash the watch loop."""
     prompt = (
@@ -179,7 +187,7 @@ def triage_incident(category, label, line):
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=90)
+        t.join(timeout=170)  # comfortably above call_role's own 150s HTTP timeout
 
     coder, coder2 = results.get("coder"), results.get("coder2")
     if not coder and not coder2:
