@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.0.1
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-06) — real bug found live while verifying the Reolink Hub integration: `bw get
+# item/username/password <name>` matches by substring, not exact-first, so once an item named
+# 'Hermes Reolink Mail' existed alongside 'Hermes Reolink', every fetch for the shorter name
+# failed with "More than one result was found" -- silently, since nothing hit this path for the
+# shorter name again until this verification. Added _resolve_item_id(): resolves to a unique item
+# ID by exact name match before every get/username/password call, falling back to the bare name
+# (old behavior) only if that resolution is itself ambiguous or empty. Same bug and same fix
+# applied to tools/vault-get-secret.sh's slow path.
 #
 # 1.0.1 (2026-09-01) — real finding from manual testing before this was ever wired into systemd: a
 # raw SIGTERM (what `systemctl stop`/`restart` sends) kills the process immediately at the
@@ -167,18 +176,38 @@ class VaultSession:
                 raise RuntimeError(f"could not fetch '{field}' from '{item_name}' even after re-auth")
             return result
 
+    def _resolve_item_id(self, item_name):
+        """`bw get item/username/password <name>` matches by substring, not exact-first -- any
+        other item whose name contains this one (e.g. 'Hermes Reolink' vs 'Hermes Reolink Mail')
+        makes every by-name lookup for the shorter name fail with "More than one result was
+        found". Confirmed live 2026-09-06. Resolve to a unique item ID by exact name match first;
+        returns None (caller falls back to the bare name, preserving old behavior) if that's
+        itself ambiguous or empty."""
+        try:
+            r = subprocess.run(
+                ["bw", "list", "items", "--search", item_name, "--session", self._session],
+                env=self._env, capture_output=True, text=True, timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            if r.returncode != 0 or not r.stdout.strip():
+                return None
+            matches = [i["id"] for i in json.loads(r.stdout) if i.get("name") == item_name]
+            return matches[0] if len(matches) == 1 else None
+        except (subprocess.TimeoutExpired, ValueError, json.JSONDecodeError, KeyError):
+            return None
+
     def _fetch_once(self, item_name, field):
         try:
+            ref = self._resolve_item_id(item_name) or item_name
             if field in ("password", "username", "notes"):
                 r = subprocess.run(
-                    ["bw", "get", field, item_name, "--session", self._session],
+                    ["bw", "get", field, ref, "--session", self._session],
                     env=self._env, capture_output=True, text=True, timeout=REQUEST_TIMEOUT_SECONDS,
                 )
                 if r.returncode != 0 or not r.stdout.strip():
                     return None
                 return r.stdout.strip()
             r = subprocess.run(
-                ["bw", "get", "item", item_name, "--session", self._session],
+                ["bw", "get", "item", ref, "--session", self._session],
                 env=self._env, capture_output=True, text=True, timeout=REQUEST_TIMEOUT_SECONDS,
             )
             if r.returncode != 0 or not r.stdout.strip():

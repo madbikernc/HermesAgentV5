@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# Version: 1.5.0 (2026-09-06 — real bug found live while verifying the Reolink Hub integration:
+# `bw get item/username/password <name>` matches by substring, not exact-first, so once an item
+# named 'Hermes Reolink Mail' existed alongside 'Hermes Reolink', every by-name lookup for the
+# shorter name failed with "More than one result was found" -- silently, since nothing called
+# vault-get-secret.sh for the shorter name again until this verification. Fixed by resolving
+# $ITEM_NAME to a unique item ID via `bw list items --search` filtered to an exact name match
+# first, falling back to the old by-name behavior only if that resolution is itself ambiguous or
+# empty. Same bug and same fix applied to tools/hermes-vault-agent.py's fast path.
+#
 # Version: 1.4.0 (2026-09-01 — direct request, following a real architecture question: "would a
 # single persistent Vaultwarden session have the same contention [that motivated never keeping
 # one]?" Investigated live first: this script's full login/unlock/sync/lock cycle measured
@@ -131,12 +140,24 @@ fetch_once() {
   local session
   session="$(bw unlock --passwordenv BW_PASSWORD --raw 2>/dev/null)" || return 1
   bw sync --session "$session" >/dev/null 2>&1
+
+  # Resolve to an exact-name item ID first. `bw get item <name>` (and `bw get
+  # username`/`password <name>`) do substring matching, not exact-first -- any other item whose
+  # name contains this one as a prefix/substring (confirmed live 2026-09-06: 'Hermes Reolink' vs
+  # 'Hermes Reolink Mail', created 2026-09-03) makes every by-name lookup fail with "More than one
+  # result was found", even though exactly one item is an exact name match. Falls back to
+  # $ITEM_NAME (old behavior/error) if resolution finds zero or >1 exact matches.
+  local item_id
+  item_id="$(bw list items --search "$ITEM_NAME" --session "$session" 2>/dev/null \
+    | jq -r --arg n "$ITEM_NAME" '[.[] | select(.name == $n)] | if length == 1 then .[0].id else empty end')"
+  local ref="${item_id:-$ITEM_NAME}"
+
   case "$FIELD" in
     password|username|notes)
-      bw get "$FIELD" "$ITEM_NAME" --session "$session" 2>/dev/null
+      bw get "$FIELD" "$ref" --session "$session" 2>/dev/null
       ;;
     *)
-      bw get item "$ITEM_NAME" --session "$session" 2>/dev/null \
+      bw get item "$ref" --session "$session" 2>/dev/null \
         | jq -r --arg f "$FIELD" '.fields[]? | select(.name==$f) | .value'
       ;;
   esac
