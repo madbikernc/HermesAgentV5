@@ -1,4 +1,25 @@
-// Version: 1.13.0
+// Version: 1.14.0
+//
+// 1.14.0 (2026-09-07) -- direct request "do all" on a further four autonomy ideas:
+// (1) base/chest storage: new "store" action (bot.craft-adjacent inverse of "loot" -- deposit
+//     instead of withdraw). New exported isEssentialItem(), factored out of loot's own filter so
+//     index.js's new checkInventoryFull() can decide what's safe to store using the identical
+//     definition of "essential" loot already uses, not a second copy.
+// (2) villager trading: new "trade" action, built on mineflayer's own openVillager()/trade()
+//     (core) -- a whole real mechanic (trade UI, emeralds) untouched until now. <item> is the
+//     OUTPUT she wants; finds a matching, affordable, not-disabled trade herself rather than
+//     needing a trade index. Deliberately direct-command only, not in the goal planner's own
+//     vocabulary -- villager availability is too unpredictable to risk another hallucination
+//     surface there.
+// (3) death/respawn handling: new "recover" action -- paths back to a stored death position
+//     (index.js's job to capture and pass in) so auto-pickup has a chance to recover dropped
+//     items before vanilla's 5-minute despawn timer. Internal-use only, not a real ACTION verb.
+// (4) true mid-action self-defense interrupt: no actions.js changes needed -- the existing
+//     stopCurrent()/cancelToken design (built for "a new command interrupts an old one") turned
+//     out to already support being invoked from index.js's own real-time 'health' listener
+//     without requiring changes here.
+// Also extracted chestObstructed() from "loot" (used by "store" too, one definition instead of
+// a second copy of the exact same double-chest-obstruction check).
 //
 // 1.13.0 (2026-09-07) -- direct follow-up to "look for more ways to improve their autonomy":
 // (1) hunger: new "eat" action (bot.consume(), core, requires the food held first) and new
@@ -256,6 +277,15 @@ const GEAR_SUFFIXES = [
 // inside an existing furnace, so it's genuinely actionable the moment it's in inventory.
 const FUEL_NAMES = ["coal", "charcoal"];
 
+// Exported for index.js's checkInventoryFull() (2026-09-07, "do all" -> base/chest storage) --
+// "essential" mirrors exactly what "loot" already considers worth taking (gear/fuel/food);
+// everything else is fair game to store away when space is tight, one definition shared instead
+// of two copies drifting apart.
+export function isEssentialItem(itemName) {
+  return GEAR_SUFFIXES.some((s) => itemName.endsWith(s)) || FUEL_NAMES.includes(itemName) ||
+    FOOD_NAMES.includes(itemName);
+}
+
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
 // for furnace input->output) -- unlike bot.craft()'s crafting-table recipes, there's no real data
 // to defer to here, so this is a small, deliberately hand-picked map of the smelting outcomes
@@ -420,6 +450,27 @@ async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
   await bot.craft(recipes[0], count, tableBlock ?? undefined);
 }
 
+// Extracted from "loot" (2026-09-06's own real find, see 1.5.0's history) so "store" (2026-09-07,
+// "do all" -> base/chest storage) can reuse the exact same check instead of a second copy
+// drifting out of sync. Any solid block directly above EITHER half of a double chest blocks the
+// whole thing in vanilla -- scanning cardinal neighbors for the matching paired half (rather than
+// trusting a memorized left/right-to-offset convention) is more robust than computing it from
+// facing+type directly.
+function chestObstructed(bot, chestBlock) {
+  const halves = [chestBlock];
+  if (chestBlock.getProperties?.().type !== undefined) {
+    const facing = chestBlock.getProperties().facing;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const neighbor = bot.blockAt(chestBlock.position.offset(dx, 0, dz));
+      if (neighbor?.name === chestBlock.name && neighbor.getProperties?.().facing === facing) {
+        halves.push(neighbor);
+        break;
+      }
+    }
+  }
+  return halves.some((half) => bot.blockAt(half.position.offset(0, 1, 0))?.boundingBox === "block");
+}
+
 let cancelToken = { cancelled: false };
 
 function stopCurrent(bot) {
@@ -550,23 +601,8 @@ export async function performAction(bot, action, speaker) {
         // Real error found live (2026-09-06): openChest() waited its own internal 20s timeout
         // ("Event windowOpen did not fire") against a chest that vanilla Minecraft will never
         // actually open -- any solid block directly above EITHER half of a double chest blocks
-        // the whole thing, a real, common world-state issue, not a bug in this code. Scanning
-        // cardinal neighbors for the matching paired half (rather than trusting a memorized
-        // left/right-to-offset convention) is more robust than computing it from facing+type.
-        const chestHalves = [chestBlock];
-        if (chestBlock.getProperties?.().type !== undefined) {
-          const facing = chestBlock.getProperties().facing;
-          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            const neighbor = bot.blockAt(chestBlock.position.offset(dx, 0, dz));
-            if (neighbor?.name === chestBlock.name && neighbor.getProperties?.().facing === facing) {
-              chestHalves.push(neighbor);
-              break;
-            }
-          }
-        }
-        const obstructed = chestHalves.some(
-          (half) => bot.blockAt(half.position.offset(0, 1, 0))?.boundingBox === "block");
-        if (obstructed) {
+        // the whole thing, a real, common world-state issue, not a bug in this code.
+        if (chestObstructed(bot, chestBlock)) {
           sawObstruction = true;
           continue; // try the next candidate instead of giving up entirely
         }
@@ -595,9 +631,7 @@ export async function performAction(bot, action, speaker) {
           // (itemsRange(0, inventoryStart)) is the actual container-only view.
           const contents = chest.containerItems();
           console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
-          const gear = contents.filter((i) =>
-            GEAR_SUFFIXES.some((s) => i.name.endsWith(s)) || FUEL_NAMES.includes(i.name) ||
-            FOOD_NAMES.includes(i.name));
+          const gear = contents.filter((i) => isEssentialItem(i.name));
           for (const item of gear) {
             try {
               await chest.withdraw(item.type, null, item.count);
@@ -913,6 +947,129 @@ export async function performAction(bot, action, speaker) {
         return fail(`couldn't place the ${action.item}: ${err.message}`);
       }
       return ok(`placed a ${action.item}.`);
+    }
+
+    case "store": {
+      // Direct request, 2026-09-07 ("do all" -> base/chest storage): the inverse of "loot" --
+      // deposit an item into the nearest chest instead of withdrawing from it. Same multi-
+      // candidate + obstruction-check pattern (chestObstructed(), extracted from loot for this).
+      const itemDef = bot.registry.itemsByName[action.item];
+      if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
+      const have = bot.inventory.count(itemDef.id, null);
+      if (!have) return fail(`don't have any ${action.item} to store.`);
+      const storeCount = Math.min(action.count, have);
+
+      const chestType = bot.registry.blocksByName.chest;
+      const trappedType = bot.registry.blocksByName.trapped_chest;
+      const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
+      if (!matchIds.length) return fail("don't know how to recognize a chest here.");
+      const storeFindOptions = { matching: matchIds, maxDistance: 32, count: 3 };
+      let positions = bot.findBlocks(storeFindOptions);
+      if (!positions.length) positions = await wanderAndRetryFind(bot, token, storeFindOptions);
+      if (!positions.length) return fail("couldn't find a chest nearby, even after looking around.");
+
+      for (const pos of positions) {
+        if (token.cancelled) return ok("stopped on the way to a chest.");
+        const chestBlock = bot.blockAt(pos);
+        if (!chestBlock || chestObstructed(bot, chestBlock)) continue;
+
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
+            chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+            () => bot.pathfinder.setGoal(null));
+        } catch (err) {
+          if (token.cancelled) return ok("stopped on the way to a chest.");
+          continue; // couldn't reach this one -- try the next candidate
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) return ok("stopped on the way to a chest.");
+
+        try {
+          const chest = await bot.openChest(chestBlock);
+          await chest.deposit(itemDef.id, null, storeCount);
+          await chest.close();
+        } catch (err) {
+          continue; // couldn't open/deposit into this one -- try the next candidate
+        }
+        return ok(`stored ${storeCount} ${action.item} in a chest.`);
+      }
+      return fail("found chests nearby, but couldn't store anything in any of them.");
+    }
+
+    case "trade": {
+      // Direct request, 2026-09-07 ("do all" -> villager trading): a whole real mechanic (trade
+      // UI, emeralds) untouched until now. Built on mineflayer's own openVillager()/trade()
+      // (core) -- confirmed against villager.js source: trades expose .outputs[0].type, .inputs
+      // (1-2 required items), .tradeDisabled (out of uses). <item> is the OUTPUT she wants, not
+      // a trade index or price she'd have to already know -- this finds a matching, currently-
+      // affordable, not-disabled trade herself. Deliberately direct-command only, not wired into
+      // the goal planner's own vocabulary -- villager availability is unpredictable enough that
+      // adding it there risks another hallucination surface rather than real capability.
+      const villagerEntity = bot.nearestEntity((e) => e.name === "villager" &&
+        e.position.distanceTo(bot.entity.position) <= 16);
+      if (!villagerEntity) return fail("no villager nearby.");
+
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(villagerEntity, 2)), ACTION_TIMEOUT_MS,
+          () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way to the villager.");
+        return fail(`couldn't reach the villager: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped on the way to the villager.");
+
+      let villager;
+      try {
+        villager = await bot.openVillager(villagerEntity);
+      } catch (err) {
+        return fail(`couldn't open trading with the villager: ${err.message}`);
+      }
+
+      try {
+        const wantedId = bot.registry.itemsByName[action.item]?.id;
+        const tradeIndex = (villager.trades ?? []).findIndex((t) =>
+          !t.tradeDisabled && t.outputs[0]?.type === wantedId &&
+          t.inputs.every((ing) => bot.inventory.count(ing.type, null) >= ing.count));
+        if (tradeIndex < 0) {
+          await villager.close();
+          return fail(`this villager doesn't have a usable trade for ${action.item}.`);
+        }
+        await bot.trade(villager, tradeIndex, 1);
+        await villager.close();
+      } catch (err) {
+        try { await villager.close(); } catch { /* already closed or never opened cleanly */ }
+        return fail(`couldn't complete the trade: ${err.message}`);
+      }
+      await refreshGear(bot);
+      return ok(`traded with a villager for ${action.item}.`);
+    }
+
+    case "recover": {
+      // Direct request, 2026-09-07 ("do all" -> death/respawn handling). Vanilla drops
+      // everything at the death location on a 5-minute despawn timer (unless keepInventory is
+      // on) -- worth trying to get back before it's gone. Picking items up is automatic on
+      // proximity, no dedicated mineflayer API needed -- just getting there is the whole job.
+      // action.position is a plain {x,y,z} (index.js's own captured bot.entity.position at the
+      // moment of death), not a real action verb a player/planner would ever construct by hand.
+      const { position } = action;
+      if (!position) return fail("don't know where I died.");
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(position.x, position.y, position.z, 1)),
+          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("gave up heading back.");
+        return fail(`couldn't get back to where I died: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("gave up heading back.");
+      // Give auto-pickup a moment to actually register nearby items before reporting done.
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await refreshGear(bot);
+      return ok("made it back to recover what I could.");
     }
 
     default:

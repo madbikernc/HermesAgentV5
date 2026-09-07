@@ -1,4 +1,21 @@
-// Version: 2.15.0
+// Version: 2.16.0
+//
+// 2.16.0 (2026-09-07) -- direct request "do all" on a further four autonomy ideas:
+// (1) death/respawn handling: new bot.on("death")/second bot.on("spawn") pair (confirmed against
+//     mineflayer's health.js source: respawn is automatic, 'spawn' re-emits after it). Abandons
+//     her standing goal on death (its assumptions about her gear/inventory are now stale) and
+//     tries the new "recover" action (actions.js 1.14.0) to get back to her death spot before
+//     vanilla's 5-minute item despawn timer.
+// (2) true mid-action self-defense interrupt: new real-time bot.on("health") listener,
+//     explicitly deferred as "a bigger design decision" when self-defense first shipped.
+//     Force-cancels whatever's physically running via the same primitives stopCurrent() uses
+//     (no changes needed to any existing busy/acting call site), then waits briefly for that to
+//     naturally release the mutex before fleeing through the normal safe path.
+// (3) base/chest storage: new checkInventoryFull() (20s timer, same idle-tick pattern as
+//     checkSleep) stores the largest non-essential stack via the new "store" action once down to
+//     3 or fewer empty slots. "ACTION STORE"/"ACTION TRADE" also added to classifyIntent.
+// (4) villager trading: "ACTION TRADE <item_id>" wired as a direct command only (see actions.js
+//     1.14.0's own comment on why it's not in the goal planner's vocabulary).
 //
 // 2.15.0 (2026-09-07) -- direct follow-up to "look for more ways to improve their autonomy," all
 // four built together:
@@ -255,7 +272,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile, isEssentialItem } from "./actions.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep } from "./goals.js";
 
@@ -493,6 +510,11 @@ async function classifyIntent(speaker, message) {
           `ACTION GIVE <item_id> <count> - asks ${USERNAME} to give the speaker some of an item ` +
           `she's carrying (e.g. "give me some bread"). <count> is a small positive integer, ` +
           `default 1 if unstated.\n` +
+          `ACTION STORE <item_id> <count> - asks ${USERNAME} to put some of an item she's ` +
+          `carrying into a nearby chest. <count> is a small positive integer, default all of it ` +
+          `if unstated.\n` +
+          `ACTION TRADE <item_id> - asks ${USERNAME} to trade with a nearby villager for a ` +
+          `specific item she wants\n` +
           `ACTION CRAFT <item_id> <count> - asks ${USERNAME} to craft/make an item, ONLY if a ` +
           `specific item was actually named or clearly implied. <item_id> must be the exact ` +
           `modern Minecraft item id (e.g. stick, oak_planks, wooden_pickaxe, crafting_table). ` +
@@ -544,6 +566,17 @@ async function classifyIntent(speaker, message) {
       const item = (parts[2] || "").toLowerCase();
       const count = parseInt(parts[3], 10);
       if (item) return { type: "action", action: { type: "give", player: speaker, item, count: count > 0 ? count : 1 } };
+    }
+    if (verb === "STORE") {
+      const item = (parts[2] || "").toLowerCase();
+      const count = parseInt(parts[3], 10);
+      // Unlike every other count default (1), this defaults to "all of it" -- performAction's
+      // "store" already caps at however much she actually has via Math.min().
+      if (item) return { type: "action", action: { type: "store", item, count: count > 0 ? count : Infinity } };
+    }
+    if (verb === "TRADE") {
+      const item = (parts[2] || "").toLowerCase();
+      if (item) return { type: "action", action: { type: "trade", item } };
     }
     if (verb === "MINE") {
       const block = (parts[2] || "").toLowerCase();
@@ -700,7 +733,8 @@ async function runAction(action, speaker, message, send) {
     : action.type === "craft" ? `craft ${action.item} x${action.count}`
     : action.type === "smelt" ? `smelt ${action.item} x${action.count}`
     : action.type === "place" ? `place ${action.item}`
-    : action.type === "give" ? `give ${action.player} ${action.item} x${action.count}` : action.type;
+    : action.type === "give" ? `give ${action.player} ${action.item} x${action.count}`
+    : action.type === "store" ? `store ${action.item}` : action.type;
   acting = true; // blocks the goal loop from stepping until this direct command is done
   try {
     const startLine = {
@@ -709,7 +743,8 @@ async function runAction(action, speaker, message, send) {
       loot: "checking a nearby chest.", craft: `let's see about crafting ${action.item}.`,
       sleep: "heading to bed.", smelt: `time to smelt some ${action.item}.`,
       place: `let's set up a ${action.item} here.`, eat: "grabbing a bite.",
-      give: `bringing you some ${action.item}.`,
+      give: `bringing you some ${action.item}.`, store: `putting away some ${action.item}.`,
+      trade: "let's see what the villager has.",
     }[action.type];
     if (startLine) send(await narrateAction(startLine));
 
@@ -1275,6 +1310,43 @@ setInterval(() => {
     console.error(`[${USERNAME}] checkPendingGiveRequests error:`, err.message));
 }, GIVE_CHECK_MS);
 
+// Direct request, 2026-09-07 ("do all" -> base/chest storage). Same idle-tick/busy-acting
+// pattern as everything else. bot.inventory.items().length is a clean count of occupied slots
+// in the 36-slot main+hotbar range (one entry per occupied slot, confirmed against how loot's
+// own containerItems()/items() distinction was worked out earlier tonight) -- no need to touch
+// raw slot indices directly. Picks the single LARGEST non-essential stack so one trip actually
+// frees meaningful space rather than storing one item at a time.
+const INVENTORY_CHECK_MS = parseInt(process.env.MC_INVENTORY_CHECK_MS || "20000", 10);
+const INVENTORY_FULL_SLOTS = 3; // 3 or fewer empty slots counts as "getting full"
+const INVENTORY_MAIN_HOTBAR_SLOTS = 36;
+
+async function checkInventoryFull() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  const emptySlots = INVENTORY_MAIN_HOTBAR_SLOTS - bot.inventory.items().length;
+  if (emptySlots > INVENTORY_FULL_SLOTS) return;
+
+  const surplus = bot.inventory.items().filter((i) => !isEssentialItem(i.name));
+  if (!surplus.length) return; // genuinely nothing spare to store this tick
+  surplus.sort((a, b) => b.count - a.count);
+  const target = surplus[0];
+
+  busy = true;
+  acting = true;
+  try {
+    const result = await performAction(bot, { type: "store", item: target.name, count: target.count }, USERNAME);
+    console.log(`[${USERNAME}] inventory management: ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] inventory check failed:`, err.message);
+  } finally {
+    busy = false;
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkInventoryFull().catch((err) => console.error(`[${USERNAME}] checkInventoryFull error:`, err.message));
+}, INVENTORY_CHECK_MS);
+
 // Setting a goal is a fast, synchronous-feeling operation (a disk write, not a physical
 // action) -- it runs inline inside handleIncoming's busy window rather than through runAction's
 // fire-and-forget/`acting` path.
@@ -1411,6 +1483,103 @@ bot.once("spawn", () => {
       }
     },
   });
+});
+
+// Direct request, 2026-09-07 ("do all" -> death/respawn handling), never addressed before now.
+// Confirmed against mineflayer's own health.js source: bot.respawn() fires automatically on
+// death (this fleet never passes `respawn: false`), and 'spawn' re-emits once she's actually
+// back -- the SAME event the very first bot.once("spawn", ...) above reacts to, so a second,
+// persistent bot.on("spawn", ...) listener is needed here rather than reusing that one (a
+// `.once` listener never fires again). hasSpawnedOnce distinguishes "the initial connection" (do
+// nothing extra) from "a real respawn after dying" (the only time this block should act).
+let deathPosition = null;
+let hasSpawnedOnce = false;
+
+bot.on("death", () => {
+  deathPosition = bot.entity.position.clone();
+  console.log(`[${USERNAME}] died at ${deathPosition}`);
+});
+
+bot.on("spawn", () => {
+  if (!hasSpawnedOnce) {
+    hasSpawnedOnce = true;
+    return; // the initial connection's own spawn -- already handled by the once() listener above
+  }
+  (async () => {
+    console.log(`[${USERNAME}] respawned after dying`);
+    bot.chat(await narrateAction("ouch, I died! let me get myself back together."));
+    // Vanilla drops everything at the death location and she respawns empty-handed -- whatever
+    // her standing goal assumed about her gear/inventory is now stale, so it doesn't make sense
+    // to just keep going as if nothing happened.
+    if (currentGoal) {
+      await broadcastGoalState("abandoned", currentGoal.description);
+      recordGoalOutcome(currentGoal.description, "gave up", "died");
+      currentGoal = null;
+      await clearGoal(PERSONA_NAME);
+    }
+    const recoverAt = deathPosition;
+    deathPosition = null;
+    if (recoverAt && AUTONOMY_ENABLED) {
+      busy = true;
+      acting = true;
+      try {
+        const result = await performAction(bot, { type: "recover", position: recoverAt }, USERNAME);
+        console.log(`[${USERNAME}] recovery: ${result.text} (ok=${result.ok})`);
+      } catch (err) {
+        console.error(`[${USERNAME}] recovery failed:`, err.message);
+      } finally {
+        busy = false;
+        acting = false;
+      }
+    }
+  })().catch((err) => console.error(`[${USERNAME}] post-respawn handling failed:`, err.message));
+});
+
+// True mid-action self-defense interrupt (direct request, 2026-09-07: "do all" -- explicitly
+// deferred when self-defense first shipped as "a bigger design decision"). checkSelfDefense()'s
+// own idle-tick version only ever runs BETWEEN actions; this fires in real time off mineflayer's
+// own 'health' event so a bot mid-mine doesn't just keep swinging while a creeper closes in.
+// Deliberately does NOT try to make every existing busy/acting call site aware of an external
+// override (a much bigger, riskier refactor) -- instead, force-cancels whatever's physically
+// happening RIGHT NOW using the exact same primitives actions.js's own stopCurrent() calls
+// (safe, idempotent, a no-op if nothing's running), which makes the interrupted call's own
+// promise settle almost immediately; THEN waits (briefly, bounded) for its normal finally block
+// to release busy/acting on its own before running the real flee through the standard safe path.
+const EMERGENCY_HEALTH_THRESHOLD = 6; // out of 20 -- stricter than checkSelfDefense's idle 10,
+                                       // reserved for genuine near-death, not routine caution
+let emergencyInFlight = false;
+
+bot.on("health", () => {
+  if (!AUTONOMY_ENABLED || emergencyInFlight) return;
+  if (bot.health <= 0 || bot.health > EMERGENCY_HEALTH_THRESHOLD) return;
+  const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
+  if (!threat) return;
+
+  emergencyInFlight = true;
+  console.log(`[${USERNAME}] EMERGENCY: health critical (${bot.health}) with ${threat.name} ` +
+              `nearby -- force-cancelling current action to flee`);
+  bot.pathfinder.setGoal(null);
+  if (bot.pvp.target) bot.pvp.stop();
+  bot.collectBlock.cancelTask();
+
+  (async () => {
+    const deadline = Date.now() + 3000;
+    while ((busy || acting) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    busy = true;
+    acting = true;
+    try {
+      const result = await performAction(bot, { type: "flee" }, USERNAME);
+      console.log(`[${USERNAME}] emergency flee: ${result.text} (ok=${result.ok})`);
+    } catch (err) {
+      console.error(`[${USERNAME}] emergency flee failed:`, err.message);
+    } finally {
+      busy = false;
+      acting = false;
+      emergencyInFlight = false;
+    }
+  })();
 });
 
 bot.on("kicked", (reason) => console.log(`[${USERNAME}] kicked:`, reason));
