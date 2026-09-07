@@ -1,4 +1,27 @@
-// Version: 2.14.1
+// Version: 2.15.0
+//
+// 2.15.0 (2026-09-07) -- direct follow-up to "look for more ways to improve their autonomy," all
+// four built together:
+// (1) Cross-bot goal coordination: new Buzz topic "minecraft-coordination" (hermes-buzz.py
+//     2.0.18, deliberately separate from "minecraft" -- see that topic's own comment on why).
+//     Every goal state change (set, done, abandoned, stopped) broadcasts; otherBotGoal tracks
+//     the other bot's current goal and feeds both proposeOwnGoal and planNextStep, so a real
+//     collision observed live tonight (both bots picking "get copper armor" at once, both
+//     burning attempts on the same occupied furnaces) has a real chance of not repeating.
+// (2) Environmental memory: planNextStep now searches the existing long-term memory (same
+//     corpus generateReply already uses for chat) using the goal description as the query, and
+//     a mine/loot/smelt failure that survived actions.js's own wander-retry ("even after
+//     looking around") writes a world-scoped note -- "no oak_log nearby" no longer has to be
+//     rediscovered from scratch by both bots across every separate goal cycle.
+// (3) Hunger: new checkHunger() on its own 15s timer, same idle-tick pattern as checkSleep --
+//     eats proactively via the new "eat" action (actions.js 1.13.0) once below 18/20 food.
+// (4) Bot-to-bot help: new "ACTION REQUEST <item_id> <count>" (goalTick handles it directly,
+//     Buzz-only, never touches performAction) lets a genuinely stuck bot ask the other one for
+//     an item over "minecraft-coordination"; the receiving bot checks her own inventory in the
+//     topic handler and, if she can help, a new checkPendingGiveRequests() (10s timer) delivers
+//     it via the new "give" action (paths to the requester, then bot.toss()). "ACTION EAT"/
+//     "ACTION GIVE" also added to classifyIntent for direct-command parity with every other
+//     action.
 //
 // 2.14.1 (2026-09-07) -- fifth and last of five scoped enhancements: tighter DONE validation.
 // goals.js 1.1.0's new `sawSuccess` field (set whenever any real step logs ok=true) lets goalTick
@@ -396,6 +419,25 @@ function recordGoalOutcome(description, outcome, reason) {
   if (recentGoalOutcomes.length > RECENT_GOAL_OUTCOMES_MAX) recentGoalOutcomes.shift();
 }
 
+// Cross-bot coordination (direct follow-up, 2026-09-07: "look for more ways to improve their
+// autonomy"), kept current by the "minecraft-coordination" Buzz subscription set up alongside
+// the existing "minecraft" one, near the bottom of this file.
+let otherBotGoal = null; // the other bot's last-known active goal description, or null if idle
+let pendingGiveRequest = null; // {forPlayer, item, count} she's agreed to fulfill, or null
+
+// Deliberately a separate topic from "minecraft" -- see hermes-buzz.py 2.0.18's own comment on
+// why (both bots relay everything they hear on "minecraft" into in-game chat; a raw JSON
+// coordination payload has no business being read aloud). Best-effort like every other Buzz call
+// in this file -- a publish failure here should never break the goal loop that triggered it.
+async function broadcastGoalState(status, description) {
+  try {
+    await buzzPublish(AGENT_ID, "minecraft-coordination",
+      JSON.stringify({ type: "goal", status, description }));
+  } catch (err) {
+    console.error(`[${USERNAME}] goal broadcast failed:`, err.message);
+  }
+}
+
 loadGoal(PERSONA_NAME).then((g) => {
   currentGoal = g;
   if (g) console.log(`[${USERNAME}] resumed goal: ${g.description} (${g.steps} steps so far)`);
@@ -447,6 +489,10 @@ async function classifyIntent(speaker, message) {
           `ACTION LOOT - asks ${USERNAME} to check a nearby chest for equipment/gear\n` +
           `ACTION SLEEP - asks ${USERNAME} to go find a bed and sleep (only makes sense at ` +
           `night or during a thunderstorm)\n` +
+          `ACTION EAT - asks ${USERNAME} to eat some food from her inventory\n` +
+          `ACTION GIVE <item_id> <count> - asks ${USERNAME} to give the speaker some of an item ` +
+          `she's carrying (e.g. "give me some bread"). <count> is a small positive integer, ` +
+          `default 1 if unstated.\n` +
           `ACTION CRAFT <item_id> <count> - asks ${USERNAME} to craft/make an item, ONLY if a ` +
           `specific item was actually named or clearly implied. <item_id> must be the exact ` +
           `modern Minecraft item id (e.g. stick, oak_planks, wooden_pickaxe, crafting_table). ` +
@@ -477,6 +523,7 @@ async function classifyIntent(speaker, message) {
     if (verb === "STOP") return { type: "action", action: { type: "stop" } };
     if (verb === "ATTACK") return { type: "action", action: { type: "attack" } };
     if (verb === "FLEE") return { type: "action", action: { type: "flee" } };
+    if (verb === "EAT") return { type: "action", action: { type: "eat" } };
     if (verb === "LOOT") return { type: "action", action: { type: "loot" } };
     if (verb === "SLEEP") return { type: "action", action: { type: "sleep" } };
     if (verb === "CRAFT") {
@@ -492,6 +539,11 @@ async function classifyIntent(speaker, message) {
     if (verb === "PLACE") {
       const item = (parts[2] || "").toLowerCase();
       if (item) return { type: "action", action: { type: "place", item } };
+    }
+    if (verb === "GIVE") {
+      const item = (parts[2] || "").toLowerCase();
+      const count = parseInt(parts[3], 10);
+      if (item) return { type: "action", action: { type: "give", player: speaker, item, count: count > 0 ? count : 1 } };
     }
     if (verb === "MINE") {
       const block = (parts[2] || "").toLowerCase();
@@ -647,7 +699,8 @@ async function runAction(action, speaker, message, send) {
   const actionDesc = action.type === "mine" ? `mine ${action.block} x${action.count}`
     : action.type === "craft" ? `craft ${action.item} x${action.count}`
     : action.type === "smelt" ? `smelt ${action.item} x${action.count}`
-    : action.type === "place" ? `place ${action.item}` : action.type;
+    : action.type === "place" ? `place ${action.item}`
+    : action.type === "give" ? `give ${action.player} ${action.item} x${action.count}` : action.type;
   acting = true; // blocks the goal loop from stepping until this direct command is done
   try {
     const startLine = {
@@ -655,7 +708,8 @@ async function runAction(action, speaker, message, send) {
       mine: `off to gather some ${action.block}.`, attack: "engaging.", flee: "getting out of here!",
       loot: "checking a nearby chest.", craft: `let's see about crafting ${action.item}.`,
       sleep: "heading to bed.", smelt: `time to smelt some ${action.item}.`,
-      place: `let's set up a ${action.item} here.`,
+      place: `let's set up a ${action.item} here.`, eat: "grabbing a bite.",
+      give: `bringing you some ${action.item}.`,
     }[action.type];
     if (startLine) send(await narrateAction(startLine));
 
@@ -722,6 +776,15 @@ function parseGoalStep(text) {
         const count = parseInt(parts[3], 10);
         if (block) return { type: "step", action: { type: "mine", block, count: count > 0 ? count : 4 } };
       }
+      // Not a "step" like the others above -- REQUEST never touches the game world, only Buzz,
+      // so goalTick handles it as its own sibling type rather than routing it through
+      // performAction (direct follow-up, 2026-09-07: "look for more ways to improve their
+      // autonomy" -> bot-to-bot help).
+      if (verb === "REQUEST") {
+        const item = (parts[2] || "").toLowerCase();
+        const count = parseInt(parts[3], 10);
+        if (item) return { type: "request", item, count: count > 0 ? count : 1 };
+      }
     }
   }
   return { type: "blocked", reason: "couldn't decide what to do next" };
@@ -735,6 +798,29 @@ function parseGoalStep(text) {
 async function planNextStep(goal) {
   const gearNote = describeGear(bot);
   const recentLog = goal.log.length ? goal.log.slice(-6).join("\n") : "(nothing done yet)";
+
+  // Environmental memory (direct follow-up, 2026-09-07: "look for more ways to improve their
+  // autonomy"). Real gap found live earlier tonight: "no oak_log nearby" got rediscovered from
+  // scratch, independently, by both bots, across many separate goal cycles -- that knowledge
+  // died with each goal instead of persisting. Reuses the EXISTING long-term memory (the same
+  // "minecraft" hermes-rag corpus generateReply already searches for chat), not a new store.
+  let environmentNote = "";
+  try {
+    const hits = await searchMemory(goal.description, { topK: 3 });
+    if (hits.length) {
+      environmentNote = "\n\nThings you remember about this area (may save you from repeating a " +
+        "dead end):\n" + hits.map((h) => `- ${h.text}`).join("\n");
+    }
+  } catch (err) {
+    console.error(`[${USERNAME}] memory recall for planning failed:`, err.message);
+  }
+
+  const otherGoalNote = otherBotGoal
+    ? `\n\nThe other bot is currently working on: "${otherBotGoal}" -- if your goal would mean ` +
+      `competing for the same scarce thing, consider whether ACTION REQUEST (ask her directly, ` +
+      `she may already have some) beats duplicating her work.`
+    : "";
+
   const reply = await callRole(
     "dispatch",
     [
@@ -785,11 +871,16 @@ async function planNextStep(goal) {
           `right next to herself, when SMELT/CRAFT needs one and none is reachable.\n` +
           `ACTION LOOT - check the nearest chest for gear\n` +
           `ACTION ATTACK - fight a nearby hostile mob\n` +
+          `ACTION REQUEST <item_id> <count> - ask the other bot (over Buzz) for an item she might ` +
+          `already have. Only after LOOT has already failed for the same need, or the item is ` +
+          `also fine to just ask for directly (e.g. borrowing fuel/food rather than gathering ` +
+          `your own from scratch).\n` +
           `Pick the single most useful next step toward the goal. If the same step already ` +
           `failed more than once in a row (see recent progress below), you must try a genuinely ` +
           `different step that addresses the actual missing ingredient, or respond BLOCKED.`,
       },
-      { role: "user", content: `Goal: ${goal.description}\n${gearNote}\nRecent progress:\n${recentLog}` },
+      { role: "user", content: `Goal: ${goal.description}\n${gearNote}\nRecent progress:\n${recentLog}` +
+          `${environmentNote}${otherGoalNote}` },
     ],
     // Real bug found live (2026-09-07), TWICE -- once at 120 tokens, again at 220: the model
     // does not reliably obey "at most one short sentence" and sometimes writes a long run-on
@@ -837,6 +928,16 @@ async function proposeOwnGoal() {
       "gear/inventory below), pick something different instead of immediately repeating it."
     : "";
 
+  // Cross-bot goal coordination (direct follow-up, 2026-09-07: "look for more ways to improve
+  // their autonomy"). Real collision observed live: both bots picked "get copper armor" at the
+  // same time and both burned attempts on the same occupied furnaces -- duplicated effort neither
+  // needed. otherBotGoal is kept current by the "minecraft-coordination" Buzz subscription below.
+  const otherGoalNote = otherBotGoal
+    ? `\n\nThe other bot is currently working on: "${otherBotGoal}" -- avoid picking something ` +
+      `that duplicates or competes with that for the same scarce resource unless you have a ` +
+      `good reason to.`
+    : "";
+
   const text = await callRole(
     "muse",
     [
@@ -857,7 +958,8 @@ async function proposeOwnGoal() {
           `"stock up on iron") rather than one specific method, since more than one way to get ` +
           `there might work -- but naming smelting/crafting as part of it is fine now, unlike ` +
           `building, which is never possible. Respond with ONLY a short phrase naming the goal, ` +
-          `in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}${recentOutcomesNote}`,
+          `in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}` +
+          `${recentOutcomesNote}${otherGoalNote}`,
       },
       { role: "user", content: "What's your goal?" },
     ],
@@ -868,6 +970,7 @@ async function proposeOwnGoal() {
 
   currentGoal = newGoal({ description, source: "self" });
   await saveGoal(PERSONA_NAME, currentGoal);
+  await broadcastGoalState("active", description);
   console.log(`[${USERNAME}] self-proposed goal: ${description}`);
   bot.chat(await narrateAction(`new goal, on my own: ${description}.`));
 }
@@ -931,8 +1034,37 @@ async function goalTick() {
       console.log(`[${USERNAME}] goal complete: ${currentGoal.description}`);
       bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
       recordGoalOutcome(currentGoal.description, "done", null);
+      await broadcastGoalState("done", currentGoal.description);
       currentGoal = null;
       await clearGoal(PERSONA_NAME);
+      return;
+    }
+
+    // Bot-to-bot help (direct follow-up, 2026-09-07: "look for more ways to improve their
+    // autonomy") -- REQUEST never touches the game world, only Buzz, so it's handled here rather
+    // than through performAction. Counts toward consecutiveFailures like any other non-resolving
+    // step: if nobody responds within a few ticks, she still gives up normally instead of waiting
+    // forever.
+    if (parsed.type === "request") {
+      console.log(`[${USERNAME}] requesting ${parsed.count} ${parsed.item} from the other bot`);
+      try {
+        await buzzPublish(AGENT_ID, "minecraft-coordination",
+          JSON.stringify({ type: "request", item: parsed.item, count: parsed.count, forPlayer: USERNAME }));
+      } catch (err) {
+        console.error(`[${USERNAME}] item request publish failed:`, err.message);
+      }
+      logStep(currentGoal, `request: asked for ${parsed.count} ${parsed.item}`, false);
+      currentGoal.consecutiveFailures += 1;
+      if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
+        bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- nobody could help with ${parsed.item}.`));
+        recordGoalOutcome(currentGoal.description, "gave up", `needed ${parsed.item}`);
+        await broadcastGoalState("abandoned", currentGoal.description);
+        currentGoal = null;
+        await clearGoal(PERSONA_NAME);
+      } else {
+        await saveGoal(PERSONA_NAME, currentGoal);
+      }
       return;
     }
 
@@ -945,6 +1077,7 @@ async function goalTick() {
         console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
         bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${parsed.reason}.`));
         recordGoalOutcome(currentGoal.description, "gave up", parsed.reason);
+        await broadcastGoalState("abandoned", currentGoal.description);
         currentGoal = null;
         await clearGoal(PERSONA_NAME);
       } else {
@@ -959,10 +1092,26 @@ async function goalTick() {
     console.log(`[${USERNAME}] goal step: ${parsed.action.type} -> ${result.text} ` +
                 `(ok=${result.ok}, consecutiveFailures=${currentGoal.consecutiveFailures})`);
 
+    // Environmental memory (direct follow-up, 2026-09-07: "look for more ways to improve their
+    // autonomy"). "even after looking around" is wanderAndRetryFind()'s own signature (actions.js
+    // 1.11.0) for "tried the normal search AND wandered, still nothing" -- a real, worth-
+    // remembering fact about this area, not just this one attempt. World-scoped (shared corpus)
+    // since it's true regardless of which bot goes looking. Best-effort, never blocks the loop.
+    if (!result.ok && result.text.includes("even after looking around")) {
+      try {
+        await writeMemoryNote({ scope: "world", persona: PERSONA_NAME,
+          text: `No ${parsed.action.block ?? parsed.action.item ?? "target"} found even after ` +
+                `wandering to look, as of ${new Date().toISOString()}.` });
+      } catch (err) {
+        console.error(`[${USERNAME}] environmental memory write failed:`, err.message);
+      }
+    }
+
     if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
       console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
       bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${result.text}`));
       recordGoalOutcome(currentGoal.description, "gave up", result.text);
+      await broadcastGoalState("abandoned", currentGoal.description);
       currentGoal = null;
       await clearGoal(PERSONA_NAME);
       return;
@@ -1066,12 +1215,73 @@ setInterval(() => {
   checkSelfDefense().catch((err) => console.error(`[${USERNAME}] checkSelfDefense error:`, err.message));
 }, SELF_DEFENSE_CHECK_MS);
 
+// Direct follow-up, 2026-09-07: "look for more ways to improve their autonomy" -> hunger. Same
+// idle-tick/busy-acting pattern as checkSleep/checkSelfDefense. Eats proactively (below full, not
+// only once it's a real problem) since a failed "nothing to eat" check is cheap and harmless --
+// correctness over minimizing calls, same standing instruction as everywhere else tonight.
+const HUNGER_CHECK_MS = parseInt(process.env.MC_HUNGER_CHECK_MS || "15000", 10);
+const HUNGER_THRESHOLD = 18; // out of a max of 20
+
+async function checkHunger() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (bot.food >= HUNGER_THRESHOLD) return;
+
+  busy = true;
+  acting = true;
+  try {
+    const result = await performAction(bot, { type: "eat" }, USERNAME);
+    if (result.ok) console.log(`[${USERNAME}] hunger: ${result.text} (food was ${bot.food})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] hunger check failed:`, err.message);
+  } finally {
+    busy = false;
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkHunger().catch((err) => console.error(`[${USERNAME}] checkHunger error:`, err.message));
+}, HUNGER_CHECK_MS);
+
+// Direct follow-up, 2026-09-07: "look for more ways to improve their autonomy" -> bot-to-bot
+// help. Fulfilling a request is itself a real action (path to the requester, toss the item), so
+// it goes through the same idle-tick/busy-acting gate as everything else -- never interrupts
+// whatever she's already doing. Clears the pending request regardless of outcome once attempted,
+// rather than retrying indefinitely if the requester wandered off in the meantime.
+const GIVE_CHECK_MS = parseInt(process.env.MC_GIVE_CHECK_MS || "10000", 10);
+
+async function checkPendingGiveRequests() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping || !pendingGiveRequest) return;
+  const { forPlayer, item, count } = pendingGiveRequest;
+  pendingGiveRequest = null;
+
+  busy = true;
+  acting = true;
+  try {
+    console.log(`[${USERNAME}] fulfilling request: giving ${count} ${item} to ${forPlayer}`);
+    const result = await performAction(bot, { type: "give", player: forPlayer, item, count }, USERNAME);
+    console.log(`[${USERNAME}] give result: ${result.text} (ok=${result.ok})`);
+    if (result.ok) bot.chat(await narrateAction(`brought you some ${item}, ${forPlayer}.`));
+  } catch (err) {
+    console.error(`[${USERNAME}] give check failed:`, err.message);
+  } finally {
+    busy = false;
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkPendingGiveRequests().catch((err) =>
+    console.error(`[${USERNAME}] checkPendingGiveRequests error:`, err.message));
+}, GIVE_CHECK_MS);
+
 // Setting a goal is a fast, synchronous-feeling operation (a disk write, not a physical
 // action) -- it runs inline inside handleIncoming's busy window rather than through runAction's
 // fire-and-forget/`acting` path.
 async function setNewGoal(description, speaker) {
   currentGoal = newGoal({ description, source: "user", setBy: speaker });
   await saveGoal(PERSONA_NAME, currentGoal);
+  await broadcastGoalState("active", description);
   return currentGoal;
 }
 
@@ -1101,6 +1311,7 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
         // "stop" means stop everything, not just the current physical motion -- a standing
         // goal she was working on shouldn't silently keep going after being told to stop.
         if (intent.action.type === "stop" && currentGoal) {
+          await broadcastGoalState("abandoned", currentGoal.description);
           currentGoal = null;
           await clearGoal(PERSONA_NAME);
         }
@@ -1167,6 +1378,37 @@ bot.once("spawn", () => {
     onMessage: (msg) => {
       console.log(`[${USERNAME}] heard on Buzz from ${msg.from_agent}: ${msg.body}`);
       bot.chat(`(heard from ${msg.from_agent}) ${msg.body}`.slice(0, MAX_CHAT_LEN));
+    },
+  });
+
+  // Cross-bot coordination (direct request, 2026-09-07: "look for more ways to improve their
+  // autonomy") -- goal-awareness and item-requests. Structured JSON, never relayed into chat
+  // (see hermes-buzz.py 2.0.18's own comment on why this is a separate topic from "minecraft").
+  watchTopic({
+    topic: "minecraft-coordination",
+    selfAgent: AGENT_ID,
+    onMessage: (msg) => {
+      let payload;
+      try {
+        payload = JSON.parse(msg.body);
+      } catch {
+        return; // not a real coordination payload -- ignore rather than crash on it
+      }
+      if (payload.type === "goal") {
+        otherBotGoal = payload.status === "active" ? payload.description : null;
+        console.log(`[${USERNAME}] heard ${msg.from_agent}'s goal: ${otherBotGoal ?? "(idle)"}`);
+      } else if (payload.type === "request" && !pendingGiveRequest) {
+        // Only agrees to fulfill one request at a time (first-come-first-served) -- simple and
+        // sufficient at 2-bot scale, avoids overcommitting inventory she doesn't actually have
+        // by the time checkPendingGiveRequests() gets to act on it.
+        const itemDef = bot.registry.itemsByName[payload.item];
+        const have = itemDef ? bot.inventory.count(itemDef.id, null) : 0;
+        if (have >= payload.count) {
+          pendingGiveRequest = { forPlayer: payload.forPlayer, item: payload.item, count: payload.count };
+          console.log(`[${USERNAME}] can fulfill ${msg.from_agent}'s request for ` +
+                      `${payload.count} ${payload.item}`);
+        }
+      }
     },
   });
 });

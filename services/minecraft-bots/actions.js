@@ -1,4 +1,15 @@
-// Version: 1.12.0
+// Version: 1.13.0
+//
+// 1.13.0 (2026-09-07) -- direct follow-up to "look for more ways to improve their autonomy":
+// (1) hunger: new "eat" action (bot.consume(), core, requires the food held first) and new
+//     exported FOOD_NAMES -- minecraft-data's own item registry carries no food/nutrition field
+//     at all (checked live: bread/apple both have no foodPoints), so this is a small curated
+//     list, same pragmatic approach as FUEL_PREFERENCE/SMELT_RECIPES. Loot now also recognizes
+//     food as worth taking.
+// (2) bot-to-bot help: new "give" action (bot.toss(), core -- drops at her own feet, so she
+//     paths next to the recipient first, same pattern as every other action here). General
+//     enough for a human to ask directly ("give me some bread") or for the autonomous cross-bot
+//     request flow (index.js) to use by naming the other bot's real username.
 //
 // 1.12.0 (2026-09-07) -- fourth of five scoped enhancements: self-defense. New "flee" action
 // (GoalInvert wrapping a GoalFollow, confirmed against mineflayer-pathfinder's own goals.js --
@@ -217,6 +228,20 @@ export function nearestHostile(bot, maxDistance = 16) {
   return bot.nearestEntity((e) => e.type === "mob" && HOSTILE_MOBS.has(e.name) &&
     e.position.distanceTo(bot.entity.position) <= maxDistance);
 }
+
+// Direct request, 2026-09-07 ("look for more ways to improve their autonomy" -> hunger). Checked
+// live: minecraft-data's own item registry carries no food/nutrition field at all (bread/apple
+// both come back with no foodPoints), unlike blocks/recipes -- there's no real data to defer to
+// here, so this is a small, deliberately curated list of common foods, the same pragmatic
+// approach already used for FUEL_PREFERENCE/SMELT_RECIPES rather than an attempt at exhaustive
+// coverage. Exported so "loot" can also recognize food as worth taking, same reasoning as fuel.
+export const FOOD_NAMES = [
+  "bread", "apple", "golden_apple", "enchanted_golden_apple", "cooked_beef", "cooked_porkchop",
+  "cooked_chicken", "cooked_mutton", "cooked_rabbit", "cooked_cod", "cooked_salmon",
+  "baked_potato", "potato", "carrot", "golden_carrot", "melon_slice", "sweet_berries",
+  "glow_berries", "cookie", "pumpkin_pie", "mushroom_stew", "rabbit_stew", "beetroot",
+  "beetroot_soup", "dried_kelp",
+];
 
 // Suffix-matched, same convention as equipment.js -- what's worth pulling out of a chest.
 // Food/blocks/misc items are left behind; this is specifically about gearing up.
@@ -571,7 +596,8 @@ export async function performAction(bot, action, speaker) {
           const contents = chest.containerItems();
           console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
           const gear = contents.filter((i) =>
-            GEAR_SUFFIXES.some((s) => i.name.endsWith(s)) || FUEL_NAMES.includes(i.name));
+            GEAR_SUFFIXES.some((s) => i.name.endsWith(s)) || FUEL_NAMES.includes(i.name) ||
+            FOOD_NAMES.includes(i.name));
           for (const item of gear) {
             try {
               await chest.withdraw(item.type, null, item.count);
@@ -629,6 +655,59 @@ export async function performAction(bot, action, speaker) {
         bot.pathfinder.setGoal(null);
       }
       return token.cancelled ? ok("stopped fleeing.") : ok("got some distance from it.");
+    }
+
+    case "eat": {
+      // Direct request, 2026-09-07: hunger management. Built on mineflayer's own core
+      // consume() (confirmed against inventory.js source: requires the food already equipped
+      // to hand -- bot.equip() first, the same pattern already used for fuel/tools elsewhere in
+      // this file).
+      const foodItem = bot.inventory.items().find((i) => FOOD_NAMES.includes(i.name));
+      if (!foodItem) return fail("don't have anything to eat.");
+      try {
+        await bot.equip(foodItem, "hand");
+        await bot.consume();
+      } catch (err) {
+        return fail(`couldn't eat: ${err.message}`);
+      } finally {
+        await refreshGear(bot); // consume() leaves the food item held -- get a real weapon back
+      }
+      return ok(`ate some ${foodItem.name}.`);
+    }
+
+    case "give": {
+      // Direct request, 2026-09-07: bot-to-bot help. General enough to also work for a human
+      // asking directly ("give me some bread") -- classifyIntent resolves the target to the
+      // speaker for that case; the autonomous cross-bot request flow (index.js) names the other
+      // bot's real in-game username explicitly. Built on mineflayer's own core toss() (drops the
+      // item at her own feet -- confirmed against simple_inventory.js source -- so she has to
+      // actually be standing next to the recipient first for it to be picked up, same
+      // path-then-act pattern as every other action here).
+      const target = bot.players[action.player]?.entity;
+      if (!target) return fail(`I can't see ${action.player} nearby.`);
+      const itemDef = bot.registry.itemsByName[action.item];
+      if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
+      const have = bot.inventory.count(itemDef.id, null);
+      if (!have) return fail(`don't have any ${action.item} to give.`);
+      const giveCount = Math.min(action.count, have);
+
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(target, 2)), ACTION_TIMEOUT_MS,
+          () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way.");
+        return fail(`couldn't reach ${action.player}: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped on the way.");
+
+      try {
+        await bot.toss(itemDef.id, null, giveCount);
+      } catch (err) {
+        return fail(`couldn't give the ${action.item}: ${err.message}`);
+      }
+      return ok(`gave ${giveCount} ${action.item} to ${action.player}.`);
     }
 
     case "sleep": {
