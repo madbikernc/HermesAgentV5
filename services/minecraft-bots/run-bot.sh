@@ -1,5 +1,18 @@
 #!/bin/bash
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-09-07) -- direct request: "check the Firmament coder logs for flagged Minecraft
+# behavior that are not yet resolved" -> "yes" -> add automatic heap-snapshot-on-crash. Two real
+# OOM contributors were found and fixed tonight (actions.js's stopDigging() gap, index.js's
+# searchRadius) by tracing live incidents through source, but a fresh post-fix crash within
+# minutes proved at least one more contributor exists that log timestamps alone can't identify --
+# a single pathfinding search was seen visiting 11,445+ nodes in 1.4s while the process's total
+# heap was 750MB, meaning ~65KB retained per visited node, far more than a pathfinding node
+# object should ever hold on its own. Getting a real answer needs an actual heap snapshot, not
+# more log-reading. --heapsnapshot-near-heap-limit=1 writes one automatically right before V8
+# would otherwise crash with OOM (a real Node feature, not a guess); --diagnostic-dir redirects
+# it away from this git-tracked directory (its own default) to MEMORY_DIR's own heapdumps/
+# subfolder, alongside every other piece of real per-bot state this fleet already keeps there.
 #
 # 1.5.0 (2026-09-07) -- real bug found live standing up Mark/Luke (direct request: "ask Muse to
 # spawn two more bots"), the first bots ever run WITHOUT a matching entry in
@@ -68,4 +81,7 @@ if [ -f "$MATRIX_CREDS" ]; then
   fi
 fi
 
-exec node --max-old-space-size=768 index.js
+HEAPDUMP_DIR="/mnt/hermes-data/minecraft-memory/heapdumps/$(echo "$MC_BOT_USERNAME" | tr '[:upper:]' '[:lower:]')"
+mkdir -p "$HEAPDUMP_DIR"
+
+exec node --max-old-space-size=768 --heapsnapshot-near-heap-limit=1 --diagnostic-dir="$HEAPDUMP_DIR" index.js

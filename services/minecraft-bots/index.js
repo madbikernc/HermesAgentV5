@@ -1,4 +1,19 @@
-// Version: 2.21.0
+// Version: 2.22.0
+//
+// 2.22.0 (2026-09-07) -- direct request: "check the Firmament coder logs for flagged Minecraft
+// behavior that are not yet resolved" -> "yes" (dig into the #1 finding, the all-day recurring
+// OOM crash coder/coder2 kept flagging but never pinpointed). Two real, distinct contributing
+// causes found by reading source and tracing live incidents, not guessed:
+// (1) actions.js's own fix (stopCurrent()/mine()/harvest() now also call bot.stopDigging(), see
+//     its 1.19.0 changelog) -- nothing needed here.
+// (2) bot.pathfinder.searchRadius lowered from 128 to 48: 128 bounded any ONE search, but
+//     mineflayer-pvp's attack() uses a DYNAMIC GoalFollow, and pathfinder's own tick loop
+//     reruns the full search on every tick the target's position changes, with no debounce of
+//     its own -- against an erratically-flying target (a phantom, live evidence: 419
+//     path_update lines in under 30 seconds fighting one) that's a fresh expensive search
+//     firing nearly 20x/second. See the setting's own updated comment for the full account.
+// Both are real, confirmed mechanisms found from live evidence; neither is claimed as the sole
+// explanation for every OOM in the triage log without a heap snapshot to fully confirm against.
 //
 // 2.21.0 (2026-09-07) -- direct request: "ask Muse to spawn two more bots, named Mark and Luke,
 // with military oriented profiles, and priority towards arming themselves and defending the
@@ -510,10 +525,25 @@ bot.once("spawn", () => {
   // own index.js/astar.js) -- "don't limit the search area" at all. thinkTimeout (default 5000ms)
   // only bounds wall-clock time, not how many node objects get allocated within that window --
   // in complex cave terrain, that was enough to hit 25,000+ visited nodes and exhaust the V8
-  // heap before the timeout even fired. 128 gives real headroom over every real target distance
-  // this codebase ever asks for (mine/loot/smelt/wander are all well under 64 blocks) while
-  // directly bounding the pathological case instead of just how long it's allowed to run.
-  bot.pathfinder.searchRadius = 128;
+  // heap before the timeout even fired.
+  //
+  // Lowered from 128 to 48, 2026-09-07 (chasing the same all-day recurring OOM the coder/coder2
+  // triage service kept flagging): 128 bounded any ONE search, but not how OFTEN a search
+  // reruns. Confirmed against mineflayer-pvp's own source: attack() sets a DYNAMIC GoalFollow
+  // (pathfinder.setGoal(goal, true)) to chase its target, and mineflayer-pathfinder's own tick
+  // loop calls resetPath('goal_moved') -- discarding the current search and starting a fresh one
+  // -- every time stateGoal.hasChanged() is true, with no debounce of its own. Against an
+  // erratically-flying target (a phantom, live evidence: 419 path_update lines in under 30
+  // seconds fighting one, "goal_moved" the single largest reason), that's a fresh full search
+  // firing on nearly every tick, each one visiting well into the thousands of nodes within the
+  // old 128-block radius -- allocation pressure high enough to exhaust the heap in under a
+  // minute even though each individual search was, technically, bounded. 48 still gives real
+  // headroom over every real target distance this codebase asks for outside combat (mine/loot/
+  // smelt/wander are all well under 64 blocks, and combat pursuit only ever needs to close a
+  // much shorter gap than that) while directly cutting the cost of each of those rapid-fire
+  // recomputes, since the recompute FREQUENCY itself isn't something this codebase can bound
+  // without patching mineflayer-pvp/mineflayer-pathfinder directly.
+  bot.pathfinder.searchRadius = 48;
 
   // Real-data visibility into navigation, not a guess: astar's own result status
   // ('success'/'partial'/'noPath'/'timeout') for every path (re)computation, so a bad

@@ -1,4 +1,45 @@
-// Version: 1.18.1
+// Version: 1.19.0
+//
+// 1.19.0 (2026-09-07) -- direct request: "check the Firmament coder logs for flagged Minecraft
+// behavior that are not yet resolved" -> "yes" (to digging into the #1 finding). The triage
+// log (637 entries, all day) was dominated by recurring heap-OOM crashes every 5-15 minutes,
+// coder/coder2 both only ever guessing "likely a memory leak, increase --max-old-space-size"
+// without ever pinpointing a cause. Traced two live instances back to their actual logs: not a
+// slow leak, a violent spike (one went 197MB -> a fatal 750MB+ heap in ~8 seconds), both
+// immediately following a MINE step on an ore block, both preceded by a burst of rapid
+// "path_reset: block_updated" events. One instance ran on code from before tonight's own
+// changes, one from after -- ruling out anything shipped earlier tonight as the cause.
+//
+// Root cause, confirmed by reading source, not guessed: mineflayer-collectblock's mineBlock()
+// calls the CORE bot.dig() directly, entirely outside pathfinder's control -- but
+// bot.collectBlock.cancelTask() (CollectBlock.js) only ever calls bot.pathfinder.stop(). It does
+// nothing to an in-flight dig. mineflayer's own dig.js registers a per-block
+// `blockUpdate:${position}` listener that's only ever removed by that exact dig completing
+// naturally or by bot.stopDigging() -- neither happens when cancelTask() is the only thing
+// called. stopCurrent() runs before EVERY new action (including the frequent self-defense/
+// emergency interrupts) and already called cancelTask() for exactly this reason, but never
+// stopDigging() -- so any action that interrupted an active dig (extremely common during ore
+// mining in cave terrain, where nearby block changes trigger frequent interruptions) orphaned
+// that listener and its pending promise permanently. This is the same root lesson already
+// learned once this session for a different call site (withTimeout's own header comment: "a
+// stuck mining action... ran unbounded for ~11 minutes... Promise.race abandons the loser, it
+// does not cancel it") -- cancelTask() turned out to be exactly that kind of incomplete
+// cancellation for the digging half specifically, not just the pathing half already covered.
+//
+// Fixed three places: stopCurrent() (the one function every single action already routes
+// through) now also calls bot.stopDigging() alongside cancelTask() -- confirmed safe to call
+// unconditionally, since dig.js's own stopDigging is a self-guarding no-op when
+// bot.targetDigBlock is unset. "mine"'s own ACTION_TIMEOUT_MS handler gets the same addition
+// (a distinct trigger from stopCurrent -- a timeout INSIDE the same still-running action, not a
+// new one starting). "harvest"'s bare `await bot.dig(cropBlock)` had no timeout protection at
+// all -- wrapped in the same withTimeout/stopDigging pattern "mine" already used, closing the
+// identical unbounded-hang risk there too.
+//
+// Not claimed as definitively the ONLY contributor to every OOM instance in the log without a
+// live heap snapshot to confirm against -- but a real, confirmed, previously-undiscovered gap in
+// how this codebase's own cancellation model handles digging specifically, on the exact action
+// (mining) most implicated by the live evidence. Worth watching crash frequency after this
+// deploy to see how much of the pattern it actually accounts for.
 //
 // 1.18.1 (2026-09-07) -- real gap found live minutes after standing up Mark/Luke (see index.js
 // 2.21.0's own changelog): the goal planner reasoned its way to "mine raw_iron" -- raw_iron is
@@ -654,6 +695,18 @@ function stopCurrent(bot) {
   bot.pathfinder.setGoal(null);
   if (bot.pvp.target) bot.pvp.stop();
   bot.collectBlock.cancelTask(); // real cancellation, not just how we interpret the eventual result
+  // Real bug found live, 2026-09-07 (chasing an all-day recurring OOM crash the coder/coder2
+  // triage service kept flagging but never pinpointed): confirmed against mineflayer-collectblock's
+  // own source that cancelTask() ONLY calls bot.pathfinder.stop() -- collectBlock's mineBlock()
+  // calls the CORE bot.dig() directly, entirely outside pathfinder's control, so cancelTask() does
+  // nothing to an in-flight dig. mineflayer's own dig.js registers a per-block
+  // `blockUpdate:${position}` listener that only ever gets removed by that exact dig completing
+  // or by bot.stopDigging() -- neither happens here, so every action interrupted mid-dig (this
+  // function runs before EVERY new action, including the frequent self-defense/emergency
+  // interrupts) orphaned that listener and its pending promise permanently. bot.stopDigging() is
+  // its own safe no-op when nothing is currently being dug (checked internally against
+  // bot.targetDigBlock), so this is harmless to call unconditionally.
+  bot.stopDigging();
   // Any new action (a direct command, or the goal loop wanting to do something else) should
   // interrupt a night's sleep rather than queue up behind it -- every performAction() call
   // starts here, so this is the one place that's guaranteed to run before anything else happens.
@@ -706,7 +759,7 @@ export async function performAction(bot, action, speaker) {
       const collectedNames = [...new Set(blocks.map((b) => b.name))].join(", ");
       try {
         await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
-                           () => bot.collectBlock.cancelTask());
+                           () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
       } catch (err) {
         if (token.cancelled) return ok("stopped mining early.");
         return fail(`had trouble mining ${collectedNames}: ${err.message}`);
@@ -1354,8 +1407,14 @@ export async function performAction(bot, action, speaker) {
 
       const farmlandPos = cropBlock.position.offset(0, -1, 0); // the crop sits on this block
       try {
-        await bot.dig(cropBlock);
+        // Real gap found live, 2026-09-07 (chasing an all-day recurring OOM crash): a bare
+        // bot.dig() with no timeout at all -- if it never settles (confirmed against dig.js's own
+        // source: it awaits a promise that only resolves via a per-block blockUpdate listener or
+        // bot.stopDigging(), neither guaranteed here), this would hang forever with no recovery,
+        // same underlying risk "mine"'s own withTimeout exists to prevent.
+        await withTimeout(bot.dig(cropBlock), ACTION_TIMEOUT_MS, () => bot.stopDigging());
       } catch (err) {
+        if (token.cancelled) return ok("stopped harvesting.");
         return fail(`couldn't harvest the ${cropBlock.name}: ${err.message}`);
       }
 
