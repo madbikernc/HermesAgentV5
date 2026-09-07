@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.0.16
+# Version: 2.0.17
+#
+# 2.0.17 (2026-09-07) — added `minecraft-triage` to `KNOWN_AGENTS` and `minecraft-ops` to
+# `KNOWN_TOPICS`, ahead of hermes-minecraft-triage.py's own first publish (direct request: "I
+# want the Firmament to do this monitoring, and engage coder/coder2 loop to do initial triage" —
+# built after a long live debugging session surfaced a real, recurring taxonomy of Minecraft bot
+# failures worth automating triage for). Deliberately a topic separate from the existing
+# `minecraft` — see this file's own note at KNOWN_TOPICS for why reusing it would be wrong (both
+# bots relay everything they hear on `minecraft` into in-game chat).
 #
 # 2.0.16 (2026-09-06) — added `mc-babs`, `mc-amy` to `KNOWN_AGENTS` and `minecraft` to the
 # additional-topics set, ahead of the Minecraft bot orchestrator's own first publish
@@ -188,15 +196,19 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "minecraft-triage"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1) plus
 # `minecraft` (shared broadcast topic for the bot coordination traffic KNOWN_AGENTS' mc-babs/
-# mc-amy entries above exist for). Most of these have no subscriber yet — same
-# ahead-of-the-consumer posture as hermes-memory's `tasks` table.
+# mc-amy entries above exist for) plus `minecraft-ops` (hermes-minecraft-triage.py's own findings
+# — deliberately a SEPARATE topic from `minecraft`, not reused: both bots subscribe to
+# `minecraft` and relay every message they hear on it into in-game chat (design doc §9) — a
+# triage verdict landing there would get read aloud in-game, not just logged for the operator).
+# Most of these have no subscriber yet — same ahead-of-the-consumer posture as hermes-memory's
+# `tasks` table.
 KNOWN_TOPICS = KNOWN_AGENTS | {
     "dispatch", "retrieve", "screen", "logs", "code", "vision", "media", "train", "results",
-    "minecraft",
+    "minecraft", "minecraft-ops",
     "websearch", "status", "probe", "reolink", "dualcoder",
 }
 

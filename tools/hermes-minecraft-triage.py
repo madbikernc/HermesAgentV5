@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+# Version: 1.0.0
+#
+# hermes-minecraft-triage.py — direct request (2026-09-07): "I want the Firmament to do this
+# monitoring, and engage coder/coder2 loop to do initial triage." Built after a long live
+# debugging session (this same night) where a human operator manually tailed both Minecraft
+# bots' journals for hours, recognizing real bugs (a crash, silent goal-loop failures, planner
+# truncation, item-name confusion, a missing-fuel gap, a spawn-protection misconfiguration) one
+# at a time from raw log lines. This service is that same watch-and-diagnose loop, running
+# permanently as fleet infrastructure instead of a human's terminal session.
+#
+# Deliberately NOT autonomous repair: "triage" means diagnose and prioritize, not fix. Every
+# real fix that night required either a code change (reviewed, committed, deployed) or a server
+# config change (server.properties, ops.json) — decisions with real blast radius that stay a
+# human/Claude-Code job. This service's only output is a written assessment, published where a
+# human or another tool can see it and decide what to do.
+#
+# Design, per the two decisions the operator made when this was commissioned:
+#   1. coder and coder2 (hermes-router.py's own two coding-tier roles) triage every incident
+#      INDEPENDENTLY and in PARALLEL, not as a draft/review pipeline. If they substantially
+#      disagree on severity, that disagreement is itself surfaced as a signal (an ambiguous or
+#      hard-to-classify incident deserves a closer look, not a coin-flip average).
+#   2. Every triage result goes to three places at once:
+#        - Buzz topic `minecraft-ops` (hermes-buzz.py 2.0.17) as agent `minecraft-triage` --
+#          deliberately NOT the existing `minecraft` topic, which both bots relay into in-game
+#          chat (design doc §9); a triage verdict has no business being read aloud in-game.
+#        - Matrix, for free: hermes-buzz.py's own matrix_mirror() already mirrors every Buzz
+#          message into the FleetOps room in real time (confirmed live, same mechanism
+#          hermes-broker.py's job delivery already relies on) -- publishing to Buzz IS publishing
+#          to Matrix here, no separate Matrix client needed in this tool.
+#        - A local log file (LOG_PATH below). The existing hermes-rag "ops" corpus was
+#          considered and deliberately NOT used: real recon (reading
+#          hermes-rag-ingest-ops.py's own header) found it's narrowly scoped to
+#          hermes-node-health.py's structured snapshots specifically, not a general
+#          incident dropbox -- writing triage notes into it would be the same scope-creep
+#          mistake that header explicitly warns against for every other fleet tool.
+#
+# What counts as "triage-worthy" (TRIAGE_PATTERNS below): real crashes/errors (TypeError,
+# ReferenceError, OOM, unhandled rejections), a repeated "stuck" pathfinding loop, a goal being
+# abandoned, and hermes-router call failures -- a deliberately wider net than a human would
+# manually narrate line-by-line, since severity judgment is now coder/coder2's job, not a
+# pre-filter here. Per-category cooldown (TRIAGE_COOLDOWN_S) stops one ongoing incident (e.g. a
+# "stuck" loop printing every few seconds for a minute) from being triaged dozens of times.
+#
+# Deliberately boring: stdlib only, same as every other worker/report in this fleet.
+#
+# Config, all from the environment:
+#   HERMES_ROUTER_URL   default http://127.0.0.1:8080/v1/chat/completions
+#   BUZZ_URL            default http://10.129.1.15:8101
+#   TRIAGE_LOG_PATH     default /mnt/hermes-data/minecraft-memory/triage.log
+#   TRIAGE_COOLDOWN_S   default 300 (5 minutes per incident category)
+#   MC_BOT_UNITS        default minecraft-bot-babs.service,minecraft-bot-amy.service
+#
+# Usage: python3 hermes-minecraft-triage.py  (run under systemd, see
+# infra/minecraft-bots-triage/hermes-minecraft-triage.service)
+
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from pathlib import Path
+
+REPO_DIR = Path(__file__).resolve().parent.parent
+VAULT_GET = str(REPO_DIR / "tools" / "vault-get-secret.sh")
+
+ROUTER_URL = os.environ.get("HERMES_ROUTER_URL", "http://127.0.0.1:8080/v1/chat/completions")
+BUZZ_URL = os.environ.get("BUZZ_URL", "http://10.129.1.15:8101")
+LOG_PATH = Path(os.environ.get("TRIAGE_LOG_PATH", "/mnt/hermes-data/minecraft-memory/triage.log"))
+COOLDOWN_S = int(os.environ.get("TRIAGE_COOLDOWN_S", "300"))
+BOT_UNITS = os.environ.get("MC_BOT_UNITS", "minecraft-bot-babs.service,minecraft-bot-amy.service").split(",")
+
+AGENT_ID = "minecraft-triage"
+TOPIC = "minecraft-ops"
+
+# (category, regex, human label) -- category drives the cooldown key, so two different lines
+# matching the same category within COOLDOWN_S of each other only triage once. Ordered roughly
+# by how the same live debugging session encountered each of these tonight.
+TRIAGE_PATTERNS = [
+    ("crash", re.compile(r"TypeError|ReferenceError|is not a function|is not iterable|"
+                          r"Cannot read propert|undefined is not|UnhandledPromiseRejection"),
+     "JS runtime error"),
+    ("oom", re.compile(r"JavaScript heap out of memory|FATAL ERROR|Ineffective mark-compacts"),
+     "out-of-memory crash"),
+    ("process-exit", re.compile(r"core-dump|Main process exited"), "bot process died"),
+    ("stuck-path", re.compile(r"path_reset: stuck"), "pathfinder repeatedly stuck"),
+    ("goal-abandoned", re.compile(r"giving up on goal"), "a standing goal was abandoned"),
+    ("router-failure", re.compile(r"hermes-router \w+ call failed"), "model backend call failed"),
+    ("action-failed", re.compile(r"action '.*' failed:"), "a direct action failed"),
+]
+
+
+def log(msg):
+    print(f"[hermes-minecraft-triage] {msg}", flush=True)
+
+
+def vault_get(item, field):
+    try:
+        r = subprocess.run([VAULT_GET, item, field], capture_output=True, text=True, timeout=15)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def call_role(role, log_line, timeout=60):
+    """One triage call. Returns (severity, cause, next_step) or None on failure -- a failed
+    triage call is itself just logged, never allowed to crash the watch loop."""
+    prompt = (
+        "You are triaging one incident from a Minecraft bot's live log (Firmament fleet, "
+        "mineflayer-based bots with autonomous goals). Given the log line(s) below, assess it "
+        "in EXACTLY this format, three lines, nothing else:\n"
+        "SEVERITY: low|medium|high\n"
+        "CAUSE: <one sentence, your best real diagnosis -- say if you're not sure>\n"
+        "NEXT: <one sentence, concrete suggested next step, or \"none -- self-resolves\">\n\n"
+        f"Log line(s):\n{log_line}"
+    )
+    body = json.dumps({
+        "model": role,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 150,
+        "temperature": 0,
+    }).encode()
+    req = urllib.request.Request(ROUTER_URL, data=body, method="POST",
+                                  headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+        text = data["choices"][0]["message"]["content"].strip()
+        sev = re.search(r"SEVERITY:\s*(\w+)", text, re.I)
+        cause = re.search(r"CAUSE:\s*(.+)", text, re.I)
+        nxt = re.search(r"NEXT:\s*(.+)", text, re.I)
+        return {
+            "severity": (sev.group(1).lower() if sev else "unknown"),
+            "cause": (cause.group(1).strip() if cause else text[:200]),
+            "next": (nxt.group(1).strip() if nxt else ""),
+        }
+    except Exception as exc:
+        log(f"triage call to '{role}' failed: {exc}")
+        return None
+
+
+def triage_incident(category, label, line):
+    """Fires coder and coder2 in parallel (real concurrency, not sequential-then-compare --
+    per the operator's own explicit choice: independent verdicts, not a draft/review pipeline),
+    then compares them. Disagreement on severity is surfaced as its own signal rather than
+    silently averaged or picked."""
+    results = {}
+
+    def run(role):
+        results[role] = call_role(role, line)
+
+    threads = [threading.Thread(target=run, args=(role,)) for role in ("coder", "coder2")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=90)
+
+    coder, coder2 = results.get("coder"), results.get("coder2")
+    if not coder and not coder2:
+        return None  # both calls failed -- nothing to report
+
+    lines = [f"[{category}] {label}"]
+    if coder:
+        lines.append(f"  coder:  severity={coder['severity']} cause={coder['cause']} next={coder['next']}")
+    if coder2:
+        lines.append(f"  coder2: severity={coder2['severity']} cause={coder2['cause']} next={coder2['next']}")
+    if coder and coder2 and coder["severity"] != coder2["severity"]:
+        lines.append(f"  ⚠ DISAGREEMENT: coder says {coder['severity']}, coder2 says {coder2['severity']} "
+                     f"-- ambiguous incident, worth a closer look")
+    lines.append(f"  source line: {line.strip()[:300]}")
+    return "\n".join(lines)
+
+
+def publish_buzz(body, buzz_token):
+    payload = json.dumps({"from": AGENT_ID, "topic": TOPIC, "body": body}).encode()
+    req = urllib.request.Request(f"{BUZZ_URL}/messages", data=payload, method="POST", headers={
+        "Content-Type": "application/json",
+        **({"Authorization": f"Bearer {buzz_token}"} if buzz_token else {}),
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+        return True
+    except Exception as exc:
+        log(f"Buzz publish failed: {exc}")
+        return False
+
+
+def append_log(text):
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n{text}\n")
+    except Exception as exc:
+        log(f"local log write failed: {exc}")
+
+
+def watch_loop(buzz_token):
+    cmd = ["journalctl"]
+    for unit in BOT_UNITS:
+        cmd += ["-u", unit.strip()]
+    cmd += ["-f", "-n0"]
+
+    log(f"watching: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                             bufsize=1)
+
+    last_triaged = {}  # category -> monotonic timestamp of last triage, for cooldown
+    for raw_line in proc.stdout:
+        for category, pattern, label in TRIAGE_PATTERNS:
+            if not pattern.search(raw_line):
+                continue
+            now = time.monotonic()
+            if now - last_triaged.get(category, 0) < COOLDOWN_S:
+                break  # same incident category still in cooldown -- don't re-triage every line
+            last_triaged[category] = now
+            log(f"triage-worthy: [{category}] {raw_line.strip()[:150]}")
+            result = triage_incident(category, label, raw_line)
+            if result:
+                append_log(result)
+                publish_buzz(result, buzz_token)
+            break  # one category match per line is enough
+
+
+def main():
+    buzz_token = vault_get("buzz-token", "password")
+    if not buzz_token:
+        log("WARNING: no Buzz token -- triage results will only go to the local log file")
+    while True:
+        try:
+            watch_loop(buzz_token)
+        except Exception as exc:
+            log(f"watch loop crashed, restarting in 10s: {exc}")
+        time.sleep(10)
+
+
+if __name__ == "__main__":
+    main()
