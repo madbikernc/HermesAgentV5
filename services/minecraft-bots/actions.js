@@ -1,4 +1,47 @@
-// Version: 1.3.0
+// Version: 1.6.2
+//
+// 1.6.2 (2026-09-06) -- actual root cause of the "(empty)" chest, after 1.6.1's timing-delay
+// guess was ruled out by direct testing: Window.items() returns the PLAYER'S OWN inventory
+// slots within the combined chest+inventory window, not the container's -- confirmed against
+// prismarine-windows' own source. containerItems() is the real container-only view. A chest
+// confirmed (by a human, in-game) to hold two netherite pickaxes was correctly reporting empty
+// every time because Babs' own inventory was empty, not the chest.
+//
+// 1.6.1 (2026-09-06) -- real bug found live: the contents-logging added in 1.6.0 immediately
+// showed the real problem -- a chest confirmed (by a human, in-game) to hold two netherite
+// pickaxes logged as "(empty)" twice in a row. Guessed this was a packet-timing race and added
+// a 200ms delay before reading -- ruled out by direct testing (still empty); see 1.6.2 for the
+// actual cause.
+//
+// 1.6.0 (2026-09-06) -- root cause of the 20s open-chest hang confirmed and fixed: minecraft-
+// data had no real protocol data for 26.1.2 (silently aliased to 26.1's), a version-support
+// gap in the mineflayer ecosystem, not a bug here -- fixed by moving the whole server to
+// 1.21.11, a mature version with genuine native support (confirmed via minecraft-data
+// resolving it exactly, no aliasing). Removed the now-unneeded position/lookAt diagnostics
+// (1.4.1) and replaced with a simple log of full chest contents -- a live test on the new
+// version opened a chest successfully but reported "nothing worth taking" despite it holding
+// real tools, a GEAR_SUFFIXES matching bug, not a protocol issue; this log is to find it.
+//
+// 1.5.0 (2026-09-06) -- real evidence from the 1.4.1 diagnostic: the chest that kept hanging
+// is one half of a double chest (getProperties() -> {type: "right", facing: "east"}). The
+// obstruction check only ever looked above the single block findBlocks returned -- never the
+// paired half, whose own obstruction blocks the whole double chest from opening in vanilla.
+// Now scans cardinal neighbors for the matching paired half and checks both. Diagnostic
+// logging (1.4.1) left in for now until this is confirmed live.
+//
+// 1.4.1 (2026-09-06) -- TEMPORARY: added console diagnostics right before the loot action's
+// open attempt (bot/chest position, distance, live block state, look angles) -- the
+// obstruction check (1.3.0) and lookAt (1.4.0) fixes both failed to resolve the same 20s hang,
+// and the server's own log shows nothing, so this stops guessing a third blind fix in favor of
+// real data. Remove once root-caused.
+//
+// 1.4.0 (2026-09-06) -- second real error found live on "loot," after ruling out the 1.3.0
+// obstruction check (confirmed no block above the chest, still hung the full 20s):
+// pathfinder's goto() only gets the bot's position near a target, it never turns the bot to
+// face it. openChest() defaults its interaction direction to (0,1,0), which doesn't reflect
+// an actual look-at-the-chest vector if the bot arrived from the side -- the server's own
+// reach/look-direction validation on the interaction then silently never answers. Explicitly
+// calling bot.lookAt() at the chest before opening it is the fix.
 //
 // 1.3.0 (2026-09-06) -- real error found live: "loot" waited openChest()'s own internal 20s
 // timeout ("Event windowOpen did not fire") against a chest that vanilla Minecraft will never
@@ -166,12 +209,30 @@ export async function performAction(bot, action, speaker) {
       const chestBlock = bot.blockAt(positions[0]);
       // Real error found live (2026-09-06): openChest() waited its own internal 20s timeout
       // ("Event windowOpen did not fire") against a chest that vanilla Minecraft will never
-      // actually open -- any solid block directly above a chest blocks it, a real, common
-      // world-state issue, not a bug in this code. Checking first turns a cryptic 20s hang
-      // into an immediate, specific answer.
-      const above = bot.blockAt(chestBlock.position.offset(0, 1, 0));
-      if (above?.boundingBox === "block") {
-        return "found a chest, but there's something on top of it blocking the lid.";
+      // actually open -- any solid block directly above EITHER half of a double chest blocks
+      // the whole thing, a real, common world-state issue, not a bug in this code. First
+      // version of this check only looked above the single block findBlocks happened to
+      // return; real evidence from a live failure (getProperties() showed {type: "right",
+      // facing: "east"}) confirmed this chest is one half of a double chest, and the *other*
+      // half's obstruction was never checked. Scanning cardinal neighbors for the matching
+      // paired half (rather than trusting a memorized left/right-to-offset convention) is more
+      // robust than computing it from facing+type directly.
+      const chestHalves = [chestBlock];
+      if (chestBlock.getProperties?.().type !== undefined) {
+        const facing = chestBlock.getProperties().facing;
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const neighbor = bot.blockAt(chestBlock.position.offset(dx, 0, dz));
+          if (neighbor?.name === chestBlock.name && neighbor.getProperties?.().facing === facing) {
+            chestHalves.push(neighbor);
+            break;
+          }
+        }
+      }
+      for (const half of chestHalves) {
+        const above = bot.blockAt(half.position.offset(0, 1, 0));
+        if (above?.boundingBox === "block") {
+          return "found a chest, but there's something on top of it blocking the lid.";
+        }
       }
       try {
         await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
@@ -188,7 +249,16 @@ export async function performAction(bot, action, speaker) {
       let taken = [];
       try {
         const chest = await bot.openChest(chestBlock);
-        const gear = chest.items().filter((i) => GEAR_SUFFIXES.some((s) => i.name.endsWith(s)));
+        // Real bug found live (2026-09-06), the actual root cause after two wrong guesses
+        // (a timing delay, then a "wrong chest" theory -- both ruled out by direct testing):
+        // Window.items() returns itemsRange(inventoryStart, inventoryEnd) -- the PLAYER'S OWN
+        // inventory slots within the combined window, not the container's. A chest confirmed
+        // (by a human, in-game) to hold two netherite pickaxes correctly logged as "(empty)"
+        // every time because Babs' own inventory was empty, not the chest. containerItems()
+        // (itemsRange(0, inventoryStart)) is the actual container-only view.
+        const contents = chest.containerItems();
+        console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
+        const gear = contents.filter((i) => GEAR_SUFFIXES.some((s) => i.name.endsWith(s)));
         for (const item of gear) {
           try {
             await chest.withdraw(item.type, null, item.count);
