@@ -1,4 +1,15 @@
-// Version: 1.10.1
+// Version: 1.10.3
+//
+// 1.10.3 (2026-09-07) -- diagnostic: the same 3 furnaces failed "destination full" across
+// several separate goal attempts tonight -- logging each slot's actual contents on open so a
+// repeat is diagnosable (someone else's items already there? a stuck previous attempt of our
+// own?) instead of just "full" with no further evidence.
+//
+// 1.10.2 (2026-09-07) -- real gap found live: once furnace smelting existed, "no fuel" became
+// the single most common reason a goal gave up, and loot -- the natural fallback -- had no idea
+// coal/charcoal were worth taking, only armor/tools (GEAR_SUFFIXES). Unlike a looted furnace or
+// crafting table (useless without a placement capability this system doesn't have), fuel is
+// directly usable the moment it's in inventory. New FUEL_NAMES, checked alongside GEAR_SUFFIXES.
 //
 // 1.10.1 (2026-09-07) -- real gap found live minutes after smelting shipped: the prompt says
 // ACTION SMELT's <item_id> is the OUTPUT (e.g. "copper_ingot"), but the planner named the INPUT
@@ -180,6 +191,13 @@ const HOSTILE_MOBS = new Set([
 const GEAR_SUFFIXES = [
   "_helmet", "_chestplate", "_leggings", "_boots", "_sword", "_axe", "_pickaxe", "_shovel", "_hoe",
 ];
+
+// Real gap found live (2026-09-07): once furnace smelting existed, "no fuel" became the single
+// most common reason a goal gave up, and loot -- the natural fallback -- had no idea coal/
+// charcoal were worth taking, only armor/tools. Unlike a looted furnace or crafting table
+// (useless without a placement capability this system doesn't have), fuel gets consumed directly
+// inside an existing furnace, so it's genuinely actionable the moment it's in inventory.
+const FUEL_NAMES = ["coal", "charcoal"];
 
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
 // for furnace input->output) -- unlike bot.craft()'s crafting-table recipes, there's no real data
@@ -485,7 +503,8 @@ export async function performAction(bot, action, speaker) {
           // (itemsRange(0, inventoryStart)) is the actual container-only view.
           const contents = chest.containerItems();
           console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
-          const gear = contents.filter((i) => GEAR_SUFFIXES.some((s) => i.name.endsWith(s)));
+          const gear = contents.filter((i) =>
+            GEAR_SUFFIXES.some((s) => i.name.endsWith(s)) || FUEL_NAMES.includes(i.name));
           for (const item of gear) {
             try {
               await chest.withdraw(item.type, null, item.count);
@@ -637,6 +656,13 @@ export async function performAction(bot, action, speaker) {
         let furnace;
         try {
           furnace = await bot.openFurnace(furnaceBlock);
+          // Real gap found live (2026-09-07): the same 3 furnaces failed "destination full"
+          // across several separate goal attempts -- logging what's actually sitting in each
+          // slot on open, so a repeat is diagnosable (someone else's items? a stuck previous
+          // attempt of our own?) instead of just "full" with no further evidence.
+          const slot = (item) => item ? `${item.name}x${item.count}` : "empty";
+          console.log(`[smelt] furnace at ${furnaceBlock.position} slots: ` +
+            `input=${slot(furnace.inputItem())} fuel=${slot(furnace.fuelItem())} output=${slot(furnace.outputItem())}`);
         } catch (err) {
           console.log(`[smelt] couldn't open furnace at ${furnaceBlock.position}: ${err.message}`);
           continue; // couldn't open this one -- try the next candidate
