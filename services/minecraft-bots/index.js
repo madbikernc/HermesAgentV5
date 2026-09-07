@@ -1,4 +1,13 @@
-// Version: 2.13.0
+// Version: 2.13.1
+//
+// 2.13.1 (2026-09-07) -- third of five scoped enhancements: cave-pathfinding cap. Real evidence
+// from tonight's own OOM crashes (hermes-minecraft-triage.py's log) traced to
+// bot.pathfinder.searchRadius's DEFAULT of -1, confirmed by reading mineflayer-pathfinder's own
+// source (index.js/astar.js) -- "don't limit the search area" at all. thinkTimeout (5000ms
+// default) only bounds wall-clock time, not how many node objects get allocated within that
+// window; in complex cave terrain that was enough to hit 25,000+ visited nodes and exhaust the
+// heap before the timeout even fired. Set to 128 -- real headroom over every target distance this
+// codebase actually asks for, while directly bounding the pathological case.
 //
 // 2.13.0 (2026-09-07) -- direct follow-up to "what other logic enhancements are available,"
 // first two of five scoped and built in order: "ACTION PLACE <item_id>" wired throughout
@@ -303,6 +312,17 @@ bot.once("spawn", () => {
   // path_update logging below, not a reason to leave it off untested.
   movements.canOpenDoors = true;
   bot.pathfinder.setMovements(movements);
+
+  // Direct follow-up to "what other logic enhancements are available" -> cave-pathfinding cap:
+  // real evidence from tonight's own OOM crashes (hermes-minecraft-triage.py's own log) traced
+  // to bot.pathfinder.searchRadius's DEFAULT VALUE OF -1 (confirmed in mineflayer-pathfinder's
+  // own index.js/astar.js) -- "don't limit the search area" at all. thinkTimeout (default 5000ms)
+  // only bounds wall-clock time, not how many node objects get allocated within that window --
+  // in complex cave terrain, that was enough to hit 25,000+ visited nodes and exhaust the V8
+  // heap before the timeout even fired. 128 gives real headroom over every real target distance
+  // this codebase ever asks for (mine/loot/smelt/wander are all well under 64 blocks) while
+  // directly bounding the pathological case instead of just how long it's allowed to run.
+  bot.pathfinder.searchRadius = 128;
 
   // Real-data visibility into navigation, not a guess: astar's own result status
   // ('success'/'partial'/'noPath'/'timeout') for every path (re)computation, so a bad
