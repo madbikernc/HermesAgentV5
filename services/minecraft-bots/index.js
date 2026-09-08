@@ -1,4 +1,26 @@
-// Version: 2.23.0
+// Version: 2.24.0
+//
+// 2.24.0 (2026-09-07) -- three direct requests in one round:
+// (1) "bots should check *any* nearby chests before resorting to mining new stacks." MINE's own
+//     prompt now tells the planner to try ACTION LOOT first for a resource need, before mining,
+//     unless the recent log already shows a LOOT attempt this goal. Pairs with actions.js
+//     1.19.1's own change (LOOT now takes any useful item, not just gear) -- without that half,
+//     nudging the planner toward LOOT wouldn't have actually found ordinary resources sitting in
+//     a chest anyway. Both ACTION LOOT descriptions (classifyIntent, planNextStep) updated to
+//     match what it actually does now.
+// (2) "they don't seem to be fighting back... when woken up from sleeping." Real gap: EVERY
+//     idle-tick check (checkSelfDefense included) is gated by the busy/acting mutex, and
+//     "sleep"'s own performAction call holds that mutex for its ENTIRE duration (until the real
+//     'wake' event or SLEEP_TIMEOUT_MS, up to 15 minutes) -- so only the emergency health-
+//     triggered interrupt could react at all while actually asleep, and only once health had
+//     already dropped to a near-death threshold. A hostile that found a sleeping bot got to hit
+//     her repeatedly, completely unopposed. Two fixes: the emergency interrupt now calls
+//     bot.wake() first when she's asleep (a forced flee can't move her while pinned in bed, and
+//     without waking her, this handler's own force-through logic would just collide with sleep's
+//     own still-pending cleanup instead of freeing it); and new checkSleepingThreat(), a
+//     dedicated short-interval check (deliberately bypassing busy/acting, checkStuck's own
+//     precedent) that wakes her and responds to a nearby hostile proactively, not just as a
+//     last-resort emergency.
 //
 // 2.23.0 (2026-09-07) -- direct request: "check the Firmament coder logs..." -> "yes" (dig
 // deeper) -> "yes" (run the retainer trace). A real heap snapshot plus a retainer-graph trace
@@ -724,7 +746,8 @@ async function classifyIntent(speaker, message) {
           `specific block is named, respond CHAT instead -- never invent a block.\n` +
           `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob\n` +
           `ACTION FLEE - asks ${USERNAME} to run away from a nearby hostile mob instead of fighting it\n` +
-          `ACTION LOOT - asks ${USERNAME} to check a nearby chest for equipment/gear\n` +
+          `ACTION LOOT - asks ${USERNAME} to check a nearby chest for anything useful (gear, ` +
+          `resources, whatever's in there)\n` +
           `ACTION SLEEP - asks ${USERNAME} to go find a bed and sleep (only makes sense at ` +
           `night or during a thunderstorm)\n` +
           `ACTION EAT - asks ${USERNAME} to eat some food from her inventory\n` +
@@ -1152,7 +1175,11 @@ async function planNextStep(goal) {
           `ACTION MINE <block_id> <count> - gather a resource. <block_id> must be the exact ` +
           `modern Minecraft block id -- never invent one. For a material class rather than one ` +
           `exact species/color (any wood, any wool, any ore), any real example works -- she'll ` +
-          `automatically gather whatever matching variant is actually nearby.\n` +
+          `automatically gather whatever matching variant is actually nearby. If she hasn't ` +
+          `already checked a chest THIS goal, try ACTION LOOT first -- a nearby chest may ` +
+          `already have the resource (LOOT now takes any useful item it finds, not just gear), ` +
+          `saving a trip. Go straight to MINE only once LOOT has already come up empty for this ` +
+          `same need, or the recent progress below already shows a LOOT attempt.\n` +
           `ACTION CRAFT <item_id> <count> - craft an item via a crafting-table/grid recipe only. ` +
           `<item_id> must be the exact modern Minecraft item id -- never invent one.\n` +
           `ACTION SMELT <item_id> <count> - smelt raw material into an ingot (or similar) at a ` +
@@ -1160,7 +1187,7 @@ async function planNextStep(goal) {
           `id -- never invent one.\n` +
           `ACTION PLACE <item_id> - place a furnace or crafting_table she's already carrying, ` +
           `right next to herself, when SMELT/CRAFT needs one and none is reachable.\n` +
-          `ACTION LOOT - check the nearest chest for gear\n` +
+          `ACTION LOOT - check the nearest chest for anything useful (gear, resources, whatever's in there)\n` +
           `ACTION ATTACK - fight a nearby hostile mob\n` +
           `ACTION HARVEST - pick a ripe crop nearby and replant it, if the goal is about food or ` +
           `farming\n` +
@@ -1958,6 +1985,16 @@ bot.on("health", () => {
   bot.pathfinder.setGoal(null);
   if (bot.pvp.target) bot.pvp.stop();
   bot.collectBlock.cancelTask();
+  // Real gap found live, 2026-09-07 ("they don't seem to be fighting back... when woken up from
+  // sleeping"): none of the above touches sleep. The in-flight "sleep" performAction call holds
+  // busy/acting for its ENTIRE duration (until the real 'wake' event or SLEEP_TIMEOUT_MS, up to
+  // 15 minutes) -- while she's actually asleep, a forced flee attempt can't move her (the avatar
+  // is pinned in bed), and this handler's own wait-then-force-through logic below would just
+  // collide with sleep's own still-pending cleanup instead of freeing it. bot.wake() lets sleep's
+  // own existing bot.once("wake", finish) listener resolve it and release busy/acting normally.
+  if (bot.isSleeping) {
+    bot.wake().catch((err) => console.error(`[${USERNAME}] emergency wake failed:`, err.message));
+  }
 
   (async () => {
     const deadline = Date.now() + 3000;
@@ -1978,6 +2015,55 @@ bot.on("health", () => {
     }
   })();
 });
+
+// Direct request, 2026-09-07 ("they don't seem to be fighting back... when woken up from
+// sleeping"). Real gap: EVERY idle-tick check (checkSelfDefense included) is gated by the
+// busy/acting mutex, and "sleep"'s own performAction call holds that mutex for its ENTIRE
+// duration -- so until now, NOTHING but the emergency health-triggered interrupt above could
+// react to a threat while she was actually asleep, and that one only ever fires once health has
+// ALREADY dropped to a near-death threshold. A hostile that wanders up to a sleeping bot got to
+// hit her repeatedly, completely unopposed, until she was nearly dead or happened to wake
+// naturally. This check runs on its own short timer, deliberately bypassing busy/acting
+// (checkStuck's own precedent) for the one case nothing else can reach: the moment a hostile is
+// nearby while she's asleep, wake her up and respond exactly like checkSelfDefense normally
+// would (flee below half health, otherwise fight) -- proactively, not just as a last resort.
+const SLEEPING_THREAT_CHECK_MS = parseInt(process.env.MC_SLEEPING_THREAT_CHECK_MS || "5000", 10);
+
+async function checkSleepingThreat() {
+  if (!AUTONOMY_ENABLED || !bot.isSleeping) return;
+  const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
+  if (!threat) return;
+
+  console.log(`[${USERNAME}] threat while sleeping (${threat.name}) -- waking up to respond`);
+  try {
+    await bot.wake();
+  } catch (err) {
+    console.error(`[${USERNAME}] force-wake failed:`, err.message);
+    return;
+  }
+  // The in-flight "sleep" action's own wake listener resolves it and releases busy/acting
+  // naturally within the same tick -- give it a brief moment before acting ourselves so this
+  // doesn't collide with that cleanup still finishing.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  if (busy || acting) return; // sleep's own cleanup is still finishing -- the next tick will catch it
+
+  busy = true;
+  acting = true;
+  try {
+    const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
+    const result = await performAction(bot, { type }, USERNAME);
+    console.log(`[${USERNAME}] post-wake defense: ${type} -> ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] post-wake defense failed:`, err.message);
+  } finally {
+    busy = false;
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkSleepingThreat().catch((err) => console.error(`[${USERNAME}] checkSleepingThreat error:`, err.message));
+}, SLEEPING_THREAT_CHECK_MS);
 
 bot.on("kicked", (reason) => console.log(`[${USERNAME}] kicked:`, reason));
 bot.on("error", (err) => console.log(`[${USERNAME}] error:`, err));

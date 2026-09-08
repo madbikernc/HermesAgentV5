@@ -1,4 +1,12 @@
-// Version: 1.19.0
+// Version: 1.19.1
+//
+// 1.19.1 (2026-09-07) -- direct request: "when a bot is looting a chest, it should only take
+// one instance of any tool, but can take resources up to one full stack at a time." "loot" used
+// to filter to the narrow isEssentialItem set (gear/fuel/food) and withdraw every matching stack
+// uncapped -- a chest with three duplicate diamond pickaxes (three separate slots, since tools
+// don't stack) got all three. Now takes everything found (a curated sandbox server, not a real-
+// survival dungeon with true junk loot), capped at ONE instance per distinct tool/weapon/armor
+// piece (GEAR_SUFFIXES) but a full stack (one inventory slot's worth) of anything else.
 //
 // 1.19.0 (2026-09-07) -- direct request: "check the Firmament coder logs for flagged Minecraft
 // behavior that are not yet resolved" -> "yes" (to digging into the #1 finding). The triage
@@ -863,11 +871,24 @@ export async function performAction(bot, action, speaker) {
           // (itemsRange(0, inventoryStart)) is the actual container-only view.
           const contents = chest.containerItems();
           console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
-          const gear = contents.filter((i) => isEssentialItem(i.name));
-          for (const item of gear) {
+          // Direct request, 2026-09-07: "should only take one instance of any tool, but can take
+          // resources up to one full stack at a time." Previously capped to the narrow
+          // isEssentialItem set (gear/fuel/food) and took every matching STACK uncapped -- a
+          // chest with three duplicate diamond pickaxes (three separate inventory slots, since
+          // tools don't stack) got all three. Now takes everything in the chest (this is a
+          // curated sandbox server, not a real-survival dungeon with true junk loot), capped at
+          // ONE instance per distinct tool/weapon/armor piece (GEAR_SUFFIXES -- she only needs
+          // one of each to be equipped) but up to a full stack (item.count, one inventory slot's
+          // worth -- vanilla's own per-slot cap) of anything else.
+          const takenToolNames = new Set();
+          for (const item of contents) {
+            const isTool = GEAR_SUFFIXES.some((s) => item.name.endsWith(s));
+            if (isTool && takenToolNames.has(item.name)) continue; // already have one of this exact piece
+            const count = isTool ? 1 : item.count;
             try {
-              await chest.withdraw(item.type, null, item.count);
-              taken.push(item.name);
+              await chest.withdraw(item.type, null, count);
+              taken.push(isTool ? item.name : `${count} ${item.name}`);
+              if (isTool) takenToolNames.add(item.name);
             } catch (err) {
               console.error(`loot: failed to withdraw ${item.name}:`, err.message);
             }
