@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots — Design
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 **Status:** Design only — nothing in this document is built. Status legend (same convention as
 `firmament-fleet-target-architecture.md`): `[DECIDED]` — operator made an explicit choice · `[PROPOSED]` —
 design recommendation, not yet ratified · `[UNKNOWN]` — needs discovery before build · `[RISK]` — flagged
@@ -218,9 +218,102 @@ moving/mining/fighting/crafting/looting.
   room (§10) — worth a quick real-world test once bots exist, since it's the one piece of this design with
   no existing fleet precedent to copy.
 
+## 14. Dynamic skill library (2026-09-08) — `[PROPOSED]`, a plan only, nothing built
+
+Direct request: "plan out" a Voyager-style skill library, following a web-research gap analysis
+against other LLM-driven Minecraft agents. Voyager's own distinctive idea: rather than an LLM
+re-deriving a plan from scratch every decision point (today's `goalTick`/`planNextStep`, §12),
+successful multi-step behaviors get **compiled into a reusable, retrievable skill** once, then
+looked up by embedding similarity next time a similar situation comes up — skills compound over
+time instead of each attempt starting cold.
+
+**Deliberate deviation from Voyager's own architecture, not a gap to close later:** Voyager has
+its LLM write and `eval()` raw JavaScript directly against the game API. That's the wrong shape
+for this fleet — four bots share one live, persistent world with a real human player in it, and
+this project's whole existing design (the tool-tier gate, `busy`/`acting` discipline,
+`stopCurrent()`'s interrupt guarantees, every action's own bounded timeout) exists specifically
+to keep a bot's behavior predictable and safe to interrupt. Arbitrary LLM-authored code eval'd
+against a live `bot` object would bypass every one of those guarantees at once. **A skill here
+should be a bounded, declarative sequence of the *existing, already-verified* action verbs
+(`performAction()`'s own 22-verb vocabulary, actions.js) — never raw code, never direct
+mineflayer API access.** This is a smaller, safer idea than Voyager's own, chosen on purpose.
+
+### Shape of a skill
+
+A skill is data, not code: `{ name, description, steps: [{ action, args }, ...] }` — `action`
+must be one of `performAction()`'s existing verb names, checked against a real allowlist before
+a skill is ever stored or run, the same "validate against real data, don't trust the model"
+discipline the tool-tier gate (actions.js 1.21.0) already uses. A bounded step count (matching
+`HARVEST_BATCH_LIMIT`/`MAX_CONSECUTIVE_FAILURES`'s own precedent — small, fixed caps everywhere
+else in this codebase) keeps a stored skill from ever becoming an unbounded program. No
+branching/looping primitives beyond "stop this skill early if a step comes back `ok: false`" —
+Voyager's own iterative self-correction happens at the *authoring* step below, not at *runtime*.
+
+### Storage and retrieval — reuses hermes-rag, no new infrastructure
+
+A new `minecraft-skills` hermes-rag corpus, the same two-script bridge pattern
+`tools/hermes-rag-ingest-minecraft.py`/`hermes-rag-search-minecraft.py` already established for
+the `minecraft`/`minecraft-world` corpora (§7) — indexed on `description`, not the raw step
+list, so retrieval is "what is this skill *for*," matching how `longterm.js`'s own dedup check
+(1.1.0) already uses `hermes_rag_common.search()`'s real cosine distance with an empirically
+calibrated threshold. World-scoped like `minecraft-world` (§7), not per-bot: a skill one bot
+worked out should immediately benefit all four, and any future bot, without re-deriving it.
+
+### Authoring — a new, occasional `coder` call, not a new per-tick cost
+
+When `goalTick`'s planner (§12) is about to attempt a step and no stored skill's description is
+a close enough match (same distance-threshold pattern as `longterm.js`'s dedup check), it
+proceeds exactly as today — a normal per-tick `ACTION <verb>` step, no behavior change. Only
+once a goal reaches `DONE` via a run of steps that *weren't* served by an existing skill is a
+single, occasional `coder` call asked to compress that run into a reusable
+`{name, description, steps}` skill (mirroring §6's own reasoning for why arbitration is a `super`
+call, not a per-tick one: "rare, not per-tick"). The compressed skill is validated against the
+real action-verb allowlist and step-count cap before it's ever written to the corpus — an
+invalid skill is discarded, not stored broken.
+
+### Retrieval and execution — folds into the existing pipeline, not a parallel one
+
+Before `planNextStep`'s own per-tick call, a cheap `hermes-rag-search-minecraft.py` query against
+`minecraft-skills` (reusing `searchMemory()`, `longterm.js`) checks for a close-enough match to
+the goal's description. A hit runs its steps one at a time through the *exact same*
+`performAction()` call every direct command and every per-tick step already goes through — it
+inherits `stopCurrent()`'s interrupt guarantees, the `busy`/`acting` discipline (index.js 2.28.0),
+and every action's own existing safety behavior for free, specifically *because* it's not a
+separate execution path. A live player command still interrupts a running skill immediately, the
+same way it already interrupts a running goal step today (§12) — nothing new to build for that.
+
+### Trust and decay — bounded, matching this codebase's own conventions everywhere else
+
+A skill that fails (a step comes back `ok: false`) when replayed gets a failure recorded against
+it (reusing the same `consecutiveFailures`-style counter `goals.js` already tracks per-goal); a
+skill crossing a small fixed failure threshold is treated as untrusted and skipped by retrieval
+(not deleted outright — a skill that fails in one biome/situation may still be right in another,
+and outright deletion risks losing something a future fix could revalidate).
+
+### What this buys, concretely
+
+Real, already-observed evidence this would help: multiple bots independently reasoning through
+the identical "I need a pickaxe, which needs planks, which needs logs" chain from scratch, per
+bot, per goal, tonight — a stored `get_first_pickaxe` skill would let every bot skip straight to
+executing it the next time, not re-derive it. This is the same benefit Voyager's own skill
+library demonstrates (63 unique items discovered 3.3x faster than prior approaches) without
+adopting its riskiest architectural choice (arbitrary code execution).
+
+### Build sequence, if greenlit — not started
+
+1. A minimal skill-runner: given `{steps}`, calls `performAction()` for each in order, stopping
+   early (and reporting how far it got) on the first `ok: false` — no new safety primitive, just
+   a loop over the existing one.
+2. `minecraft-skills` hermes-rag corpus + its own ingest/search script pair (§7's own pattern).
+3. Wire retrieval into `goalTick` as a first-choice check before per-tick planning (§12).
+4. Wire authoring: one `coder` call on goal completion, gated on "wasn't already served by a
+   skill," with real allowlist/step-count validation before storage.
+5. Trust/decay counter, reusing `goals.js`'s own `consecutiveFailures` shape.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-09-06 | Initial design, incorporating operator decisions: dedicated offline-mode instance, Zomboid out of scope, single shared Matrix room. |
 | 1.1.0 | 2026-09-07 | §12 added: autonomy/standing goals, player-assigned or self-proposed (operator decided both, not just one), built on top of the already-built system §1-§11 describe. |
+| 1.2.0 | 2026-09-08 | §14 added: a plan (not built) for a Voyager-style dynamic skill library, deliberately deviating from Voyager's own raw-code-eval architecture in favor of bounded, declarative sequences of the existing verified action verbs, reusing hermes-rag for storage/retrieval rather than new infrastructure. |
