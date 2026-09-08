@@ -1,4 +1,13 @@
-// Version: 2.32.0
+// Version: 2.33.0
+//
+// 2.33.0 (2026-09-08) -- direct report: "they get in water, jump to come up, but do not ever
+// try to reach land." Confirmed real: the anti-drowning reflex (2.29.0) only ever answered
+// "don't drown right now" -- once oxygen recovered, nothing steered her anywhere, so she just
+// kept floating wherever she surfaced. New findNearestShore() + a goto() call at the end of the
+// breath handler, using the pathfinder every bot already carries (now genuinely able to route
+// out of water since swim-movements.js's SwimMovements stopped getMoveUp()/getMoveDown() from
+// refusing while already submerged -- this literally could not have worked before that shipped
+// the same night).
 //
 // 2.32.0 (2026-09-08) -- direct request "start on #6" (MINECRAFT_BOTS_DESIGN.md §14, a Voyager-
 // style dynamic skill library). goalTick() now checks skills.js's findSkill() before spending a
@@ -550,7 +559,7 @@ import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveSt
 import { SwimMovements } from "./swim-movements.js";
 import { findSkill, runSkill, recordSkillOutcome, authorSkillFromGoal } from "./skills.js";
 
-const { pathfinder } = pathfinderPkg;
+const { pathfinder, goals } = pathfinderPkg;
 
 const HOST = process.env.MC_HOST || "192.168.1.221";
 const PORT = parseInt(process.env.MC_PORT || "25580", 10);
@@ -2400,7 +2409,44 @@ const DROWNING_OXYGEN_THRESHOLD = 4; // out of ~20 -- drowning damage only start
                                       // margin, same "stricter than routine caution" reasoning
                                       // as EMERGENCY_HEALTH_THRESHOLD above
 const SURFACE_SWIM_TIMEOUT_MS = 8000; // bounded -- never hold jump forever if something's wrong
+
+// Direct report, 2026-09-08 ("they get in water, jump to come up, but do not ever try to reach
+// land"): confirmed real -- the surfacing reflex above only ever answers "don't drown right
+// now"; once oxygen recovered, nothing steered her anywhere, so she'd just keep floating (or
+// sink again the moment something else needed her attention) exactly where she surfaced. This
+// genuinely couldn't have worked when the surfacing reflex first shipped: mineflayer-pathfinder
+// refused to generate any vertical move while already in liquid, so a goto() call from inside
+// open water had no way to route out at all. swim-movements.js's own SwimMovements (shipped the
+// same night, separately) is what makes this possible now -- getMoveUp()/getMoveDown() no
+// longer refuse in water, so a normal pathfinder goal can actually find a way to shore.
+// findNearestShore() can't match by block type (land isn't one block id) -- it scans for a
+// column where the space to stand IN is open/non-liquid and the block below it is solid,
+// non-liquid ground, using bot.findBlocks()'s own function-matcher path (confirmed sorted
+// nearest-first by mineflayer's own blocks.js, not assumed).
+const SHORE_SEARCH_DISTANCE = 48; // matches bot.pathfinder.searchRadius's own OOM-safety cap
+                                   // from tonight's earlier investigation -- no point finding a
+                                   // "shore" pathfinder could never actually route to anyway
+const SHORE_TRAVEL_TIMEOUT_MS = 20_000;
 let drowningInFlight = false;
+
+function findNearestShore(bot, maxDistance) {
+  // Real bug found live (2026-09-08): block.position was null for some candidate blocks
+  // findBlocks() itself handed in (bot.blockAt() can return a Block missing this even when the
+  // Block itself isn't null -- an edge the block-scanning code elsewhere in this file never hit
+  // since it always calls blockAt() on a position IT already has, never a position handed back
+  // TO it by the search). Defensive on both the block and its position now, not just liquid
+  // checks that never actually threw.
+  const positions = bot.findBlocks({
+    maxDistance,
+    count: 1,
+    matching: (block) => {
+      if (!block?.position || block.liquid || block.boundingBox === "block") return false;
+      const below = bot.blockAt(block.position.offset(0, -1, 0));
+      return !!below && !below.liquid && below.boundingBox === "block";
+    },
+  });
+  return positions[0] || null;
+}
 
 bot.on("breath", () => {
   if (!AUTONOMY_ENABLED || drowningInFlight) return;
@@ -2433,6 +2479,29 @@ bot.on("breath", () => {
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
       console.log(`[${USERNAME}] surfaced (oxygen=${bot.oxygenLevel}, stillInWater=${bot.entity.isInWater})`);
+      bot.setControlState("jump", false);
+
+      // Surviving the dunk isn't the same as being somewhere sensible -- head for the nearest
+      // real dry land now that the pathfinder can actually generate a route out of water.
+      if (bot.entity.isInWater) {
+        const shore = findNearestShore(bot, SHORE_SEARCH_DISTANCE);
+        if (!shore) {
+          console.log(`[${USERNAME}] surfaced but couldn't find dry land within ${SHORE_SEARCH_DISTANCE} blocks`);
+        } else {
+          console.log(`[${USERNAME}] heading for dry land at`, shore);
+          let timedOut = false;
+          const timer = setTimeout(() => { timedOut = true; bot.pathfinder.setGoal(null); }, SHORE_TRAVEL_TIMEOUT_MS);
+          try {
+            await bot.pathfinder.goto(new goals.GoalNear(shore.x, shore.y, shore.z, 1));
+          } catch (err) {
+            if (!timedOut) console.error(`[${USERNAME}] couldn't reach shore:`, err.message);
+          } finally {
+            clearTimeout(timer);
+            bot.pathfinder.setGoal(null);
+          }
+          console.log(`[${USERNAME}] reached shore attempt finished (isInWater=${bot.entity.isInWater})`);
+        }
+      }
     } catch (err) {
       console.error(`[${USERNAME}] surfacing failed:`, err.message);
     } finally {
