@@ -1,4 +1,11 @@
-// Version: 2.29.0
+// Version: 2.30.0
+//
+// 2.30.0 (2026-09-07) -- direct request: "build the water crossing mechanic," following 2.29.0's
+// anti-drowning reflex (survival, not capability). Now uses new swim-movements.js's
+// SwimMovements in place of stock Movements -- see that file's own comment for the confirmed
+// gap it closes: pathfinding could already cross open water at the surface, but had no way to
+// generate a move that changes depth once already in liquid, so a bank dive or a resurface
+// partway across a crossing was never in the search graph at all, not just expensive.
 //
 // 2.29.0 (2026-09-07) -- direct request: "they need to know how to swim." New bot.on("breath")
 // handler: watches bot.oxygenLevel (mineflayer's real air-supply tracking) and, once critical,
@@ -523,8 +530,9 @@ import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
 import { loadActionPlugins, performAction, nearestHostile, isEssentialItem } from "./actions.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
+import { SwimMovements } from "./swim-movements.js";
 
-const { pathfinder, Movements } = pathfinderPkg;
+const { pathfinder } = pathfinderPkg;
 
 const HOST = process.env.MC_HOST || "192.168.1.221";
 const PORT = parseInt(process.env.MC_PORT || "25580", 10);
@@ -607,7 +615,10 @@ loadActionPlugins(bot);
 
 bot.once("spawn", async () => {
   console.log(`[${USERNAME}] spawned at`, bot.entity.position);
-  const movements = new Movements(bot);
+  // SwimMovements (swim-movements.js): stock Movements can walk across open water at a
+  // constant Y-level but can never change depth once already in it -- see that file's own
+  // comment for the confirmed library gap this closes (water crossings only, lava unaffected).
+  const movements = new SwimMovements(bot);
   // mineflayer-pathfinder defaults canOpenDoors to false, with its own comment: "Causes
   // issues. Probably due to none paper servers." Direct report: bots navigate badly around
   // doors, ladders, and stairs -- doors are the one of those three with a known, named,
