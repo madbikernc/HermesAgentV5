@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 2.10.0
+**Version:** 3.0.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -17,10 +17,15 @@ the same fleet node as a router instance (spark), and every call already gets th
 own two-layer injection-guard screening for free, so untrusted player chat text never needs
 a separate guard step here.
 
-Two bots: **Babs** (`agents/minecraft-babs/PROMPT.md`, flirty/playful/capable) and **Amy**
-(`agents/minecraft-amy/PROMPT.md`, sweet/playful, Babs' sister, deferential to The Boss). Each
-runs as its own process -- there's no multi-bot-per-process multiplexing yet (a later
-efficiency pass the design doc's §5 anticipates, not needed to prove multiple bots work).
+Four bots: **Babs** and **Amy** (`agents/minecraft-babs/PROMPT.md`,
+`agents/minecraft-amy/PROMPT.md`, flirty/playful/capable and sweet/playful/deferential
+respectively, Amy is Babs' sister), plus **Mark** and **Luke** (military personas, added
+2026-09-07). Each runs as its own process -- there's no multi-bot-per-process multiplexing yet
+(a later efficiency pass the design doc's §5 anticipates, not needed to prove multiple bots
+work). All four are granted level-2 (command) access in muncraft-bots' `ops.json` -- needed for
+self-teleport (see "stuck"/"dusk" below), computed from their offline-mode UUIDs
+(`MD5("OfflinePlayer:<username>")` with version/variant bits set, since the bot sandbox server
+runs offline-mode).
 
 Persistent per-bot conversation memory is wired via `hermes-memory.py`: every line and reply
 is recorded as a turn (`agent=mc-<persona>`, `conv_id=mc-<persona>:<speaker>`), and recent
@@ -111,7 +116,66 @@ just `bot.time.timeOfDay`. The real per-bed logic (find a bed, try it, wait for 
 bed, monsters nearby, reach) and throws a specific reason for each. Tries up to 3 candidate beds
 before giving up, same reasoning as loot's multi-candidate fix. A live command always interrupts
 a night's sleep (`stopCurrent()` forces a wake). Also directly triggerable via chat (`ACTION
-SLEEP`), same as every other action.
+SLEEP`), same as every other action. **Sleep self-defense** was added later: `checkSleepingThreat()`
+(5s timer, bypasses the `busy`/`acting` guard the way `checkStuck()` does) wakes a sleeping bot
+and responds the instant a hostile mob is nearby, and the existing health-emergency interrupt
+also wakes a sleeping bot before force-cancelling her other actions.
+
+**The action set has grown to 21 verbs** (`actions.js` 1.20.0): navigate (`goto`/`follow`/`stop`),
+gather (`mine`, `harvest` a ripe crop and replant it, `fish`), combat (`attack`/`flee`), crafting
+(`craft`/`smelt`/`enchant`/`breed`), inventory (`loot` a chest -- now takes *everything* in it,
+capped at one instance per distinct tool/weapon/armor piece rather than the old narrow
+gear-only list; `give`/`store`/`trade` with a villager), and utility (`place` one carried utility
+block, `eat`, `sleep`, `gohome`, `recover` dropped items after death). `resolveBlockFamily()`
+lets a general material class ("any wood," "any ore," "any wool") match whatever specific
+variant is actually nearby, rather than requiring the exact species/color named.
+
+**Hazard-aware pathing and the OOM investigation**: a recurring crash was root-caused (via
+direct V8 heap snapshot analysis, not guessing from logs) to `mineflayer-pathfinder`'s own
+`astar.js` -- its synchronous `compute()` loop can block Node's single event loop for seconds
+per search, starving already-resolvable promise continuations from
+`mineflayer-collectblock`/`-tool`/`-pvp` until the heap fills. Fixed by lowering
+`bot.pathfinder.thinkTimeout` (5000ms -> 1000ms) and `tickTimeout` (40ms -> 20ms), plus
+`searchRadius` (library default unbounded -> 48). `run-bot.sh` layers defense in depth on top:
+`--max-old-space-size` bounds the heap (raised 768MB -> 1536MB once live evidence showed the
+same leak, slowed but not eliminated by the above, still outgrowing the original ceiling under
+sustained overnight load with all four bots active) and `--heapsnapshot-near-heap-limit=1`
+captures a real snapshot automatically right before any future OOM; `hermes-minecraft-triage.py`
+(the fleet's standing triage service) finds and surfaces the latest one in its own incident
+reports.
+
+**Teleport-when-stuck**: a bot physically wedged in terrain doesn't get unstuck by a process
+restart -- Minecraft persists position across reconnects like a real player logging back in, so
+she gets stuck again immediately. `checkStuck()` escalates to a self-teleport
+(`bot.chat("/tp ...")`, to `bot.spawnPoint` -- the server's own real compass-needle target, not
+corrupted by the bot's own stuck position) after repeated in-process nudges; a new cross-restart
+check (`goals.js`'s `loadStuckState`/`saveStuckState`) catches a bot being restarted faster than
+one `checkStuck` cycle can complete, by comparing position across the restart itself.
+
+**Dusk awareness**: `checkDusk()` (30s timer) sends a bot home -- the new `"gohome"` action,
+also targeting `bot.spawnPoint` -- once `bot.time.timeOfDay` crosses `MC_DUSK_START_TICK`
+(10000 default), once per night, rather than waiting for full dark or relying on the separate
+sleep logic to notice.
+
+**Cross-bot goal arbitration** (design doc §6, previously undelivered): `arbitrateGoalConflict()`
+makes a real `super`-role model call before a self-proposed goal is adopted, checking it against
+what other bots are already actively doing and substituting a different concrete goal only on a
+genuine conflict (same scarce resource/location right now, not just loose topical overlap).
+
+**Long-term memory deduplication**: `writeMemoryNote()` (`longterm.js` 1.1.0) now skips writing
+a note that's a near-duplicate (cosine distance <= 0.15, calibrated against real duplicate/
+non-duplicate note pairs found live) of one already in the corpus -- a real gap found live where
+the same fact got written to the shared world corpus six separate times in one night.
+
+**Known limitation**: the single global `busy` flag that guards the classify/reply step also
+guards nearly every autonomous action (goals, mining, crafting, fighting, self-proposing a
+goal) and drops any incoming chat unconditionally while true, *before* checking whether the
+message was even addressed to this bot. With the autonomy loop now keeping bots busy most of
+the time, live logs show real player chat getting dropped as "busy" across an entire day almost
+without exception. The ambient-vs-addressed relevance classification itself (`classifyIntent()`'s
+`OTHER_BOTS` note, making a bot stand down when a message names a different bot by name) works
+correctly on the messages that do get through -- this is an availability gap upstream of it, not
+a routing bug, and is unfixed as of this writing.
 
 ## Requirements
 
@@ -126,7 +190,9 @@ this was built and tested against).
 cd services/minecraft-bots
 npm install
 MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Babs ./run-bot.sh
-MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Amy ./run-bot.sh    # second bot, own process
+MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Amy ./run-bot.sh    # own process, same as every other bot
+MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Mark ./run-bot.sh
+MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Luke ./run-bot.sh
 ```
 
 Defaults to `192.168.1.221:25580` (the offline-mode bot instance on muncraft) and username
@@ -140,6 +206,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.0.0 | 2026-09-07 | Catch-up rewrite (this file had drifted to v2.10.0 while the code moved to index.js 2.27.0/actions.js 1.20.0): Mark & Luke added (4 bots total), 21-verb action set, hazard-aware pathing + full OOM investigation/fix chain (heap ceiling raised 768MB->1536MB after live evidence the leak was slowed, not eliminated), teleport-when-stuck, dusk awareness, sleep self-defense, cross-bot goal arbitration, memory-note deduplication, and a documented known limitation (the global `busy` flag drops real player chat almost all the time now that the autonomy loop keeps bots busy most of the day). |
 | 2.10.0 | 2026-09-07 | Bots sleep at night: deterministic `checkSleep()` on its own timer plus a new `"sleep"` action (`actions.js` 1.9.0) built on mineflayer's own `bed.js` plugin. Also directly triggerable via `ACTION SLEEP`. |
 | 2.9.0 | 2026-09-07 | Autonomy (`goals.js`): standing goals, player-assigned or self-proposed while idle, worked step-by-step via the existing `performAction()` pipeline on their own timer. `actions.js` 1.8.0's `performAction()` now returns `{ ok, text }` instead of a bare string so goal progress can be judged structurally, not by parsing English. |
 | 2.8.0 | 2026-09-06 | Equipment management (`equipment.js`): new `loot` action, auto-equip best armor/weapon after mine/attack/loot and at spawn. Fixed a real gap: `mineflayer-tool` was never loaded, so `collectBlock`'s own internal task-specific tool selection had nothing to call. |
