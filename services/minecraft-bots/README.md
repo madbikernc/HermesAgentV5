@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.3.0
+**Version:** 3.4.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -178,6 +178,36 @@ upstream bug in how mineflayer handles `use_item`/rotation on 1.21.x
 known limitation in `actions.js`'s own `tryLaunchBoat()` rather than claimed as working; it
 degrades safely to a no-op fallback inside `"gohome"` in the meantime.
 
+**Wandering toward known resources, not blindly** (direct report: "the bots just stand around
+most of the time"): root-caused live to zero logs within 100 blocks of spawn on this world, so
+every wood-gathering goal step (the very first, most basic resource in the tech tree) failed
+instantly, cascading into everything downstream. `wanderAndRetryFind()` (shared by
+mine/loot/craft/smelt/store/enchant) now uses this server's own view-distance (confirmed live:
+160 blocks -- mineflayer already has chunk data that far out even though the pathfinder can't
+route there directly) to run a free, stationary extended-radius scan for a real known bearing to
+wander toward in bounded hops, instead of guessing a direction (live-tested and confirmed
+unreliable on its own). `ACTION_TIMEOUT_MS` raised 60s -> 90s to fit the extra wander time
+alongside the real work afterward. Verified live: found and collected wood ~83 blocks from spawn
+in 27 seconds.
+
+**Dynamic skill library** (`MINECRAFT_BOTS_DESIGN.md` §14): a skill is data, not code --
+`{name, steps: [{type, ...args}]}`, validated against a real action-verb allowlist before ever
+being stored or run, never raw code/eval (a deliberate deviation from Voyager's own architecture,
+which evals LLM-authored JavaScript directly -- too risky for four bots sharing one live world).
+New `skills.js`: `findSkill()` searches a new `minecraft-skills` hermes-rag corpus (its own
+ingest/search script pair, mirroring the existing `minecraft` corpus's pattern) before
+`goalTick`'s own per-tick planning call, and a close-enough, still-trusted match runs directly
+through the same `performAction()` pipeline every other action already uses -- inheriting every
+existing safety guarantee for free. A goal that completes without ever being served by a stored
+skill gets compressed into one afterward, using the REAL `{type, ...args}` objects each
+successful step actually ran with (`goals.js`'s new `actionsTaken`) -- an LLM only ever names and
+describes that already-real sequence, never invents steps. A skill that fails when replayed
+accumulates failures and gets skipped (not deleted) after 3 in a row. Verified live end-to-end:
+seeded a real test skill, confirmed retrieval (with an empirically calibrated 0.7 distance
+threshold -- genuinely related queries measured 0.54-0.64, far above the initially guessed 0.25),
+confirmed the runner executes real steps and correctly detects failure, confirmed the failure
+counter persists correctly, and confirmed a full happy-path run.
+
 **Teleport-when-stuck**: a bot physically wedged in terrain doesn't get unstuck by a process
 restart -- Minecraft persists position across reconnects like a real player logging back in, so
 she gets stuck again immediately. `checkStuck()` escalates to a self-teleport
@@ -243,6 +273,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.4.0 | 2026-09-08 | Fixed bots standing around most of the time (directed wandering toward real known resources instead of guessing) and built the dynamic skill library (`MINECRAFT_BOTS_DESIGN.md` §14, new `skills.js` + a `minecraft-skills` hermes-rag corpus). |
 | 3.3.0 | 2026-09-08 | Building (`"build"`, a small fixed shelter), a tool-tier gate for `"mine"` (`block.harvestTools`), and farm automation (`"harvest"` batches up to 8 crops), following a web-research gap analysis against Mindcraft-CE/Voyager/other mineflayer bots. Boat crossing has real supporting infrastructure and a genuine upstream crash fix but doesn't work end-to-end yet, blocked on an open mineflayer bug (#3742). |
 | 3.2.0 | 2026-09-07 | Swimming: an anti-drowning reflex (`index.js` 2.29.0, `bot.on("breath")`) and real water-crossing pathfinding (`index.js` 2.30.0, new `swim-movements.js`'s `SwimMovements`, fixing `mineflayer-pathfinder`'s own inability to change depth once already in liquid). |
 | 3.1.0 | 2026-09-07 | The `busy`-flag lockout of real player chat (flagged as a known limitation in 3.0.0) is fixed -- `index.js` 2.28.0 holds only `acting` around the ten idle-tick functions' physical actions instead of `busy` for their whole duration. |
