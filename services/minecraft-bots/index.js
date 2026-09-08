@@ -1,4 +1,17 @@
-// Version: 2.34.0
+// Version: 2.35.0
+//
+// 2.35.0 (2026-09-08) -- direct report: "they still don't seem to react to a threatening
+// creature." Real, confirmed gap: checkSelfDefense() was gated on !acting, same as every other
+// idle-tick check -- but acting now spans an entire physical action end-to-end (up to
+// ACTION_TIMEOUT_MS, 90s after an earlier raise tonight), and goal-directed autonomy keeps a bot
+// "acting" a large fraction of the time. A threat showing up mid-mine/mid-craft got NO response
+// from this check at all until the health-triggered TRUE interrupt (bot.on("health") below)
+// finally engaged -- and that one only fires at 30% health, meaning several real, avoidable hits
+// already landed first. checkSelfDefense() now uses that same handler's own proven force-cancel-
+// then-wait-then-act sequence instead of the idle-tick gate, consistent with
+// checkSleepingThreat's own precedent of bypassing busy/acting for exactly the one case nothing
+// else can reach in time -- a live threat, unlike every other routine check's own physical work,
+// genuinely cannot wait.
 //
 // 2.34.0 (2026-09-08) -- direct request: "if they can't craft, they should explore, and find
 // resources for later." Wired actions.js's new "explore" verb (1.24.0) into both classifyIntent
@@ -1868,12 +1881,15 @@ setInterval(() => {
 }, DUSK_CHECK_MS);
 
 // Fourth of five scoped enhancements, direct follow-up to "what other logic enhancements are
-// available" -> self-defense. A shorter interval than sleep's 30s since a nearby hostile is more
-// time-sensitive than the day/night cycle. Deliberately the idle-tick version: only fires when
-// nothing else has her attention (same busy/acting mutex everything else uses), not a true
-// mid-action interrupt -- see actions.js 1.12.0's own comment on why that's a bigger design
-// decision left for later rather than folded in here.
-const SELF_DEFENSE_CHECK_MS = parseInt(process.env.MC_SELF_DEFENSE_CHECK_MS || "7000", 10);
+// available" -> self-defense. checkSelfDefense() itself is now a true mid-action interrupt
+// (2026-09-08, see its own header comment), not the idle-tick version this comment originally
+// described -- but real live testing of THAT fix found a second, separate gap worth fixing at
+// the same time: a zombie that spawned right next to Babs killed her in about 7 seconds, right
+// at the edge of this interval's own old 7000ms value, meaning the routine check may not have
+// gotten a single turn before she died, independent of the acting-gate bug. Lowered to 2000ms --
+// a melee mob hits roughly once a second at adjacent range, so this now gets at least 2-3
+// chances to react within a typical short encounter instead of maybe zero.
+const SELF_DEFENSE_CHECK_MS = parseInt(process.env.MC_SELF_DEFENSE_CHECK_MS || "2000", 10);
 // Out of a max of 20 -- flee rather than fight once she's below half health with a threat
 // actually nearby, same "correctness over guessing" reasoning as everywhere else tonight: an
 // exact threshold beats a vague "if hurt." Now env-configurable (direct request, 2026-09-07:
@@ -1884,22 +1900,53 @@ const SELF_DEFENSE_CHECK_MS = parseInt(process.env.MC_SELF_DEFENSE_CHECK_MS || "
 const SELF_DEFENSE_FLEE_HEALTH = parseInt(process.env.MC_SELF_DEFENSE_FLEE_HEALTH || "10", 10);
 const SELF_DEFENSE_RANGE = parseInt(process.env.MC_SELF_DEFENSE_RANGE || "12", 10);
 
+// Direct report, 2026-09-08 ("they still don't seem to react to a threatening creature"). Real,
+// confirmed gap: this used to be gated on !acting, same as every other idle-tick check here --
+// but `acting` now spans an entire physical action end-to-end (up to ACTION_TIMEOUT_MS, 90s
+// after tonight's own earlier raise), and goal-directed autonomy keeps a bot "acting" a large
+// fraction of the time. A threat that showed up mid-mine/mid-craft got NO response at all from
+// this check until the health-triggered TRUE interrupt (bot.on("health") below) finally fired --
+// and that one only engages at EMERGENCY_HEALTH_THRESHOLD (30% health), meaning she'd already
+// taken several real, avoidable hits first. This borrows that handler's own proven force-cancel-
+// then-wait-then-act sequence instead of the idle-tick gate every other routine check still
+// correctly uses (their own physical actions genuinely can wait; a live threat cannot) --
+// consistent with checkSleepingThreat's own precedent of bypassing busy/acting for exactly the
+// one case nothing else can reach in time.
+let selfDefenseInFlight = false;
+
 async function checkSelfDefense() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || selfDefenseInFlight || bot.isSleeping) return;
   const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
   if (!threat) return;
 
-  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  selfDefenseInFlight = true;
+  console.log(`[${USERNAME}] self-defense: threat detected (${threat.name}) -- force-cancelling ` +
+              `current action to respond`);
+  // Same interruption primitives actions.js's own stopCurrent() uses.
+  bot.pathfinder.setGoal(null);
+  if (bot.pvp.target) bot.pvp.stop();
+  bot.collectBlock.cancelTask();
+  bot.stopDigging();
+
   try {
-    const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
-    console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
-    const result = await performAction(bot, { type }, USERNAME);
-    console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
+    const deadline = Date.now() + 3000;
+    while ((busy || acting) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
+    acting = true;
+    try {
+      const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
+      console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
+      const result = await performAction(bot, { type }, USERNAME);
+      console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
+    } finally {
+      acting = false;
+    }
   } catch (err) {
     console.error(`[${USERNAME}] self-defense check failed:`, err.message);
   } finally {
-    acting = false;
+    selfDefenseInFlight = false;
   }
 }
 
