@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.4.0
+**Version:** 3.5.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -157,7 +157,14 @@ liquid, so a bank dive or a resurface partway across a crossing was never in the
 all, not just expensive. The override allows vertical travel through water specifically -- checked
 by block name, not the library's generic `liquid` flag (which doesn't distinguish water from
 lava) -- so lava's own vertical-movement refusal is completely unchanged; verified live via a
-negative control (0 neighbors generated in lava, same as stock).
+negative control (0 neighbors generated in lava, same as stock). **Update, direct report ("they
+jump to come up, but do not ever try to reach land")**: the surfacing reflex alone only answered
+"don't drown right now" -- once oxygen recovered she'd just keep floating wherever she surfaced.
+The breath handler now finds the nearest real dry land (`findNearestShore()`, since "land" isn't
+a matchable block type -- it scans for an open, non-liquid space with solid, non-liquid ground
+beneath it) and paths there via the same pathfinder, now genuinely able to route out of water
+thanks to `SwimMovements`. Verified live: swam 76+ blocks to real shore in 24 seconds from a
+confirmed 10+ block deep body of water.
 
 **Building, tool tiers, and farm automation** (following a web-research gap analysis against
 other mineflayer/LLM Minecraft bot projects -- Mindcraft-CE, Voyager, general-purpose farm/
@@ -273,6 +280,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.5.0 | 2026-09-08 | Bots now actually swim to real shore after surfacing (`findNearestShore()`) instead of just treading water where they surfaced -- verified live swimming 76+ blocks to dry land. |
 | 3.4.0 | 2026-09-08 | Fixed bots standing around most of the time (directed wandering toward real known resources instead of guessing) and built the dynamic skill library (`MINECRAFT_BOTS_DESIGN.md` §14, new `skills.js` + a `minecraft-skills` hermes-rag corpus). |
 | 3.3.0 | 2026-09-08 | Building (`"build"`, a small fixed shelter), a tool-tier gate for `"mine"` (`block.harvestTools`), and farm automation (`"harvest"` batches up to 8 crops), following a web-research gap analysis against Mindcraft-CE/Voyager/other mineflayer bots. Boat crossing has real supporting infrastructure and a genuine upstream crash fix but doesn't work end-to-end yet, blocked on an open mineflayer bug (#3742). |
 | 3.2.0 | 2026-09-07 | Swimming: an anti-drowning reflex (`index.js` 2.29.0, `bot.on("breath")`) and real water-crossing pathfinding (`index.js` 2.30.0, new `swim-movements.js`'s `SwimMovements`, fixing `mineflayer-pathfinder`'s own inability to change depth once already in liquid). |
