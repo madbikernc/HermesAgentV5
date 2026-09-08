@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-07) -- added "distance" to each result. Real gap found live: the same "no
+# oak_log found nearby" fact got written to the shared world corpus four separate times over one
+# night (services/minecraft-bots/longterm.js's writeMemoryNote() had no way to tell a near-
+# duplicate was already there, since this script silently dropped hermes_rag_common.search()'s
+# own cosine distance before it ever left this process). Exposing it lets a caller check
+# "is there already a note this close?" before writing another one.
 """
 hermes-rag-search-minecraft.py -- CLI search over the "minecraft" long-term memory corpus
 (MINECRAFT_BOTS_DESIGN.md §7), for services/minecraft-bots/longterm.js to shell out to.
@@ -7,7 +14,8 @@ hermes_rag_common has no HTTP API (direct SQLite+sqlite-vec file access, unlike
 hermes-router.py/hermes-memory.py) -- this is the thin bridge, same split as
 hermes-rag-ingest-minecraft.py's own docstring explains, kept to a single-purpose read path.
 
-Prints a JSON array of {citation, text, source_path} to stdout, best (lowest distance) first.
+Prints a JSON array of {citation, text, source_path, distance} to stdout, best (lowest
+distance) first.
 
 Usage:
     /opt/hermes/venvs/rag/bin/python3 hermes-rag-search-minecraft.py "<query>" [--top-k N]
@@ -36,7 +44,8 @@ def main():
         return 1
 
     print(json.dumps([
-        {"citation": r["citation"], "text": r["text"], "source_path": r["source_path"]}
+        {"citation": r["citation"], "text": r["text"], "source_path": r["source_path"],
+         "distance": r["distance"]}
         for r in results
     ]))
     return 0

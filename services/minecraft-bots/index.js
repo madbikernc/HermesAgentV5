@@ -1,4 +1,14 @@
-// Version: 2.26.0
+// Version: 2.27.0
+//
+// 2.27.0 (2026-09-07) -- direct request: "what other behavior rules have any other sources
+// published or suggested" -> "all". New arbitrateGoalConflict(), built against
+// MINECRAFT_BOTS_DESIGN.md's own §6 table: "Cross-bot conflict arbitration (two bots claim the
+// same sub-goal) -> super (rare, not per-tick)" -- decided and documented back when this was
+// designed, never actually built until now. What existed was only the soft otherGoalsNote()
+// prompt nudge, which depends entirely on a bot's own model voluntarily noticing and avoiding a
+// collision, with nothing that actually resolves one if it doesn't. Wired into proposeOwnGoal()
+// only (self-proposed goals), deliberately not player-assigned ones (ACTION GOAL) -- a human's
+// direct instruction should never get silently overridden by an arbitration call.
 //
 // 2.26.0 (2026-09-07) -- direct request: "bots should pay attention to the time of day, and try
 // to return 'home' before full dark." New checkDusk(), same deterministic on-a-timer shape as
@@ -1293,6 +1303,53 @@ async function planNextStep(goal) {
 // mechanical classification -- what a bot chooses to do with idle time should sound like her,
 // grounded in her real gear (never invented) and whatever long-term memory might suggest
 // something worth pursuing.
+// Direct request, 2026-09-07 ("what other behavior rules have any other sources published or
+// suggested" -> MINECRAFT_BOTS_DESIGN.md's own §6 table: "Cross-bot conflict arbitration (two
+// bots claim the same sub-goal) -> super (rare, not per-tick -- an occasional top-tier call, not
+// a standing cost)"). Decided and documented back when this was designed (2026-09-06), never
+// actually built -- what existed until tonight was only the soft otherGoalsNote() prompt nudge
+// below, which depends entirely on THIS bot's own model voluntarily noticing and avoiding a
+// collision, with nothing that actually resolves one if it doesn't. Only fires when there's
+// something to arbitrate (an active other-bot goal exists AND this bot is about to commit to a
+// new self-proposed one) -- rare by construction, matching the design doc's own "not per-tick."
+// Deliberately scoped to self-proposed goals only, not player-assigned ones (ACTION GOAL) -- a
+// human's direct instruction should never get silently overridden by an arbitration call.
+async function arbitrateGoalConflict(proposedDescription) {
+  if (!otherBotGoals.size) return proposedDescription;
+  const othersText = [...otherBotGoals.entries()].map(([agent, desc]) => `${agent}: ${desc}`).join("\n");
+  try {
+    const reply = await callRole("super", [
+      {
+        role: "system",
+        content:
+          "You arbitrate goal conflicts between autonomous Minecraft bots sharing one world " +
+          "and its scarce resources. Given one bot's proposed new goal and what other bots are " +
+          "already actively doing, decide whether it's a REAL conflict worth avoiding (both " +
+          "need the same scarce, limited resource or location right now), not just a loose " +
+          "topical overlap -- two bots both wanting \"some iron\" isn't automatically a " +
+          "conflict if iron ore is common. Respond in EXACTLY this format, two lines:\n" +
+          "CONFLICT: yes|no\n" +
+          "GOAL: <if yes, a different, still-concrete goal for this bot to pursue instead; if " +
+          "no, repeat the original goal unchanged>",
+      },
+      {
+        role: "user",
+        content: `This bot's proposed goal: "${proposedDescription}"\n\nOther bots already ` +
+          `active:\n${othersText}`,
+      },
+    ], { maxTokens: 100, temperature: 0 });
+    if (!/CONFLICT:\s*yes/i.test(reply)) return proposedDescription;
+    const goalMatch = reply.match(/GOAL:\s*(.+)/i);
+    const alternative = goalMatch ? goalMatch[1].trim().replace(/^["']|["']$/g, "").slice(0, 120) : "";
+    if (!alternative) return proposedDescription; // flagged a conflict but gave nothing usable -- don't block on it
+    console.log(`[${USERNAME}] goal conflict arbitrated: "${proposedDescription}" -> "${alternative}"`);
+    return alternative;
+  } catch (err) {
+    console.error(`[${USERNAME}] goal arbitration failed:`, err.message);
+    return proposedDescription; // arbitration is a refinement, not a hard gate -- never block a goal on it failing
+  }
+}
+
 async function proposeOwnGoal() {
   const gearNote = describeGear(bot);
   let memoryNote = "";
@@ -1353,8 +1410,9 @@ async function proposeOwnGoal() {
     ],
     { maxTokens: 30, temperature: 0.9 },
   );
-  const description = text.trim().replace(/^["']|["']$/g, "").slice(0, 120);
+  let description = text.trim().replace(/^["']|["']$/g, "").slice(0, 120);
   if (!description) return;
+  description = await arbitrateGoalConflict(description);
 
   currentGoal = newGoal({ description, source: "self" });
   await saveGoal(PERSONA_NAME, currentGoal);

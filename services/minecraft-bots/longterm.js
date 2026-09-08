@@ -1,4 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-09-07) -- direct request: "what other behavior rules have any other sources
+// published or suggested" -> note deduplication. writeMemoryNote() now checks for a
+// near-duplicate before writing -- see its own comment for the real live evidence and threshold
+// calibration. Requires hermes-rag-search-minecraft.py 1.1.0 (exposes the real cosine distance
+// this check reads).
 //
 // Bridge to the "minecraft" long-term memory corpus (MINECRAFT_BOTS_DESIGN.md §7).
 // hermes_rag_common.py has no HTTP API -- direct SQLite+sqlite-vec file access, unlike
@@ -26,10 +32,27 @@ function slugify(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "note";
 }
 
+// Real gap found live, 2026-09-07: the same fact ("no oak_log found nearby") got written to the
+// shared world corpus SIX separate times over one night, and a differently-worded one ("no
+// target found") three more -- nothing here ever checked whether an existing note already said
+// basically the same thing before writing another one. Threshold calibrated against that exact
+// live data (real cosine distance, not guessed): querying with a known duplicate's own exact
+// text returned its five siblings at distance 0.08-0.10; querying with genuinely distinct notes
+// (different facts, or the same topic worded differently) returned 0.57+. 0.15 sits with real
+// margin on both sides.
+const DUPLICATE_DISTANCE_THRESHOLD = 0.15;
+
 // scope: "world" -> shared corpus note; "bot" -> this bot's own personal note (source_path
 // under bots/<persona>/, not the speaker's name -- the persona owns the memory, the speaker
 // is just recorded inside the note text for context).
 export async function writeMemoryNote({ scope, persona, text }) {
+  const existing = await searchMemory(text, { topK: 1 });
+  if (existing.length && existing[0].distance <= DUPLICATE_DISTANCE_THRESHOLD) {
+    console.log(`[longterm] skipping near-duplicate note (distance=${existing[0].distance.toFixed(3)}): ` +
+      `"${text.slice(0, 80)}" already covered by ${existing[0].source_path}`);
+    return;
+  }
+
   const dir = scope === "world" ? path.join(MEMORY_DIR, "world")
                                  : path.join(MEMORY_DIR, "bots", persona);
   await mkdir(dir, { recursive: true });
