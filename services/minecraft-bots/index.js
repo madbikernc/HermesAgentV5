@@ -1,4 +1,14 @@
-// Version: 2.28.0
+// Version: 2.29.0
+//
+// 2.29.0 (2026-09-07) -- direct request: "they need to know how to swim." New bot.on("breath")
+// handler: watches bot.oxygenLevel (mineflayer's real air-supply tracking) and, once critical,
+// force-cancels whatever's running and holds the jump control while bot.entity.isInWater --
+// confirmed against prismarine-physics's own tick loop that this adds real upward velocity every
+// tick, the same mechanic a player uses to swim up. mineflayer-pathfinder itself can never
+// generate a "swim to the surface" move (confirmed against movements.js's own getMoveUp(): it
+// unconditionally refuses once already in liquid), so this had to be a direct control-state
+// action, not a pathfinder goal. Deliberately just a surfacing reflex (don't drown), not full
+// swim-to-shore navigation.
 //
 // 2.28.0 (2026-09-07) -- direct request: "fix it," following a real finding from tonight's own
 // Matrix-routing-convention check: live logs showed literally every real player chat message
@@ -2282,6 +2292,69 @@ bot.on("health", () => {
     } finally {
       acting = false;
       emergencyInFlight = false;
+    }
+  })();
+});
+
+// Direct request, 2026-09-07 ("they need to know how to swim"). Real, confirmed gap: nothing in
+// this file ever watched bot.oxygenLevel -- movements.liquidCost's own comment above already
+// documents a live incident ("Amy drowned repeatedly because her death spot ... sat right at
+// open water"), but that fix only ever discourages PATHFINDER route choice; it does nothing once
+// a bot is actually submerged and running low on air for any other reason (fell in, a
+// gohome/goal route crossed open water, chased into a lake while fleeing). mineflayer-pathfinder
+// itself can never generate a "swim to the surface" move on its own -- confirmed against its own
+// movements.js: getMoveUp() unconditionally refuses once already in liquid ("if (block1.liquid)
+// return"), so resurfacing can never come from the path search itself, no matter the settings.
+// bot.oxygenLevel (mineflayer's own entities.js, real server-tracked air supply 0-20, matching
+// the vanilla bubble meter) and the real 'breath' event it fires on every change give a direct,
+// verified hook; confirmed against prismarine-physics's own tick loop that holding the jump
+// control while entity.isInWater adds upward velocity every tick (vel.y += 0.04) -- the same
+// real mechanic a player uses to swim up, not a guess. Deliberately just a vertical surfacing
+// reflex, not full swim-to-shore navigation -- a bigger feature than "don't drown" needed.
+const DROWNING_OXYGEN_THRESHOLD = 4; // out of ~20 -- drowning damage only starts once air
+                                      // actually hits 0, so this leaves a few real seconds of
+                                      // margin, same "stricter than routine caution" reasoning
+                                      // as EMERGENCY_HEALTH_THRESHOLD above
+const SURFACE_SWIM_TIMEOUT_MS = 8000; // bounded -- never hold jump forever if something's wrong
+let drowningInFlight = false;
+
+bot.on("breath", () => {
+  if (!AUTONOMY_ENABLED || drowningInFlight) return;
+  if (!bot.entity.isInWater || bot.oxygenLevel > DROWNING_OXYGEN_THRESHOLD) return;
+
+  drowningInFlight = true;
+  console.log(`[${USERNAME}] EMERGENCY: oxygen critical (${bot.oxygenLevel}) -- force-cancelling ` +
+              `current action to surface`);
+  // Same interruption primitives actions.js's own stopCurrent() uses.
+  bot.pathfinder.setGoal(null);
+  if (bot.pvp.target) bot.pvp.stop();
+  bot.collectBlock.cancelTask();
+  bot.stopDigging();
+
+  (async () => {
+    const deadline = Date.now() + 3000;
+    while ((busy || acting) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
+    acting = true;
+    try {
+      bot.setControlState("jump", true);
+      const surfaceDeadline = Date.now() + SURFACE_SWIM_TIMEOUT_MS;
+      // Keep holding jump until oxygen is actually recovering (a reliable sign her head cleared
+      // the surface) rather than just "not in water anymore" -- isInWater stays true while
+      // floating right at the surface, so that alone would release control too early.
+      while (bot.entity.isInWater && bot.oxygenLevel <= DROWNING_OXYGEN_THRESHOLD + 2 &&
+             Date.now() < surfaceDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      console.log(`[${USERNAME}] surfaced (oxygen=${bot.oxygenLevel}, stillInWater=${bot.entity.isInWater})`);
+    } catch (err) {
+      console.error(`[${USERNAME}] surfacing failed:`, err.message);
+    } finally {
+      bot.setControlState("jump", false);
+      acting = false;
+      drowningInFlight = false;
     }
   })();
 });
