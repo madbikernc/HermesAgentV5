@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.2.0
+**Version:** 3.3.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -159,6 +159,25 @@ by block name, not the library's generic `liquid` flag (which doesn't distinguis
 lava) -- so lava's own vertical-movement refusal is completely unchanged; verified live via a
 negative control (0 neighbors generated in lava, same as stock).
 
+**Building, tool tiers, and farm automation** (following a web-research gap analysis against
+other mineflayer/LLM Minecraft bot projects -- Mindcraft-CE, Voyager, general-purpose farm/
+building bots): a new `"build"` action constructs a small, fixed 3x3-footprint shelter (walls,
+one doorway, a roof) using whichever solid block she has the most of -- the "own pass" building
+always deserved rather than being half-built alongside navigate/gather/fight, still deliberately
+not a general blueprint/planning system. `"mine"` now checks `block.harvestTools`
+(minecraft-data, real per-block tool requirements -- e.g. iron ore needs at least a stone
+pickaxe) against her whole inventory before starting a collect, avoiding a wasted attempt with
+the wrong tool tier, the same idea Voyager uses to sequence wood -> stone -> iron -> diamond
+tools explicitly. `"harvest"` now works up to 8 mature crops per invocation instead of one, a
+real "work the field" pass matching dedicated farm bots elsewhere in the ecosystem. **Boat
+crossing is real infrastructure, not yet working**: a genuine crash bug was found and fixed
+(`bot.placeEntity()`'s own boat-specific packet is missing fields this server's protocol
+requires), but the actual boat spawn still silently fails, traced to a currently open, unresolved
+upstream bug in how mineflayer handles `use_item`/rotation on 1.21.x
+([mineflayer#3742](https://github.com/PrismarineJS/mineflayer/issues/3742)) -- documented as a
+known limitation in `actions.js`'s own `tryLaunchBoat()` rather than claimed as working; it
+degrades safely to a no-op fallback inside `"gohome"` in the meantime.
+
 **Teleport-when-stuck**: a bot physically wedged in terrain doesn't get unstuck by a process
 restart -- Minecraft persists position across reconnects like a real player logging back in, so
 she gets stuck again immediately. `checkStuck()` escalates to a self-teleport
@@ -224,6 +243,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.3.0 | 2026-09-08 | Building (`"build"`, a small fixed shelter), a tool-tier gate for `"mine"` (`block.harvestTools`), and farm automation (`"harvest"` batches up to 8 crops), following a web-research gap analysis against Mindcraft-CE/Voyager/other mineflayer bots. Boat crossing has real supporting infrastructure and a genuine upstream crash fix but doesn't work end-to-end yet, blocked on an open mineflayer bug (#3742). |
 | 3.2.0 | 2026-09-07 | Swimming: an anti-drowning reflex (`index.js` 2.29.0, `bot.on("breath")`) and real water-crossing pathfinding (`index.js` 2.30.0, new `swim-movements.js`'s `SwimMovements`, fixing `mineflayer-pathfinder`'s own inability to change depth once already in liquid). |
 | 3.1.0 | 2026-09-07 | The `busy`-flag lockout of real player chat (flagged as a known limitation in 3.0.0) is fixed -- `index.js` 2.28.0 holds only `acting` around the ten idle-tick functions' physical actions instead of `busy` for their whole duration. |
 | 3.0.0 | 2026-09-07 | Catch-up rewrite (this file had drifted to v2.10.0 while the code moved to index.js 2.27.0/actions.js 1.20.0): Mark & Luke added (4 bots total), 21-verb action set, hazard-aware pathing + full OOM investigation/fix chain (heap ceiling raised 768MB->1536MB after live evidence the leak was slowed, not eliminated), teleport-when-stuck, dusk awareness, sleep self-defense, cross-bot goal arbitration, memory-note deduplication, and a documented known limitation (the global `busy` flag drops real player chat almost all the time now that the autonomy loop keeps bots busy most of the day). |
