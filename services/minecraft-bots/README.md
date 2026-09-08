@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.6.0
+**Version:** 3.7.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -225,6 +225,27 @@ when a goal gets blocked on a missing raw material, since a model sometimes give
 trying it even though the prompt already teaches it as an option. A successful explore also
 writes a world memory note with position, so another bot's own goal can recall it later.
 
+**No more duplicate crafting tables/furnaces** (direct report: "they keep creating crafting
+tables, even when there is a number of them nearby"): `"craft"`'s own "does this need a table"
+check only ever asked whether crafting the CURRENT item needs a different existing table/furnace
+as a station -- crafting_table's own recipe needs no table at all, so that check always said "no"
+and fell straight through to making a brand new one, never checking whether an instance of what
+she's about to make already exists in reach. Fixed with a direct nearby-search before crafting
+either reusable utility block.
+
+**Self-defense was a true mid-action interrupt in name only** (direct report: "they still don't
+seem to react to a threatening creature"). Two real, distinct bugs, both required for this to
+ever have worked: (1) `checkSelfDefense()` was gated on `!acting`, which now spans an entire
+physical action (up to 90s), so a threat mid-mine/mid-craft got no response until the health-
+triggered interrupt engaged at 30% health -- fixed using that same handler's own force-cancel-
+then-wait-then-act sequence, plus lowering the check interval 7s -> 2s after a live test found a
+zombie could kill a bot in about 7 seconds, right at the old interval's edge. (2) The actual
+foundational bug: `nearestHostile()` required `entity.type === "mob"`, but a real zombie's actual
+type on this server is `"hostile"` -- confirmed by direct inspection. This function had never
+matched a single real hostile mob since it was written, on any version of this codebase. Verified
+live: a bot that died outright to a summoned zombie before these fixes correctly detected it,
+fought back while healthy, fled once low on health, and survived afterward.
+
 **Teleport-when-stuck**: a bot physically wedged in terrain doesn't get unstuck by a process
 restart -- Minecraft persists position across reconnects like a real player logging back in, so
 she gets stuck again immediately. `checkStuck()` escalates to a self-teleport
@@ -290,6 +311,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.7.0 | 2026-09-08 | Fixed duplicate crafting-table/furnace crafting, and fixed self-defense never actually firing -- a true mid-action interrupt plus (the real foundational bug) `nearestHostile()` checking the wrong entity type entirely (`"mob"` instead of the real `"hostile"`). |
 | 3.6.0 | 2026-09-08 | New `"explore"` action -- gathers any common raw material broadly when a specific craft/mine target can't be found, forced via a deterministic `BLOCKED` override, writes a world memory note on success so it's remembered for later. |
 | 3.5.0 | 2026-09-08 | Bots now actually swim to real shore after surfacing (`findNearestShore()`) instead of just treading water where they surfaced -- verified live swimming 76+ blocks to dry land. |
 | 3.4.0 | 2026-09-08 | Fixed bots standing around most of the time (directed wandering toward real known resources instead of guessing) and built the dynamic skill library (`MINECRAFT_BOTS_DESIGN.md` §14, new `skills.js` + a `minecraft-skills` hermes-rag corpus). |
