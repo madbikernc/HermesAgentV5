@@ -1,4 +1,14 @@
-// Version: 2.33.0
+// Version: 2.34.0
+//
+// 2.34.0 (2026-09-08) -- direct request: "if they can't craft, they should explore, and find
+// resources for later." Wired actions.js's new "explore" verb (1.24.0) into both classifyIntent
+// (player-facing) and the goal planner's own vocabulary, plus a new deterministic BLOCKED
+// override -- same "prompt guidance plus a code guard" reasoning as the existing LOOT-before-
+// smelt-blocked override: a model BLOCKED on a missing raw material sometimes gives up rather
+// than trying EXPLORE even though the prompt already teaches it as an option. A successful
+// explore also writes a world memory note (position included) -- the "for later" half of the
+// request: not just solving today's shortage, leaving a record another bot's own goal can
+// recall next time it needs the same material.
 //
 // 2.33.0 (2026-09-08) -- direct report: "they get in water, jump to come up, but do not ever
 // try to reach land." Confirmed real: the anti-drowning reflex (2.29.0) only ever answered
@@ -903,6 +913,8 @@ async function classifyIntent(speaker, message) {
           `ACTION TRADE <item_id> - asks ${USERNAME} to trade with a nearby villager for a ` +
           `specific item she wants\n` +
           `ACTION HARVEST - asks ${USERNAME} to pick a ripe crop nearby and replant it\n` +
+          `ACTION EXPLORE - asks ${USERNAME} to go looking for any useful raw material (wood, ` +
+          `ore) when no specific one was named. No parameters.\n` +
           `ACTION BREED <species> - asks ${USERNAME} to breed two nearby animals of the same ` +
           `kind (e.g. cow, sheep, pig, chicken) using the right food\n` +
           `ACTION ENCHANT <item_id> - asks ${USERNAME} to enchant an item she's carrying at a ` +
@@ -975,6 +987,7 @@ async function classifyIntent(speaker, message) {
     }
     if (verb === "HARVEST") return { type: "action", action: { type: "harvest" } };
     if (verb === "BUILD") return { type: "action", action: { type: "build" } };
+    if (verb === "EXPLORE") return { type: "action", action: { type: "explore" } };
     if (verb === "BREED") {
       const species = (parts[2] || "").toLowerCase();
       if (species) return { type: "action", action: { type: "breed", species } };
@@ -1226,6 +1239,7 @@ function parseGoalStep(text) {
       // farm, breed, enchant, or fish. Same parsing shape as every verb above.
       if (verb === "HARVEST") return { type: "step", action: { type: "harvest" } };
       if (verb === "BUILD") return { type: "step", action: { type: "build" } };
+      if (verb === "EXPLORE") return { type: "step", action: { type: "explore" } };
       if (verb === "BREED") {
         const species = (parts[2] || "").toLowerCase();
         if (species) return { type: "step", action: { type: "breed", species } };
@@ -1328,6 +1342,10 @@ async function planNextStep(goal) {
           `same need, or the recent progress below already shows a LOOT attempt.\n` +
           `ACTION CRAFT <item_id> <count> - craft an item via a crafting-table/grid recipe only. ` +
           `<item_id> must be the exact modern Minecraft item id -- never invent one.\n` +
+          `ACTION EXPLORE - go looking for any useful raw material (wood, ore) when CRAFT/MINE ` +
+          `failed because a needed resource isn't nearby and you don't have a more specific ` +
+          `block to try -- gathers whatever's found, worth doing before giving up or asking the ` +
+          `other bot for help.\n` +
           `ACTION SMELT <item_id> <count> - smelt raw material into an ingot (or similar) at a ` +
           `furnace. <item_id> is the OUTPUT (e.g. iron_ingot), the exact modern Minecraft item ` +
           `id -- never invent one.\n` +
@@ -1590,6 +1608,20 @@ async function goalTick() {
         console.log(`[${USERNAME}] overriding BLOCKED (${parsed.reason}) -- no LOOT attempt yet, forcing one`);
         parsed = { type: "step", action: { type: "loot" } };
       }
+
+      // Direct request, 2026-09-08 ("if they can't craft, they should explore, and find
+      // resources for later"). Same "prompt guidance plus a code guard" reasoning as the LOOT
+      // override just above: the prompt already teaches EXPLORE as an option, but a model
+      // BLOCKED on a missing raw material (wood/ore not found nearby) sometimes gives up rather
+      // than trying it, the same failure shape that override exists to catch. Checked AFTER the
+      // smelt/furnace/ingot case above (and only if that one didn't already fire, since parsed
+      // would no longer be "blocked" once it does) so the two overrides can't fight over which
+      // fallback wins -- LOOT for a smelting-specific shortfall, EXPLORE for everything else.
+      if (parsed.type === "blocked" && /craft|log|ore|plank|wood|resource|material|ingredient/i.test(parsed.reason) &&
+          !currentGoal.log.some((l) => l.startsWith("explore:"))) {
+        console.log(`[${USERNAME}] overriding BLOCKED (${parsed.reason}) -- no EXPLORE attempt yet, forcing one`);
+        parsed = { type: "step", action: { type: "explore" } };
+      }
     } finally {
       busy = false;
     }
@@ -1691,6 +1723,23 @@ async function goalTick() {
                 `wandering to look, as of ${new Date().toISOString()}.` });
       } catch (err) {
         console.error(`[${USERNAME}] environmental memory write failed:`, err.message);
+      }
+    }
+
+    // Direct request, 2026-09-08 ("if they can't craft, they should explore, and find resources
+    // for later"): the positive counterpart to the failure-case write just above -- a
+    // successful EXPLORE found something worth remembering not just for the current goal, but
+    // for whichever bot needs the same raw material next, world-scoped for the same reason.
+    // Position included (rounded -- exact block precision doesn't matter for "worth checking
+    // around here again"), since a note with no location is far less actionable than one with
+    // one.
+    if (parsed.action.type === "explore" && result.ok) {
+      try {
+        const pos = bot.entity.position.floored();
+        await writeMemoryNote({ scope: "world", persona: PERSONA_NAME,
+          text: `${result.text} near (${pos.x}, ${pos.y}, ${pos.z}), as of ${new Date().toISOString()}.` });
+      } catch (err) {
+        console.error(`[${USERNAME}] exploration memory write failed:`, err.message);
       }
     }
 

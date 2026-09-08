@@ -1,4 +1,12 @@
-// Version: 1.23.0
+// Version: 1.24.0
+//
+// 1.24.0 (2026-09-08) -- direct request: "if they can't craft, they should explore, and find
+// resources for later." New "explore" action: scans broadly for ANY common raw material (every
+// log species, every ore family) instead of one named target, for when a craft/mine step fails
+// with nothing specific left to try. Reuses wanderAndRetryFind()'s own directed extended-search
+// wandering and "mine"'s own tool-tier gate rather than duplicating either. Gathers a full batch
+// (up to 8) of whatever's found first, not just enough for the immediate need -- added to
+// SKILL_ACTION_VERBS too, so a stored skill can include an exploration step.
 //
 // 1.23.0 (2026-09-08) -- direct request "start on #6" (MINECRAFT_BOTS_DESIGN.md §14, the
 // Voyager-style dynamic skill library plan). New export SKILL_ACTION_VERBS: the real allowlist
@@ -487,7 +495,7 @@ export function isEssentialItem(itemName) {
 // skill would be compressed from, so leaving them out costs nothing real.
 export const SKILL_ACTION_VERBS = new Set([
   "stop", "goto", "follow", "mine", "craft", "loot", "attack", "flee", "eat", "fish", "give",
-  "sleep", "smelt", "place", "build", "store", "trade", "harvest", "breed", "enchant",
+  "sleep", "smelt", "place", "build", "store", "trade", "harvest", "breed", "enchant", "explore",
 ]);
 
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
@@ -1097,6 +1105,45 @@ export async function performAction(bot, action, speaker) {
         await refreshGear(bot); // may have picked up something worth wearing/wielding
       }
       return token.cancelled ? ok("stopped mining early.") : ok(`collected some ${collectedNames}.`);
+    }
+
+    case "explore": {
+      // Direct request, 2026-09-08 ("if they can't craft, they should explore, and find
+      // resources for later"). For when a specific target isn't known -- CRAFT failed on a
+      // missing ingredient with nothing obvious nearby, but there's no one named block worth a
+      // dedicated "mine" attempt. Scans broadly for ANY common raw material (every log species,
+      // every ore family -- the same real id sets resolveBlockFamily() already resolves for a
+      // single request) instead of one target, reusing the same directed extended-search
+      // wandering wanderAndRetryFind() already relies on for "mine." Gathers a full batch of
+      // whatever's found first, not just enough for right now -- the travel is the real cost
+      // here, not the extra inventory slots, so "find resources for later" means actually
+      // stockpiling while she's already out looking, not just solving today's shortage.
+      const EXPLORE_TARGET_NAMES = ["oak_log", "coal_ore", "iron_ore", "copper_ore"];
+      const blockIds = [...new Set(EXPLORE_TARGET_NAMES.flatMap((name) => resolveBlockFamily(bot, name)))];
+      const findOptions = { matching: blockIds, maxDistance: 32, count: 8 };
+      let positions = bot.findBlocks(findOptions);
+      if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
+      if (!positions.length) return fail("didn't find anything useful nearby, even after looking around.");
+      const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
+      const collectedNames = [...new Set(blocks.map((b) => b.name))].join(", ");
+
+      // Same tool-tier gate "mine" already applies -- no point starting a collect on ore she
+      // can't yet break, same real block.harvestTools data.
+      const toolReq = blocks[0]?.harvestTools;
+      if (toolReq && !bot.inventory.items().some((item) => toolReq[item.type])) {
+        return fail(`found ${collectedNames} but don't have a good enough tool for it yet.`);
+      }
+
+      try {
+        await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
+                           () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
+      } catch (err) {
+        if (token.cancelled) return ok("stopped exploring early.");
+        return fail(`found ${collectedNames} but had trouble gathering it: ${err.message}`);
+      } finally {
+        await refreshGear(bot);
+      }
+      return token.cancelled ? ok("stopped exploring early.") : ok(`explored and found some ${collectedNames}.`);
     }
 
     case "craft": {
