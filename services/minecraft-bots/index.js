@@ -1,4 +1,11 @@
-// Version: 2.25.0
+// Version: 2.26.0
+//
+// 2.26.0 (2026-09-07) -- direct request: "bots should pay attention to the time of day, and try
+// to return 'home' before full dark." New checkDusk(), same deterministic on-a-timer shape as
+// checkSleep -- DUSK_START_TICK (10000) fires well before checkSleep's own sleep-eligible window
+// (12541, bed.js's own real enforcement) so she has actual travel time, not just a same-tick
+// notice. Calls actions.js's new "gohome" action (1.20.0), a plain goto to bot.spawnPoint -- the
+// same real "home" reference the teleport-when-stuck mechanism already uses.
 //
 // 2.25.0 (2026-09-07) -- direct request: "if a bot gets stuck, there needs to be a mechanism to
 // teleport it back to its spawn point rather than continually restart that bot." Real evidence
@@ -1558,6 +1565,60 @@ async function checkSleep() {
 setInterval(() => {
   checkSleep().catch((err) => console.error(`[${USERNAME}] checkSleep error:`, err.message));
 }, SLEEP_CHECK_MS);
+
+// Direct request, 2026-09-07: "bots should pay attention to the time of day, and try to return
+// 'home' before full dark." Plain deterministic check on its own timer, same shape as
+// checkSleep just above -- "is dusk approaching" needs no reasoning, just bot.time.timeOfDay.
+// DUSK_START_TICK (10000) is set well before checkSleep's own 12541 (the exact tick bed.js's
+// bot.sleep() actually becomes usable, matched there so sleep never tries early) specifically so
+// she has real travel time to walk home -- roughly 2500 ticks/~127 real seconds of buffer,
+// generous over any real distance searchRadius (48 blocks) ever puts her at from a normal
+// day's wandering -- rather than only noticing once it's already the sleep-eligible window.
+// "home" is bot.spawnPoint (actions.js's new "gohome" action) -- the same real reference the
+// teleport-when-stuck mechanism already uses, not a second notion of home.
+const DUSK_CHECK_MS = parseInt(process.env.MC_DUSK_CHECK_MS || "30000", 10);
+const DUSK_START_TICK = parseInt(process.env.MC_DUSK_START_TICK || "10000", 10);
+// Tracks whether tonight's trip home has already been tried so she doesn't retry every 30s for
+// the rest of the ~13000-tick night window -- resets the moment a new day's tick count is back
+// below DUSK_START_TICK, ready for the next dusk.
+let wentHomeTonight = false;
+
+async function checkDusk() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping || !bot.time) return;
+  const t = bot.time.timeOfDay;
+  if (t < DUSK_START_TICK) {
+    wentHomeTonight = false;
+    return;
+  }
+  if (wentHomeTonight) return;
+  wentHomeTonight = true;
+
+  // Whatever her standing goal assumed, getting home before dark takes priority -- same
+  // reasoning as death/respawn/stuck: she can always pick something new up tomorrow.
+  if (currentGoal) {
+    await broadcastGoalState("abandoned", currentGoal.description);
+    recordGoalOutcome(currentGoal.description, "gave up", "heading home before dark");
+    currentGoal = null;
+    await clearGoal(PERSONA_NAME);
+  }
+
+  busy = true;
+  acting = true;
+  try {
+    bot.chat(await narrateAction("sun's getting low -- heading home before dark."));
+    const result = await performAction(bot, { type: "gohome" }, USERNAME);
+    console.log(`[${USERNAME}] heading home: ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] heading home failed:`, err.message);
+  } finally {
+    busy = false;
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkDusk().catch((err) => console.error(`[${USERNAME}] checkDusk error:`, err.message));
+}, DUSK_CHECK_MS);
 
 // Fourth of five scoped enhancements, direct follow-up to "what other logic enhancements are
 // available" -> self-defense. A shorter interval than sleep's 30s since a nearby hostile is more

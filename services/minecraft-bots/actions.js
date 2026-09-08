@@ -1,4 +1,9 @@
-// Version: 1.19.1
+// Version: 1.20.0
+//
+// 1.20.0 (2026-09-07) -- direct request: "bots should pay attention to the time of day, and try
+// to return 'home' before full dark." New "gohome" action, a plain goto to bot.spawnPoint -- the
+// same real "home" reference the teleport-when-stuck mechanism already uses. index.js's own new
+// checkDusk() decides WHEN to call it (bot.time.timeOfDay), this just handles the walk.
 //
 // 1.19.1 (2026-09-07) -- direct request: "when a bot is looting a chest, it should only take
 // one instance of any tool, but can take resources up to one full stack at a time." "loot" used
@@ -1056,6 +1061,28 @@ export async function performAction(bot, action, speaker) {
         return fail(`couldn't give the ${action.item}: ${err.message}`);
       }
       return ok(`gave ${giveCount} ${action.item} to ${action.player}.`);
+    }
+
+    case "gohome": {
+      // Direct request, 2026-09-07: "bots should pay attention to the time of day, and try to
+      // return 'home' before full dark." bot.spawnPoint (confirmed against mineflayer's own
+      // spawn_point.js source: populated from the server's own spawn_position packet -- her bed
+      // if she's claimed one, otherwise the world spawn) is the same real "home" reference the
+      // teleport-when-stuck mechanism already uses -- one shared notion of home, not a second one.
+      const dest = bot.spawnPoint;
+      if (!dest || (dest.x === 0 && dest.y === 0 && dest.z === 0)) {
+        return fail("don't know where home is yet.");
+      }
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 3)),
+          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped heading home.");
+        return fail(`couldn't make it home: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      return token.cancelled ? ok("stopped heading home.") : ok("made it home before dark.");
     }
 
     case "sleep": {
