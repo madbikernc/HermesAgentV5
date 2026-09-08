@@ -1,4 +1,18 @@
-// Version: 2.22.0
+// Version: 2.23.0
+//
+// 2.23.0 (2026-09-07) -- direct request: "check the Firmament coder logs..." -> "yes" (dig
+// deeper) -> "yes" (run the retainer trace). A real heap snapshot plus a retainer-graph trace
+// (both taken from a live crash, not guessed) found the actual root mechanism: astar.js's
+// compute() is a fully synchronous loop that can hog Node's event loop in ~40ms chunks for up to
+// 5 STRAIGHT SECONDS per search (tickTimeout/thinkTimeout's old defaults), starving everything
+// else -- Buzz, Matrix, incoming packets, pending promise callbacks -- and letting a backlog of
+// never-settled promises accumulate (confirmed via the snapshot's own retainer chains: rooted at
+// Stack/GC roots, i.e. genuinely pending, not forgotten references). thinkTimeout lowered
+// 5000ms -> 1000ms, tickTimeout 40ms -> 20ms. See the setting's own comment for the full
+// evidence chain. This supersedes the earlier "reduce searchRadius" theory as the dominant
+// contributor -- that fix (2.22.0) was real and stays, but pathfinding NODE COUNT wasn't what
+// the snapshot actually showed dominating memory; event-loop starvation from BLOCKING DURATION
+// was.
 //
 // 2.22.0 (2026-09-07) -- direct request: "check the Firmament coder logs for flagged Minecraft
 // behavior that are not yet resolved" -> "yes" (dig into the #1 finding, the all-day recurring
@@ -544,6 +558,31 @@ bot.once("spawn", () => {
   // recomputes, since the recompute FREQUENCY itself isn't something this codebase can bound
   // without patching mineflayer-pvp/mineflayer-pathfinder directly.
   bot.pathfinder.searchRadius = 48;
+
+  // Direct request, 2026-09-07 ("check the Firmament coder logs... yes... yes" -- three rounds
+  // deep into the same all-day OOM). A real heap snapshot (--heapsnapshot-near-heap-limit, taken
+  // automatically right before an actual crash) showed the dominant memory cost wasn't
+  // pathfinding nodes at all -- it was ~2.5M V8 Context objects, ~1M Generators, ~1M Promises,
+  // and 514,115 EACH of closures literally named step/fulfilled/rejected/adopt (the compiled
+  // TypeScript `__awaiter` helper used by mineflayer-collectblock/-tool/-pvp). Tracing their
+  // retainers confirmed they're rooted via (Stack roots)/(GC roots) -- genuinely PENDING
+  // promises that never settled, not simply forgotten references. Root cause, confirmed against
+  // astar.js's own compute(): it's a fully synchronous `while` loop, checked against elapsed
+  // time only at the top of each iteration, bounded by tickTimeout (default 40ms per chunk) and
+  // thinkTimeout (default 5000ms total ceiling) -- meaning a single hard search can legitimately
+  // hog Node's single-threaded event loop in ~40ms synchronous chunks for up to 5 STRAIGHT
+  // SECONDS, with negligible time handed back in between (live evidence matches exactly: 28
+  // consecutive path_update lines each ~40-50ms apart, zero gap). While starved like that,
+  // nothing else -- Buzz polling, Matrix, incoming Minecraft packets, any already-resolved
+  // promise's own .then() -- gets a turn, so anything scheduled during that window piles up
+  // unsettled. Repeated searches (goal_moved/block_updated kept re-triggering fresh ones) could
+  // hit this ceiling over and over. Lowered thinkTimeout to 1000ms (real searches this codebase
+  // asks for complete in well under 100ms per the very same live evidence; only the pathological
+  // cases were ever hitting the old 5000ms ceiling) and tickTimeout to 20ms (smaller synchronous
+  // chunks, more frequent opportunities for the event loop to interleave other work between
+  // them) to bound the worst case far short of where it was.
+  bot.pathfinder.thinkTimeout = 1000;
+  bot.pathfinder.tickTimeout = 20;
 
   // Real-data visibility into navigation, not a guess: astar's own result status
   // ('success'/'partial'/'noPath'/'timeout') for every path (re)computation, so a bad
