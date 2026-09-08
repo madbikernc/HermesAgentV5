@@ -1,5 +1,21 @@
 #!/bin/bash
-# Version: 1.6.0
+# Version: 1.7.0
+#
+# 1.7.0 (2026-09-07) -- direct request: "check the Firmament coder logs for flagged Minecraft
+# behavior that are not yet resolved" (again) -> the 1.4.0 768MB ceiling turned out too tight
+# once index.js 2.20.0's thinkTimeout/tickTimeout fix shipped. That fix slowed the promise-
+# backlog leak (astar.js's synchronous compute() still starves pending collectblock/tool/pvp
+# continuations every search -- see index.js's own 2.20.0 comment for the full mechanism) but
+# never eliminated it, and it's architectural, not a bug with a real fix available tonight. Real
+# evidence: with all four bots running continuously overnight instead of the lighter load the
+# fix was first verified under, journalctl showed Babs at 220 OOM crashes and Amy at 238 since
+# midnight -- a few minutes apart, continuously, worse than the pre-fix baseline this was meant
+# to solve. Raised to 1536MB: spark had 14Gi RAM genuinely free when checked (96Gi/121Gi used),
+# so this buys real breathing room without pushing the shared host into swap (already at
+# 14/15Gi used) the way an unbounded heap did before 1.4.0 existed. This is still defense in
+# depth, not a fix -- the leak itself needs the astar.js starvation mechanism addressed at its
+# source (chunking searches to actually yield, or a pathfinding library that doesn't block the
+# event loop), tracked as follow-up, not attempted here.
 #
 # 1.6.0 (2026-09-07) -- direct request: "check the Firmament coder logs for flagged Minecraft
 # behavior that are not yet resolved" -> "yes" -> add automatic heap-snapshot-on-crash. Two real
@@ -84,4 +100,4 @@ fi
 HEAPDUMP_DIR="/mnt/hermes-data/minecraft-memory/heapdumps/$(echo "$MC_BOT_USERNAME" | tr '[:upper:]' '[:lower:]')"
 mkdir -p "$HEAPDUMP_DIR"
 
-exec node --max-old-space-size=768 --heapsnapshot-near-heap-limit=1 --diagnostic-dir="$HEAPDUMP_DIR" index.js
+exec node --max-old-space-size=1536 --heapsnapshot-near-heap-limit=1 --diagnostic-dir="$HEAPDUMP_DIR" index.js
