@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.5.0
+**Version:** 3.6.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -215,6 +215,16 @@ threshold -- genuinely related queries measured 0.54-0.64, far above the initial
 confirmed the runner executes real steps and correctly detects failure, confirmed the failure
 counter persists correctly, and confirmed a full happy-path run.
 
+**Explore when a specific craft/mine target can't be found** (direct request: "if they can't
+craft, they should explore, and find resources for later"): a new `"explore"` action scans
+broadly for any common raw material (every log species, every ore family) instead of one named
+target, reusing `"mine"`'s own tool-tier gate and directed extended-search wandering, and gathers
+a full batch of whatever's found first rather than just enough for right now. A new deterministic
+`BLOCKED` override -- same shape as the existing LOOT-before-smelt-blocked one -- forces this
+when a goal gets blocked on a missing raw material, since a model sometimes gives up rather than
+trying it even though the prompt already teaches it as an option. A successful explore also
+writes a world memory note with position, so another bot's own goal can recall it later.
+
 **Teleport-when-stuck**: a bot physically wedged in terrain doesn't get unstuck by a process
 restart -- Minecraft persists position across reconnects like a real player logging back in, so
 she gets stuck again immediately. `checkStuck()` escalates to a self-teleport
@@ -280,6 +290,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.6.0 | 2026-09-08 | New `"explore"` action -- gathers any common raw material broadly when a specific craft/mine target can't be found, forced via a deterministic `BLOCKED` override, writes a world memory note on success so it's remembered for later. |
 | 3.5.0 | 2026-09-08 | Bots now actually swim to real shore after surfacing (`findNearestShore()`) instead of just treading water where they surfaced -- verified live swimming 76+ blocks to dry land. |
 | 3.4.0 | 2026-09-08 | Fixed bots standing around most of the time (directed wandering toward real known resources instead of guessing) and built the dynamic skill library (`MINECRAFT_BOTS_DESIGN.md` §14, new `skills.js` + a `minecraft-skills` hermes-rag corpus). |
 | 3.3.0 | 2026-09-08 | Building (`"build"`, a small fixed shelter), a tool-tier gate for `"mine"` (`block.harvestTools`), and farm automation (`"harvest"` batches up to 8 crops), following a web-research gap analysis against Mindcraft-CE/Voyager/other mineflayer bots. Boat crossing has real supporting infrastructure and a genuine upstream crash fix but doesn't work end-to-end yet, blocked on an open mineflayer bug (#3742). |
