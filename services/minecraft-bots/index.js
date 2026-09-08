@@ -1,4 +1,24 @@
-// Version: 2.27.0
+// Version: 2.28.0
+//
+// 2.28.0 (2026-09-07) -- direct request: "fix it," following a real finding from tonight's own
+// Matrix-routing-convention check: live logs showed literally every real player chat message
+// all day getting logged as "busy, dropping," including ones explicitly naming a specific bot
+// by name. Root cause: goalTick() and nine other idle-tick action functions (checkSleep,
+// checkDusk, checkSelfDefense, checkHunger, checkPendingGiveRequests, checkInventoryFull,
+// checkLighting, the post-respawn recovery block, the emergency-flee handler,
+// checkSleepingThreat) all held the SAME `busy` flag handleIncoming checks for their entire
+// physical-action duration (up to ACTION_TIMEOUT_MS each) -- not just the brief decision that
+// preceded it -- even though a direct player command's own runAction() never held `busy` for
+// its action, only `acting`. With the autonomy loop now keeping a bot in one of these ten
+// functions most of the time, `busy` was effectively true almost continuously. Fixed by
+// removing the needless `busy` hold from all nine simple checks (kept `acting`, which already
+// and correctly prevents them from double-firing) and restructuring goalTick() into two
+// phases: `busy` held only for planNextStep()'s own decision call, released before the
+// resulting physical action executes, `acting` held across both. This makes the actual
+// behavior match this file's own pre-existing comment on goalTick ("a live player command
+// always wins immediately") for the first time -- it relies on nothing new: every action
+// already calls stopCurrent() first (actions.js), which safely interrupts whatever's
+// physically in flight, exactly like a direct command already could interrupt itself.
 //
 // 2.27.0 (2026-09-07) -- direct request: "what other behavior rules have any other sources
 // published or suggested" -> "all". New arbitrateGoalConflict(), built against
@@ -1443,27 +1463,45 @@ async function goalTick() {
     return;
   }
 
-  busy = true;
   acting = true;
   try {
-    const stepLine = await planNextStep(currentGoal);
-    let parsed = parseGoalStep(stepLine);
-    console.log(`[${USERNAME}] goal plan: ${stepLine}`);
+    // busy is held only for this planning call, not the physical action below -- see the
+    // 2026-09-07 fix note above planNextStep's own call site history for why. Releasing it
+    // immediately after the plan is known (instead of holding it until the whole step,
+    // including a potentially minute-long physical action, finishes) is what actually delivers
+    // this function's own documented promise above ("a live player command always wins
+    // immediately"): handleIncoming only ever checks `busy`, not `acting`, so a real chat
+    // message arriving mid-action was being unconditionally dropped as "busy" for as long as
+    // the action ran -- live evidence: an entire day of real player chat logged as dropped.
+    // `acting` alone still prevents this function (and every other idle-tick check) from
+    // starting a second physical action while this one is in flight; a live command's own
+    // performAction call safely interrupts it via the same stopCurrent() every action already
+    // calls first, exactly like a direct command already could while a PREVIOUS design's
+    // goalTick was mid-plan.
+    let stepLine, parsed;
+    busy = true;
+    try {
+      stepLine = await planNextStep(currentGoal);
+      parsed = parseGoalStep(stepLine);
+      console.log(`[${USERNAME}] goal plan: ${stepLine}`);
 
-    // Real gap found live (2026-09-07), twice: the prompt explicitly says to try ACTION LOOT
-    // before giving up on a smelting-only ingredient, and the model sometimes states that exact
-    // reasoning out loud ("no prior LOOT attempt...") and goes BLOCKED anyway -- correct
-    // diagnosis, no follow-through, the same failure shape as 2.11.2 but surviving a prose fix.
-    // This particular condition is simple and mechanically checkable (has "loot:" appeared in
-    // this goal's own log yet?), so it's enforced in code here instead of trusted to a written
-    // instruction a second time -- prompt guidance plus a code guard, not prompt guidance alone.
-    // Still a valid last-resort fallback now that ACTION SMELT exists (2.12.1): the prompt teaches
-    // SMELT as the primary path for a smelted item, but if she's genuinely stuck (no furnace
-    // reachable, out of fuel) LOOT remains a legitimate alternate source worth forcing once.
-    if (parsed.type === "blocked" && /smelt|furnace|ingot/i.test(parsed.reason) &&
-        !currentGoal.log.some((l) => l.startsWith("loot:"))) {
-      console.log(`[${USERNAME}] overriding BLOCKED (${parsed.reason}) -- no LOOT attempt yet, forcing one`);
-      parsed = { type: "step", action: { type: "loot" } };
+      // Real gap found live (2026-09-07), twice: the prompt explicitly says to try ACTION LOOT
+      // before giving up on a smelting-only ingredient, and the model sometimes states that exact
+      // reasoning out loud ("no prior LOOT attempt...") and goes BLOCKED anyway -- correct
+      // diagnosis, no follow-through, the same failure shape as 2.11.2 but surviving a prose fix.
+      // This particular condition is simple and mechanically checkable (has "loot:" appeared in
+      // this goal's own log yet?), so it's enforced in code here instead of trusted to a written
+      // instruction a second time -- prompt guidance plus a code guard, not prompt guidance alone.
+      // Still a valid last-resort fallback now that ACTION SMELT exists (2.12.1): the prompt teaches
+      // SMELT as the primary path for a smelted item, but if she's genuinely stuck (no furnace
+      // reachable, out of fuel) LOOT remains a legitimate alternate source worth forcing once.
+      if (parsed.type === "blocked" && /smelt|furnace|ingot/i.test(parsed.reason) &&
+          !currentGoal.log.some((l) => l.startsWith("loot:"))) {
+        console.log(`[${USERNAME}] overriding BLOCKED (${parsed.reason}) -- no LOOT attempt yet, forcing one`);
+        parsed = { type: "step", action: { type: "loot" } };
+      }
+    } finally {
+      busy = false;
     }
 
     if (parsed.type === "done") {
@@ -1572,7 +1610,6 @@ async function goalTick() {
   } catch (err) {
     console.error(`[${USERNAME}] goal tick failed:`, err.message);
   } finally {
-    busy = false;
     acting = false;
   }
 }
@@ -1605,7 +1642,9 @@ async function checkSleep() {
   if (sleepAttemptedThisNight) return;
   sleepAttemptedThisNight = true;
 
-  busy = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note on why an
+  // idle-tick physical action shouldn't block handleIncoming's `busy` check. acting alone
+  // still prevents another idle-tick action from starting while this one runs.
   acting = true;
   try {
     bot.chat(await narrateAction("getting sleepy -- heading to bed."));
@@ -1615,7 +1654,6 @@ async function checkSleep() {
   } catch (err) {
     console.error(`[${USERNAME}] sleep check failed:`, err.message);
   } finally {
-    busy = false;
     acting = false;
   }
 }
@@ -1660,7 +1698,7 @@ async function checkDusk() {
     await clearGoal(PERSONA_NAME);
   }
 
-  busy = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   acting = true;
   try {
     bot.chat(await narrateAction("sun's getting low -- heading home before dark."));
@@ -1669,7 +1707,6 @@ async function checkDusk() {
   } catch (err) {
     console.error(`[${USERNAME}] heading home failed:`, err.message);
   } finally {
-    busy = false;
     acting = false;
   }
 }
@@ -1700,7 +1737,7 @@ async function checkSelfDefense() {
   const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
   if (!threat) return;
 
-  busy = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   acting = true;
   try {
     const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
@@ -1710,7 +1747,6 @@ async function checkSelfDefense() {
   } catch (err) {
     console.error(`[${USERNAME}] self-defense check failed:`, err.message);
   } finally {
-    busy = false;
     acting = false;
   }
 }
@@ -1730,7 +1766,7 @@ async function checkHunger() {
   if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
   if (bot.food >= HUNGER_THRESHOLD) return;
 
-  busy = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   acting = true;
   try {
     const result = await performAction(bot, { type: "eat" }, USERNAME);
@@ -1749,7 +1785,6 @@ async function checkHunger() {
   } catch (err) {
     console.error(`[${USERNAME}] hunger check failed:`, err.message);
   } finally {
-    busy = false;
     acting = false;
   }
 }
@@ -1770,7 +1805,7 @@ async function checkPendingGiveRequests() {
   const { forPlayer, item, count } = pendingGiveRequest;
   pendingGiveRequest = null;
 
-  busy = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   acting = true;
   try {
     console.log(`[${USERNAME}] fulfilling request: giving ${count} ${item} to ${forPlayer}`);
@@ -1780,7 +1815,6 @@ async function checkPendingGiveRequests() {
   } catch (err) {
     console.error(`[${USERNAME}] give check failed:`, err.message);
   } finally {
-    busy = false;
     acting = false;
   }
 }
@@ -1810,7 +1844,7 @@ async function checkInventoryFull() {
   surplus.sort((a, b) => b.count - a.count);
   const target = surplus[0];
 
-  busy = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   acting = true;
   try {
     const result = await performAction(bot, { type: "store", item: target.name, count: target.count }, USERNAME);
@@ -1818,7 +1852,6 @@ async function checkInventoryFull() {
   } catch (err) {
     console.error(`[${USERNAME}] inventory check failed:`, err.message);
   } finally {
-    busy = false;
     acting = false;
   }
 }
@@ -1845,7 +1878,7 @@ async function checkLighting() {
   const block = bot.blockAt(bot.entity.position);
   if (!block || block.light >= DARK_LIGHT_LEVEL) return;
 
-  busy = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   acting = true;
   try {
     const result = await performAction(bot, { type: "place", item: "torch" }, USERNAME);
@@ -1853,7 +1886,6 @@ async function checkLighting() {
   } catch (err) {
     console.error(`[${USERNAME}] lighting check failed:`, err.message);
   } finally {
-    busy = false;
     acting = false;
   }
 }
@@ -2182,7 +2214,7 @@ bot.on("spawn", () => {
       console.log(`[${USERNAME}] skipping gear recovery -- ${recoveryAttempts} deaths in quick ` +
         `succession, accepting the loss for now.`);
     } else if (recoverAt && AUTONOMY_ENABLED) {
-      busy = true;
+      // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
       acting = true;
       recovering = true;
       try {
@@ -2192,7 +2224,6 @@ bot.on("spawn", () => {
         console.error(`[${USERNAME}] recovery failed:`, err.message);
       } finally {
         recovering = false;
-        busy = false;
         acting = false;
       }
     }
@@ -2241,7 +2272,7 @@ bot.on("health", () => {
     while ((busy || acting) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    busy = true;
+    // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
     acting = true;
     try {
       const result = await performAction(bot, { type: "flee" }, USERNAME);
@@ -2249,7 +2280,6 @@ bot.on("health", () => {
     } catch (err) {
       console.error(`[${USERNAME}] emergency flee failed:`, err.message);
     } finally {
-      busy = false;
       acting = false;
       emergencyInFlight = false;
     }
@@ -2287,7 +2317,7 @@ async function checkSleepingThreat() {
   await new Promise((resolve) => setTimeout(resolve, 250));
   if (busy || acting) return; // sleep's own cleanup is still finishing -- the next tick will catch it
 
-  busy = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   acting = true;
   try {
     const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
@@ -2296,7 +2326,6 @@ async function checkSleepingThreat() {
   } catch (err) {
     console.error(`[${USERNAME}] post-wake defense failed:`, err.message);
   } finally {
-    busy = false;
     acting = false;
   }
 }
