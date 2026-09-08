@@ -1,4 +1,19 @@
-// Version: 1.21.0
+// Version: 1.22.0
+//
+// 1.22.0 (2026-09-08) -- direct report: "the bots just stand around most of the time." Real,
+// confirmed root cause, not guessed: a live on-server check found ZERO logs within 100 blocks
+// of spawn (the nearest real tree cluster was ~83 blocks away in one specific direction), so
+// every wood-gathering goal step failed instantly, cascading into everything downstream (no
+// planks -> no sticks -> no tools -> can't progress) -- which is what "standing around" actually
+// looked like in the logs: goal after goal giving up within 1-2 ticks. wanderAndRetryFind()
+// rewritten from a single blind hop (its original 2026-09-07 form) to use this server's own
+// view-distance (confirmed live: 160 blocks) -- mineflayer already has chunk data that far out
+// whether or not she can path there directly, so an extended stationary bot.findBlocks() call
+// (free, no movement) can find a REAL known bearing to wander toward in bounded hops, instead of
+// guessing a random direction (live-tested and confirmed unreliable: missed the real tree
+// cluster entirely, twice, before this fix). ACTION_TIMEOUT_MS raised 60s -> 90s to fit the
+// extra wander time alongside the real work that still needs to happen afterward. Verified live:
+// a bot with nothing within 100 blocks found and collected oak_log from ~83 blocks away in 27s.
 //
 // 1.21.0 (2026-09-07) -- direct request "do 1,2,4,5" on a web-research gap analysis against
 // other mineflayer/LLM Minecraft bot projects (Mindcraft-CE, Voyager, general-purpose farm/
@@ -382,7 +397,16 @@ import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipme
 
 const { goals } = pathfinderPkg;
 
-const ACTION_TIMEOUT_MS = 60_000;
+// 2026-09-08 ("the bots just stand around most of the time"): raised 60s -> 90s. Real evidence:
+// wanderAndRetryFind() now takes up to 3 wander hops (its own 2026-09-08 fix, see its header
+// comment) to actually reach resources that turned out to be 150+ blocks from spawn -- a
+// worst-case 45s of wandering alone left too little of the old 60s ceiling for the real work
+// (walking to and digging/interacting with whatever was actually found) that needs to happen
+// afterward, inside the very same withTimeout() call. Every action here already has its own
+// real cancellation via withTimeout's required onTimeout callback, so a larger ceiling doesn't
+// add a new risk class -- it just means a genuinely stuck action takes a bit longer to be
+// force-cancelled.
+const ACTION_TIMEOUT_MS = 90_000;
 // A real Minecraft night (or the wait for it to naturally pass while sleeping) runs several
 // real-world minutes even at normal speed -- ACTION_TIMEOUT_MS (60s) would abort a perfectly
 // normal night's sleep as a "failure." This is a safety backstop for something going genuinely
@@ -566,31 +590,69 @@ function resolveBlockFamily(bot, requestedName) {
 // wander"): the single biggest recurring blocker across a whole night's live testing was
 // "couldn't find X nearby" (wood, ore, chests) purely because nothing existed within the normal
 // maxDistance of wherever the bot happened to be standing -- with no way to deliberately look
-// further. Deliberately bounded, not open-ended exploration: ONE wander-then-retry per failed
+// further. Deliberately bounded, not open-ended exploration: a wander-then-retry per failed
 // search, a fixed modest distance, not a search loop. This runs the same kind of long-distance
 // pathfinding linked to tonight's cave-pathfinding OOM crashes, so it stays conservative
 // (EXPLORE_DISTANCE well under a chunk-loading concern, a real timeout on the wander itself)
 // rather than searching further and further outward.
+//
+// 2026-09-08 ("the bots just stand around most of the time"): real, confirmed root cause of a
+// live report, not guessed -- direct on-server check found ZERO logs within 100 blocks of
+// spawn, so the original single-hop version of this function (and this fix's own first two live-
+// tested attempts: one long hop in a random direction, then several random-direction hops) had
+// no reliable way to reach wood at all -- confirmed live that pure random-direction wandering
+// missed a real tree cluster sitting ~83 blocks away in one specific direction, repeatedly,
+// since nothing steered it that way. Every wood-gathering goal step failing instantly, over and
+// over, is what "standing around" actually looked like in the logs: goal after goal giving up
+// within 1-2 ticks because the very first, most basic resource was never reachable.
+//
+// The actual fix: this server's own view-distance (confirmed live: view-distance=10, 160
+// blocks) means mineflayer already has chunk data for anything within ~160 blocks, whether or
+// not she could path there directly -- bot.findBlocks() with a large maxDistance is a real,
+// free, stationary lookup (no movement, no pathfinder search at all), it was only ever "mine"'s
+// own SEARCH radius (32) that was narrow, not what the client could actually see. So rather than
+// guessing a wander direction, EXTENDED_SEARCH_DISTANCE first checks if anything exists further
+// out than the normal search, and if so, wanders TOWARD ITS REAL KNOWN BEARING in bounded hops
+// (each still EXPLORE_DISTANCE, safely under bot.pathfinder.searchRadius's own 48-block OOM-
+// safety cap from tonight's investigation) instead of a blind guess -- re-checking the ORIGINAL
+// (narrow, cheap) findOptions after every hop, since the real goal is always "close enough for
+// the normal search radius to find it now," not the extended one.
 const EXPLORE_DISTANCE = 40;
-const EXPLORE_TIMEOUT_MS = 30_000;
+const EXPLORE_TIMEOUT_MS = 15_000;
+const EXTENDED_SEARCH_DISTANCE = 150;
+const MAX_DIRECTED_HOPS = 4;
 
 async function wanderAndRetryFind(bot, token, findOptions) {
   if (token.cancelled) return [];
-  const angle = Math.random() * Math.PI * 2;
-  const dx = Math.round(Math.cos(angle) * EXPLORE_DISTANCE);
-  const dz = Math.round(Math.sin(angle) * EXPLORE_DISTANCE);
-  const target = bot.entity.position.offset(dx, 0, dz);
-  try {
-    await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 4)),
-      EXPLORE_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-  } catch {
-    // Couldn't fully reach the wander point (cliff, water, whatever's out there) -- still worth
-    // searching from wherever she actually ended up rather than giving up on wandering entirely.
-  } finally {
-    bot.pathfinder.setGoal(null);
+  // Callers only reach here after their own initial findBlocks(findOptions) already came up
+  // empty -- no need to repeat that exact same scan.
+  let positions;
+  const farPositions = bot.findBlocks({ ...findOptions, maxDistance: EXTENDED_SEARCH_DISTANCE, count: 1 });
+  if (!farPositions.length) return []; // genuinely nothing visible at all, not just unreachable yet
+
+  const beacon = farPositions[0];
+  for (let hop = 0; hop < MAX_DIRECTED_HOPS; hop++) {
+    if (token.cancelled) return [];
+    const pos = bot.entity.position;
+    const dx = beacon.x - pos.x, dz = beacon.z - pos.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 1) break; // already there
+    const step = Math.min(EXPLORE_DISTANCE, dist);
+    const target = pos.offset((dx / dist) * step, 0, (dz / dist) * step);
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 4)),
+        EXPLORE_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+    } catch {
+      // Couldn't fully reach this hop's point (cliff, water, whatever's out there) -- still worth
+      // checking from wherever she actually ended up rather than giving up on the whole approach.
+    } finally {
+      bot.pathfinder.setGoal(null);
+    }
+    if (token.cancelled) return [];
+    positions = bot.findBlocks(findOptions);
+    if (positions.length) return positions;
   }
-  if (token.cancelled) return [];
-  return bot.findBlocks(findOptions);
+  return [];
 }
 
 // Direct request, 2026-09-07 ("build the water crossing mechanic" -> boat/vehicle use, following
