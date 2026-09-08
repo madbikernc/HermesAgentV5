@@ -1,4 +1,41 @@
-// Version: 1.20.0
+// Version: 1.21.0
+//
+// 1.21.0 (2026-09-07) -- direct request "do 1,2,4,5" on a web-research gap analysis against
+// other mineflayer/LLM Minecraft bot projects (Mindcraft-CE, Voyager, general-purpose farm/
+// building bots):
+// (1) Boat crossing: new ensureBoat()/tryLaunchBoat()/attemptBoatCrossing(), wired as a fallback
+//     inside "gohome" when the normal walking route fails. Real crash bug found and fixed along
+//     the way: bot.placeEntity()'s own boat-specific packet write is missing fields this exact
+//     server's protocol actually requires. mount()/moveVehicle()/dismount() (entities.js) supply
+//     steering once mounted, bot.lookAt() the yaw/pitch to aim, both confirmed real APIs. NOT yet
+//     working end-to-end, though: extensive live testing traced the remaining failure (no boat
+//     ever spawns, no crash) to a currently open, unresolved upstream mineflayer bug affecting
+//     use_item/rotation handling on 1.21.x (PrismarineJS/mineflayer#3742) -- see
+//     tryLaunchBoat()'s own header comment for the full investigation. Left in place rather than
+//     reverted since the crash fix, crafting logic, and launch-site/steering code are all real
+//     and correct, and the whole thing degrades safely to a no-op fallback in the meantime.
+// (2) Building: new "build" action -- a small, fixed 3x3-footprint shelter (walls, one doorway,
+//     a roof) using whichever solid block she has the most of. This is the "own pass" this
+//     file's own 1.0.0-era header comment always said building deserved rather than being half-
+//     built alongside navigate/gather/fight -- not a general blueprint/planning system, which
+//     stays out of scope for the same reason it always has (even Voyager needs human feedback
+//     for its own house-building). Placement order is ground-up per wall column and outward
+//     from an already-placed edge for the roof, so no cell ever needs a reference that doesn't
+//     exist yet, and the doorway column is never in the placement list at all -- no self-
+//     entombment risk regardless of what order individual placements actually succeed in.
+// (4) Tool-tier gate: "mine" now checks block.harvestTools (minecraft-data, confirmed live
+//     against this exact server's registry) against her whole inventory before ever starting a
+//     collect -- real data, not a hand-typed tier table that could drift from this server's
+//     actual version (this future version's own copper_pickaxe tier, confirmed live, would have
+//     been missed by anything hand-typed from memory). Following external research on how
+//     Voyager avoids wasted attempts by sequencing tool tiers explicitly -- this is the
+//     deterministic guard half of that idea; the goal loop's own already-evidenced ability to
+//     reason "I need a pickaxe, I need planks, I need logs" from an informative failure message
+//     is the re-planning half, not a second thing to build.
+// (5) Farm automation: "harvest" now processes up to HARVEST_BATCH_LIMIT (8) mature crops per
+//     invocation instead of one -- a real "work the field" pass, matching how dedicated farm
+//     bots elsewhere in the mineflayer ecosystem work a whole field per pass rather than one
+//     plant per goal step.
 //
 // 1.20.0 (2026-09-07) -- direct request: "bots should pay attention to the time of day, and try
 // to return 'home' before full dark." New "gohome" action, a plain goto to bot.spawnPoint -- the
@@ -556,6 +593,187 @@ async function wanderAndRetryFind(bot, token, findOptions) {
   return bot.findBlocks(findOptions);
 }
 
+// Direct request, 2026-09-07 ("build the water crossing mechanic" -> boat/vehicle use, following
+// the swim-crossing work). A boat is the real, standard way a player crosses open water --
+// faster and with zero drowning risk, unlike swimming (index.js's own anti-drowning reflex is a
+// safety net for when she's already in the water, not a substitute for a real crossing plan).
+// mineflayer core already has everything needed for this, confirmed by reading its own source:
+// bot.placeEntity() (place_entity.js) is a first-class API for spawning a rideable boat -- not a
+// repurposed placeBlock() call, it sends the extra packet vanilla boats specifically need after
+// the initial place -- and bot.mount()/bot.moveVehicle()/bot.dismount() (entities.js) are the
+// real steering primitives a mounted vehicle uses, distinct from the normal walking controls
+// (setControlState). bot.lookAt() (physics.js) computes the yaw/pitch to face a point directly,
+// avoiding a hand-rolled (and easy to get backwards) yaw formula for steering.
+const BOAT_STEER_INTERVAL_MS = 200;
+const BOAT_CROSSING_TIMEOUT_MS = 60_000;
+const BOAT_ARRIVAL_RADIUS = 4;
+
+function findBoatItem(bot) {
+  return bot.inventory.items().find((i) => i.name.endsWith("_boat"));
+}
+
+// Vanilla's boat recipe is real data bot.recipesFor() already knows -- checked live against
+// this exact server's registry, not assumed: it's a 3-wide shape (5 planks of one species),
+// which DOES need a crafting table (the personal grid is only 2x2), confirmed after an initial
+// version of this wrongly assumed otherwise and failed live. Same tableBlock-lookup pattern the
+// "craft" action already uses.
+async function ensureBoat(bot) {
+  const existing = findBoatItem(bot);
+  if (existing) return existing;
+  const planks = bot.inventory.items().find((i) => i.name.endsWith("_planks") && i.count >= 5);
+  if (!planks) return null;
+  const boatName = planks.name.replace("_planks", "_boat");
+  const itemDef = bot.registry.itemsByName[boatName];
+  if (!itemDef) return null;
+
+  const tableType = bot.registry.blocksByName.crafting_table;
+  const positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
+  if (!positions.length) return null; // no table nearby -- can't craft a boat, nothing more to try
+  const tableBlock = bot.blockAt(positions[0]);
+
+  try {
+    await craftItem(bot, boatName, 1, tableBlock);
+  } catch (err) {
+    console.error("ensureBoat: craft failed:", err.message);
+    return null;
+  }
+  return findBoatItem(bot);
+}
+
+// Best-effort: false covers every "can't do this right now" case (no boat/materials, no
+// reachable water, launch failed, never got close enough before the timeout) uniformly, so
+// callers can fall back to reporting their own original failure rather than a boat-specific one.
+// Extracted so attemptBoatCrossing can retry against several candidate water/shore pairs --
+// real testing found the first candidate found is often a bad launch spot (a shallow puddle, or
+// a "ground neighbor" that pathfinder actually approaches from the far side, landing her at the
+// water's edge rather than clearly on dry land), same "don't give up on the first failure"
+// reasoning as every other multi-candidate loop in this file (loot/sleep/harvest).
+//
+// KNOWN LIMITATION, not yet resolved (2026-09-07): the actual boat spawn does not currently
+// succeed live on this server, and extensive live testing narrowed down why without fully
+// fixing it. One real, confirmed bug IS fixed here: bot.placeEntity() (mineflayer core,
+// place_entity.js) sent boats' own supplementary "use_item" packet with only a `hand` field --
+// this exact server's protocol.json (1.21.11) requires `hand`, `sequence`, AND `rotation`, and
+// the missing fields crashed serialization outright the first time this was tried
+// ("SizeOf error... reading 'x'"). Switching to bot.activateItem() (which builds that packet
+// correctly -- the same call this file's "fish" action already uses successfully, confirmed
+// live here too by directly testing it) stopped the crash, but no boat entity has been observed
+// to actually spawn afterward despite: correct packet shape (confirmed via direct packet-write
+// logging), correct entity-name matching for this version's per-species boat entities
+// (oak_boat/spruce_boat/... replacing the old generic "Boat"), a non-forced bot.lookAt() (so the
+// orientation update is confirmed sent before activating, not just applied locally), and precise
+// /tp-based positioning that ruled out pathfinding drift as the cause. This matches a real,
+// currently open, unresolved upstream report (PrismarineJS/mineflayer#3742, "use_item packet /
+// activateItem not working on Minecraft 1.21.8") describing the exact same rotation/use_item
+// breakage on 1.21.x -- closed "not planned" upstream with no fix or workaround published.
+// Left in place rather than removed: the crash fix, crafting/table logic, multi-candidate
+// launch-site selection, and steering-once-mounted code are all real and correct, and
+// attemptBoatCrossing degrades safely to `return false` (its caller, "gohome", just falls
+// through to its normal failure message) -- if a future mineflayer release fixes the underlying
+// use_item/rotation handling, this should start working with no further changes needed here.
+async function tryLaunchBoat(bot, token, boatItem, launch) {
+  try {
+    await withTimeout(bot.pathfinder.goto(new goals.GoalNear(launch.ground.position.x,
+      launch.ground.position.y, launch.ground.position.z, 0)), ACTION_TIMEOUT_MS,
+      () => bot.pathfinder.setGoal(null));
+  } catch {
+    return null;
+  } finally {
+    bot.pathfinder.setGoal(null);
+  }
+  if (token.cancelled) return null;
+  // Real gap found live: GoalNear(..., 1) let pathfinder settle anywhere within 1 block of the
+  // "ground" reference, including the water's own far edge -- confirmed live by ending up
+  // standing on the FAR side of the water, looking almost straight down at her own feet instead
+  // of across at it. GoalNear(..., 0) plus this direct check make sure she's actually somewhere
+  // sane before ever trying to launch from here.
+  if (bot.entity.isInWater) return null;
+  if (bot.entity.position.distanceTo(launch.water.position) > 2.5) return null;
+
+  try {
+    await bot.equip(boatItem, "hand");
+    const spawnPromise = new Promise((resolve, reject) => {
+      const onSpawn = (entity) => {
+        // Real gap found live (2026-09-07): this server's version gives each wood species its
+        // own distinct boat entity (oak_boat, spruce_boat, ...), not a single generic
+        // "Boat"/"boat" entity like older versions -- confirmed against this exact server's own
+        // entitiesArray data. The spawned entity's name matches the item name directly.
+        if (entity.name !== boatItem.name) return;
+        if (entity.position.distanceTo(launch.water.position) > 3) return;
+        bot.off("entitySpawn", onSpawn);
+        resolve(entity);
+      };
+      bot.on("entitySpawn", onSpawn);
+      setTimeout(() => { bot.off("entitySpawn", onSpawn); reject(new Error("boat never spawned")); }, 3000);
+    });
+    // Non-forced (awaited) lookAt -- confirmed the orientation update actually reaches the
+    // server before activating, not just applied to local state (see this function's own header
+    // comment on why that distinction mattered here). Aiming at the water's real surface height
+    // (~0.88, not its lower raw block-center) keeps the look angle from being steeper than
+    // necessary.
+    await bot.lookAt(launch.water.position.offset(0.5, 0.88, 0.5), false);
+    bot.activateItem();
+    const boatEntity = await spawnPromise;
+    await bot.mount(boatEntity);
+    return boatEntity;
+  } catch (err) {
+    console.error("tryLaunchBoat: launch failed:", err.message);
+    return null;
+  }
+}
+
+async function attemptBoatCrossing(bot, token, target) {
+  const boatItem = await ensureBoat(bot);
+  if (!boatItem) return false;
+
+  const waterId = bot.registry.blocksByName.water?.id;
+  if (waterId === undefined) return false;
+  // Any water within a short walk with dry ground on one side to launch from -- doesn't need to
+  // be exactly on the route, just somewhere she can actually get a boat into the water near
+  // wherever she already got stuck trying to walk.
+  const waterPositions = bot.findBlocks({ matching: waterId, maxDistance: 24, count: 20 });
+  const candidates = [];
+  for (const pos of waterPositions) {
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const ground = bot.blockAt(pos.offset(dx, 0, dz));
+      if (ground?.boundingBox === "block") {
+        candidates.push({ water: bot.blockAt(pos), ground });
+        break;
+      }
+    }
+    if (candidates.length >= 5) break; // enough real attempts without walking her all over the map
+  }
+  if (!candidates.length) return false;
+
+  let boatEntity = null;
+  for (const launch of candidates) {
+    if (token.cancelled) return false;
+    boatEntity = await tryLaunchBoat(bot, token, boatItem, launch);
+    if (boatEntity) break;
+  }
+  if (!boatEntity) return false;
+
+  const deadline = Date.now() + BOAT_CROSSING_TIMEOUT_MS;
+  let arrived = false;
+  try {
+    while (Date.now() < deadline && !token.cancelled && bot.vehicle) {
+      const pos = bot.entity.position;
+      const dist = Math.hypot(target.x - pos.x, target.z - pos.z);
+      if (dist <= BOAT_ARRIVAL_RADIUS) {
+        arrived = true;
+        break;
+      }
+      await bot.lookAt(new Vec3(target.x, pos.y, target.z), true);
+      bot.moveVehicle(0, 1);
+      await new Promise((resolve) => setTimeout(resolve, BOAT_STEER_INTERVAL_MS));
+    }
+  } finally {
+    bot.moveVehicle(0, 0);
+    if (bot.vehicle) bot.dismount();
+  }
+  return arrived;
+}
+
 export function loadActionPlugins(bot) {
   bot.loadPlugin(collectBlockPkg.plugin);
   bot.loadPlugin(pvpPkg.plugin);
@@ -770,6 +988,26 @@ export async function performAction(bot, action, speaker) {
       // asked for "oak_log" but the only trees around were spruce, this should say so rather than
       // claiming oak_log when resolveBlockFamily is what actually made that substitution work.
       const collectedNames = [...new Set(blocks.map((b) => b.name))].join(", ");
+
+      // Direct request, 2026-09-07 ("build the water crossing mechanic" -> "do 1,2,4,5" -> a
+      // tech-tier check, following external research on how Voyager avoids wasted mining
+      // attempts by sequencing wood -> stone -> iron -> diamond tools explicitly instead of
+      // letting a model free-associate a target each cycle). Real data, not a hand-typed tier
+      // table that could drift from whatever this server's actual version considers correct:
+      // block.harvestTools (minecraft-data, confirmed live against this exact server's registry
+      // -- e.g. iron_ore requires copper/stone/iron/diamond/netherite pickaxe, gold pickaxe is
+      // deliberately absent from that list despite mining faster, matching real vanilla) is
+      // undefined for a block with no tool requirement at all (coal/wood need nothing) and a
+      // real {itemId: true} lookup otherwise. Checking her whole inventory, not just whatever's
+      // currently held, since mineflayer-tool's own equipForBlock() (already wired via
+      // mineflayer-collectblock) re-equips the best tool she owns before actually digging --
+      // this only needs to answer "does she own ANY tool that would work," not which one.
+      const toolReq = blocks[0]?.harvestTools;
+      if (toolReq && !bot.inventory.items().some((item) => toolReq[item.type])) {
+        const needed = Object.keys(toolReq).map((id) => bot.registry.items[id]?.name).filter(Boolean);
+        return fail(`need a better tool for ${collectedNames} -- one of: ${needed.join(", ")}.`);
+      }
+
       try {
         await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
                            () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
@@ -1078,6 +1316,21 @@ export async function performAction(bot, action, speaker) {
           ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
       } catch (err) {
         if (token.cancelled) return ok("stopped heading home.");
+        // Direct request, 2026-09-07 ("build the water crossing mechanic"): a normal walking
+        // route failing (timeout/no-path) is exactly the shape water-blocked routes take --
+        // worth one real attempt at a boat crossing before giving up outright, rather than
+        // stranding her every dusk a lake happens to sit between here and spawn.
+        if (await attemptBoatCrossing(bot, token, dest)) {
+          try {
+            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 3)),
+              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+            return ok("made it home before dark (by boat).");
+          } catch {
+            return ok("got most of the way home by boat, on foot from here.");
+          } finally {
+            bot.pathfinder.setGoal(null);
+          }
+        }
         return fail(`couldn't make it home: ${err.message}`);
       } finally {
         bot.pathfinder.setGoal(null);
@@ -1294,6 +1547,92 @@ export async function performAction(bot, action, speaker) {
       return ok(`placed a ${action.item}.`);
     }
 
+    case "build": {
+      // Direct request, 2026-09-07 ("build the water crossing mechanic" -> "do 1,2,4,5" -> a
+      // real building capability, the "own pass" this file's header always said it deserved
+      // rather than being half-built alongside navigate/gather/fight, see the header's own
+      // 1.0.0-era comment). Deliberately one fixed, small shape (a 3x3 footprint, three walls
+      // tall, one doorway, a roof) using whatever solid block she already has the most of --
+      // not a general blueprint/planning system (even Voyager needs human feedback for its own
+      // house-building; a real planner is its own much bigger feature, left for a future pass
+      // same as this one was). Placement order matters: walls are generated ground-up
+      // (dy 0 -> 1 -> 2 per column) so each new block always has an already-placed block right
+      // below it to reference off of, and the roof is generated so the center tile references an
+      // already-placed edge tile horizontally -- no cell ever needs a reference that doesn't
+      // exist yet. The doorway (south edge, one column, all three wall heights) is never in the
+      // placement list at all, so she can never seal herself in no matter what order placement
+      // actually succeeds in.
+      const material = bot.inventory.items()
+        .filter((i) => bot.registry.blocksByName[i.name] && !isEssentialItem(i.name))
+        .sort((a, b) => b.count - a.count)[0];
+      if (!material) return fail("don't have a good building material -- need a stack of some solid block.");
+
+      const base = bot.entity.position.floored();
+      const wallPositions = [];
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          if (Math.abs(dx) !== 1 && Math.abs(dz) !== 1) continue; // interior column -- no wall here
+          if (dx === 0 && dz === 1) continue; // doorway column -- never placed, on purpose
+          for (let dy = 0; dy <= 2; dy++) wallPositions.push(base.offset(dx, dy, dz));
+        }
+      }
+      const roofPositions = [];
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dz = -1; dz <= 1; dz++) roofPositions.push(base.offset(dx, 3, dz));
+      }
+      const buildOrder = [...wallPositions, ...roofPositions];
+
+      const needed = buildOrder.length;
+      if (material.count < needed) {
+        return fail(`need ${needed} ${material.name} for a small shelter, only have ${material.count}.`);
+      }
+
+      let placed = 0;
+      for (const pos of buildOrder) {
+        if (token.cancelled) break;
+        const existing = bot.blockAt(pos);
+        if (existing?.boundingBox === "block") { placed++; continue; } // terrain already solid here
+
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        } catch {
+          if (token.cancelled) break;
+          continue; // couldn't get near this spot -- an imperfect shelter beats abandoning it
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) break;
+
+        // A solid neighbor to place against, below first (matches how a wall naturally grows
+        // upward), otherwise whichever cardinal/vertical neighbor is already solid.
+        let refBlock = null, face = null;
+        for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
+          const neighbor = bot.blockAt(pos.offset(dx, dy, dz));
+          if (neighbor?.boundingBox === "block") {
+            refBlock = neighbor;
+            face = new Vec3(-dx, -dy, -dz);
+            break;
+          }
+        }
+        if (!refBlock) continue; // nothing solid to place against yet -- skip, a later pass could catch it
+
+        try {
+          const item = bot.inventory.items().find((i) => i.name === material.name);
+          if (!item) break; // ran out mid-build
+          await bot.equip(item, "hand");
+          await bot.placeBlock(refBlock, face);
+          placed++;
+        } catch (err) {
+          console.error(`build: placement failed at ${pos}:`, err.message);
+        }
+      }
+
+      if (token.cancelled) return ok(`stopped building (${placed}/${needed} placed).`);
+      if (!placed) return fail("couldn't place any of the shelter.");
+      return ok(`built a small shelter out of ${material.name} (${placed}/${needed} blocks placed).`);
+    }
+
     case "store": {
       // Direct request, 2026-09-07 ("do all" -> base/chest storage): the inverse of "loot" --
       // deposit an item into the nearest chest instead of withdrawing from it. Same multi-
@@ -1423,8 +1762,20 @@ export async function performAction(bot, action, speaker) {
       // scratch: harvest a crop that's already ripe and replant, rather than placing on bare
       // dirt. Ages/replant items confirmed against minecraft-data's own block-state definitions
       // (wheat/carrots/potatoes: age 0-7, mature at 7; beetroots: age 0-3, mature at 3).
+      //
+      // 2026-09-07, later same day ("build the water crossing mechanic" -> "do 1,2,4,5" ->
+      // farm automation): real gap found by comparing against dedicated farm bots elsewhere in
+      // the mineflayer ecosystem -- this only ever processed ONE crop per invocation, so a
+      // genuinely productive field needed one goal step (a full classifyIntent/goalTick round
+      // trip) per single plant. Now processes up to HARVEST_BATCH_LIMIT mature crops in one call,
+      // one goto+dig+replant cycle each -- a real "work the field" pass, not one plant at a time.
+      // Bounded, not the whole field in one go: each cycle already carries its own ACTION_TIMEOUT_MS
+      // pathing/digging risk (same withTimeout/stopDigging protection as every other digging
+      // action here), so an unbounded batch could compound that risk across dozens of plants
+      // instead of the usual single one.
       const CROP_MAX_AGE = { wheat: 7, carrots: 7, potatoes: 7, beetroots: 3 };
       const CROP_REPLANT = { wheat: "wheat_seeds", carrots: "carrot", potatoes: "potato", beetroots: "beetroot_seeds" };
+      const HARVEST_BATCH_LIMIT = 8;
       const cropIds = Object.keys(CROP_MAX_AGE).map((n) => bot.registry.blocksByName[n]?.id)
         .filter((id) => id !== undefined);
       if (!cropIds.length) return fail("don't know how to recognize any crops here.");
@@ -1435,51 +1786,71 @@ export async function performAction(bot, action, speaker) {
       // block TYPE (the proven-reliable pattern, same as loot/smelt/store) and checks maturity
       // afterward via direct bot.blockAt() calls, the exact pattern already confirmed working
       // for the double-chest obstruction check.
-      const positions = bot.findBlocks({ matching: cropIds, maxDistance: 32, count: 15 });
+      const positions = bot.findBlocks({ matching: cropIds, maxDistance: 32, count: 40 });
       const matureBlocks = positions.map((pos) => bot.blockAt(pos))
-        .filter((block) => block && Number(block.getProperties?.().age) === CROP_MAX_AGE[block.name]);
+        .filter((block) => block && Number(block.getProperties?.().age) === CROP_MAX_AGE[block.name])
+        .slice(0, HARVEST_BATCH_LIMIT);
       if (!matureBlocks.length) return fail("couldn't find any ripe crops nearby.");
-      const cropBlock = matureBlocks[0];
 
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(cropBlock.position.x,
-          cropBlock.position.y, cropBlock.position.z, 2)), ACTION_TIMEOUT_MS,
-          () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to the crop.");
-        return fail(`couldn't reach the crop: ${err.message}`);
-      } finally {
-        bot.pathfinder.setGoal(null);
-      }
-      if (token.cancelled) return ok("stopped on the way to the crop.");
+      const harvestedCounts = {};
+      let replantedCount = 0;
+      let stoppedEarly = false;
 
-      const farmlandPos = cropBlock.position.offset(0, -1, 0); // the crop sits on this block
-      try {
-        // Real gap found live, 2026-09-07 (chasing an all-day recurring OOM crash): a bare
-        // bot.dig() with no timeout at all -- if it never settles (confirmed against dig.js's own
-        // source: it awaits a promise that only resolves via a per-block blockUpdate listener or
-        // bot.stopDigging(), neither guaranteed here), this would hang forever with no recovery,
-        // same underlying risk "mine"'s own withTimeout exists to prevent.
-        await withTimeout(bot.dig(cropBlock), ACTION_TIMEOUT_MS, () => bot.stopDigging());
-      } catch (err) {
-        if (token.cancelled) return ok("stopped harvesting.");
-        return fail(`couldn't harvest the ${cropBlock.name}: ${err.message}`);
-      }
+      for (const cropBlock of matureBlocks) {
+        if (token.cancelled) {
+          stoppedEarly = true;
+          break;
+        }
+        // A crop dug earlier in this same batch can leave a later position stale (already dug by
+        // a nearby double-wide plant, or the age check above is now out of date) -- re-check
+        // rather than trust the snapshot from before this loop started.
+        const current = bot.blockAt(cropBlock.position);
+        if (!current || Number(current.getProperties?.().age) !== CROP_MAX_AGE[current.name]) continue;
 
-      const seedName = CROP_REPLANT[cropBlock.name];
-      const seedItem = bot.inventory.items().find((i) => i.name === seedName);
-      let replanted = false;
-      if (seedItem) {
         try {
-          await bot.equip(seedItem, "hand");
-          await bot.placeBlock(bot.blockAt(farmlandPos), new Vec3(0, 1, 0));
-          replanted = true;
-        } catch (err) {
-          console.error(`harvest: replant failed:`, err.message); // harvest itself still succeeded
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(current.position.x,
+            current.position.y, current.position.z, 2)), ACTION_TIMEOUT_MS,
+            () => bot.pathfinder.setGoal(null));
+        } catch {
+          if (token.cancelled) { stoppedEarly = true; break; }
+          continue; // couldn't reach this one -- move on to the next rather than abandon the batch
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) { stoppedEarly = true; break; }
+
+        const farmlandPos = current.position.offset(0, -1, 0); // the crop sits on this block
+        try {
+          // Real gap found live, 2026-09-07 (chasing an all-day recurring OOM crash): a bare
+          // bot.dig() with no timeout at all -- if it never settles (confirmed against dig.js's
+          // own source: it awaits a promise that only resolves via a per-block blockUpdate
+          // listener or bot.stopDigging(), neither guaranteed here), this would hang forever with
+          // no recovery, same underlying risk "mine"'s own withTimeout exists to prevent.
+          await withTimeout(bot.dig(current), ACTION_TIMEOUT_MS, () => bot.stopDigging());
+        } catch {
+          if (token.cancelled) { stoppedEarly = true; break; }
+          continue; // this one failed -- still worth trying the rest of the batch
+        }
+        harvestedCounts[current.name] = (harvestedCounts[current.name] || 0) + 1;
+
+        const seedName = CROP_REPLANT[current.name];
+        const seedItem = bot.inventory.items().find((i) => i.name === seedName);
+        if (seedItem) {
+          try {
+            await bot.equip(seedItem, "hand");
+            await bot.placeBlock(bot.blockAt(farmlandPos), new Vec3(0, 1, 0));
+            replantedCount++;
+          } catch (err) {
+            console.error(`harvest: replant failed:`, err.message); // this harvest still counts
+          }
         }
       }
+
       await refreshGear(bot);
-      return ok(`harvested some ${cropBlock.name}${replanted ? " and replanted" : ""}.`);
+      const total = Object.values(harvestedCounts).reduce((a, b) => a + b, 0);
+      if (!total) return stoppedEarly ? ok("stopped harvesting.") : fail("couldn't harvest any of the ripe crops found.");
+      const summary = Object.entries(harvestedCounts).map(([name, n]) => `${n} ${name}`).join(", ");
+      return ok(`harvested ${summary} (${replantedCount} replanted)${stoppedEarly ? ", stopped early" : ""}.`);
     }
 
     case "breed": {

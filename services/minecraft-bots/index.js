@@ -1,4 +1,10 @@
-// Version: 2.30.0
+// Version: 2.31.0
+//
+// 2.31.0 (2026-09-07) -- direct request "do 1,2,4,5" on a web-research gap analysis (see
+// actions.js 1.21.0's own changelog for the real detail on all four). This file's own share:
+// wired the new "build" verb into both classifyIntent (player-facing) and the goal planner's
+// vocabulary (self-directed), and corrected ACTION PLACE's now-stale "never for building"
+// wording now that a real building capability exists.
 //
 // 2.30.0 (2026-09-07) -- direct request: "build the water crossing mechanic," following 2.29.0's
 // anti-drowning reflex (survival, not capability). Now uses new swim-movements.js's
@@ -889,9 +895,11 @@ async function classifyIntent(speaker, message) {
           `similar) at a furnace, ONLY if a specific output was actually named or clearly ` +
           `implied (e.g. iron_ingot, copper_ingot, gold_ingot, glass, stone). <count> is a small ` +
           `positive integer, default 1 if unstated.\n` +
-          `ACTION PLACE <item_id> - asks ${USERNAME} to place a block she's carrying right next ` +
-          `to herself (e.g. a furnace or crafting_table she crafted). ONLY for placing one ` +
-          `utility block for her own use, never for building/constructing anything.\n` +
+          `ACTION PLACE <item_id> - asks ${USERNAME} to place ONE block she's carrying right next ` +
+          `to herself (e.g. a furnace or crafting_table she crafted). For a single utility block, ` +
+          `not a structure -- use ACTION BUILD for that instead.\n` +
+          `ACTION BUILD - asks ${USERNAME} to build a small shelter (walls, a doorway, a roof) ` +
+          `around herself using whatever solid block she has the most of. No parameters.\n` +
           `ACTION GOAL <description> - gives ${USERNAME} a standing objective to keep working ` +
           `on by herself over time (not a single one-off task), e.g. "get full iron armor" or ` +
           `"stock up on wood". Only use this if the speaker is clearly assigning an ongoing ` +
@@ -945,6 +953,7 @@ async function classifyIntent(speaker, message) {
       if (item) return { type: "action", action: { type: "trade", item } };
     }
     if (verb === "HARVEST") return { type: "action", action: { type: "harvest" } };
+    if (verb === "BUILD") return { type: "action", action: { type: "build" } };
     if (verb === "BREED") {
       const species = (parts[2] || "").toLowerCase();
       if (species) return { type: "action", action: { type: "breed", species } };
@@ -1195,6 +1204,7 @@ function parseGoalStep(text) {
       // reasoning on her own) never did, so a self-proposed goal could never actually choose to
       // farm, breed, enchant, or fish. Same parsing shape as every verb above.
       if (verb === "HARVEST") return { type: "step", action: { type: "harvest" } };
+      if (verb === "BUILD") return { type: "step", action: { type: "build" } };
       if (verb === "BREED") {
         const species = (parts[2] || "").toLowerCase();
         if (species) return { type: "step", action: { type: "breed", species } };
@@ -1312,6 +1322,9 @@ async function planNextStep(goal) {
           `(needs lapis lazuli and enough XP levels), if the goal is about gear upgrades\n` +
           `ACTION FISH - fish at nearby water with a fishing rod, if the goal is about food and ` +
           `no crops/animals are a better fit\n` +
+          `ACTION BUILD - build a small shelter (walls, a doorway, a roof) around herself using ` +
+          `whatever solid block she has the most of, if the goal is about shelter/safety and she ` +
+          `hasn't got one nearby already\n` +
           `ACTION REQUEST <item_id> <count> - ask the other bot (over Buzz) for an item she might ` +
           `already have. Only after LOOT has already failed for the same need, or the item is ` +
           `also fine to just ask for directly (e.g. borrowing fuel/food rather than gathering ` +
