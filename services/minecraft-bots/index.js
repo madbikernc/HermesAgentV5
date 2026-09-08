@@ -1,4 +1,15 @@
-// Version: 2.31.0
+// Version: 2.32.0
+//
+// 2.32.0 (2026-09-08) -- direct request "start on #6" (MINECRAFT_BOTS_DESIGN.md §14, a Voyager-
+// style dynamic skill library). goalTick() now checks skills.js's findSkill() before spending a
+// planNextStep call -- a close-enough, still-trusted match runs directly via runSkill() through
+// the same performAction() pipeline every other step already uses, completing the goal in one
+// shot on success. A goal that finishes DONE without ever being served by a stored skill gets
+// compressed into one via authorSkillFromGoal(), using goals.js's new actionsTaken (1.3.0) --
+// the REAL {type, ...args} objects each successful step actually ran with, never re-derived
+// from text by an LLM. This is the retrieval+authoring half of §14's plan (steps 3-4 of its own
+// "build sequence, if greenlit"); the skill-runner and hermes-rag corpus (steps 1-2) are new
+// skills.js and tools/hermes-rag-{ingest,search}-minecraft-skills.py.
 //
 // 2.31.0 (2026-09-07) -- direct request "do 1,2,4,5" on a web-research gap analysis (see
 // actions.js 1.21.0's own changelog for the real detail on all four). This file's own share:
@@ -537,6 +548,7 @@ import { loadActionPlugins, performAction, nearestHostile, isEssentialItem } fro
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements } from "./swim-movements.js";
+import { findSkill, runSkill, recordSkillOutcome, authorSkillFromGoal } from "./skills.js";
 
 const { pathfinder } = pathfinderPkg;
 
@@ -1499,6 +1511,41 @@ async function goalTick() {
 
   acting = true;
   try {
+    // Skill retrieval (MINECRAFT_BOTS_DESIGN.md §14, 2026-09-08): before spending a
+    // planNextStep call, check for an existing, trusted skill whose description matches this
+    // goal closely enough to just run directly -- skips per-tick planning entirely on a hit,
+    // the actual efficiency payoff a dynamic skill library is for (real, already-observed
+    // evidence it would help: multiple bots independently re-deriving the identical "need a
+    // pickaxe -> need planks -> need logs" chain from scratch, per bot, per goal). A miss (no
+    // close match, or every close match already untrusted) costs one cheap search call and
+    // falls through to normal planning unchanged. Checked once per goal (servedBySkill), not
+    // every tick, once a goal has already gone one way or the other.
+    if (!currentGoal.servedBySkill) {
+      const skill = await findSkill(currentGoal.description);
+      if (skill) {
+        console.log(`[${USERNAME}] running stored skill "${skill.name}" for goal: ${currentGoal.description}`);
+        const result = await runSkill(performAction, bot, skill, currentGoal.setBy || USERNAME);
+        await recordSkillOutcome(skill.jsonPath, result.ok);
+        currentGoal.servedBySkill = true;
+        logStep(currentGoal, `skill(${skill.name}): ${result.text}`, result.ok);
+        if (result.ok) {
+          console.log(`[${USERNAME}] goal complete via skill: ${currentGoal.description}`);
+          bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
+          recordGoalOutcome(currentGoal.description, "done", null);
+          await broadcastGoalState("done", currentGoal.description);
+          currentGoal = null;
+          await clearGoal(PERSONA_NAME);
+        } else {
+          // Doesn't duplicate the give-up/consecutiveFailures check here -- one failed skill
+          // attempt counts as one failed step, same as any other, and the very next tick's own
+          // normal planning already re-checks that threshold on the same shared counter.
+          currentGoal.consecutiveFailures += 1;
+          await saveGoal(PERSONA_NAME, currentGoal);
+        }
+        return;
+      }
+    }
+
     // busy is held only for this planning call, not the physical action below -- see the
     // 2026-09-07 fix note above planNextStep's own call site history for why. Releasing it
     // immediately after the plan is known (instead of holding it until the whole step,
@@ -1553,6 +1600,19 @@ async function goalTick() {
       bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
       recordGoalOutcome(currentGoal.description, "done", null);
       await broadcastGoalState("done", currentGoal.description);
+      // Authoring (MINECRAFT_BOTS_DESIGN.md §14): only for a goal that actually worked its way
+      // through from scratch, not one already served by a stored skill (servedBySkill) -- that
+      // would just be re-storing an existing skill's own steps back under a new name. An
+      // occasional coder call, not a per-tick cost -- see authorSkillFromGoal's own header on
+      // why it's safe to await here (rare, not per-tick) and why the LLM only ever names the
+      // already-real actionsTaken rather than inventing steps.
+      if (!currentGoal.servedBySkill) {
+        try {
+          await authorSkillFromGoal(currentGoal.description, currentGoal.actionsTaken);
+        } catch (err) {
+          console.error(`[${USERNAME}] skill authoring failed:`, err.message);
+        }
+      }
       currentGoal = null;
       await clearGoal(PERSONA_NAME);
       return;
@@ -1605,7 +1665,7 @@ async function goalTick() {
     }
 
     const result = await performAction(bot, parsed.action, currentGoal.setBy || USERNAME);
-    logStep(currentGoal, `${parsed.action.type}: ${result.text}`, result.ok);
+    logStep(currentGoal, `${parsed.action.type}: ${result.text}`, result.ok, parsed.action);
     currentGoal.consecutiveFailures = result.ok ? 0 : currentGoal.consecutiveFailures + 1;
     console.log(`[${USERNAME}] goal step: ${parsed.action.type} -> ${result.text} ` +
                 `(ok=${result.ok}, consecutiveFailures=${currentGoal.consecutiveFailures})`);

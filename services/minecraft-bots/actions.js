@@ -1,4 +1,9 @@
-// Version: 1.22.0
+// Version: 1.23.0
+//
+// 1.23.0 (2026-09-08) -- direct request "start on #6" (MINECRAFT_BOTS_DESIGN.md §14, the
+// Voyager-style dynamic skill library plan). New export SKILL_ACTION_VERBS: the real allowlist
+// services/minecraft-bots/skills.js checks a model-authored skill's steps against before ever
+// storing one, so a skill can only ever reference verbs performAction() actually implements.
 //
 // 1.22.0 (2026-09-08) -- direct report: "the bots just stand around most of the time." Real,
 // confirmed root cause, not guessed: a live on-server check found ZERO logs within 100 blocks
@@ -472,6 +477,18 @@ export function isEssentialItem(itemName) {
   return GEAR_SUFFIXES.some((s) => itemName.endsWith(s)) || FUEL_NAMES.includes(itemName) ||
     FOOD_NAMES.includes(itemName);
 }
+
+// Exported for skills.js (MINECRAFT_BOTS_DESIGN.md §14, 2026-09-08): the real, authoritative set
+// of verbs performAction() actually implements, checked against before a model-authored skill is
+// ever stored -- "validate against real data, don't trust the model" (already the tool-tier
+// gate's own reasoning). Deliberately excludes "gohome" and "recover": both are invoked directly
+// by index.js's own timers/handlers with context a stored skill has no way to reconstruct
+// (bot.spawnPoint, a captured death position) -- they never appear in a goal's own step log a
+// skill would be compressed from, so leaving them out costs nothing real.
+export const SKILL_ACTION_VERBS = new Set([
+  "stop", "goto", "follow", "mine", "craft", "loot", "attack", "flee", "eat", "fish", "give",
+  "sleep", "smelt", "place", "build", "store", "trade", "harvest", "breed", "enchant",
+]);
 
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
 // for furnace input->output) -- unlike bot.craft()'s crafting-table recipes, there's no real data

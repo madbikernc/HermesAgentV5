@@ -1,4 +1,10 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-09-08) -- direct request "start on #6" (MINECRAFT_BOTS_DESIGN.md §14, the
+// Voyager-style dynamic skill library plan). New `actionsTaken`/`servedBySkill` fields and
+// logStep()'s new optional `action` argument -- see newGoal()'s own comment for why the real
+// {type, ...args} object a step ran with is captured here rather than re-derived later from its
+// human-readable log line.
 //
 // 1.2.0 (2026-09-07) -- direct request: "if a bot gets stuck, there needs to be a mechanism to
 // teleport it back to its spawn point rather than continually restart that bot." New
@@ -102,16 +108,38 @@ export function newGoal({ description, source, setBy = null }) {
     // loop) -- a DONE that arrives with zero real successes behind it.
     sawSuccess: false,
     steps: 0, consecutiveFailures: 0, log: [],
+    // actionsTaken: added 2026-09-08 (MINECRAFT_BOTS_DESIGN.md §14, the dynamic skill library).
+    // `log` is human-readable text ("mine: collected some oak_log.") -- fine for a prompt, but
+    // authoring a REUSABLE skill from it would mean an LLM re-guessing the exact block/count/item
+    // args that actually worked, a real hallucination risk for something meant to be replayed
+    // verbatim later. This instead keeps the REAL {type, ...args} object performAction() was
+    // actually called with, for every step that actually succeeded -- skills.js's own
+    // authorSkillFromGoal() uses these directly as a skill's steps, never re-derived from text.
+    actionsTaken: [],
+    // servedBySkill: set true the moment goalTick's own skill-retrieval path runs this goal via
+    // an existing stored skill (index.js, not this file) -- authoring a NEW skill only makes
+    // sense for a goal that worked its way through from scratch, not one that already replayed
+    // a known-good one.
+    servedBySkill: false,
   };
 }
 
 // Capped so a long-running goal's file (and the prompt built from it) doesn't grow without
 // bound -- only the last dozen step outcomes matter for deciding what to try next. `ok` is
 // required, not inferred from `line`'s English text later -- see newGoal's own comment on why.
-export function logStep(goal, line, ok) {
+// `action` (optional): the real {type, ...args} object this step actually ran, recorded into
+// `actionsTaken` when the step succeeded -- see newGoal's own comment on actionsTaken for why.
+const MAX_ACTIONS_TAKEN = 20; // generous headroom over skills.js's own tighter per-skill cap;
+                               // trimming to a good REUSABLE length is authoring's job, not this
+export function logStep(goal, line, ok, action = null) {
   goal.log.push(line);
   if (goal.log.length > MAX_LOG_LINES) goal.log.shift();
   goal.steps += 1;
   goal.updatedAt = Date.now();
-  if (ok) goal.sawSuccess = true;
+  if (ok) {
+    goal.sawSuccess = true;
+    if (action && goal.actionsTaken.length < MAX_ACTIONS_TAKEN) {
+      goal.actionsTaken.push(action);
+    }
+  }
 }
