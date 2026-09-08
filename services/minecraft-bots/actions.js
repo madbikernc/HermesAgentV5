@@ -1,4 +1,24 @@
-// Version: 1.24.0
+// Version: 1.26.0
+//
+// 1.26.0 (2026-09-08) -- direct report: "they still don't seem to react to a threatening
+// creature." Found the real, foundational cause while live-testing index.js's own self-defense
+// interrupt fix (2.35.0): nearestHostile() required entity.type === "mob", but a real, freshly
+// summoned zombie's actual type on this server is "hostile" -- confirmed by direct inspection,
+// not assumed. This function has never matched a single real hostile mob since the day it was
+// written; every caller (checkSelfDefense, checkSleepingThreat, "attack"/"flee" targeting) was
+// working from a function that always silently returned undefined. Not a timing bug, a data
+// bug -- see the function's own updated comment for the real confirmed entity-type taxonomy on
+// this version.
+//
+// 1.25.0 (2026-09-08) -- direct report: "they keep creating crafting tables, even when there is
+// a number of them nearby." Real gap: "craft"'s own "does this need a table" check only ever
+// asks whether crafting THIS item needs a DIFFERENT existing table/furnace as a station --
+// crafting_table's own recipe needs no table at all (4 planks, fits the personal grid), so that
+// check always said "no" for it and fell straight through to making a brand new one, never
+// checking whether an instance of what she's ABOUT TO MAKE already exists in reach. New
+// REUSABLE_UTILITY_BLOCKS check (crafting_table, furnace -- same real gap applies to furnace,
+// also craftable without a table) short-circuits to success if one's already within the same
+// 32-block radius every other nearby-search in this file already uses.
 //
 // 1.24.0 (2026-09-08) -- direct request: "if they can't craft, they should explore, and find
 // resources for later." New "explore" action: scans broadly for ANY common raw material (every
@@ -442,11 +462,24 @@ const HOSTILE_MOBS = new Set([
   "ravager", "hoglin", "zoglin", "piglin_brute", "warden",
 ]);
 
-// Shared between the "attack"/"flee" actions here and index.js's checkSelfDefense() (fourth of
-// five scoped enhancements, direct follow-up to "what other logic enhancements are available")
-// so HOSTILE_MOBS has exactly one definition instead of two copies drifting apart.
+// Shared between the "attack"/"flee" actions here and index.js's checkSelfDefense()/
+// checkSleepingThreat() (fourth of five scoped enhancements, direct follow-up to "what other
+// logic enhancements are available") so HOSTILE_MOBS has exactly one definition instead of two
+// copies drifting apart.
+//
+// Real, foundational bug found live 2026-09-08 (direct report: "they still don't seem to react
+// to a threatening creature"): confirmed by directly inspecting a real, freshly summoned zombie
+// entity on this exact server that its own entity.type is "hostile", not "mob" -- this check had
+// been requiring "mob" the entire time, meaning this function has NEVER matched a single real
+// hostile mob (zombie, skeleton, creeper, or anything else in HOSTILE_MOBS below), on any
+// version of this codebase, since the day it was written. Not a timing/gating bug -- every
+// caller (checkSelfDefense, checkSleepingThreat, "attack"/"flee" targeting) was working from a
+// function that always returned undefined. This future version's entity type taxonomy is more
+// granular than whatever assumption "mob" was originally based on (the real, confirmed set on
+// this server: player/animal/passive/mob/hostile/ambient/other) -- HOSTILE_MOBS' own explicit
+// name allowlist is kept as a real safety net alongside the corrected type check, not removed.
 export function nearestHostile(bot, maxDistance = 16) {
-  return bot.nearestEntity((e) => e.type === "mob" && HOSTILE_MOBS.has(e.name) &&
+  return bot.nearestEntity((e) => e.type === "hostile" && HOSTILE_MOBS.has(e.name) &&
     e.position.distanceTo(bot.entity.position) <= maxDistance);
 }
 
@@ -1149,6 +1182,24 @@ export async function performAction(bot, action, speaker) {
     case "craft": {
       const itemDef = bot.registry.itemsByName[action.item];
       if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
+
+      // Direct report, 2026-09-08 ("they keep creating crafting tables, even when there is a
+      // number of them nearby"). Real gap: the "does this need a table" check just below only
+      // ever asks whether crafting THIS item needs a DIFFERENT existing table/furnace as a
+      // station -- crafting_table's own recipe needs no table at all (4 planks, fits the
+      // personal 2x2 grid), so that check always says "no" for it and falls straight through to
+      // making a brand new one, never once checking whether an instance of what she's ABOUT TO
+      // MAKE already exists in reach. Same real gap applies to furnace (also craftable without a
+      // table, also commonly over-made). Reusable utility blocks -- unlike a personal tool or a
+      // piece of armor, there's no reason to own a SECOND one when the first is right there.
+      const REUSABLE_UTILITY_BLOCKS = ["crafting_table", "furnace"];
+      if (REUSABLE_UTILITY_BLOCKS.includes(action.item)) {
+        const existingType = bot.registry.blocksByName[action.item];
+        const existing = existingType ? bot.findBlocks({ matching: existingType.id, maxDistance: 32, count: 1 }) : [];
+        if (existing.length) {
+          return ok(`already have a ${action.item} nearby, no need to make another.`);
+        }
+      }
 
       // Does this need a table? `true` satisfies recipesFor()'s own requiresTable check
       // without needing a real Block reference yet -- confirmed against mineflayer's own
