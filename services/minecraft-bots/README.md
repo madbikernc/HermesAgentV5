@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.0.0
+**Version:** 3.1.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -167,15 +167,18 @@ a note that's a near-duplicate (cosine distance <= 0.15, calibrated against real
 non-duplicate note pairs found live) of one already in the corpus -- a real gap found live where
 the same fact got written to the shared world corpus six separate times in one night.
 
-**Known limitation**: the single global `busy` flag that guards the classify/reply step also
-guards nearly every autonomous action (goals, mining, crafting, fighting, self-proposing a
-goal) and drops any incoming chat unconditionally while true, *before* checking whether the
-message was even addressed to this bot. With the autonomy loop now keeping bots busy most of
-the time, live logs show real player chat getting dropped as "busy" across an entire day almost
-without exception. The ambient-vs-addressed relevance classification itself (`classifyIntent()`'s
-`OTHER_BOTS` note, making a bot stand down when a message names a different bot by name) works
-correctly on the messages that do get through -- this is an availability gap upstream of it, not
-a routing bug, and is unfixed as of this writing.
+**Fixed (was a known limitation)**: the single global `busy` flag that guards the classify/reply
+step was also held by ten different autonomous-action functions (`goalTick` and nine idle-tick
+checks) for their *entire physical-action duration*, not just the brief decision that preceded
+it -- so with the autonomy loop keeping a bot busy most of the time, real player chat was being
+dropped unconditionally as "busy" across an entire day almost without exception, before ever
+checking whether the message was addressed to this bot. Fixed by holding only `acting` (which
+already correctly prevented these functions from double-firing) around the physical action, and
+splitting `goalTick` into a planning phase (holds `busy` briefly) and an execution phase (doesn't)
+-- this needed nothing new, since every action already calls `stopCurrent()` first and safely
+interrupts whatever's physically in flight. The ambient-vs-addressed relevance classification
+itself (`classifyIntent()`'s `OTHER_BOTS` note, making a bot stand down when a message names a
+different bot by name) was already correct on the messages that made it through.
 
 ## Requirements
 
@@ -206,6 +209,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.1.0 | 2026-09-07 | The `busy`-flag lockout of real player chat (flagged as a known limitation in 3.0.0) is fixed -- `index.js` 2.28.0 holds only `acting` around the ten idle-tick functions' physical actions instead of `busy` for their whole duration. |
 | 3.0.0 | 2026-09-07 | Catch-up rewrite (this file had drifted to v2.10.0 while the code moved to index.js 2.27.0/actions.js 1.20.0): Mark & Luke added (4 bots total), 21-verb action set, hazard-aware pathing + full OOM investigation/fix chain (heap ceiling raised 768MB->1536MB after live evidence the leak was slowed, not eliminated), teleport-when-stuck, dusk awareness, sleep self-defense, cross-bot goal arbitration, memory-note deduplication, and a documented known limitation (the global `busy` flag drops real player chat almost all the time now that the autonomy loop keeps bots busy most of the day). |
 | 2.10.0 | 2026-09-07 | Bots sleep at night: deterministic `checkSleep()` on its own timer plus a new `"sleep"` action (`actions.js` 1.9.0) built on mineflayer's own `bed.js` plugin. Also directly triggerable via `ACTION SLEEP`. |
 | 2.9.0 | 2026-09-07 | Autonomy (`goals.js`): standing goals, player-assigned or self-proposed while idle, worked step-by-step via the existing `performAction()` pipeline on their own timer. `actions.js` 1.8.0's `performAction()` now returns `{ ok, text }` instead of a bare string so goal progress can be judged structurally, not by parsing English. |
