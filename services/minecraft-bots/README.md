@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.1.0
+**Version:** 3.2.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -144,6 +144,21 @@ captures a real snapshot automatically right before any future OOM; `hermes-mine
 (the fleet's standing triage service) finds and surfaces the latest one in its own incident
 reports.
 
+**Swimming**: two real, separate gaps closed together (world regeneration onto a coastal,
+village-rich seed surfaced both live). First, survival: a new `bot.on("breath")` handler watches
+`bot.oxygenLevel` (mineflayer's real air-supply tracking) and, once critical, force-cancels the
+current action and holds the jump control while `bot.entity.isInWater` -- confirmed against
+`prismarine-physics`'s own tick loop that this adds real upward velocity every tick, the same
+mechanic a player uses to swim up. Second, capability: a new `swim-movements.js` (`SwimMovements`,
+extending `Movements`) fixes a real library gap confirmed by reading `mineflayer-pathfinder`'s own
+source -- stock `Movements` can already cross the *surface* of open water at a constant Y-level,
+but `getMoveDown()`/`getMoveUp()` both unconditionally refuse once the bot is already standing in
+liquid, so a bank dive or a resurface partway across a crossing was never in the search graph at
+all, not just expensive. The override allows vertical travel through water specifically -- checked
+by block name, not the library's generic `liquid` flag (which doesn't distinguish water from
+lava) -- so lava's own vertical-movement refusal is completely unchanged; verified live via a
+negative control (0 neighbors generated in lava, same as stock).
+
 **Teleport-when-stuck**: a bot physically wedged in terrain doesn't get unstuck by a process
 restart -- Minecraft persists position across reconnects like a real player logging back in, so
 she gets stuck again immediately. `checkStuck()` escalates to a self-teleport
@@ -209,6 +224,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.2.0 | 2026-09-07 | Swimming: an anti-drowning reflex (`index.js` 2.29.0, `bot.on("breath")`) and real water-crossing pathfinding (`index.js` 2.30.0, new `swim-movements.js`'s `SwimMovements`, fixing `mineflayer-pathfinder`'s own inability to change depth once already in liquid). |
 | 3.1.0 | 2026-09-07 | The `busy`-flag lockout of real player chat (flagged as a known limitation in 3.0.0) is fixed -- `index.js` 2.28.0 holds only `acting` around the ten idle-tick functions' physical actions instead of `busy` for their whole duration. |
 | 3.0.0 | 2026-09-07 | Catch-up rewrite (this file had drifted to v2.10.0 while the code moved to index.js 2.27.0/actions.js 1.20.0): Mark & Luke added (4 bots total), 21-verb action set, hazard-aware pathing + full OOM investigation/fix chain (heap ceiling raised 768MB->1536MB after live evidence the leak was slowed, not eliminated), teleport-when-stuck, dusk awareness, sleep self-defense, cross-bot goal arbitration, memory-note deduplication, and a documented known limitation (the global `busy` flag drops real player chat almost all the time now that the autonomy loop keeps bots busy most of the day). |
 | 2.10.0 | 2026-09-07 | Bots sleep at night: deterministic `checkSleep()` on its own timer plus a new `"sleep"` action (`actions.js` 1.9.0) built on mineflayer's own `bed.js` plugin. Also directly triggerable via `ACTION SLEEP`. |
