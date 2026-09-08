@@ -1,4 +1,10 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-09-07) -- direct request: "if a bot gets stuck, there needs to be a mechanism to
+// teleport it back to its spawn point rather than continually restart that bot." New
+// loadStuckState()/saveStuckState() -- see their own comment for the real evidence and why
+// cross-restart persistence is the piece index.js's own in-process checkStuck can't provide by
+// itself. Same load/save/shape-only convention as loadGoal/saveGoal above.
 //
 // 1.1.0 (2026-09-07) -- fifth of five scoped enhancements: tighter DONE validation. New
 // `sawSuccess` field (see newGoal's own comment) and a required `ok` argument on logStep() so
@@ -48,6 +54,36 @@ export async function clearGoal(persona) {
   } catch {
     // nothing to remove -- fine
   }
+}
+
+// Direct request, 2026-09-07 ("if a bot gets stuck, there needs to be a mechanism to teleport it
+// back to its spawn point rather than continually restart that bot"). Real evidence: Babs
+// reconnected at the EXACT SAME coordinate across seven consecutive process restarts over 9
+// minutes that same night -- a crash-and-restart cycle does nothing for a bot wedged in terrain,
+// since Minecraft persists player position across reconnects just like a real player logging
+// back in, so she just gets stuck again immediately. This is the missing piece a purely
+// in-process stuck timer (index.js's own checkStuck) can't catch on its own: if something ELSE
+// is also crash-looping her every minute or two, checkStuck's multi-minute threshold may never
+// even complete one cycle before the next restart wipes its counters. Persisting the last known
+// position across restarts lets a FRESH process recognize "I keep reconnecting into this exact
+// same spot" immediately on spawn, rather than needing to survive long enough in one continuous
+// run to notice on its own. Same load/save/shape-only convention as the goal functions above.
+function stuckStatePath(persona) {
+  return path.join(MEMORY_DIR, "bots", persona, "stuck_state.json");
+}
+
+export async function loadStuckState(persona) {
+  try {
+    return JSON.parse(await readFile(stuckStatePath(persona), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export async function saveStuckState(persona, state) {
+  const file = stuckStatePath(persona);
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify(state, null, 2), "utf8");
 }
 
 // source: "user" (given in chat/Matrix by a real player, `setBy` is their name) or "self" (the

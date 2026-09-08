@@ -1,4 +1,29 @@
-// Version: 2.24.0
+// Version: 2.25.0
+//
+// 2.25.0 (2026-09-07) -- direct request: "if a bot gets stuck, there needs to be a mechanism to
+// teleport it back to its spawn point rather than continually restart that bot." Real evidence
+// found while investigating: Babs reconnected at the EXACT SAME coordinate across seven
+// consecutive process restarts over 9 minutes that same night -- a crash-and-restart cycle does
+// nothing for a bot wedged in terrain, since Minecraft persists player position across
+// reconnects just like a real player logging back in; she just gets stuck again immediately.
+// Two layers, both landing on the same new teleportToSpawn():
+// (1) In-process escalation: checkStuck's existing jump-nudge now escalates to a real teleport
+//     after MAX_STUCK_NUDGES consecutive zero-movement cycles despite nudging (handles a bot
+//     that's wedged but NOT also crash-looping).
+// (2) Cross-restart detection (goals.js 1.2.0's new loadStuckState/saveStuckState): the compound
+//     case a purely in-process timer can't catch on its own -- if something else is ALSO
+//     crash-looping her every minute or two, checkStuck's multi-minute threshold may never
+//     complete one cycle before the next restart wipes its counters. Every checkStuck tick saves
+//     her current position; on every fresh spawn, this position is compared against whatever was
+//     saved right before the process went down -- RESTART_STUCK_THRESHOLD consecutive reconnects
+//     within RESTART_STUCK_RADIUS blocks of each other teleports home immediately, without
+//     waiting to survive long enough in one continuous run to notice.
+// teleportToSpawn() targets bot.spawnPoint (confirmed against mineflayer's own spawn_point.js:
+// populated from the server's own spawn_position packet, so it's NOT corrupted by wherever she's
+// currently wedged), issued via bot.chat("/tp x y z") -- requires /tp permission, so
+// Babs/Amy/Mark/Luke were added to ops.json at level 2 (command access, not full admin) for
+// exactly this. Abandons her current goal on teleport, same reasoning as death/respawn: whatever
+// she assumed about her surroundings is now stale.
 //
 // 2.24.0 (2026-09-07) -- three direct requests in one round:
 // (1) "bots should check *any* nearby chests before resorting to mining new stacks." MINE's own
@@ -450,7 +475,7 @@ import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
 import { loadActionPlugins, performAction, nearestHostile, isEssentialItem } from "./actions.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
-import { loadGoal, saveGoal, clearGoal, newGoal, logStep } from "./goals.js";
+import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 
 const { pathfinder, Movements } = pathfinderPkg;
 
@@ -533,7 +558,7 @@ const bot = mineflayer.createBot({
 bot.loadPlugin(pathfinder);
 loadActionPlugins(bot);
 
-bot.once("spawn", () => {
+bot.once("spawn", async () => {
   console.log(`[${USERNAME}] spawned at`, bot.entity.position);
   const movements = new Movements(bot);
   // mineflayer-pathfinder defaults canOpenDoors to false, with its own comment: "Causes
@@ -624,6 +649,38 @@ bot.once("spawn", () => {
   // this process) -- worth checking gear right away, not only after an action changes it.
   equipBestArmor(bot).then(() => equipBestWeapon(bot)).catch((err) =>
     console.error(`[${USERNAME}] initial gear check failed:`, err.message));
+
+  // Direct request, 2026-09-07 ("if a bot gets stuck... teleport... rather than continually
+  // restart"). Real evidence: Babs reconnected at the EXACT SAME coordinate across seven
+  // consecutive restarts over 9 minutes -- Minecraft persists player position across reconnects
+  // just like a real player logging back in, so a crash-and-restart cycle does nothing for a bot
+  // wedged in terrain; she just gets stuck again immediately. If something ELSE is also
+  // crash-looping her every minute or two, checkStuck's own multi-minute in-process threshold
+  // may never even complete one cycle before the next restart wipes its counters -- comparing
+  // THIS fresh spawn's position against wherever she was saved right before the process went
+  // down catches that compound case immediately, rather than needing to survive long enough in
+  // one continuous run to notice on its own.
+  try {
+    const prior = await loadStuckState(PERSONA_NAME);
+    const pos = bot.entity.position;
+    let closeToLast = false;
+    if (prior) {
+      const dx = pos.x - prior.x, dy = pos.y - prior.y, dz = pos.z - prior.z;
+      closeToLast = Math.sqrt(dx * dx + dy * dy + dz * dz) < RESTART_STUCK_RADIUS;
+    }
+    currentSameSpotCount = closeToLast ? (prior.sameSpotCount || 0) + 1 : 0;
+    await saveStuckState(PERSONA_NAME, { x: pos.x, y: pos.y, z: pos.z, sameSpotCount: currentSameSpotCount });
+    if (currentSameSpotCount >= RESTART_STUCK_THRESHOLD) {
+      const streak = currentSameSpotCount + 1;
+      console.log(`[${USERNAME}] reconnected at essentially the same spot ${streak} times in a ` +
+        `row -- likely wedged across restarts`);
+      currentSameSpotCount = 0;
+      await saveStuckState(PERSONA_NAME, { x: pos.x, y: pos.y, z: pos.z, sameSpotCount: 0 });
+      await teleportToSpawn(`reconnected at the same spot ${streak} times in a row`);
+    }
+  } catch (err) {
+    console.error(`[${USERNAME}] cross-restart stuck check failed:`, err.message);
+  }
 });
 
 // TEMPORARY diagnostic (2026-09-06): both bots hit V8's heap limit and crashed twice in a row,
@@ -1697,25 +1754,89 @@ setInterval(() => {
 // distinguishing "genuinely idle" from "actually stuck," just patient about the threshold.
 const STUCK_CHECK_MS = parseInt(process.env.MC_STUCK_CHECK_MS || "30000", 10);
 const STUCK_THRESHOLD_MS = 5 * 60_000;
+// Direct request, 2026-09-07 ("if a bot gets stuck, there needs to be a mechanism to teleport it
+// back to its spawn point rather than continually restart that bot"): a jump nudge handles the
+// common minor snag, but does nothing for a bot genuinely wedged (fallen into an inaccessible
+// pocket, glitched into a block). MAX_STUCK_NUDGES consecutive zero-movement cycles despite
+// nudging (10 minutes total, on top of the first 5 before nudging even starts) escalates to a
+// real teleport rather than nudging forever.
+const MAX_STUCK_NUDGES = parseInt(process.env.MC_MAX_STUCK_NUDGES || "2", 10);
+// How close a fresh spawn's position has to be to the last saved one to count as "reconnected
+// into the same spot," and how many such consecutive reconnects (via bot.once("spawn") below)
+// before teleporting home immediately rather than waiting for checkStuck's own in-process timer.
+const RESTART_STUCK_RADIUS = parseInt(process.env.MC_RESTART_STUCK_RADIUS || "3", 10);
+const RESTART_STUCK_THRESHOLD = parseInt(process.env.MC_RESTART_STUCK_THRESHOLD || "2", 10);
 
 let lastPosition = null;
 let lastMovedAt = Date.now();
+let stuckNudgeCount = 0;
+// Set once at spawn (by the cross-restart check below) and carried forward as-is by every
+// periodic save in checkStuck -- NOT reset to 0 here, or the periodic saves would destroy the
+// cross-restart signal before the next crash ever got a chance to read it back.
+let currentSameSpotCount = 0;
+
+// bot.spawnPoint (confirmed against mineflayer's own spawn_point.js source: populated from the
+// server's own spawn_position packet -- the same coordinate the vanilla compass points to, her
+// bed if she's claimed one, otherwise the world spawn) is used as the teleport target rather
+// than her own physical position, specifically because it's NOT corrupted by whatever bad spot
+// she's currently wedged in. Requires /tp permission -- Babs/Amy/Mark/Luke were added to
+// ops.json at level 2 (command access, not full admin) for exactly this.
+async function teleportToSpawn(reason) {
+  const dest = bot.spawnPoint;
+  if (!dest || (dest.x === 0 && dest.y === 0 && dest.z === 0)) {
+    console.error(`[${USERNAME}] can't teleport home -- no real spawn point known yet`);
+    return;
+  }
+  console.log(`[${USERNAME}] TELEPORT: ${reason} -- heading back to spawn ${dest}`);
+  // Same interruption primitives actions.js's own stopCurrent() uses (kept local to that file,
+  // called at the top of every performAction) -- whatever she's doing physically is about to be
+  // invalidated by teleporting, so stop it cleanly first rather than leaving it to dangle.
+  bot.pathfinder.setGoal(null);
+  if (bot.pvp.target) bot.pvp.stop();
+  bot.collectBlock.cancelTask();
+  bot.stopDigging();
+  bot.chat(`/tp ${dest.x.toFixed(2)} ${dest.y.toFixed(2)} ${dest.z.toFixed(2)}`);
+  // Whatever her standing goal assumed about her surroundings is now stale, same reasoning as
+  // death/respawn.
+  if (currentGoal) {
+    await broadcastGoalState("abandoned", currentGoal.description);
+    recordGoalOutcome(currentGoal.description, "gave up", "stuck");
+    currentGoal = null;
+    await clearGoal(PERSONA_NAME);
+  }
+}
 
 function checkStuck() {
   if (!AUTONOMY_ENABLED || bot.isSleeping || !bot.entity) return;
   const pos = bot.entity.position;
+  // Kept fresh on every tick (not just while possibly-stuck) so that IF this process goes down
+  // for any reason, the next spawn's own cross-restart check (bot.once("spawn") below) is
+  // comparing against somewhere close to where she actually was, not a stale position from
+  // hours ago or the very start of this session.
+  saveStuckState(PERSONA_NAME, { x: pos.x, y: pos.y, z: pos.z, sameSpotCount: currentSameSpotCount })
+    .catch((err) => console.error(`[${USERNAME}] stuck-state save failed:`, err.message));
   if (!lastPosition || pos.distanceTo(lastPosition) > 0.1) {
     lastPosition = pos.clone();
     lastMovedAt = Date.now();
+    stuckNudgeCount = 0; // real movement happened -- whatever the snag was, it's resolved
     return;
   }
   if (Date.now() - lastMovedAt < STUCK_THRESHOLD_MS) return;
 
+  stuckNudgeCount += 1;
+  lastMovedAt = Date.now(); // reset so this doesn't spam-nudge/escalate every 30s while still stuck
+
+  if (stuckNudgeCount > MAX_STUCK_NUDGES) {
+    stuckNudgeCount = 0;
+    teleportToSpawn(`no movement for ${MAX_STUCK_NUDGES + 1} consecutive checks despite nudging`)
+      .catch((err) => console.error(`[${USERNAME}] teleport-home failed:`, err.message));
+    return;
+  }
+
   console.log(`[${USERNAME}] possibly stuck -- no movement in ` +
-              `${Math.round((Date.now() - lastMovedAt) / 1000)}s, nudging`);
+              `${Math.round((Date.now() - lastMovedAt) / 1000)}s, nudging (${stuckNudgeCount}/${MAX_STUCK_NUDGES})`);
   bot.setControlState("jump", true);
   setTimeout(() => bot.setControlState("jump", false), 500);
-  lastMovedAt = Date.now(); // reset so this doesn't spam-nudge every 30s while still stuck
 }
 
 setInterval(checkStuck, STUCK_CHECK_MS);
