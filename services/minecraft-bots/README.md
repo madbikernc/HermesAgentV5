@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.12.0
+**Version:** 3.13.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -347,6 +347,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.13.0 | 2026-09-08 | Fixed hallucinated goal completions ("Mark and Luke claim they have bows"): a goal is only announced DONE after the specific item that proves it is verified against real inventory/equipped gear, not just on the model's own say-so. The existing "did any step ever succeed" check couldn't catch this -- an unrelated successful step elsewhere in the same goal was enough to pass it. |
 | 3.12.0 | 2026-09-08 | Functional/crafted blocks (bed, furnace, crafting table, bookshelf, etc.) can no longer be dug or destroyed -- `"mine"` refuses to deliberately target one by name, and `movements.blocksCantBreak` now protects them from the pathfinder auto-digging through one incidentally while routing around an obstacle (confirmed live: stock mineflayer-pathfinder only ever protects chests and non-diggable blocks by default). |
 | 3.11.0 | 2026-09-08 | Fixed Babs/Amy/Mark/Luke going permanently idle after a goal ended -- Mayor's own periodic chat was resetting `lastActivityAt` for every other bot (the timer that gates "propose a new goal after 10 quiet minutes"), so as long as Mayor kept talking, no one else's idle clock could ever elapse. Now only a real player's message resets it. |
 | 3.10.0 | 2026-09-08 | "Fix all the above" batch: skill retrieval threshold recalibrated (0.7->0.78), cross-bot resource contention (`filterAwayFromOtherBots()`), farming from scratch (till+plant fallback in `"harvest"`), bed ownership (`loadClaimedBed`/`saveClaimedBed`), inventory insurance (`checkInventoryInsurance()`), squad response (Mark/Luke respond to a teammate's threat alert). Also fixed a live self-defense thrash bug found while verifying Mayor's first directive (`"attack"`/`"flee"` now reuse the already-found threat entity instead of racing a second lookup against it). |
