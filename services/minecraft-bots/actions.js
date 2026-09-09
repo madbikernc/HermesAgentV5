@@ -1,4 +1,15 @@
-// Version: 1.26.0
+// Version: 1.27.0
+//
+// 1.27.0 (2026-09-08) -- direct request: "the duplicate crafting check should be for all
+// resources as well as utilities like crafting tables. if a resource is in a nearby chest, they
+// should not mine it." Generalizes the crafting_table/furnace nearby-block check (1.25.0) with
+// a new shared tryTakeFromNearbyChest() helper, reusing "loot"'s own real chest-interaction
+// mechanics: "craft" now checks a nearby chest for ANY item before crafting it (not just the two
+// utility blocks), and "mine"/"explore" now check for the REAL resulting item of what they're
+// about to gather (new MINE_DROPS/itemNamesForMinedBlocks -- a chest holds raw_iron, not
+// iron_ore, real vanilla drop behavior, not the block's own name) before ever searching for the
+// block itself. All-or-nothing: only skips mining/crafting if a chest has the FULL amount
+// needed, never a partial one.
 //
 // 1.26.0 (2026-09-08) -- direct report: "they still don't seem to react to a threatening
 // creature." Found the real, foundational cause while live-testing index.js's own self-defense
@@ -1020,6 +1031,92 @@ function chestObstructed(bot, chestBlock) {
   return halves.some((half) => bot.blockAt(half.position.offset(0, 1, 0))?.boundingBox === "block");
 }
 
+// Direct request, 2026-09-08 ("the duplicate crafting check should be for all resources as well
+// as utilities like crafting tables. if a resource is in a nearby chest, they should not mine
+// it"). Generalizes the crafting_table/furnace nearby-block check ("craft"'s own
+// REUSABLE_UTILITY_BLOCKS) to ANY resource in a nearby CHEST, not just a placed utility block --
+// before spending time mining or consuming raw materials to craft something, check whether it's
+// already sitting in a container within reach. Reuses "loot"'s own real chest-interaction
+// mechanics (chestObstructed, multi-candidate search, openChest/containerItems/withdraw) rather
+// than a second, drifting copy. Deliberately an all-or-nothing check: takes exactly `wantCount`
+// only if a chest has AT LEAST that much of one matching item, never a partial amount -- taking
+// some and still needing to mine/craft the rest would need the caller to juggle a reduced
+// target count, real complexity for a check that's meant to catch the common, high-value case
+// (a chest already has enough), not optimize every partial one.
+const CHEST_CHECK_MAX_CANDIDATES = 3;
+
+async function tryTakeFromNearbyChest(bot, token, itemNames, wantCount) {
+  const chestType = bot.registry.blocksByName.chest;
+  const trappedType = bot.registry.blocksByName.trapped_chest;
+  const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
+  if (!matchIds.length) return null;
+  const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: CHEST_CHECK_MAX_CANDIDATES });
+
+  for (const pos of positions) {
+    if (token.cancelled) return null;
+    const chestBlock = bot.blockAt(pos);
+    if (!chestBlock || chestObstructed(bot, chestBlock)) continue;
+
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
+        chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+        () => bot.pathfinder.setGoal(null));
+    } catch {
+      continue; // couldn't reach this one -- try the next candidate
+    } finally {
+      bot.pathfinder.setGoal(null);
+    }
+    if (token.cancelled) return null;
+
+    try {
+      const chest = await bot.openChest(chestBlock);
+      const contents = chest.containerItems();
+      const match = contents.find((i) => itemNames.includes(i.name) && i.count >= wantCount);
+      if (!match) {
+        await chest.close();
+        continue; // this chest doesn't have enough -- try the next candidate, not give up
+      }
+      await chest.withdraw(match.type, null, wantCount);
+      await chest.close();
+      return { name: match.name, count: wantCount };
+    } catch {
+      continue; // couldn't open this one -- try the next candidate
+    }
+  }
+  return null;
+}
+
+// What item actually lands in her inventory when she MINES this block, for the unenchanted
+// (non-Silk-Touch) case this codebase always uses -- real vanilla drop behavior, not the
+// block's own name. Most ores drop a raw/processed item, not a copy of themselves (confirmed
+// against real game rules: coal_ore drops "coal", iron/copper/gold ore drop "raw_x", diamond/
+// emerald/redstone/lapis ore drop the gem/dust item directly). Logs are the one common case
+// that genuinely doesn't need an entry -- an oak_log block drops an oak_log item, same name.
+// Small and deliberately curated, same pragmatic scope as SMELT_RECIPES/FUEL_PREFERENCE above,
+// not an attempt at exhaustive coverage of every block in the game.
+const MINE_DROPS = {
+  coal_ore: "coal", deepslate_coal_ore: "coal",
+  iron_ore: "raw_iron", deepslate_iron_ore: "raw_iron",
+  copper_ore: "raw_copper", deepslate_copper_ore: "raw_copper",
+  gold_ore: "raw_gold", deepslate_gold_ore: "raw_gold", nether_gold_ore: "gold_nugget",
+  diamond_ore: "diamond", deepslate_diamond_ore: "diamond",
+  emerald_ore: "emerald", deepslate_emerald_ore: "emerald",
+  redstone_ore: "redstone", deepslate_redstone_ore: "redstone",
+  lapis_ore: "lapis_lazuli", deepslate_lapis_ore: "lapis_lazuli",
+};
+
+// Maps a resolved family of block ids (resolveBlockFamily's own output -- e.g. every log
+// species, or both the stone- and deepslate-layer variant of one ore) to the real item name(s)
+// that would already satisfy the same need if sitting in a chest, deduplicated since a whole ore
+// family usually collapses to one drop item.
+function itemNamesForMinedBlocks(bot, blockIds) {
+  const names = blockIds.map((id) => {
+    const blockName = bot.registry.blocks[id]?.name;
+    return blockName ? (MINE_DROPS[blockName] || blockName) : null;
+  }).filter(Boolean);
+  return [...new Set(names)];
+}
+
 // Real incident found live (2026-09-07): Amy's bed sat right at the edge of open water, so every
 // death near it turned "recover" into a repeated drowning loop -- the bed itself was never the
 // bug, but sleeping in one next to a hazard is what put her in harm's way in the first place.
@@ -1099,6 +1196,17 @@ export async function performAction(bot, action, speaker) {
     case "mine": {
       const blockIds = resolveBlockFamily(bot, action.block);
       if (!blockIds.length) return fail(`I don't recognize the block "${action.block}".`);
+
+      // Direct request, 2026-09-08 ("if a resource is in a nearby chest, they should not mine
+      // it"). Checks the REAL resulting item (itemNamesForMinedBlocks/MINE_DROPS above), not the
+      // block name itself -- a chest holds raw_iron, not iron_ore.
+      const chestMatch = await tryTakeFromNearbyChest(bot, token,
+        itemNamesForMinedBlocks(bot, blockIds), action.count);
+      if (chestMatch) {
+        await refreshGear(bot);
+        return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to mine it.`);
+      }
+
       const findOptions = { matching: blockIds, maxDistance: 32, count: action.count };
       let positions = bot.findBlocks(findOptions);
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
@@ -1153,7 +1261,20 @@ export async function performAction(bot, action, speaker) {
       // stockpiling while she's already out looking, not just solving today's shortage.
       const EXPLORE_TARGET_NAMES = ["oak_log", "coal_ore", "iron_ore", "copper_ore"];
       const blockIds = [...new Set(EXPLORE_TARGET_NAMES.flatMap((name) => resolveBlockFamily(bot, name)))];
-      const findOptions = { matching: blockIds, maxDistance: 32, count: 8 };
+
+      // Direct request, 2026-09-08 ("if a resource is in a nearby chest, they should not mine
+      // it") -- same reasoning as "mine"'s own check, applied to explore's own broader target
+      // list: no reason to go looking for wood/ore at all if a chest nearby already has a full
+      // batch of one of them.
+      const EXPLORE_BATCH_COUNT = 8;
+      const chestMatch = await tryTakeFromNearbyChest(bot, token,
+        itemNamesForMinedBlocks(bot, blockIds), EXPLORE_BATCH_COUNT);
+      if (chestMatch) {
+        await refreshGear(bot);
+        return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to explore for it.`);
+      }
+
+      const findOptions = { matching: blockIds, maxDistance: 32, count: EXPLORE_BATCH_COUNT };
       let positions = bot.findBlocks(findOptions);
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
       if (!positions.length) return fail("didn't find anything useful nearby, even after looking around.");
@@ -1199,6 +1320,17 @@ export async function performAction(bot, action, speaker) {
         if (existing.length) {
           return ok(`already have a ${action.item} nearby, no need to make another.`);
         }
+      }
+
+      // Direct request, 2026-09-08 ("the duplicate crafting check should be for all resources as
+      // well as utilities like crafting tables"). Generalizes the check above beyond just
+      // crafting_table/furnace (placed WORLD blocks) to any item at all, checked against nearby
+      // CHESTS instead -- no reason to spend raw materials crafting something that's already
+      // sitting in a container within reach.
+      const chestMatch = await tryTakeFromNearbyChest(bot, token, [action.item], action.count);
+      if (chestMatch) {
+        await refreshGear(bot);
+        return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to craft it.`);
       }
 
       // Does this need a table? `true` satisfies recipesFor()'s own requiresTable check
