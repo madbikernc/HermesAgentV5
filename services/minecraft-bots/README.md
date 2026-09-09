@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.13.0
+**Version:** 3.14.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -317,6 +317,15 @@ individual. Also fixed along the way: a live bug found while verifying Mayor's f
 (observed live: 90+ seconds of "threat detected" -> "no hostile mobs nearby" with zero actual
 combat).
 
+**Full activity log** (2026-09-08, direct request: "setup a log of their activities that would
+be sufficient for review later, to look for misbehaviors and broken behaviors"). A new companion
+service, `infra/minecraft-bots-activity-log/` -- a full, raw `journalctl -f` mirror of all five
+bots into one durable, bot-scoped file (`/mnt/hermes-data/minecraft-memory/activity.log`,
+rotated daily via `logrotate`, 14 kept). Deliberately separate from `hermes-minecraft-triage.py`'s
+own `triage.log`: that one only ever records the LLM triage of a known `TRIAGE_PATTERNS` match,
+so it can't surface a misbehavior nobody has pattern-matched yet -- this one keeps everything, for
+exactly that kind of later, open-ended review.
+
 ## Requirements
 
 Node.js 22 LTS (installed on `spark` 2026-09-06 via NodeSource). Run `npm install` in this
@@ -347,6 +356,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.14.0 | 2026-09-08 | New `infra/minecraft-bots-activity-log/` companion service -- a full, raw, durable `journalctl` mirror of all five bots (`activity.log`, daily-rotated) for later open-ended misbehavior review, separate from `hermes-minecraft-triage.py`'s own pattern-matched-only `triage.log`. Also added `infra/minecraft-bots/minecraft-bot-mayor.service` to the repo (deployed 2026-09-08, never previously committed). |
 | 3.13.0 | 2026-09-08 | Fixed hallucinated goal completions ("Mark and Luke claim they have bows"): a goal is only announced DONE after the specific item that proves it is verified against real inventory/equipped gear, not just on the model's own say-so. The existing "did any step ever succeed" check couldn't catch this -- an unrelated successful step elsewhere in the same goal was enough to pass it. |
 | 3.12.0 | 2026-09-08 | Functional/crafted blocks (bed, furnace, crafting table, bookshelf, etc.) can no longer be dug or destroyed -- `"mine"` refuses to deliberately target one by name, and `movements.blocksCantBreak` now protects them from the pathfinder auto-digging through one incidentally while routing around an obstacle (confirmed live: stock mineflayer-pathfinder only ever protects chests and non-diggable blocks by default). |
 | 3.11.0 | 2026-09-08 | Fixed Babs/Amy/Mark/Luke going permanently idle after a goal ended -- Mayor's own periodic chat was resetting `lastActivityAt` for every other bot (the timer that gates "propose a new goal after 10 quiet minutes"), so as long as Mayor kept talking, no one else's idle clock could ever elapse. Now only a real player's message resets it. |

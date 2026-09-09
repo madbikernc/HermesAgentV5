@@ -1,0 +1,14 @@
+[Unit]
+Description=Firmament Minecraft Bots Activity Log (full raw journal mirror for later review)
+After=minecraft-bot-babs.service minecraft-bot-amy.service minecraft-bot-mark.service minecraft-bot-luke.service minecraft-bot-mayor.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/journalctl -u minecraft-bot-babs -u minecraft-bot-amy -u minecraft-bot-mark -u minecraft-bot-luke -u minecraft-bot-mayor -f --no-pager -o short-iso
+StandardOutput=append:/mnt/hermes-data/minecraft-memory/activity.log
+StandardError=journal
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
