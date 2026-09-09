@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.7.0
+**Version:** 3.8.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -231,7 +231,13 @@ check only ever asked whether crafting the CURRENT item needs a different existi
 as a station -- crafting_table's own recipe needs no table at all, so that check always said "no"
 and fell straight through to making a brand new one, never checking whether an instance of what
 she's about to make already exists in reach. Fixed with a direct nearby-search before crafting
-either reusable utility block.
+either reusable utility block. **Generalized further** (direct request: "the duplicate crafting
+check should be for all resources as well as utilities... if a resource is in a nearby chest,
+they should not mine it"): a new shared `tryTakeFromNearbyChest()` helper (reusing `"loot"`'s own
+chest-interaction mechanics) means `"craft"` now checks a chest for ANY item before crafting it,
+and `"mine"`/`"explore"` check for the REAL resulting item of what they're about to gather (new
+`MINE_DROPS` -- a chest holds `raw_iron`, not `iron_ore`) before ever searching for the block
+itself. All-or-nothing: only skips the action if a chest has the full amount needed.
 
 **Self-defense was a true mid-action interrupt in name only** (direct report: "they still don't
 seem to react to a threatening creature"). Two real, distinct bugs, both required for this to
@@ -311,6 +317,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.8.0 | 2026-09-08 | Generalized the duplicate-avoidance check to a shared `tryTakeFromNearbyChest()`: `"craft"` checks a chest for any item, `"mine"`/`"explore"` check for the real resulting item (`raw_iron`, not `iron_ore`) before gathering from scratch. |
 | 3.7.0 | 2026-09-08 | Fixed duplicate crafting-table/furnace crafting, and fixed self-defense never actually firing -- a true mid-action interrupt plus (the real foundational bug) `nearestHostile()` checking the wrong entity type entirely (`"mob"` instead of the real `"hostile"`). |
 | 3.6.0 | 2026-09-08 | New `"explore"` action -- gathers any common raw material broadly when a specific craft/mine target can't be found, forced via a deterministic `BLOCKED` override, writes a world memory note on success so it's remembered for later. |
 | 3.5.0 | 2026-09-08 | Bots now actually swim to real shore after surfacing (`findNearestShore()`) instead of just treading water where they surfaced -- verified live swimming 76+ blocks to dry land. |
