@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# Version: 1.6.1 (2026-09-09 — follow-up to 1.6.0 below: the isolated BITWARDENCLI_APPDATA_DIR was
+# left at mkdir's default mode (775 under this project's umask, group-writable/listable) instead of
+# matching hermes-vault-agent.py's own convention for equivalent sensitive state (chmod 700 on
+# SOCK_PATH.parent). The data.json inside is already 0600 from bw CLI itself, so this closes a
+# directory-listing gap, not a decryption one -- but it should match the existing pattern rather
+# than default to something looser.
+#
 # Version: 1.6.0 (2026-09-09 — real outage found live: a fleet-wide service restart made
 # hermes-router unreachable for ~10 minutes. Root cause traced with controlled live tests, not
 # guessed: this script's slow path and tools/hermes-vault-agent.py's persistent session share ONE
