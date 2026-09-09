@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.21.0
+**Version:** 3.22.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -356,6 +356,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.22.0 | 2026-09-09 | Post-craft home storage confirmed working live (20 successful stores across all five bots). The one real failure observed showed no diagnostic line at all, revealing "store" had two MORE silent chest-candidate skip points (obstruction check, pathfinder-unreachable) beyond the deposit failure just fixed -- all three now logged. |
 | 3.21.0 | 2026-09-09 | The new post-craft home-storage cleanup failed twice, live, both times with no visible reason ("store"'s per-chest-candidate deposit failure was silently swallowed, never logged). Now logged per candidate so the real reason is diagnosable next time it happens. |
 | 3.20.0 | 2026-09-09 | "Near a building" (sapling planting's rule 2) is now exactly 6 blocks, was a guess of 3. |
 | 3.19.0 | 2026-09-09 | Two more real bugs in sapling planting, found via a 25-minute post-deploy watch: Luke and Mayor never once found a spot to plant near their base (rule 2 had no wander fallback like every other search-based action already has -- fixed), and a real placement failure traced to the "air above" check being too loose (accepted a spot where a sapling/plant was already growing -- now requires real air). |
