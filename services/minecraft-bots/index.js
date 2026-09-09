@@ -1,4 +1,18 @@
-// Version: 2.46.0
+// Version: 2.47.0
+//
+// 2.47.0 (2026-09-09) -- direct request: "after any crafting activity, surplus materials should
+// be stored in a chest as close to their sleeping home as possible." New storeSurplusNearHome():
+// batches every distinct non-essential surplus item (bounded, STORE_NEAR_HOME_BATCH_LIMIT=5) into
+// actions.js's new "store" with action.near set to her own claimed bed position (loadClaimedBed(),
+// exported from actions.js -- the same real position "sleep" itself already tries first every
+// night). Triggered from both runAction (direct player command) and goalTick (self-directed goal
+// step) right after a successful "craft" or "smelt", via a craftedOk flag checked in each
+// function's own outer `finally` (after `acting` is released, avoiding a race with
+// storeSurplusNearHome's own acting=true). Deliberately separate from the existing
+// storeSurplusValuables (checkInventoryFull/Insurance) -- that one is a space/risk reflex aimed
+// at "nearest to wherever I am," this one is a post-activity cleanup reflex aimed at home
+// specifically. A skill-served craft/smelt (runSkill's own replay path) doesn't trigger this yet
+// -- a known, minor gap, not fixed here.
 //
 // 2.46.0 (2026-09-09) -- direct request: "when they find saplings, they should plant them (1)
 // near other trees of the same variety if they can (2) in any free soil not directly adjacent
@@ -701,7 +715,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed } from "./actions.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements } from "./swim-movements.js";
@@ -1345,6 +1359,8 @@ async function runAction(action, speaker, message, send) {
     : action.type === "breed" ? `breed ${action.species}`
     : action.type === "enchant" ? `enchant ${action.item}` : action.type;
   acting = true; // blocks the goal loop from stepping until this direct command is done
+  // Same post-craft-cleanup trigger as goalTick's own -- see storeSurplusNearHome's header.
+  let craftedOk = false;
   try {
     const startLine = {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
@@ -1359,6 +1375,7 @@ async function runAction(action, speaker, message, send) {
     if (startLine) send(await narrateAction(startLine));
 
     const result = await performAction(bot, action, speaker);
+    craftedOk = result.ok && (action.type === "craft" || action.type === "smelt");
     send(await narrateAction(result.text));
 
     // Actions are conversational events too -- worth the same continuity as a chat exchange.
@@ -1371,6 +1388,10 @@ async function runAction(action, speaker, message, send) {
     send(`something went wrong trying to do that.`);
   } finally {
     acting = false;
+    if (craftedOk) {
+      storeSurplusNearHome("post-craft cleanup").catch((err) =>
+        console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
+    }
   }
 }
 
@@ -1741,6 +1762,14 @@ async function goalTick() {
   }
 
   acting = true;
+  // Direct request, 2026-09-09 ("after any crafting activity, surplus materials should be
+  // stored in a chest as close to their sleeping home as possible"). Declared at function scope
+  // (not inside the try below) so the goalTick's own outer `finally` can fire the cleanup AFTER
+  // acting is released, rather than racing storeSurplusNearHome's own acting=true against this
+  // function's -- see its own header for why an early `return` elsewhere in this function
+  // (DONE/BLOCKED/etc.) never touches this flag and so never triggers it, correctly, since those
+  // paths never actually ran a craft/smelt step.
+  let craftedOk = false;
   try {
     // Skill retrieval (MINECRAFT_BOTS_DESIGN.md §14, 2026-09-08): before spending a
     // planNextStep call, check for an existing, trusted skill whose description matches this
@@ -1939,6 +1968,7 @@ async function goalTick() {
     }
 
     const result = await performAction(bot, parsed.action, currentGoal.setBy || USERNAME);
+    craftedOk = result.ok && (parsed.action.type === "craft" || parsed.action.type === "smelt");
     logStep(currentGoal, `${parsed.action.type}: ${result.text}`, result.ok, parsed.action);
     currentGoal.consecutiveFailures = result.ok ? 0 : currentGoal.consecutiveFailures + 1;
     console.log(`[${USERNAME}] goal step: ${parsed.action.type} -> ${result.text} ` +
@@ -1996,6 +2026,10 @@ async function goalTick() {
     console.error(`[${USERNAME}] goal tick failed:`, err.message);
   } finally {
     acting = false;
+    if (craftedOk) {
+      storeSurplusNearHome("post-craft cleanup").catch((err) =>
+        console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
+    }
   }
 }
 
@@ -2512,6 +2546,44 @@ async function storeSurplusValuables(reason) {
   try {
     const result = await performAction(bot, { type: "store", item: target.name, count: target.count }, USERNAME);
     console.log(`[${USERNAME}] ${reason}: ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] ${reason} failed:`, err.message);
+  } finally {
+    acting = false;
+  }
+}
+
+// Direct request, 2026-09-09: "after any crafting activity, surplus materials should be stored
+// in a chest as close to their sleeping home as possible." A deliberately separate function from
+// storeSurplusValuables above, not a shared parameter on it: that one is a SPACE-management
+// reflex (picks the single largest non-essential stack, nearest-to-wherever-she-is chest, "get
+// rid of it quickly"), this one is a CLEANUP reflex after a specific activity (batches every
+// distinct surplus item, always aimed at home specifically) -- different triggers, different
+// goals, worth keeping legible as two functions rather than one with a mode flag. Reuses
+// actions.js's own loadClaimedBed() -- the exact real position "sleep" itself already tries
+// first every night -- as "home," rather than inventing a second notion of it; null (no claimed
+// bed yet) just falls through to "store"'s own normal nearest-to-current-position search, still
+// useful, just not the more specific "near home" behavior this exists for.
+const STORE_NEAR_HOME_BATCH_LIMIT = 5;
+
+async function storeSurplusNearHome(reason) {
+  const surplusNames = [...new Set(bot.inventory.items()
+    .filter((i) => !isEssentialItem(i.name) && !i.name.endsWith("_sapling"))
+    .map((i) => i.name))].slice(0, STORE_NEAR_HOME_BATCH_LIMIT);
+  if (!surplusNames.length) return;
+  const home = await loadClaimedBed(bot);
+
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
+  acting = true;
+  try {
+    for (const name of surplusNames) {
+      // Infinity: "store" already caps at however much she actually has via Math.min() --
+      // matches STORE's own existing player-command convention (index.js's classifyIntent,
+      // "unlike every other count default (1), this defaults to 'all of it'").
+      const result = await performAction(bot, { type: "store", item: name, count: Infinity, near: home }, USERNAME);
+      console.log(`[${USERNAME}] ${reason}: ${result.text} (ok=${result.ok})`);
+      if (!result.ok) break; // couldn't find/use a chest this trip -- no point trying more items
+    }
   } catch (err) {
     console.error(`[${USERNAME}] ${reason} failed:`, err.message);
   } finally {

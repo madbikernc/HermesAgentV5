@@ -1,4 +1,20 @@
-// Version: 1.33.0
+// Version: 1.34.0
+//
+// 1.34.0 (2026-09-09) -- two changes shipped together. (1) Fixed a real live crash in
+// "plant_sapling" (1.33.0), found minutes after it first deployed: rule 2's own findBlocks()
+// matcher read block.position without guarding it first, and a matcher candidate can have a null
+// .position despite the block itself being non-null -- the exact same mineflayer edge case
+// findNearestShore() (index.js) already found and guarded against once before. Repeated on every
+// SAPLING_CHECK_MS tick for any bot carrying a sapling ("sapling check failed: Cannot read
+// properties of null (reading 'offset')") until fixed. (2) Direct request: "after any crafting
+// activity, surplus materials should be stored in a chest as close to their sleeping home as
+// possible." "store" now accepts an optional action.near ({x,y,z}) -- when given, searches for a
+// chest FROM that point instead of the bot's own current position (confirmed against mineflayer's
+// own findBlocks() source: `point` is the real reference every result is sorted by distance to).
+// loadClaimedBed() exported so index.js's new storeSurplusNearHome() can pass the bot's own real
+// claimed bed position as `near`, reusing "sleep"'s own notion of home rather than inventing a
+// second one. Every existing "store" caller (checkInventoryFull/Insurance) omits `near` and keeps
+// the original "nearest to wherever I am right now" behavior, which is what those actually want.
 //
 // 1.33.0 (2026-09-09) -- direct request: "when they find saplings, they should plant them (1)
 // near other trees of the same variety if they can (2) in any free soil not directly adjacent
@@ -1331,7 +1347,11 @@ function findPlantableSpotNear(bot, center, radius) {
 // need.
 const BEDS_DIR = "/mnt/hermes-data/minecraft-memory/beds";
 
-async function loadClaimedBed(bot) {
+// Exported 2026-09-09 so index.js's storeSurplusNearHome() ("after any crafting activity,
+// surplus materials should be stored in a chest as close to their sleeping home as possible")
+// can read the same real claimed-bed position "sleep" itself already tries first every night,
+// rather than a second, drifting notion of "home."
+export async function loadClaimedBed(bot) {
   try {
     const data = JSON.parse(await readFile(path.join(BEDS_DIR, `${bot.username}.json`), "utf8"));
     return new Vec3(data.x, data.y, data.z);
@@ -2213,7 +2233,16 @@ export async function performAction(bot, action, speaker) {
       const trappedType = bot.registry.blocksByName.trapped_chest;
       const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
       if (!matchIds.length) return fail("don't know how to recognize a chest here.");
-      const storeFindOptions = { matching: matchIds, maxDistance: 32, count: 3 };
+      // Direct request, 2026-09-09 ("after any crafting activity, surplus materials should be
+      // stored in a chest as close to their sleeping home as possible"). action.near (optional):
+      // search FROM that point instead of the bot's own current position -- confirmed against
+      // mineflayer's own findBlocks() source (blocks.js): `point` (default bot.entity.position)
+      // is the real reference every result is sorted by distance to, not a cosmetic option.
+      // storeNearHome() (index.js) is the one caller that sets this, to her own claimed bed
+      // position; every other "store" caller (checkInventoryFull/Insurance) omits it and keeps
+      // the original "nearest to wherever I am right now" behavior, which is what they actually
+      // want (get rid of it quickly, not necessarily near home).
+      const storeFindOptions = { matching: matchIds, maxDistance: 32, count: 3, point: action.near };
       let positions = bot.findBlocks(storeFindOptions);
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, storeFindOptions);
       if (!positions.length) return fail("couldn't find a chest nearby, even after looking around.");
@@ -2516,9 +2545,16 @@ export async function performAction(bot, action, speaker) {
         // Rule 2: fall back to any free soil not directly adjacent to a building.
         if (!targetPos) {
           const positions = bot.findBlocks({
-            matching: (block) => groundIds.includes(block.type) &&
-              bot.blockAt(block.position.offset(0, 1, 0))?.boundingBox !== "block" &&
-              !nearBuilding(bot, block.position),
+            // Real live crash, 2026-09-09: a findBlocks() matcher candidate can have a null
+            // .position despite the block itself being non-null -- the exact same mineflayer
+            // edge case findNearestShore() (index.js) already found and guarded against; this
+            // matcher hit it too ("sapling check failed: Cannot read properties of null
+            // (reading 'offset')", repeating every idle tick for any bot carrying a sapling).
+            matching: (block) => {
+              if (!block?.position || !groundIds.includes(block.type)) return false;
+              if (bot.blockAt(block.position.offset(0, 1, 0))?.boundingBox === "block") return false;
+              return !nearBuilding(bot, block.position);
+            },
             maxDistance: 32, count: 1,
           });
           targetPos = positions[0] || null;
