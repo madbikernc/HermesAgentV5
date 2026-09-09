@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-09) -- direct request: "expose it via the matrix interface as well" (the
+# Firmament bot-sandbox world-reinit task, hermes-minecraft-admin.py 1.1.0's new "bots"
+# subcommand group). Two new actions, "bots_list"/"bots_reinit_world" -- deliberately their own
+# ACTION_GAMES entries and parse_action() patterns, not folded into the existing "minecraft"
+# newworld/status verbs, since that server (minecraft-bots.service) is a completely separate
+# instance from the one every other Minecraft action here targets (minecraft.service, the real
+# survival server with a real human player). The trigger phrase requires "bot(s)"/"sandbox"
+# explicitly so a plain "reset the minecraft world" still correctly falls through to "not
+# supported" rather than risk hitting the wrong server. bots_reinit_world gets its own 180s
+# subprocess timeout (every other action here is one fast RCON round trip; this one does a real
+# backup + world swap + restart-and-wait cycle on the remote box).
 #
 # hermes-game-admin — Minecraft/Zomboid ADMIN actions from Matrix chat: kick/ban/pardon, whitelist
 # add/remove, op/deop (Minecraft) or access-level (Zomboid), restart/stop/start, broadcast,
@@ -105,13 +117,23 @@ ACTION_GAMES = {
     "op": ("minecraft",), "deop": ("minecraft",),
     "setaccesslevel": ("zomboid",), "sandboxvars": ("zomboid",), "sandboxvar_set": ("zomboid",),
     "newworld": ("zomboid",), "update": ("zomboid",), "logins": ("zomboid",), "auditlog": ("zomboid",),
+    # Direct request, 2026-09-09 ("expose it via the matrix interface as well"): the Firmament
+    # bot-sandbox instance (minecraft-bots.service, port 25580) -- a SEPARATE Minecraft server
+    # from the one every other "minecraft" action above targets (minecraft.service, port 25565,
+    # the real survival server with a real human player). Deliberately its own two actions, not
+    # folded into the existing "minecraft" newworld/status verbs -- see parse_action()'s own
+    # comment on why the trigger phrase requires "bot(s)"/"sandbox" explicitly, so a plain
+    # "reset the minecraft world" still correctly falls through to "not supported" instead of
+    # accidentally wiping the wrong server.
+    "bots_reinit_world": ("minecraft",), "bots_list": ("minecraft",),
 }
 
 USAGE_HINT = (
     "I can run these against Minecraft or Zomboid (say which game): status, players, "
     "\"whitelist list\" / \"whitelist add <name>\" / \"whitelist remove <name>\", "
     "\"kick <name> [for <reason>]\", \"ban <name> [for <reason>]\", \"pardon <name>\", "
-    "\"say <message>\", save, start/stop/restart. Minecraft only: \"op <name>\", \"deop <name>\". "
+    "\"say <message>\", save, start/stop/restart. Minecraft only: \"op <name>\", \"deop <name>\", "
+    "\"list the minecraft bots\", \"reinit/reset the bot sandbox world [seed <N>]\". "
     "Zomboid only: \"set access level <name> to <level>\" "
     "(banned/user/priority/observer/gm/moderator/admin), \"sandboxvars\" or \"<Key>=<value>\" to "
     "change one, \"update\", \"logins\", \"audit log\", \"reset the world\" (new random seed)."
@@ -288,6 +310,21 @@ def parse_action(text):
     if m:
         return "setaccesslevel", {"name": m.group(1), "level": m.group(2).lower()}
 
+    # Bot-sandbox actions, 2026-09-09 -- checked BEFORE the generic Zomboid-only "newworld"
+    # pattern just below, and deliberately require "bot(s)"/"sandbox" explicitly in the text so
+    # this can never be confused with a request to reset the real, human-facing Minecraft world
+    # (which stays correctly unsupported -- see ACTION_GAMES's own comment).
+    if re.search(r'\b(?:reset|wipe|regenerate|reinit(?:ialize)?)\b.{0,30}\bbots?\b.{0,20}\bworld\b', lowered) or \
+       re.search(r'\b(?:reset|wipe|regenerate|reinit(?:ialize)?)\b.{0,30}\bsandbox\b.{0,20}\bworld\b', lowered) or \
+       re.search(r'\bbot\s+sandbox\b.{0,30}\b(?:reset|wipe|regenerate|reinit(?:ialize)?)\b', lowered):
+        seed_m = re.search(r'\bseed\s*[:=]?\s*(-?\d+)\b', t, re.I)
+        return "bots_reinit_world", {"seed": seed_m.group(1) if seed_m else None}
+
+    if re.search(r'\blist\s+(?:the\s+)?(?:minecraft\s+)?bots?\b', lowered) or \
+       re.search(r'\bwhich\s+bots?\s+(?:are\s+)?running\b', lowered) or \
+       re.search(r'\bbot\s+status\b', lowered):
+        return "bots_list", {}
+
     if re.search(r'\b(?:reset|wipe|regenerate)\b.{0,20}\b(?:world|map|save)\b', lowered) or \
        re.search(r'\bnew\s+(?:zomboid\s+)?world\b', lowered) or \
        re.search(r'\bnew\s+(?:random\s+)?seed\b', lowered):
@@ -355,13 +392,22 @@ def run_minecraft(action, kwargs):
         args += ["say", kwargs["message"]]
     elif action in ("save", "start", "stop", "restart", "status", "players"):
         args += [action]
+    elif action == "bots_list":
+        args += ["bots", "list"]
+    elif action == "bots_reinit_world":
+        args += ["bots", "reinit-world"] + ([kwargs["seed"]] if kwargs.get("seed") else [])
     else:
         return None, f"'{action}' isn't a Minecraft concept — that's Zomboid-specific"
 
+    # bots_reinit_world does a real backup + world swap + a restart-and-wait cycle on the remote
+    # box (hermes-minecraft-admin.py's own SANDBOX_RESTART_TIMEOUT_S=60, plus backup time) --
+    # every other action here is a single fast RCON round trip, so only this one needs real
+    # headroom over the normal 30s budget.
+    timeout = 180 if action == "bots_reinit_world" else 30
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return None, "Minecraft admin command timed out after 30s"
+        return None, f"Minecraft admin command timed out after {timeout}s"
     except Exception as exc:
         return None, f"Minecraft admin command failed to start: {exc}"
     output = result.stdout.strip()

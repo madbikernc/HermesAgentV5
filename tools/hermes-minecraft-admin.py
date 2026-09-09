@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-09-09) -- direct request: "add this task to the minecraft admin tool/skill on the
+# Fleet ... discover the existing bots and handle them dynamically." New "bots" subcommand group
+# (list, reinit-world) for the Firmament bot-sandbox instance (minecraft-bots.service, port
+# 25580) -- a separate server from the one this file otherwise manages. See the new BOTS_*
+# constants' own header comment for the full account of what's different about it (different
+# account owns it outright but still can't systemctl it, different host for the per-bot clients,
+# etc.) and discover_bot_units()'s own comment for why the bot roster is queried from systemd
+# every call rather than ever hardcoded.
 #
 # Remote admin for the vanilla Minecraft server on the muncraft box
 # (192.168.1.221, systemd unit minecraft.service). Ported from v1's
@@ -61,8 +70,12 @@
 from __future__ import annotations
 
 import argparse
+import datetime
+import glob
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -77,6 +90,39 @@ VAULT_ITEM = "Zomboid Admin - muncraft"
 HOST = "192.168.1.221"
 CONNECT_TIMEOUT = 10
 EXEC_TIMEOUT = 20
+
+# --- Firmament bot-sandbox instance -----------------------------------------
+# Direct request, 2026-09-09 ("add this task to the minecraft admin tool/skill on the Fleet"):
+# a SEPARATE Minecraft server instance on the SAME box (192.168.1.221) from the one this file was
+# originally built for -- minecraft-bots.service (port 25580, offline-mode, no RCON), not
+# minecraft.service (port 25565, RCON-managed, the real survival server with a real human player).
+# Confirmed live while re-initializing the bot world by hand: it runs as `zomboid-admin` (the
+# SAME account this file already authenticates as -- WorkingDirectory=/home/zomboid-admin/
+# minecraft-bots, owned by that account directly, not muncraft:muncraft like the main server), but
+# `systemctl stop/restart minecraft-bots` still fails with "Access denied" even so -- managing a
+# SYSTEM unit needs root regardless of which user the unit's own process runs as. Since the
+# process itself runs as zomboid-admin, killing it directly (a user can always signal their own
+# process) and letting the unit's own Restart=always bring it back up works without ever needing
+# systemctl access -- confirmed live, this is not a theoretical fallback.
+#
+# The per-bot Node.js clients (minecraft-bot-<name>.service, one per persona: Babs/Amy/Mark/Luke/
+# Mayor as of 2026-09-08, MORE ADDED SINCE) run on a DIFFERENT host entirely -- the Spark
+# (dgx-spark), not this box. This tool is meant to run there (same assumption
+# tools/vault-get-secret.sh and every other spark-hosted hermes-*.py wrapper already makes), so
+# those steps use plain local systemctl/file calls, no second SSH hop.
+#
+# Direct instruction, 2026-09-09: "make sure the tool does not ASSUME the existing bots. it needs
+# to DISCOVER the existing bots and handle them dynamically." The bot roster is NEVER hardcoded
+# here -- discover_bot_units() queries systemd directly (glob "minecraft-bot-*.service", the
+# per-instance naming convention -- deliberately excludes "minecraft-bots*.service", the plural
+# server + its own companion services) every time, so a bot added or removed from the fleet after
+# this file was last edited is picked up automatically, with zero code change needed.
+BOTS_DIR_REMOTE = "/home/zomboid-admin/minecraft-bots"
+BOTS_SERVICE = "minecraft-bots"
+BOT_UNIT_GLOB = "minecraft-bot-*.service"
+BEDS_DIR = "/mnt/hermes-data/minecraft-memory/beds"
+SANDBOX_RESTART_TIMEOUT_S = 60
+SANDBOX_RESTART_POLL_S = 5
 
 # Minimal Source RCON client (same protocol Minecraft and Source-engine
 # games use), run *on* the remote box against 127.0.0.1 — copied from
@@ -300,6 +346,104 @@ def cmd_lifecycle(client, args):
     print(f"minecraft.service: {out2 or 'unknown'}")
 
 
+# --- bot-sandbox subcommands (minecraft-bots.service, see module docstring) -----------------
+def discover_bot_units() -> list[str]:
+    """The real, current bot roster -- queried from systemd every call, never a hardcoded list.
+    Local (this tool is meant to run on the Spark, where the per-bot units actually live)."""
+    result = subprocess.run(
+        ["systemctl", "list-units", "--all", "--type=service", "--plain", "--no-legend", BOT_UNIT_GLOB],
+        capture_output=True, text=True, timeout=15,
+    )
+    units = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if parts and parts[0].endswith(".service"):
+            units.append(parts[0])
+    return sorted(units)
+
+
+def cmd_bots_list(client, args):
+    units = discover_bot_units()
+    if not units:
+        print(f"No {BOT_UNIT_GLOB} units found on this host.")
+        return
+    print(f"Discovered {len(units)} bot unit(s):")
+    for unit in units:
+        active = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True).stdout.strip()
+        print(f"  {unit}: {active or 'unknown'}")
+
+
+def cmd_bots_reinit_world(client, args):
+    # Direct request, 2026-09-09: "re-init the world using seed <N>," now a repeatable admin
+    # action instead of a one-off manual sequence. Mirrors that live sequence exactly: fresh
+    # backup first, rename the old world aside (never delete -- recoverable if this was a
+    # mistake), set the seed, restart the sandbox server the only way this account actually can
+    # (kill its own process, not systemctl), clear stale claimed-bed files (old-world
+    # coordinates), restart every DISCOVERED bot client.
+    seed = _reject_unsafe_text(args.seed, "seed") if args.seed else None
+
+    units = discover_bot_units()
+    if not units:
+        sys.exit(f"ERROR: no {BOT_UNIT_GLOB} units discovered on this host -- refusing to "
+                  f"proceed without knowing which bots to stop/restart")
+    print(f"Discovered {len(units)} bot unit(s): {', '.join(units)}")
+
+    print("Stopping bot clients...")
+    subprocess.run(["sudo", "systemctl", "stop", *units], check=False)
+
+    print("Backing up the current bot-sandbox world...")
+    out, err = run(client, f"cd {BOTS_DIR_REMOTE} && ./backup.sh 2>&1", timeout=60)
+    print(out or err or "(no backup output)")
+
+    level_name_line, _ = run(client, f"grep '^level-name=' {BOTS_DIR_REMOTE}/server.properties")
+    level_name = level_name_line.split("=", 1)[1].strip() if "=" in level_name_line else "world"
+
+    ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    backup_dirname = f"{level_name}.bak-{ts}"
+    print(f"Renaming current world '{level_name}' aside as '{backup_dirname}' (not deleted)...")
+    run(client, f"mv {BOTS_DIR_REMOTE}/{level_name} {BOTS_DIR_REMOTE}/{backup_dirname}")
+
+    if seed:
+        run(client, f"sed -i 's/^level-seed=.*/level-seed={seed}/' {BOTS_DIR_REMOTE}/server.properties")
+        print(f"Set level-seed={seed}")
+    else:
+        run(client, f"sed -i 's/^level-seed=.*/level-seed=/' {BOTS_DIR_REMOTE}/server.properties")
+        print("Cleared level-seed -- the server will generate a fresh random seed")
+
+    pid, _ = run(client, f"systemctl show {BOTS_SERVICE} -p MainPID --value")
+    pid = pid.strip()
+    if not pid or pid == "0":
+        sys.exit(f"ERROR: could not find the running PID for {BOTS_SERVICE}.service -- "
+                  f"aborting before restart (the world dir has already been renamed and the "
+                  f"seed already set; rerun once the service is confirmed running)")
+    print(f"Restarting the bot-sandbox server (killing PID {pid} -- Restart=always brings it back)...")
+    run(client, f"kill {pid}")
+
+    print("Waiting for the sandbox server to come back up with the new world...")
+    for _ in range(SANDBOX_RESTART_TIMEOUT_S // SANDBOX_RESTART_POLL_S):
+        time.sleep(SANDBOX_RESTART_POLL_S)
+        status, _ = run(client, f"systemctl is-active {BOTS_SERVICE}")
+        if status.strip() == "active":
+            break
+    else:
+        print(f"WARNING: {BOTS_SERVICE}.service did not report active within "
+              f"{SANDBOX_RESTART_TIMEOUT_S}s -- check it manually before restarting the bots")
+
+    print("Clearing stale claimed-bed files (they name old-world coordinates)...")
+    for bed_file in glob.glob(os.path.join(BEDS_DIR, "*.json")):
+        os.remove(bed_file)
+
+    print(f"Restarting {len(units)} bot client(s)...")
+    subprocess.run(["sudo", "systemctl", "start", *units], check=False)
+    time.sleep(3)
+    for unit in units:
+        active = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True).stdout.strip()
+        print(f"  {unit}: {active or 'unknown'}")
+
+    seed_note = f"seed {seed}" if seed else "a fresh random seed"
+    print(f"Done. World reinitialized with {seed_note}. Previous world preserved as {backup_dirname}.")
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="Remote admin for the Minecraft server on 192.168.1.221")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -347,6 +491,19 @@ def build_parser():
     for action in ("start", "stop", "restart"):
         lp = sub.add_parser(action, help=f"systemctl {action} minecraft.service (needs sudo grant — see Notes)")
         lp.set_defaults(func=cmd_lifecycle, action=action)
+
+    bots = sub.add_parser("bots", help="Manage the Firmament bot-sandbox instance "
+                                        "(minecraft-bots.service, port 25580) and its bot clients")
+    bots_sub = bots.add_subparsers(dest="bots_cmd", required=True)
+
+    bots_sub.add_parser("list", help="Discover and list the current minecraft-bot-*.service "
+                                      "units (never hardcoded)").set_defaults(func=cmd_bots_list)
+
+    reinit = bots_sub.add_parser("reinit-world", help="Back up, wipe, and regenerate the bot-"
+                                  "sandbox world; restarts every discovered bot client")
+    reinit.add_argument("seed", nargs="?", default=None,
+                         help="New level-seed (omit for a fresh random seed)")
+    reinit.set_defaults(func=cmd_bots_reinit_world)
 
     return p
 

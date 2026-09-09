@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.0.20
+# Version: 2.0.21
+#
+# 2.0.21 (2026-09-09) — added `gameadmin` to `KNOWN_AGENTS` (which folds into `KNOWN_TOPICS` via
+# the union just below). Real gap found live enabling hermes-game-admin.service for the first
+# time (built and documented back on 2026-09-06 as "wired into Matrix chat," but never actually
+# deployed until now): its own `claim_next('gameadmin')` failed with a 400 immediately on
+# startup, because the `gameadmin` topic — and the `gameadmin` identity it publishes results as
+# in `publish_result()` — were never registered here, the exact same "forgetting a new sender
+# identity crashes its caller" class of bug this file's own 2.0.3 note already documents.
 #
 # 2.0.20 (2026-09-08) — added `mc-mayor` to `KNOWN_AGENTS`, ahead of the new fifth Minecraft bot
 # (direct request: "add another bot, Mayor, whose personality is to be a leader and set goals for
@@ -214,7 +222,7 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "mc-mark", "mc-luke", "mc-mayor", "minecraft-triage"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "mc-mark", "mc-luke", "mc-mayor", "minecraft-triage", "gameadmin"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1) plus
 # `minecraft` (shared broadcast topic for the bot coordination traffic KNOWN_AGENTS' mc-babs/
