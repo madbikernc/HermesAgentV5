@@ -1,4 +1,21 @@
-// Version: 2.44.0
+// Version: 2.45.0
+//
+// 2.45.0 (2026-09-08) -- direct request: "give the mayor a default set of goals to try to
+// accomplish, starting with basic tools for everyone, then basic armor, then farming. he should
+// set increasingly useful larger goals as they successfully meet earlier goals. progress
+// through the tech tree." New TECH_TREE_STAGES, a fixed, ordered curriculum (basic tools ->
+// basic armor -> farming -> iron gear -> diamond gear -> enchanting) replacing
+// proposeDirectiveForOthers' previous fully-freeform "invent whatever task" directive -- muse
+// still phrases each directive in Mayor's own voice, but the real objective for the current
+// stage always comes from this list, never invented. Progress is tracked with real, verified
+// signals, not self-reported claims: Mayor checks his OWN inventory/equipped gear directly for
+// item-based stages, and reads every other bot's REAL, checked DONE <item_id> broadcast
+// (parseGoalStep's own verification, 2.43.0 -- broadcastGoalState now carries that item)
+// arriving over the existing minecraft-coordination Buzz topic. Once every bot has cleared the
+// current stage, the whole fleet advances together and Mayor announces it in chat; the stage
+// index is persisted (mayor-curriculum.json, same durable-mount pattern actions.js's bed-
+// ownership fix already uses) so a Mayor restart doesn't reset the fleet back to square one.
+// Falls back to the original freeform directive behavior once the fixed ladder is fully cleared.
 //
 // 2.44.0 (2026-09-08) -- direct request: "watch their behavior for a while, look for
 // misbehaviors." A 25-minute live capture across all five bots (via the new activity.log
@@ -665,6 +682,7 @@
 // concurrent chat lines pile up parallel router calls -- matches the design doc's own
 // efficiency principle (§5): don't spend a model call faster than the previous one resolved.
 
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import mineflayer from "mineflayer";
 import pathfinderPkg from "mineflayer-pathfinder";
 import { callRole } from "./router.js";
@@ -775,6 +793,10 @@ loadActionPlugins(bot);
 
 bot.once("spawn", async () => {
   console.log(`[${USERNAME}] spawned at`, bot.entity.position);
+  // Tech-tree curriculum (2026-09-08): only Mayor's own process ever reads curriculumStageIndex,
+  // but loading it is cheap and harmless for every other bot too -- one code path, not a
+  // separate Mayor-only startup branch.
+  if (USERNAME === MAYOR_USERNAME) await loadCurriculumStage();
   // SwimMovements (swim-movements.js): stock Movements can walk across open water at a
   // constant Y-level but can never change depth once already in it -- see that file's own
   // comment for the confirmed library gap this closes (water crossings only, lava unaffected).
@@ -974,10 +996,15 @@ function otherGoalsNote(intro) {
 // why (both bots relay everything they hear on "minecraft" into in-game chat; a raw JSON
 // coordination payload has no business being read aloud). Best-effort like every other Buzz call
 // in this file -- a publish failure here should never break the goal loop that triggered it.
-async function broadcastGoalState(status, description) {
+// `item` (optional): the real, verified item that proved a "done" completion (parseGoalStep's
+// own DONE <item_id>, already checked against real inventory/equipped gear before this ever
+// fires -- see that fix's own header). Added for Mayor's tech-tree curriculum
+// (proposeDirectiveForOthers/checkCurriculumProgress below): a trustworthy, structured "bot X
+// really has item Y now" signal, not another text description to fuzzy-match against.
+async function broadcastGoalState(status, description, item = null) {
   try {
     await buzzPublish(AGENT_ID, "minecraft-coordination",
-      JSON.stringify({ type: "goal", status, description }));
+      JSON.stringify({ type: "goal", status, description, item }));
   } catch (err) {
     console.error(`[${USERNAME}] goal broadcast failed:`, err.message);
   }
@@ -1836,7 +1863,7 @@ async function goalTick() {
       console.log(`[${USERNAME}] goal complete: ${currentGoal.description}`);
       bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
       recordGoalOutcome(currentGoal.description, "done", null);
-      await broadcastGoalState("done", currentGoal.description);
+      await broadcastGoalState("done", currentGoal.description, parsed.item);
       // Authoring (MINECRAFT_BOTS_DESIGN.md §14): only for a goal that actually worked its way
       // through from scratch, not one already served by a stored skill (servedBySkill) -- that
       // would just be re-storing an existing skill's own steps back under a new name. An
@@ -1969,40 +1996,158 @@ setInterval(() => {
 // Mayor-only autonomous behavior, 2026-09-08 ("add another bot, Mayor, whose personality is to
 // be a leader and set goals for the others"). A no-op check (USERNAME !== MAYOR_USERNAME) makes
 // this genuinely inert for every other bot's own process -- same file, same timer registration,
-// no separate build for "the other four" vs "Mayor." Picks whichever OTHER bot currently has NO
-// active goal (absent from otherBotGoals, the same live signal arbitrateGoalConflict() already
-// reads from the "minecraft-coordination" Buzz topic) rather than a random pick, matching the
-// persona's own "leads by competence" directive -- an idle teammate is the one who actually
-// needs direction. A cheap `muse` call in Mayor's own voice turns that into a real, addressed
-// in-game chat line, which then flows through the EXACT SAME classifyIntent -> ACTION GOAL path
-// a player's own instruction already takes (isMayor()'s own exception to isAnotherBot(), and the
-// priority check in handleIncoming's own ACTION GOAL branch, both above) -- no separate
-// "assign a goal to another bot" mechanism to build or keep in sync with the real one.
+// no separate build for "the other four" vs "Mayor." A cheap `muse` call in Mayor's own voice
+// turns the assigned objective into a real, addressed in-game chat line, which then flows
+// through the EXACT SAME classifyIntent -> ACTION GOAL path a player's own instruction already
+// takes (isMayor()'s own exception to isAnotherBot(), and the priority check in handleIncoming's
+// own ACTION GOAL branch, both above) -- no separate "assign a goal to another bot" mechanism to
+// build or keep in sync with the real one.
 const MAYOR_DIRECTIVE_MS = parseInt(process.env.MC_MAYOR_DIRECTIVE_MS || "300000", 10); // 5 min
+
+// Direct request, 2026-09-08: "give the mayor a default set of goals to try to accomplish,
+// starting with basic tools for everyone, then basic armor, then farming. he should set
+// increasingly useful larger goals as they successfully meet earlier goals. progress through
+// the tech tree." Replaces the previous fully-freeform "invent whatever task" directive with a
+// fixed, ordered curriculum -- muse still phrases each directive in Mayor's own voice, but the
+// underlying real objective for the CURRENT stage is always this list's, never invented, until
+// the whole fleet clears it and moves on. doneItems is deliberately a small SET of real
+// (never-invented) item ids per stage, not one exact item -- multiple tool/armor materials count
+// (a bot who skips straight to iron tools has still cleared "basic tools"), and matches
+// parseGoalStep's own DONE <item_id> verification (index.js 2.43.0) exactly: real, checked
+// completion, not a self-reported claim. Farming's stage is proven by a harvested crop ITEM
+// (wheat/carrot/potato/beetroot/bread), not "a farm exists somewhere" -- a real, unambiguous,
+// checkable fact instead of something that would need its own separate detection method.
+const TECH_TREE_STAGES = [
+  {
+    name: "basic tools",
+    directive: "make sure you have basic tools -- at least a pickaxe and an axe, wood or stone is fine to start",
+    doneItems: ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe", "netherite_pickaxe",
+                "wooden_axe", "stone_axe", "iron_axe", "diamond_axe", "netherite_axe"],
+  },
+  {
+    name: "basic armor",
+    directive: "get yourself some armor -- leather is fine to start, iron is better",
+    doneItems: ["leather_helmet", "leather_chestplate", "leather_leggings", "leather_boots",
+                "iron_helmet", "iron_chestplate", "iron_leggings", "iron_boots",
+                "chainmail_helmet", "chainmail_chestplate", "chainmail_leggings", "chainmail_boots"],
+  },
+  {
+    name: "farming",
+    directive: "start a farm and bring back some real food from it -- till ground, plant seeds, and harvest what you grow",
+    doneItems: ["wheat", "carrot", "potato", "beetroot", "bread"],
+  },
+  {
+    name: "iron gear",
+    directive: "mine iron and smelt enough for a full set of iron armor and an iron sword",
+    doneItems: ["iron_chestplate", "iron_sword"],
+  },
+  {
+    name: "diamond gear",
+    directive: "find diamonds -- you'll need an iron pickaxe first -- and craft diamond tools or armor",
+    doneItems: ["diamond_pickaxe", "diamond_sword", "diamond_chestplate", "diamond_helmet"],
+  },
+  {
+    name: "enchanting",
+    directive: "set up an enchanting table (needs obsidian and diamonds) and get some lapis lazuli for it",
+    doneItems: ["enchanting_table"],
+  },
+];
+
+// Persisted so Mayor's own process restarting doesn't reset the whole fleet back to "basic
+// tools" -- same small-JSON-file-under-the-durable-mount pattern actions.js's bed-ownership fix
+// (loadClaimedBed/saveClaimedBed, 1.31.0) already uses. Only curriculumStageIndex is persisted,
+// not per-bot within-stage progress -- a Mayor restart mid-stage just re-observes completions as
+// they're (re-)broadcast or re-checked, an acceptable, low-cost simplification given stages take
+// a while regardless.
+const CURRICULUM_FILE = "/mnt/hermes-data/minecraft-memory/mayor-curriculum.json";
+let curriculumStageIndex = 0;
+// Bot names (plain, e.g. "Mark") who've provably cleared the CURRENT stage -- reset on advance.
+let stageProgress = new Set();
+
+async function loadCurriculumStage() {
+  try {
+    const data = JSON.parse(await readFile(CURRICULUM_FILE, "utf8"));
+    if (Number.isInteger(data.stageIndex)) curriculumStageIndex = data.stageIndex;
+  } catch {
+    // no saved progress yet -- start at stage 0, the normal first-ever-run case
+  }
+}
+
+async function saveCurriculumStage() {
+  try {
+    await mkdir("/mnt/hermes-data/minecraft-memory", { recursive: true });
+    await writeFile(CURRICULUM_FILE, JSON.stringify({ stageIndex: curriculumStageIndex }), "utf8");
+  } catch (err) {
+    console.error(`[${USERNAME}] failed to persist curriculum stage:`, err.message);
+  }
+}
+
+// Mayor's own progress on an item-based stage is checked directly against his own real
+// inventory/equipped gear -- no broadcast round-trip needed, he can just look. Other bots'
+// progress arrives via their own verified "done" broadcasts (see the minecraft-coordination
+// subscriber below) since Mayor has no direct view into their inventories.
+function mayorHasStageItem(stage) {
+  return bot.inventory.items().some((i) => stage.doneItems.includes(i.name)) ||
+    [5, 6, 7, 8].some((slot) => stage.doneItems.includes(bot.inventory.slots[slot]?.name));
+}
+
+// Checked after every relevant "done" broadcast AND once per directive tick -- advancing
+// promptly rather than waiting up to a full MAYOR_DIRECTIVE_MS after the fleet's last bot
+// actually finishes the current stage.
+async function checkCurriculumAdvance() {
+  if (curriculumStageIndex >= TECH_TREE_STAGES.length) return; // graduated the whole ladder
+  const stage = TECH_TREE_STAGES[curriculumStageIndex];
+  if (mayorHasStageItem(stage)) stageProgress.add(MAYOR_USERNAME);
+  const everyone = [...BOT_USERNAMES];
+  if (!everyone.every((name) => stageProgress.has(name))) return;
+
+  curriculumStageIndex += 1;
+  stageProgress = new Set();
+  await saveCurriculumStage();
+  const next = TECH_TREE_STAGES[curriculumStageIndex];
+  console.log(`[${USERNAME}] curriculum stage complete: "${stage.name}" -- advancing to ` +
+    (next ? `"${next.name}"` : "the full ladder, improvising from here"));
+  bot.chat(await narrateAction(next
+    ? `everyone's cleared "${stage.name}" -- nice work. Next up: ${next.name}.`
+    : `everyone's cleared the whole starting curriculum -- "${stage.name}" was the last of it. Good work, all of you.`));
+}
 
 async function proposeDirectiveForOthers() {
   if (USERNAME !== MAYOR_USERNAME || !AUTONOMY_ENABLED || busy || acting) return;
+  await checkCurriculumAdvance();
   const idleBots = [...BOT_USERNAMES].filter((name) =>
     name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${name.toLowerCase()}`));
   if (!idleBots.length) return; // everyone already has something going -- nothing to assign
-  const target = idleBots[Math.floor(Math.random() * idleBots.length)];
+  // Prefer an idle bot who still needs the current stage over one who's already cleared it --
+  // matching "increasingly useful larger goals as they successfully meet earlier goals" means
+  // pushing the ones behind, not re-nagging someone already done.
+  const target = idleBots.find((name) => !stageProgress.has(name)) ||
+    idleBots[Math.floor(Math.random() * idleBots.length)];
+  const stage = curriculumStageIndex < TECH_TREE_STAGES.length ? TECH_TREE_STAGES[curriculumStageIndex] : null;
 
   busy = true;
   try {
     const reply = await callRole("muse", [
       {
         role: "system",
-        content: `${persona}\n\n---\n\n${target} currently has no active goal. Give ${target} ` +
-          `ONE short, specific, in-character task to work on -- a real Minecraft objective ` +
-          `(gear up, gather a resource, craft or smelt something), not vague encouragement. ` +
-          `Address ${target} by name, exactly like a real chat message you'd actually send. One ` +
-          `or two sentences, nothing else -- no quotes, no stage directions.`,
+        content: stage
+          ? `${persona}\n\n---\n\n${target} currently has no active goal. The fleet's current ` +
+            `curriculum stage is "${stage.name}": ${stage.directive}. Tell ${target} to do ` +
+            `exactly that, in your own voice -- don't invent a different objective. Address ` +
+            `${target} by name, exactly like a real chat message you'd actually send. One or ` +
+            `two sentences, nothing else -- no quotes, no stage directions.`
+          : `${persona}\n\n---\n\n${target} currently has no active goal, and the fleet has ` +
+            `already cleared the whole starting curriculum (basic tools, armor, farming, iron, ` +
+            `diamonds, enchanting). Give ${target} ONE short, specific, in-character task that ` +
+            `pushes further -- a real, more advanced Minecraft objective, not vague ` +
+            `encouragement. Address ${target} by name, exactly like a real chat message you'd ` +
+            `actually send. One or two sentences, nothing else -- no quotes, no stage directions.`,
       },
       { role: "user", content: `What do you tell ${target}?` },
     ], { maxTokens: 60, temperature: 0.9 });
     if (reply) {
       bot.chat(reply);
-      console.log(`[${USERNAME}] issued directive to ${target}: ${reply}`);
+      console.log(`[${USERNAME}] issued directive to ${target} (stage: ${stage?.name ?? "post-curriculum"}): ${reply}`);
     }
   } catch (err) {
     console.error(`[${USERNAME}] failed to issue a directive:`, err.message);
@@ -2686,6 +2831,24 @@ bot.once("spawn", () => {
         if (payload.status === "active") otherBotGoals.set(msg.from_agent, payload.description);
         else otherBotGoals.delete(msg.from_agent);
         console.log(`[${USERNAME}] heard ${msg.from_agent}'s goal: ${payload.status === "active" ? payload.description : "(idle)"}`);
+        // Tech-tree curriculum (2026-09-08): Mayor has no view into another bot's own
+        // inventory, so her OWN verified "done" broadcast (parseGoalStep's real, checked
+        // DONE <item_id>, not a self-reported claim) is the only trustworthy signal available
+        // for tracking someone else's progress -- payload.item is null for a skill-served
+        // completion or a NONE-typed goal, both harmlessly no-ops here.
+        if (USERNAME === MAYOR_USERNAME && payload.status === "done" && payload.item &&
+            curriculumStageIndex < TECH_TREE_STAGES.length) {
+          const stage = TECH_TREE_STAGES[curriculumStageIndex];
+          if (stage.doneItems.includes(payload.item)) {
+            const agentName = [...BOT_USERNAMES].find((name) => `mc-${name.toLowerCase()}` === msg.from_agent);
+            if (agentName) {
+              stageProgress.add(agentName);
+              console.log(`[${USERNAME}] curriculum: ${agentName} cleared "${stage.name}" (${payload.item})`);
+              checkCurriculumAdvance().catch((err) =>
+                console.error(`[${USERNAME}] checkCurriculumAdvance error:`, err.message));
+            }
+          }
+        }
       } else if (payload.type === "threat" && SQUAD_RESPONDER && !squadResponseInFlight) {
         const dx = bot.entity.position.x - payload.x;
         const dy = bot.entity.position.y - payload.y;
