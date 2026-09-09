@@ -1,4 +1,14 @@
-// Version: 2.42.0
+// Version: 2.43.0
+//
+// 2.43.0 (2026-09-08) -- direct live report ("Mark and Luke claim they have bows"), confirmed
+// real: Mark's "Secure a bow" goal was marked DONE and announced complete in chat after every
+// real attempt to gather wood/string for one had failed -- the existing SUSPICIOUS DONE check
+// (2.14.1) only verifies SOME step in the goal ever succeeded, which was true here purely
+// because an unrelated step (a loot pass that found something else) had succeeded, not because
+// a bow existed. parseGoalStep's DONE now requires an item_id (or NONE) naming what proves
+// completion, verified here against real inventory/equipped gear before the goal is ever
+// announced complete -- a false claim is now rejected outright (treated as a real give-up, not
+// silently flagged) rather than told to anyone, the bot herself included.
 //
 // 2.42.0 (2026-09-08) -- companion fix to actions.js 1.32.0: confirmed against mineflayer-
 // pathfinder's own movements.js source that its default blocksCantBreak only ever protects
@@ -1333,7 +1343,10 @@ function parseGoalStep(text) {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     const trimmed = line.toUpperCase();
-    if (trimmed.startsWith("DONE")) return { type: "done" };
+    if (trimmed.startsWith("DONE")) {
+      const item = (trimmed.split(/\s+/)[1] || "NONE").toLowerCase();
+      return { type: "done", item: item === "none" ? null : item };
+    }
     if (trimmed.startsWith("BLOCKED")) return { type: "blocked", reason: line.slice(7).trim() || "stuck" };
     if (trimmed.startsWith("ACTION")) {
       const parts = trimmed.split(/\s+/);
@@ -1457,7 +1470,11 @@ async function planNextStep(goal) {
           `factually off the goal description sounds (reinterpret it charitably as the closest ` +
           `realistic Minecraft objective rather than dwelling on why it's worded oddly) -- then ` +
           `on its own final line you MUST respond with EXACTLY ONE of these forms, no exceptions:\n` +
-          `DONE - the goal is already fully achieved given her current gear/inventory\n` +
+          `DONE <item_id or NONE> - the goal is already fully achieved given her current gear/` +
+          `inventory. <item_id> is the exact modern Minecraft item id she now owns or has ` +
+          `equipped that proves it (e.g. "bow", "iron_chestplate") -- never invent or assume one ` +
+          `is there without checking the inventory/gear given above. Use NONE only when the goal ` +
+          `genuinely isn't about owning one specific item (e.g. "explore the area").\n` +
           `BLOCKED <short reason> - she cannot make progress right now and should give up\n` +
           `ACTION MINE <block_id> <count> - gather a resource. <block_id> must be the exact ` +
           `modern Minecraft block id -- never invent one. For a material class rather than one ` +
@@ -1764,6 +1781,35 @@ async function goalTick() {
         console.log(`[${USERNAME}] SUSPICIOUS DONE (no successful step ever logged for this ` +
                     `goal): ${currentGoal.description}`);
       }
+
+      // Direct live report, 2026-09-08 ("Mark and Luke claim they have bows") -- confirmed real:
+      // "Secure a bow" was marked DONE and announced complete in chat while every actual attempt
+      // to gather wood/string for one had failed (sawSuccess was true only because an UNRELATED
+      // step elsewhere in the same goal had succeeded, e.g. a loot pass that found something
+      // else entirely -- the weak "did anything ever succeed" check above can't catch this,
+      // since it doesn't verify progress on the actual thing the goal was about). The DONE
+      // prompt now asks for the specific item_id that proves completion; checked here against
+      // real inventory/equipped gear (not the model's own say-so) before ever telling anyone --
+      // the bot herself included -- that she has something she doesn't. A goal with no single
+      // checkable item (DONE NONE, e.g. "explore the area") skips this and falls back to the
+      // existing sawSuccess-based flag above, unchanged.
+      if (parsed.item) {
+        const reallyHasIt = bot.inventory.items().some((i) => i.name === parsed.item) ||
+          [5, 6, 7, 8, 45].some((slot) => bot.inventory.slots[slot]?.name === parsed.item);
+        if (!reallyHasIt) {
+          console.log(`[${USERNAME}] REJECTED DONE (claimed ${parsed.item}, not actually in ` +
+                      `inventory or equipped): ${currentGoal.description}`);
+          bot.chat(await narrateAction(
+            `giving up on "${currentGoal.description}" -- never actually got a ${parsed.item}.`));
+          recordGoalOutcome(currentGoal.description, "gave up",
+            `claimed done but no ${parsed.item} in inventory`);
+          await broadcastGoalState("abandoned", currentGoal.description);
+          currentGoal = null;
+          await clearGoal(PERSONA_NAME);
+          return;
+        }
+      }
+
       console.log(`[${USERNAME}] goal complete: ${currentGoal.description}`);
       bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
       recordGoalOutcome(currentGoal.description, "done", null);
