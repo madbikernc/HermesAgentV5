@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.8.0
+**Version:** 3.10.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -17,15 +17,20 @@ the same fleet node as a router instance (spark), and every call already gets th
 own two-layer injection-guard screening for free, so untrusted player chat text never needs
 a separate guard step here.
 
-Four bots: **Babs** and **Amy** (`agents/minecraft-babs/PROMPT.md`,
+Five bots: **Babs** and **Amy** (`agents/minecraft-babs/PROMPT.md`,
 `agents/minecraft-amy/PROMPT.md`, flirty/playful/capable and sweet/playful/deferential
-respectively, Amy is Babs' sister), plus **Mark** and **Luke** (military personas, added
-2026-09-07). Each runs as its own process -- there's no multi-bot-per-process multiplexing yet
-(a later efficiency pass the design doc's §5 anticipates, not needed to prove multiple bots
-work). All four are granted level-2 (command) access in muncraft-bots' `ops.json` -- needed for
-self-teleport (see "stuck"/"dusk" below), computed from their offline-mode UUIDs
-(`MD5("OfflinePlayer:<username>")` with version/variant bits set, since the bot sandbox server
-runs offline-mode).
+respectively, Amy is Babs' sister), **Mark** and **Luke** (military personas, added
+2026-09-07), and **Mayor** (`agents/minecraft-mayor/PROMPT.md`, added 2026-09-08, muse-drafted
+leader persona -- addresses the operator as "The President" and his own superior, and the
+other four bots defer to a direct Mayor instruction unless it conflicts with something a real
+player already assigned them; `isMayor()`'s exception to `isAnotherBot()` in `index.js` is the
+one case a bot's own chat reaches another bot's real `classifyIntent` -> `ACTION GOAL` pipeline
+rather than staying coordinate-over-Buzz-only). Each runs as its own process -- there's no
+multi-bot-per-process multiplexing yet (a later efficiency pass the design doc's §5 anticipates,
+not needed to prove multiple bots work). All five are granted level-2 (command) access in
+muncraft-bots' `ops.json` -- needed for self-teleport (see "stuck"/"dusk" below), computed from
+their offline-mode UUIDs (`MD5("OfflinePlayer:<username>")` with version/variant bits set, since
+the bot sandbox server runs offline-mode).
 
 Persistent per-bot conversation memory is wired via `hermes-memory.py`: every line and reply
 is recorded as a turn (`agent=mc-<persona>`, `conv_id=mc-<persona>:<speaker>`), and recent
@@ -288,6 +293,30 @@ interrupts whatever's physically in flight. The ambient-vs-addressed relevance c
 itself (`classifyIntent()`'s `OTHER_BOTS` note, making a bot stand down when a message names a
 different bot by name) was already correct on the messages that made it through.
 
+**"Fix all the above" batch** (2026-09-08, direct follow-up to a "what other autonomous behaviors
+are solvable" survey): six real gaps closed in one pass. (1) Skill retrieval threshold
+recalibrated 0.7 -> 0.78 against the real, organically-grown 20-skill corpus (the original value
+was tuned against a single seeded skill and was rejecting roughly half of genuinely relevant
+matches once a real corpus existed). (2) Cross-bot resource contention: new
+`filterAwayFromOtherBots()` avoids mining/exploring a block position too close to another live
+bot (a purely spatial check, independent of and complementary to `arbitrateGoalConflict()`'s own
+goal-text-time judgment, which can't see two non-conflicting goals physically converging on the
+same vein). (3) Farming from scratch: `"harvest"` now tills open ground and plants seeds when
+nothing is ripe yet, instead of only ever working a field that already existed. (4) Bed
+ownership: `loadClaimedBed()`/`saveClaimedBed()` persist whichever bed actually worked and try it
+first every night, instead of every bot re-competing for "nearest" and colliding on a shared map
+with fewer beds than bots. (5) Inventory insurance: `checkInventoryInsurance()` proactively banks
+surplus valuables (ingots, spare gear) after taking real damage, not just when inventory space
+runs out, so an otherwise-survivable death doesn't erase progress a nearby chest could have saved.
+(6) Squad response: Mark/Luke (`MC_SQUAD_RESPONDER=true`) now hear a teammate's threat alert
+(broadcast over the existing `minecraft-coordination` Buzz topic) and travel to help fight, matching
+their own "defend the perimeter" military framing instead of self-defense staying purely
+individual. Also fixed along the way: a live bug found while verifying Mayor's first directive --
+`"attack"`/`"flee"` were re-deriving the threat entity a second time instead of using the one
+`checkSelfDefense()` already found, racing it moving/despawning and thrashing indefinitely
+(observed live: 90+ seconds of "threat detected" -> "no hostile mobs nearby" with zero actual
+combat).
+
 ## Requirements
 
 Node.js 22 LTS (installed on `spark` 2026-09-06 via NodeSource). Run `npm install` in this
@@ -304,6 +333,7 @@ MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Babs ./run-bot.sh
 MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Amy ./run-bot.sh    # own process, same as every other bot
 MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Mark ./run-bot.sh
 MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Luke ./run-bot.sh
+MC_HOST=192.168.1.221 MC_PORT=25580 MC_BOT_USERNAME=Mayor ./run-bot.sh
 ```
 
 Defaults to `192.168.1.221:25580` (the offline-mode bot instance on muncraft) and username
@@ -317,6 +347,8 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.10.0 | 2026-09-08 | "Fix all the above" batch: skill retrieval threshold recalibrated (0.7->0.78), cross-bot resource contention (`filterAwayFromOtherBots()`), farming from scratch (till+plant fallback in `"harvest"`), bed ownership (`loadClaimedBed`/`saveClaimedBed`), inventory insurance (`checkInventoryInsurance()`), squad response (Mark/Luke respond to a teammate's threat alert). Also fixed a live self-defense thrash bug found while verifying Mayor's first directive (`"attack"`/`"flee"` now reuse the already-found threat entity instead of racing a second lookup against it). |
+| 3.9.0 | 2026-09-08 | New fifth bot **Mayor** -- a muse-drafted leader persona who treats the operator as "The President" and whose directives the other four bots defer to (`isMayor()`'s exception to `isAnotherBot()`) unless a real player already assigned them something. Proactively assigns idle teammates a task (`proposeDirectiveForOthers()`). |
 | 3.8.0 | 2026-09-08 | Generalized the duplicate-avoidance check to a shared `tryTakeFromNearbyChest()`: `"craft"` checks a chest for any item, `"mine"`/`"explore"` check for the real resulting item (`raw_iron`, not `iron_ore`) before gathering from scratch. |
 | 3.7.0 | 2026-09-08 | Fixed duplicate crafting-table/furnace crafting, and fixed self-defense never actually firing -- a true mid-action interrupt plus (the real foundational bug) `nearestHostile()` checking the wrong entity type entirely (`"mob"` instead of the real `"hostile"`). |
 | 3.6.0 | 2026-09-08 | New `"explore"` action -- gathers any common raw material broadly when a specific craft/mine target can't be found, forced via a deterministic `BLOCKED` override, writes a world memory note on success so it's remembered for later. |

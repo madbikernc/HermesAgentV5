@@ -11,6 +11,7 @@ WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
 Environment=MC_BOT_USERNAME=Mark
 Environment=MC_SELF_DEFENSE_FLEE_HEALTH=4
 Environment=MC_SELF_DEFENSE_RANGE=20
+Environment=MC_SQUAD_RESPONDER=true
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

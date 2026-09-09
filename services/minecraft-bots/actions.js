@@ -1,4 +1,48 @@
-// Version: 1.27.0
+// Version: 1.31.0
+//
+// 1.31.0 (2026-09-08) -- item #4 of "fix all the above" (bed ownership). "sleep" re-ran the same
+// "nearest 3 beds" search every night with no memory of what worked before -- on a shared map
+// with fewer beds than bots, several bots would converge on the same nearest bed the same night
+// (bot.sleep()'s own real "occupied" rejection already caught that safely, just wasting a
+// travel-then-fail cycle for whoever lost). New loadClaimedBed()/saveClaimedBed() (a small
+// per-bot file under BEDS_DIR, same hermes-data-mount pattern skills.js's SKILLS_DIR already
+// uses) persist whichever bed actually worked last time and try it FIRST, ahead of the normal
+// broad search -- a bot with a working bed stops competing for "nearest" every night and just
+// goes home, falling back to the broad candidate list only if her own bed is gone, occupied, or
+// unreachable.
+//
+// 1.30.0 (2026-09-08) -- item #3 of "fix all the above" (farming from scratch). "harvest" could
+// only ever work a field that already existed (pick what's ripe, replant it) -- with nothing
+// planted anywhere nearby it just failed outright, no path to ever bootstrap a farm at all. New
+// fallback when no mature crop is found: till nearby dirt/grass_block (air above, real vanilla
+// tilling has no dedicated mineflayer API -- bot.activateBlock() with a hoe equipped is the same
+// "simulate a real client interaction" primitive already the right tool for this) and plant
+// whatever seed she's carrying, bounded to HARVEST_BATCH_LIMIT tiles same as the existing harvest
+// loop. index.js's own HARVEST description (classifyIntent and the goal-step planner, both) is
+// updated to mention this so the planner knows "harvest" now covers starting a farm too, not just
+// working an existing one -- one verb, not a second one to teach the planner from scratch.
+//
+// 1.29.0 (2026-09-08) -- item #2 of "fix all the above" (cross-bot resource contention). New
+// filterAwayFromOtherBots(), applied in "mine" and "explore": other known bots are ordinary
+// named players from this bot's own point of view, so their live position needs no Buzz message
+// to check -- filters out candidate block positions within BOT_PROXIMITY_AVOID_DISTANCE (6) of
+// another bot before mining, falling back to the unfiltered list only if every candidate is
+// contested (mining something beats mining nothing). Complements, doesn't replace,
+// arbitrateGoalConflict()'s own goal-text-time check -- that one catches two bots both WANTING
+// the same thing before either commits to a goal; this one catches two non-conflicting goals
+// that still happen to converge on the same physical vein, which no amount of text-level
+// judgment could ever see coming.
+//
+// 1.28.0 (2026-09-08) -- live bug found while verifying an unrelated change (Mayor's first
+// autonomous directive): Mark was spamming "threat detected (spider)" -> "no hostile mobs
+// nearby" every ~2s for 90+ seconds straight, doing nothing else the entire time. Root cause:
+// index.js's checkSelfDefense()/emergency-health/checkSleepingThreat handlers each already find
+// a real, specific entity via nearestHostile(bot, SELF_DEFENSE_RANGE), but "attack"/"flee" below
+// threw that away and re-ran nearestHostile(bot) (default range 16) a second time -- racing the
+// same entity moving out of range or despawning in the gap (checkSelfDefense's own force-cancel-
+// then-wait sequence can take up to 3s). "attack"/"flee" now accept an optional action.target and
+// use it directly when a caller already has the real entity in hand; goal-directed callers with
+// no known entity still fall back to a fresh nearestHostile(bot) search exactly as before.
 //
 // 1.27.0 (2026-09-08) -- direct request: "the duplicate crafting check should be for all
 // resources as well as utilities like crafting tables. if a resource is in a nearby chest, they
@@ -437,6 +481,8 @@ import pathfinderPkg from "mineflayer-pathfinder";
 import collectBlockPkg from "mineflayer-collectblock";
 import pvpPkg from "mineflayer-pvp";
 import { Vec3 } from "vec3";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
 import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipment.js";
 
 const { goals } = pathfinderPkg;
@@ -1086,6 +1132,43 @@ async function tryTakeFromNearbyChest(bot, token, itemNames, wantCount) {
   return null;
 }
 
+// Direct follow-up to "what other autonomous behaviors are solvable" -> "fix all the above":
+// cross-bot resource contention. arbitrateGoalConflict() (index.js) already judges conflict at
+// GOAL-SELECTION time from goal *text* -- real, but blind to the case that actually matters here:
+// two bots with differently-worded, individually-non-conflicting goals ("get some iron" /
+// "smelt myself a chestplate") converging on the exact same ore vein simply because that's where
+// the ore happens to be, discovered only once both are already standing on top of each other. No
+// amount of language-level judgment catches that -- it's a physical fact about the world, not a
+// disagreement about intent. This is purely spatial and runs at mining time, not goal time:
+// other known bots are ordinary named players from this bot's own point of view (bot.players),
+// so their live position is already free, real data -- no Buzz coordination message needed for
+// something this bot can just see. Independent small env-derived roster, same pattern
+// index.js's own BOT_USERNAMES already uses -- actions.js stays a leaf module with no import from
+// index.js (this file's own header: "index.js does the mutating," never the reverse).
+const OTHER_BOT_USERNAMES = new Set(
+  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor").split(",").map((s) => s.trim()).filter(Boolean),
+);
+const BOT_PROXIMITY_AVOID_DISTANCE = 6;
+// How many extra candidates to fetch beyond what's actually needed, so filtering out ones too
+// close to another bot still leaves enough real candidates -- findBlocks' own `count` caps
+// results BEFORE this filter can run, so asking for only the bare minimum up front would silently
+// defeat this the moment the nearest few happen to be the contested ones.
+const CONTENTION_SEARCH_OVERFETCH = 3;
+
+function filterAwayFromOtherBots(bot, positions) {
+  const otherPositions = [...OTHER_BOT_USERNAMES]
+    .filter((name) => name !== bot.username)
+    .map((name) => bot.players[name]?.entity?.position)
+    .filter(Boolean);
+  if (!otherPositions.length) return positions; // no other bot even visible -- nothing to avoid
+  const clear = positions.filter((pos) =>
+    otherPositions.every((otherPos) => pos.distanceTo(otherPos) > BOT_PROXIMITY_AVOID_DISTANCE));
+  // Avoiding crowding is a courtesy, not a hard requirement -- if EVERY candidate is contested
+  // (e.g. a single small vein with a bot already parked on it), mining the contested one still
+  // beats finding nothing at all.
+  return clear.length ? clear : positions;
+}
+
 // What item actually lands in her inventory when she MINES this block, for the unenchanted
 // (non-Silk-Touch) case this codebase always uses -- real vanilla drop behavior, not the
 // block's own name. Most ores drop a raw/processed item, not a copy of themselves (confirmed
@@ -1133,6 +1216,31 @@ function bedNearHazard(bot, bedPos) {
     }
   }
   return false;
+}
+
+// Item #4 of "fix all the above" (bed ownership) -- see "sleep"'s own changelog note below for
+// why. One small file per bot, same hermes-data-mount-backed pattern skills.js's SKILLS_DIR
+// already uses for exactly this "small, durable, per-process state that must survive a restart"
+// need.
+const BEDS_DIR = "/mnt/hermes-data/minecraft-memory/beds";
+
+async function loadClaimedBed(bot) {
+  try {
+    const data = JSON.parse(await readFile(path.join(BEDS_DIR, `${bot.username}.json`), "utf8"));
+    return new Vec3(data.x, data.y, data.z);
+  } catch {
+    return null; // no claim yet, or the file's gone/corrupt -- fall back to a fresh search
+  }
+}
+
+async function saveClaimedBed(bot, position) {
+  try {
+    await mkdir(BEDS_DIR, { recursive: true });
+    await writeFile(path.join(BEDS_DIR, `${bot.username}.json`),
+      JSON.stringify({ x: position.x, y: position.y, z: position.z }), "utf8");
+  } catch (err) {
+    console.error("sleep: failed to persist claimed bed:", err.message);
+  }
 }
 
 let cancelToken = { cancelled: false };
@@ -1207,10 +1315,12 @@ export async function performAction(bot, action, speaker) {
         return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to mine it.`);
       }
 
-      const findOptions = { matching: blockIds, maxDistance: 32, count: action.count };
+      const wantCount = action.count || 1;
+      const findOptions = { matching: blockIds, maxDistance: 32, count: wantCount * CONTENTION_SEARCH_OVERFETCH };
       let positions = bot.findBlocks(findOptions);
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
       if (!positions.length) return fail(`couldn't find any ${action.block} nearby, even after looking around.`);
+      positions = filterAwayFromOtherBots(bot, positions).slice(0, wantCount);
       const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
       // Report what she actually found/collected, not just the name she was originally given --
       // asked for "oak_log" but the only trees around were spruce, this should say so rather than
@@ -1274,10 +1384,11 @@ export async function performAction(bot, action, speaker) {
         return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to explore for it.`);
       }
 
-      const findOptions = { matching: blockIds, maxDistance: 32, count: EXPLORE_BATCH_COUNT };
+      const findOptions = { matching: blockIds, maxDistance: 32, count: EXPLORE_BATCH_COUNT * CONTENTION_SEARCH_OVERFETCH };
       let positions = bot.findBlocks(findOptions);
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
       if (!positions.length) return fail("didn't find anything useful nearby, even after looking around.");
+      positions = filterAwayFromOtherBots(bot, positions).slice(0, EXPLORE_BATCH_COUNT);
       const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
       const collectedNames = [...new Set(blocks.map((b) => b.name))].join(", ");
 
@@ -1460,7 +1571,17 @@ export async function performAction(bot, action, speaker) {
     }
 
     case "attack": {
-      const target = nearestHostile(bot);
+      // Real live bug, 2026-09-08: checkSelfDefense() already finds a specific real entity
+      // (nearestHostile(bot, SELF_DEFENSE_RANGE)) before calling here -- re-deriving it a second
+      // time via a fresh nearestHostile(bot) call raced against that exact entity moving out of
+      // range or despawning in the gap between detection and this call (checkSelfDefense's own
+      // force-cancel-then-wait sequence can take up to 3s). Confirmed live: Mark spammed "threat
+      // detected" -> "no hostile mobs nearby" every 2s for 90+ seconds straight, never landing a
+      // single hit, because the second lookup kept missing what the first one had already found.
+      // action.target (when a caller already has the real entity in hand) is now used directly,
+      // no re-derivation -- goal-directed callers with no known entity still fall back to a fresh
+      // search exactly as before.
+      const target = action.target || nearestHostile(bot);
       if (!target) return fail("no hostile mobs nearby.");
       // Real gap found by reading mineflayer-pvp's own source (PVP.js), 2026-09-07: it already
       // fully automates shield use during combat -- blocking a creeper's explosion, and an
@@ -1498,7 +1619,9 @@ export async function performAction(bot, action, speaker) {
       // mineflayer-pathfinder's own goals.js (heuristic() returns -goal.heuristic(); isEnd()
       // returns !goal.isEnd(), so the flee goal is "reached" once genuinely outside the wrapped
       // GoalFollow's own radius, not an arbitrary duration this code has to guess at).
-      const target = nearestHostile(bot);
+      // Same fix as "attack" above -- use the already-found entity when the caller has one
+      // instead of racing a second nearestHostile(bot) lookup against it moving/despawning.
+      const target = action.target || nearestHostile(bot);
       if (!target) return ok("nothing to flee from.");
       try {
         await withTimeout(bot.pathfinder.goto(new goals.GoalInvert(new goals.GoalFollow(target, 16))),
@@ -1656,8 +1779,26 @@ export async function performAction(bot, action, speaker) {
       // bad bed (occupied, monsters nearby right there) shouldn't block trying another.
       if (bot.isSleeping) return ok("already asleep.");
       const MAX_CANDIDATES = 3;
-      const positions = bot.findBlocks({ matching: (block) => bot.isABed(block), maxDistance: 32,
-                                          count: MAX_CANDIDATES });
+
+      // Direct follow-up to "what other autonomous behaviors are solvable" -> "fix all the
+      // above": bed ownership. Real gap: every bot re-ran the SAME "nearest N beds" search every
+      // single night with zero memory of what worked before -- on a shared map with fewer beds
+      // than bots, several would converge on the same nearest bed the same night, only one
+      // succeeding (bot.sleep()'s own real "occupied" rejection was already caught and skipped
+      // below, so this never crashed anything, just wasted a travel-then-fail cycle for whoever
+      // lost the race). Persists whichever bed actually worked last time (one small per-bot file,
+      // same hermes-data-mount-backed pattern skills.js's SKILLS_DIR already uses) and tries that
+      // SPECIFIC position FIRST, ahead of the normal broad search -- a bot that already has a
+      // working bed stops competing for "nearest" every night and just goes home, only falling
+      // back to the broad candidate list if her own bed is gone, occupied, or unreachable.
+      const claimed = await loadClaimedBed(bot);
+      const claimedBlock = claimed && bot.blockAt(claimed);
+      const positions = claimedBlock && bot.isABed(claimedBlock) && !bedNearHazard(bot, claimed)
+        ? [claimed] : [];
+      for (const pos of bot.findBlocks({ matching: (block) => bot.isABed(block), maxDistance: 32,
+                                          count: MAX_CANDIDATES })) {
+        if (!positions.some((p) => p.equals(pos))) positions.push(pos);
+      }
       if (!positions.length) return fail("couldn't find a bed nearby.");
 
       for (const pos of positions) {
@@ -1692,6 +1833,7 @@ export async function performAction(bot, action, speaker) {
           console.log(`[sleep] couldn't use bed at ${bedBlock.position}: ${err.message}`);
           continue; // this bed didn't work (occupied, monsters nearby, too far, etc) -- try next
         }
+        await saveClaimedBed(bot, bedBlock.position); // this bed worked -- go straight back to it next time
 
         // Asleep now. Wait for the real 'wake' event (fires when day comes, or when everyone
         // sleeping lets the server skip the night) rather than guessing a duration -- a plain
@@ -2099,7 +2241,71 @@ export async function performAction(bot, action, speaker) {
       const matureBlocks = positions.map((pos) => bot.blockAt(pos))
         .filter((block) => block && Number(block.getProperties?.().age) === CROP_MAX_AGE[block.name])
         .slice(0, HARVEST_BATCH_LIMIT);
-      if (!matureBlocks.length) return fail("couldn't find any ripe crops nearby.");
+
+      // Direct request, 2026-09-08 ("farming from scratch"). Real gap: "harvest" could only ever
+      // work a field that already existed (replant what's already growing) -- with nothing yet
+      // planted anywhere nearby, it just failed outright, no path to ever bootstrap a farm at
+      // all. Real vanilla tilling has no dedicated mineflayer API: right-clicking a hoe on
+      // dirt/grass_block with air directly above is what converts it to farmland, so this uses
+      // bot.activateBlock() (the same "simulate a real client interaction" primitive prismarine
+      // itself documents for exactly this kind of non-dig, non-place block interaction).
+      // Deliberately doesn't check for nearby water -- unhydrated farmland just grows slower in
+      // real vanilla mechanics, it isn't broken or crop-killing, so this isn't worth the added
+      // complexity of a water search for what would only ever be a minor optimization.
+      if (!matureBlocks.length) {
+        const hoe = bot.inventory.items().find((i) => i.name.endsWith("_hoe"));
+        if (!hoe) return fail("couldn't find any ripe crops, and don't have a hoe to start a new farm.");
+        const seedNames = Object.values(CROP_REPLANT);
+        if (!bot.inventory.items().some((i) => seedNames.includes(i.name))) {
+          return fail("couldn't find any ripe crops, and don't have any seeds to start a new farm.");
+        }
+
+        const barePositions = bot.findBlocks({
+          matching: (block) => (block.name === "dirt" || block.name === "grass_block") &&
+            bot.blockAt(block.position.offset(0, 1, 0))?.boundingBox !== "block",
+          maxDistance: 32, count: HARVEST_BATCH_LIMIT,
+        });
+        if (!barePositions.length) return fail("couldn't find any ripe crops or open ground to start a new farm.");
+
+        let tilled = 0, planted = 0;
+        for (const pos of barePositions) {
+          if (token.cancelled) break;
+          try {
+            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2)),
+              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+          } catch {
+            if (token.cancelled) break;
+            continue; // couldn't reach this one -- try the next candidate
+          } finally {
+            bot.pathfinder.setGoal(null);
+          }
+          if (token.cancelled) break;
+
+          const dirtBlock = bot.blockAt(pos);
+          if (!dirtBlock) continue;
+          try {
+            await bot.equip(hoe, "hand");
+            await bot.activateBlock(dirtBlock);
+            tilled++;
+          } catch (err) {
+            console.error("harvest: tilling failed:", err.message);
+            continue;
+          }
+          const seed = bot.inventory.items().find((i) => seedNames.includes(i.name));
+          if (seed) {
+            try {
+              await bot.equip(seed, "hand");
+              await bot.placeBlock(bot.blockAt(pos), new Vec3(0, 1, 0)); // re-fetch: now farmland, not the old dirtBlock snapshot
+              planted++;
+            } catch (err) {
+              console.error("harvest: planting failed:", err.message); // this tilling still counts
+            }
+          }
+        }
+        await refreshGear(bot);
+        if (!tilled) return fail("couldn't till any ground to start a new farm.");
+        return ok(`started a new farm plot: tilled ${tilled}, planted ${planted}${token.cancelled ? ", stopped early" : ""}.`);
+      }
 
       const harvestedCounts = {};
       let replantedCount = 0;

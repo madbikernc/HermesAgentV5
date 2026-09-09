@@ -1,4 +1,9 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-09-08) -- direct follow-up to a "what other autonomous behaviors are solvable"
+// survey ("fix all the above"): MATCH_DISTANCE_THRESHOLD re-calibrated 0.7 -> 0.78 against the
+// real, organically-grown 20-skill corpus (not the single seeded test skill 0.7 was tuned
+// against) -- see its own comment for the real measured distances that motivated this.
 //
 // 1.0.0 (2026-09-08) -- direct request "start on #6" (MINECRAFT_BOTS_DESIGN.md §14, a Voyager-
 // style dynamic skill library). A skill is data, not code: {name, steps: [{action, ...args}]} --
@@ -34,24 +39,23 @@ const SEARCH_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-search-minecraft
 const INGEST_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-ingest-minecraft-skills.py");
 const SKILLS_DIR = "/mnt/hermes-data/minecraft-memory/skills";
 
-// Empirically calibrated live against a real seeded test skill, not guessed -- and NOT the same
-// order of magnitude as longterm.js's own DUPLICATE_DISTANCE_THRESHOLD (0.15), which was tuned
-// for near-DUPLICATE text (the same fact, reworded slightly). A goal description and a stored
-// skill's description are written by two different model calls at two different times for the
-// same general TASK, a much looser match -- real queries closely related to a real seeded skill
-// ("craft a wooden pickaxe," "I have no tools and need a pickaxe," "gather wood and make a
-// pickaxe") measured cosine distance 0.54-0.64 against it; queries for a genuinely different
-// task ("get iron armor," "build a small shelter for the night") returned no candidate at all
-// rather than a bad-but-present match -- confirmed this is search()'s own corpus-filtering
-// behavior (hermes_rag_common.py), not a relevance cutoff: it fetches a modestly widened top-K
-// across ALL corpora sharing one vec_chunks table, then filters to this one afterward, so a
-// still-small "minecraft-skills" corpus can get crowded out of that shared pool entirely by
-// larger corpora (fleet-docs/ops/podcasts/personal-kb) before this threshold ever gets a chance
-// to reject anything -- expect retrieval to get MORE reliable, not less, as more skills exist to
-// compete for a place in that shared pool, not something to "fix" here. 0.7 sits with real
-// margin above the observed genuine-match range while still providing a real ceiling once the
-// corpus is big enough for an actual bad-but-present match to show up.
-const MATCH_DISTANCE_THRESHOLD = 0.7;
+// Re-calibrated live 2026-09-08 against the REAL, organically-grown corpus (20 skills authored
+// by authorSkillFromGoal() over the course of one night, not a single seeded test skill) after
+// a direct report that retrieval barely ever hit despite goals closely matching what was
+// already stored. The original 0.7 (tuned against one seeded skill in an empty corpus) was
+// rejecting roughly half of genuinely relevant matches -- real measurements against the grown
+// corpus: "Secure iron leggings" (0.76), "smelt myself an iron chestplate" (0.76), "Iron armor
+// first" (0.66), "gather wood and craft tools" (0.67), "get some copper" (0.68) all matched a
+// real, correct skill, but every one of those distances is ABOVE the old 0.7 cutoff except two.
+// No single value cleanly separates genuine matches from noise at this corpus size, confirmed by
+// negative controls landing IN the same range as some positives ("build a small shelter" 0.83,
+// "breed some cows" 0.88, both genuinely unrelated -- but "get iron armor" vs a general iron-
+// production skill also measured 0.87 despite being conceptually related). 0.78 is a practical
+// compromise, not a perfect one: it captures the bulk of the observed genuine-match cluster
+// (0.66-0.77) while still excluding the clearest negatives. Revisit again as the corpus keeps
+// growing -- retrieval quality should keep improving as more, better-described skills exist to
+// compete for a match, the same expectation the original calibration comment already noted.
+const MATCH_DISTANCE_THRESHOLD = 0.78;
 // Matches actions.js's own comment on why a stored skill is bounded, not an unbounded program --
 // same "small, fixed caps everywhere else in this codebase" reasoning as
 // HARVEST_BATCH_LIMIT/MAX_CONSECUTIVE_FAILURES.

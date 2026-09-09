@@ -1,4 +1,39 @@
-// Version: 2.36.0
+// Version: 2.40.0
+//
+// 2.40.0 (2026-09-08) -- item #6 of "fix all the above" (squad response for Mark/Luke). Self-
+// defense was purely individual despite Mark/Luke's own "military... defending the spawn point"
+// framing (2026-09-07) implying a squad that backs each other up. New broadcastThreatAlert() over
+// the existing "minecraft-coordination" Buzz topic (same JSON-payload channel otherBotGoals
+// already reads) -- checkSelfDefense() calls it (cooldown-debounced) whenever a real threat is
+// found. New SQUAD_RESPONDER (env-gated per-bot, same pattern as
+// MC_SELF_DEFENSE_FLEE_HEALTH/RANGE, set true for Mark/Luke only -- Babs/Amy abandoning a
+// gathering run for a fight three biomes away would be a net loss, not backup) + respondToSquadCall():
+// on hearing an alert within SQUAD_ASSIST_RANGE, force-cancels current action (same shape as
+// checkSelfDefense's own interrupt), travels to the real coordinates, and fights whatever hostile
+// is still there.
+//
+// 2.39.0 (2026-09-08) -- item #5 of "fix all the above" (inventory insurance). New
+// checkInventoryInsurance(): checkInventoryFull()'s own store pass, refactored into a shared
+// storeSurplusValuables() and now ALSO triggered by taking real damage (health <=
+// INSURANCE_HEALTH_THRESHOLD, well above the emergency-flee threshold), not just by running out
+// of inventory space. A bot could carry a stack of diamonds or a spare armor set indefinitely
+// with room to spare and never bank any of it -- a death that was otherwise survivable-in-
+// hindsight still wiped out real progress a nearby chest could have prevented. Cooldown-gated so
+// one low-health episode doesn't retry every idle tick.
+//
+// 2.38.0 (2026-09-08) -- item #3 of "fix all the above" (farming from scratch, actions.js
+// 1.30.0's own new till-and-plant fallback in "harvest"). Both ACTION HARVEST descriptions
+// (classifyIntent's direct-command parser and the goal-step planner) now mention that harvest
+// also starts a new farm when nothing is ripe yet, so the planner knows one verb covers both
+// cases instead of never reaching for it to bootstrap a farm.
+//
+// 2.37.0 (2026-09-08) -- companion fix to actions.js 1.28.0: checkSelfDefense(), the emergency-
+// health handler, and checkSleepingThreat all already hold the real entity they detected via
+// nearestHostile(bot, SELF_DEFENSE_RANGE) -- now passed through as action.target on the
+// performAction() call instead of being discarded, so "attack"/"flee" don't re-derive it (and
+// race it moving/despawning) a second time. Found live verifying Mayor's first directive: Mark
+// was stuck thrashing on this exact bug (spamming detect-then-fail every 2s) instead of ever
+// getting back to an idle tick that could have heard and acted on the directive.
 //
 // 2.36.0 (2026-09-08) -- direct request: "add another bot, Mayor, whose personality is to be a
 // leader and set goals for the others. The others can defer to him when his instructions are
@@ -887,6 +922,20 @@ async function broadcastGoalState(status, description) {
   }
 }
 
+// Item #6 of "fix all the above" (squad response for Mark/Luke). Same best-effort broadcast
+// pattern as broadcastGoalState -- see checkSelfDefense's own call site for the cooldown that
+// keeps one drawn-out fight from spamming this every 2s.
+async function broadcastThreatAlert(threatName) {
+  try {
+    await buzzPublish(AGENT_ID, "minecraft-coordination", JSON.stringify({
+      type: "threat", name: threatName,
+      x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
+    }));
+  } catch (err) {
+    console.error(`[${USERNAME}] threat alert broadcast failed:`, err.message);
+  }
+}
+
 loadGoal(PERSONA_NAME).then((g) => {
   currentGoal = g;
   if (g) console.log(`[${USERNAME}] resumed goal: ${g.description} (${g.steps} steps so far)`);
@@ -952,7 +1001,9 @@ async function classifyIntent(speaker, message) {
           `if unstated.\n` +
           `ACTION TRADE <item_id> - asks ${USERNAME} to trade with a nearby villager for a ` +
           `specific item she wants\n` +
-          `ACTION HARVEST - asks ${USERNAME} to pick a ripe crop nearby and replant it\n` +
+          `ACTION HARVEST - asks ${USERNAME} to pick a ripe crop nearby and replant it, or, if ` +
+          `nothing is ripe yet, till open ground and plant seeds she's carrying to start a new ` +
+          `farm\n` +
           `ACTION EXPLORE - asks ${USERNAME} to go looking for any useful raw material (wood, ` +
           `ore) when no specific one was named. No parameters.\n` +
           `ACTION BREED <species> - asks ${USERNAME} to breed two nearby animals of the same ` +
@@ -1393,8 +1444,8 @@ async function planNextStep(goal) {
           `right next to herself, when SMELT/CRAFT needs one and none is reachable.\n` +
           `ACTION LOOT - check the nearest chest for anything useful (gear, resources, whatever's in there)\n` +
           `ACTION ATTACK - fight a nearby hostile mob\n` +
-          `ACTION HARVEST - pick a ripe crop nearby and replant it, if the goal is about food or ` +
-          `farming\n` +
+          `ACTION HARVEST - pick a ripe crop nearby and replant it, or till open ground and plant ` +
+          `seeds to start a new farm if nothing is ripe yet, if the goal is about food or farming\n` +
           `ACTION BREED <species> - breed two nearby animals of the same kind (cow, sheep, pig, ` +
           `or chicken) using the right food, if the goal is about animals or farming\n` +
           `ACTION ENCHANT <item_id> - enchant an item she's carrying at a nearby enchanting table ` +
@@ -1976,6 +2027,24 @@ const SELF_DEFENSE_CHECK_MS = parseInt(process.env.MC_SELF_DEFENSE_CHECK_MS || "
 const SELF_DEFENSE_FLEE_HEALTH = parseInt(process.env.MC_SELF_DEFENSE_FLEE_HEALTH || "10", 10);
 const SELF_DEFENSE_RANGE = parseInt(process.env.MC_SELF_DEFENSE_RANGE || "12", 10);
 
+// Item #6 of "fix all the above" (squad response). Real gap: self-defense was purely individual
+// -- Mark/Luke's own "military... defending the spawn point" framing (2026-09-07) implied a
+// squad that backs each other up, but nothing ever told a teammate someone else was under
+// attack. ANY bot broadcasts a threat alert (calling for help costs nothing and might as well be
+// universal), but only a SQUAD_RESPONDER actually drops what she's doing to go help -- Babs/Amy
+// abandoning a gathering run for a spider three biomes away would be a net loss, not backup.
+// Mirrors MC_SELF_DEFENSE_FLEE_HEALTH/RANGE's own "same code, per-bot tuning via each unit's own
+// Environment= lines" pattern, set true for Mark/Luke only.
+const SQUAD_RESPONDER = process.env.MC_SQUAD_RESPONDER === "true";
+// No point racing across half the map for a fight that's very likely already over by the time
+// she'd arrive -- bounded to a real, reachable-in-time assist radius.
+const SQUAD_ASSIST_RANGE = 48;
+// Keeps one drawn-out fight from re-alerting every 2000ms (checkSelfDefense's own tick) for the
+// entire duration -- one call for help per fight is enough for a teammate to start moving.
+const SQUAD_ALERT_COOLDOWN_MS = 15_000;
+let lastSquadAlertAt = 0;
+let squadResponseInFlight = false;
+
 // Direct report, 2026-09-08 ("they still don't seem to react to a threatening creature"). Real,
 // confirmed gap: this used to be gated on !acting, same as every other idle-tick check here --
 // but `acting` now spans an entire physical action end-to-end (up to ACTION_TIMEOUT_MS, 90s
@@ -1998,6 +2067,10 @@ async function checkSelfDefense() {
   selfDefenseInFlight = true;
   console.log(`[${USERNAME}] self-defense: threat detected (${threat.name}) -- force-cancelling ` +
               `current action to respond`);
+  if (Date.now() - lastSquadAlertAt > SQUAD_ALERT_COOLDOWN_MS) {
+    lastSquadAlertAt = Date.now();
+    broadcastThreatAlert(threat.name);
+  }
   // Same interruption primitives actions.js's own stopCurrent() uses.
   bot.pathfinder.setGoal(null);
   if (bot.pvp.target) bot.pvp.stop();
@@ -2014,7 +2087,9 @@ async function checkSelfDefense() {
     try {
       const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
       console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
-      const result = await performAction(bot, { type }, USERNAME);
+      // action.target: the already-found entity, not re-derived -- see actions.js's own
+      // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.
+      const result = await performAction(bot, { type, target: threat }, USERNAME);
       console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
     } finally {
       acting = false;
@@ -2029,6 +2104,56 @@ async function checkSelfDefense() {
 setInterval(() => {
   checkSelfDefense().catch((err) => console.error(`[${USERNAME}] checkSelfDefense error:`, err.message));
 }, SELF_DEFENSE_CHECK_MS);
+
+// Squad response (item #6 of "fix all the above"), the SQUAD_RESPONDER receiving side -- same
+// force-cancel-then-wait-then-act shape checkSelfDefense already uses, since a teammate under
+// attack is exactly as urgent as being under attack herself. Travels toward the alert's real
+// coordinates (a manual setTimeout-guarded goto, same pattern the shore-travel code above already
+// uses -- no shared withTimeout() to import, that helper is actions.js-private) and, once there,
+// runs the real self-defense attack against whatever hostile she can actually find -- the
+// original threat may already be dead by the time she arrives, in which case there's simply
+// nothing left to do, a good outcome, not a failure.
+const SQUAD_RESPONSE_TRAVEL_TIMEOUT_MS = 20_000;
+
+async function respondToSquadCall(payload) {
+  squadResponseInFlight = true;
+  bot.pathfinder.setGoal(null);
+  if (bot.pvp.target) bot.pvp.stop();
+  bot.collectBlock.cancelTask();
+  bot.stopDigging();
+  try {
+    const deadline = Date.now() + 3000;
+    while ((busy || acting) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    acting = true;
+    try {
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; bot.pathfinder.setGoal(null); },
+        SQUAD_RESPONSE_TRAVEL_TIMEOUT_MS);
+      try {
+        await bot.pathfinder.goto(new goals.GoalNear(payload.x, payload.y, payload.z, 4));
+      } catch (err) {
+        if (!timedOut) console.error(`[${USERNAME}] squad response travel failed:`, err.message);
+      } finally {
+        clearTimeout(timer);
+        bot.pathfinder.setGoal(null);
+      }
+
+      const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
+      if (!threat) {
+        console.log(`[${USERNAME}] squad response: arrived, nothing left to fight.`);
+      } else {
+        const result = await performAction(bot, { type: "attack", target: threat }, USERNAME);
+        console.log(`[${USERNAME}] squad response result: ${result.text} (ok=${result.ok})`);
+      }
+    } finally {
+      acting = false;
+    }
+  } finally {
+    squadResponseInFlight = false;
+  }
+}
 
 // Direct follow-up, 2026-09-07: "look for more ways to improve their autonomy" -> hunger. Same
 // idle-tick/busy-acting pattern as checkSleep/checkSelfDefense. Eats proactively (below full, not
@@ -2109,11 +2234,9 @@ const INVENTORY_CHECK_MS = parseInt(process.env.MC_INVENTORY_CHECK_MS || "20000"
 const INVENTORY_FULL_SLOTS = 3; // 3 or fewer empty slots counts as "getting full"
 const INVENTORY_MAIN_HOTBAR_SLOTS = 36;
 
-async function checkInventoryFull() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
-  const emptySlots = INVENTORY_MAIN_HOTBAR_SLOTS - bot.inventory.items().length;
-  if (emptySlots > INVENTORY_FULL_SLOTS) return;
-
+// Extracted so checkInventoryInsurance() (below) can trigger the exact same store pass off a
+// different condition, instead of a second copy drifting out of sync.
+async function storeSurplusValuables(reason) {
   const surplus = bot.inventory.items().filter((i) => !isEssentialItem(i.name));
   if (!surplus.length) return; // genuinely nothing spare to store this tick
   surplus.sort((a, b) => b.count - a.count);
@@ -2123,16 +2246,51 @@ async function checkInventoryFull() {
   acting = true;
   try {
     const result = await performAction(bot, { type: "store", item: target.name, count: target.count }, USERNAME);
-    console.log(`[${USERNAME}] inventory management: ${result.text} (ok=${result.ok})`);
+    console.log(`[${USERNAME}] ${reason}: ${result.text} (ok=${result.ok})`);
   } catch (err) {
-    console.error(`[${USERNAME}] inventory check failed:`, err.message);
+    console.error(`[${USERNAME}] ${reason} failed:`, err.message);
   } finally {
     acting = false;
   }
 }
 
+async function checkInventoryFull() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  const emptySlots = INVENTORY_MAIN_HOTBAR_SLOTS - bot.inventory.items().length;
+  if (emptySlots > INVENTORY_FULL_SLOTS) return;
+  await storeSurplusValuables("inventory management");
+}
+
 setInterval(() => {
   checkInventoryFull().catch((err) => console.error(`[${USERNAME}] checkInventoryFull error:`, err.message));
+}, INVENTORY_CHECK_MS);
+
+// Item #5 of "fix all the above" (inventory insurance). Real gap: checkInventoryFull() only ever
+// stores surplus when SPACE runs low -- a bot can carry a stack of diamonds or a full spare
+// armor set indefinitely with room to spare and never bank any of it, so a death that was
+// otherwise perfectly survivable-in-hindsight (just bad luck, not a resource problem) still wipes
+// out real, hard-won progress for no reason a chest three minutes away couldn't have prevented.
+// This is the same storeSurplusValuables() pass, triggered by a different, risk-based condition
+// instead: taken real damage (health at or below INSURANCE_HEALTH_THRESHOLD, well above
+// EMERGENCY_HEALTH_THRESHOLD's near-death flee trigger -- this fires on "this is getting risky,"
+// not "about to die"). A cooldown keeps one low-health episode from retrying every tick while
+// health stays low -- one honest attempt is enough; retrying constantly wouldn't bank anything
+// new and would just compete with checkSelfDefense for the same idle ticks.
+const INSURANCE_HEALTH_THRESHOLD = 14; // out of 20
+const INSURANCE_COOLDOWN_MS = 120_000;
+let lastInsuranceAttemptAt = 0;
+
+async function checkInventoryInsurance() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (bot.health > INSURANCE_HEALTH_THRESHOLD) return;
+  if (Date.now() - lastInsuranceAttemptAt < INSURANCE_COOLDOWN_MS) return;
+  lastInsuranceAttemptAt = Date.now();
+  await storeSurplusValuables("inventory insurance");
+}
+
+setInterval(() => {
+  checkInventoryInsurance().catch((err) =>
+    console.error(`[${USERNAME}] checkInventoryInsurance error:`, err.message));
 }, INVENTORY_CHECK_MS);
 
 // Direct request, 2026-09-07 ("do 1-3" + "and 4" -> torch placement). Same idle-tick/busy-acting
@@ -2407,6 +2565,17 @@ bot.once("spawn", () => {
         if (payload.status === "active") otherBotGoals.set(msg.from_agent, payload.description);
         else otherBotGoals.delete(msg.from_agent);
         console.log(`[${USERNAME}] heard ${msg.from_agent}'s goal: ${payload.status === "active" ? payload.description : "(idle)"}`);
+      } else if (payload.type === "threat" && SQUAD_RESPONDER && !squadResponseInFlight) {
+        const dx = bot.entity.position.x - payload.x;
+        const dy = bot.entity.position.y - payload.y;
+        const dz = bot.entity.position.z - payload.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist <= SQUAD_ASSIST_RANGE) {
+          console.log(`[${USERNAME}] squad response: ${msg.from_agent} under attack (${payload.name}) ` +
+                      `${dist.toFixed(0)} blocks away -- moving to assist`);
+          respondToSquadCall(payload).catch((err) =>
+            console.error(`[${USERNAME}] squad response failed:`, err.message));
+        }
       } else if (payload.type === "request" && !pendingGiveRequest) {
         // Only agrees to fulfill one request at a time (first-come-first-served) -- simple and
         // sufficient at 2-bot scale, avoids overcommitting inventory she doesn't actually have
@@ -2567,7 +2736,7 @@ bot.on("health", () => {
     // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
     acting = true;
     try {
-      const result = await performAction(bot, { type: "flee" }, USERNAME);
+      const result = await performAction(bot, { type: "flee", target: threat }, USERNAME);
       console.log(`[${USERNAME}] emergency flee: ${result.text} (ok=${result.ok})`);
     } catch (err) {
       console.error(`[${USERNAME}] emergency flee failed:`, err.message);
@@ -2736,7 +2905,7 @@ async function checkSleepingThreat() {
   acting = true;
   try {
     const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
-    const result = await performAction(bot, { type }, USERNAME);
+    const result = await performAction(bot, { type, target: threat }, USERNAME);
     console.log(`[${USERNAME}] post-wake defense: ${type} -> ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] post-wake defense failed:`, err.message);
