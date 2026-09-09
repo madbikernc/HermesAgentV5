@@ -1,4 +1,18 @@
-// Version: 2.47.0
+// Version: 2.48.0
+//
+// 2.48.0 (2026-09-09) -- direct request: "monitor their behavior, look for issues." Found and
+// closed a real loophole in the DONE item-verification fix (2.43.0): nothing stopped the model
+// from just answering DONE NONE on a goal that plainly WAS about a specific item, dodging
+// verification entirely -- caught live, "mine some iron" was marked DONE NONE and announced
+// complete with zero successful steps ever logged (SUSPICIOUS DONE fired on the very same line,
+// but that flag was cosmetic-only until now). A NONE claim backed by zero evidence of any real
+// progress is now rejected exactly like a false item claim, via the same safe "treat as a real
+// give-up" path -- NONE is still accepted when real progress WAS logged (a genuinely open-ended
+// goal that isn't reducible to one item, but did succeed at something).
+// Also: storeSurplusNearHome() no longer aborts its whole batch over one item-specific failure
+// (a real one observed live -- pathfinder's own scaffolding mechanic had consumed an item
+// mid-travel between being picked as surplus and the deposit actually running) -- now tries
+// every item in the batch regardless, still bounded by STORE_NEAR_HOME_BATCH_LIMIT.
 //
 // 2.47.0 (2026-09-09) -- direct request: "after any crafting activity, surplus materials should
 // be stored in a chest as close to their sleeping home as possible." New storeSurplusNearHome():
@@ -1866,7 +1880,8 @@ async function goalTick() {
       // refusing the model's own DONE risks a worse failure mode (an endless "are you sure"
       // loop) than the rare cosmetic mislabeling this catches -- visible here for a human, and
       // matched by hermes-minecraft-triage.py's own TRIAGE_PATTERNS for the Firmament to notice.
-      if (currentGoal.steps > 0 && !currentGoal.sawSuccess) {
+      const noEvidenceOfProgress = currentGoal.steps > 0 && !currentGoal.sawSuccess;
+      if (noEvidenceOfProgress) {
         console.log(`[${USERNAME}] SUSPICIOUS DONE (no successful step ever logged for this ` +
                     `goal): ${currentGoal.description}`);
       }
@@ -1879,9 +1894,18 @@ async function goalTick() {
       // since it doesn't verify progress on the actual thing the goal was about). The DONE
       // prompt now asks for the specific item_id that proves completion; checked here against
       // real inventory/equipped gear (not the model's own say-so) before ever telling anyone --
-      // the bot herself included -- that she has something she doesn't. A goal with no single
-      // checkable item (DONE NONE, e.g. "explore the area") skips this and falls back to the
-      // existing sawSuccess-based flag above, unchanged.
+      // the bot herself included -- that she has something she doesn't.
+      //
+      // Direct follow-up, 2026-09-09 ("monitor their behavior, look for issues"): confirmed live
+      // that this item check has its own loophole -- nothing stopped the model from just saying
+      // DONE NONE on a goal that plainly WAS about a specific item, dodging verification entirely.
+      // Caught in the act: "mine some iron" was marked DONE NONE and announced complete with
+      // zero successful steps ever logged (SUSPICIOUS DONE fired on the very same line, but back
+      // then that flag was cosmetic-only). A NONE claim with zero evidence of ANY real progress
+      // is now rejected exactly like a false item claim, using the same safe "treat as a real
+      // give-up" path already proven not to cause an endless retry loop -- NONE is still accepted
+      // when real progress WAS logged (a genuinely open-ended goal like "explore the area" that
+      // isn't reducible to one item, but did succeed at something).
       if (parsed.item) {
         const reallyHasIt = bot.inventory.items().some((i) => i.name === parsed.item) ||
           [5, 6, 7, 8, 45].some((slot) => bot.inventory.slots[slot]?.name === parsed.item);
@@ -1897,6 +1921,16 @@ async function goalTick() {
           await clearGoal(PERSONA_NAME);
           return;
         }
+      } else if (noEvidenceOfProgress) {
+        console.log(`[${USERNAME}] REJECTED DONE (NONE claimed, but no successful step ever ` +
+                    `logged): ${currentGoal.description}`);
+        bot.chat(await narrateAction(
+          `giving up on "${currentGoal.description}" -- never actually made any real progress.`));
+        recordGoalOutcome(currentGoal.description, "gave up", "claimed done with no real progress");
+        await broadcastGoalState("abandoned", currentGoal.description);
+        currentGoal = null;
+        await clearGoal(PERSONA_NAME);
+        return;
       }
 
       console.log(`[${USERNAME}] goal complete: ${currentGoal.description}`);
@@ -2582,7 +2616,13 @@ async function storeSurplusNearHome(reason) {
       // "unlike every other count default (1), this defaults to 'all of it'").
       const result = await performAction(bot, { type: "store", item: name, count: Infinity, near: home }, USERNAME);
       console.log(`[${USERNAME}] ${reason}: ${result.text} (ok=${result.ok})`);
-      if (!result.ok) break; // couldn't find/use a chest this trip -- no point trying more items
+      // Real live gap found 2026-09-09 ("monitor their behavior, look for issues"): a real
+      // failure was observed for one item ("can't find dirt in slots..." -- pathfinder's own
+      // scaffolding mechanic had consumed it mid-travel between when this item was picked as
+      // surplus and when the deposit actually ran) that had nothing to do with the OTHER surplus
+      // items in this same batch -- `break` was throwing away a perfectly good remaining batch
+      // over one item-specific hiccup. Now tries every item regardless; still bounded by
+      // STORE_NEAR_HOME_BATCH_LIMIT either way.
     }
   } catch (err) {
     console.error(`[${USERNAME}] ${reason} failed:`, err.message);
