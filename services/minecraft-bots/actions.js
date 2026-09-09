@@ -1,4 +1,14 @@
-// Version: 1.31.0
+// Version: 1.32.0
+//
+// 1.32.0 (2026-09-08) -- direct request: "before they dig or destroy a block, they should make
+// sure it is not a functional block like a bed or a furnace, a book[shelf], a table, or any
+// other form of crafted item or block." New PROTECTED_BLOCK_NAMES/isProtectedBlockName()
+// (exported for index.js's pathfinder Movements setup to reuse): "mine" now refuses to
+// deliberately target one (resolveBlockFamily()'s own raw single-name fallback would otherwise
+// happily resolve "furnace" or "crafting_table" like any other real block name). The other,
+// bigger half of this -- a bot's pathfinder auto-digging through one incidentally while routing
+// around an obstacle -- is closed in index.js instead, since that's mineflayer-pathfinder's own
+// Movements config, not an actions.js concern.
 //
 // 1.31.0 (2026-09-08) -- item #4 of "fix all the above" (bed ownership). "sleep" re-ran the same
 // "nearest 3 beds" search every night with no memory of what worked before -- on a shared map
@@ -701,6 +711,33 @@ function resolveBlockFamily(bot, requestedName) {
   return single ? [single.id] : [];
 }
 
+// Direct request, 2026-09-08 ("before they dig or destroy a block, they should make sure it is
+// not a functional block like a bed or a furnace, a book[shelf], a table, or any other form of
+// crafted item or block"). Two real, separate places this matters, both closed by this one
+// shared list (exported so index.js's pathfinder Movements setup can reuse the exact same
+// definition, "one definition shared instead of two copies drifting apart" per isEssentialItem's
+// own precedent): (1) resolveBlockFamily()'s own raw single-name fallback (just above) will
+// happily resolve ANY real block name at all, including "furnace" or "crafting_table" -- nothing
+// before now stopped "mine"/"explore" from being pointed at one on purpose. (2) mineflayer-
+// pathfinder's own Movements defaults (confirmed against its real movements.js source) only ever
+// protects chests and non-diggable blocks (bedrock etc.) from auto-digging while pathing around
+// an obstacle -- a furnace, bed, or bookshelf sitting in a bot's way is "diggable" by that
+// library's own definition and gets bulldozed through exactly like stone would. Bed and shulker
+// box colors are matched by suffix since minecraft-data registers each of the 16 as its own
+// block name (`red_bed`, `lime_shulker_box`, etc.), not one shared id.
+const PROTECTED_BLOCK_NAMES = [
+  "furnace", "blast_furnace", "smoker", "crafting_table", "smithing_table", "cartography_table",
+  "fletching_table", "loom", "stonecutter", "grindstone", "anvil", "chipped_anvil", "damaged_anvil",
+  "enchanting_table", "brewing_stand", "cauldron", "beacon", "jukebox", "note_block", "lectern",
+  "composter", "lodestone", "respawn_anchor", "chest", "trapped_chest", "ender_chest", "barrel",
+  "bookshelf", "chiseled_bookshelf",
+];
+
+export function isProtectedBlockName(name) {
+  return PROTECTED_BLOCK_NAMES.includes(name) || (name?.endsWith("_bed") ?? false) ||
+    (name?.endsWith("_shulker_box") ?? false);
+}
+
 // Direct request, 2026-09-07 ("what other logic enhancements are available" -> "explore/
 // wander"): the single biggest recurring blocker across a whole night's live testing was
 // "couldn't find X nearby" (wood, ore, chests) purely because nothing existed within the normal
@@ -1304,6 +1341,14 @@ export async function performAction(bot, action, speaker) {
     case "mine": {
       const blockIds = resolveBlockFamily(bot, action.block);
       if (!blockIds.length) return fail(`I don't recognize the block "${action.block}".`);
+      // Direct request, 2026-09-08 ("make sure it is not a functional block like a bed or a
+      // furnace... before they dig or destroy a block"). resolveBlockFamily()'s own raw
+      // single-name fallback will resolve ANY real block name, functional ones included --
+      // checked here, not inside that function, so it stays a pure "does this name exist"
+      // resolver and every caller decides for itself what's off-limits.
+      if (blockIds.some((id) => isProtectedBlockName(bot.registry.blocks[id]?.name))) {
+        return fail(`won't mine ${action.block} -- that's a placed/crafted block, not a raw resource.`);
+      }
 
       // Direct request, 2026-09-08 ("if a resource is in a nearby chest, they should not mine
       // it"). Checks the REAL resulting item (itemNamesForMinedBlocks/MINE_DROPS above), not the

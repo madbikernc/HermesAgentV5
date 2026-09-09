@@ -1,4 +1,13 @@
-// Version: 2.41.0
+// Version: 2.42.0
+//
+// 2.42.0 (2026-09-08) -- companion fix to actions.js 1.32.0: confirmed against mineflayer-
+// pathfinder's own movements.js source that its default blocksCantBreak only ever protects
+// chests and non-diggable blocks (bedrock etc.) -- a furnace, bed, or bookshelf standing between
+// a bot and her goal is "diggable" by that library's own definition and gets auto-dug through
+// exactly like stone would, independent of whatever action she was actually trying to run. Every
+// real functional/crafted block (isProtectedBlockName(), actions.js -- the same shared list
+// "mine" now refuses to deliberately target) is added to movements.blocksCantBreak at setup, so
+// this holds regardless of why the pathfinder wanted to dig.
 //
 // 2.41.0 (2026-09-08) -- direct live report ("check the bots other than mayor, they are
 // stuck?"), confirmed real: Babs/Amy/Mark/Luke all sat completely idle for 3+ minutes after
@@ -639,7 +648,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile, isEssentialItem } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName } from "./actions.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements } from "./swim-movements.js";
@@ -762,6 +771,19 @@ bot.once("spawn", async () => {
   // deprioritized) when it's genuinely the only way through -- not banned outright, since that
   // would strand her at any water-crossed goal with no alternative route.
   movements.liquidCost = 20;
+  // Direct request, 2026-09-08 ("before they dig or destroy a block, they should make sure it
+  // is not a functional block like a bed or a furnace... or any other form of crafted item or
+  // block"). Confirmed against mineflayer-pathfinder's own movements.js source: its default
+  // blocksCantBreak only ever protects chests and non-diggable blocks (bedrock etc.) from being
+  // auto-dug through while routing around an obstacle -- a furnace, bed, or bookshelf sitting in
+  // a bot's way is "diggable" by that library's own definition and gets bulldozed exactly like
+  // stone would. Adds every real functional/crafted block (isProtectedBlockName(), actions.js --
+  // the same shared list "mine" now also refuses to deliberately target) to blocksCantBreak, so
+  // this holds regardless of WHY the pathfinder wanted to dig, not just for one action's own
+  // deliberate target check.
+  for (const block of bot.registry.blocksArray) {
+    if (isProtectedBlockName(block.name)) movements.blocksCantBreak.add(block.id);
+  }
   bot.pathfinder.setMovements(movements);
 
   // Direct follow-up to "what other logic enhancements are available" -> cave-pathfinding cap:
