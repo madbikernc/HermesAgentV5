@@ -1,4 +1,10 @@
-// Version: 1.37.0
+// Version: 1.38.0
+//
+// 1.38.0 (2026-09-09) -- follow-up to 1.37.0's own deposit-failure logging: watched it live and
+// the one real failure that occurred ("found chests nearby, but couldn't store anything in any
+// of them") showed NO deposit-failure log line at all -- meaning every candidate was actually
+// being skipped at chestObstructed() or the pathfinder-unreachable catch instead, both exactly as
+// silent as the deposit failure was before 1.37.0. Same fix applied to both.
 //
 // 1.37.0 (2026-09-09) -- real live gap found watching the new post-craft cleanup
 // (storeSurplusNearHome, index.js 2.47.0) fire: it failed twice, live, both times with
@@ -2281,7 +2287,16 @@ export async function performAction(bot, action, speaker) {
       for (const pos of positions) {
         if (token.cancelled) return ok("stopped on the way to a chest.");
         const chestBlock = bot.blockAt(pos);
-        if (!chestBlock || chestObstructed(bot, chestBlock)) continue;
+        if (!chestBlock) continue;
+        // Real live gap, 2026-09-09: this and the pathfinder catch just below were exactly as
+        // silent as the deposit failure right after them ("found chests nearby, but couldn't
+        // store anything in any of them" with zero clue why) -- a real occurrence of this
+        // failure showed no deposit-failure log at all, meaning it was skipped here or below
+        // instead, neither of which said so. Logged for the same reason.
+        if (chestObstructed(bot, chestBlock)) {
+          console.log(`[store] skipping chest at ${chestBlock.position}: obstructed (blocked above).`);
+          continue;
+        }
 
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
@@ -2289,6 +2304,7 @@ export async function performAction(bot, action, speaker) {
             () => bot.pathfinder.setGoal(null));
         } catch (err) {
           if (token.cancelled) return ok("stopped on the way to a chest.");
+          console.log(`[store] couldn't reach chest at ${chestBlock.position}: ${err.message}`);
           continue; // couldn't reach this one -- try the next candidate
         } finally {
           bot.pathfinder.setGoal(null);
