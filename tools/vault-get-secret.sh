@@ -159,6 +159,7 @@ flock -w 120 9 || { echo "[vault-get-secret] ERROR: timed out waiting for anothe
 # agent's long-lived session and this script's own short-lived one can coexist indefinitely.
 export BITWARDENCLI_APPDATA_DIR="${HOME}/.hermes/bw-slowpath-appdata"
 mkdir -p "$BITWARDENCLI_APPDATA_DIR"
+chmod 700 "$BITWARDENCLI_APPDATA_DIR"  # match hermes-vault-agent.py's own SOCK_PATH.parent convention
 if [ ! -f "$BITWARDENCLI_APPDATA_DIR/data.json" ]; then
   # One-time bootstrap: copy the server URL from the default profile (already configured per the
   # Requires section above) into this isolated one. Reads BITWARDENCLI_APPDATA_DIR-unset here on
