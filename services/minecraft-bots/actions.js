@@ -1,4 +1,7 @@
-// Version: 1.35.0
+// Version: 1.36.0
+//
+// 1.36.0 (2026-09-09) -- direct request: "'near a building' is defined as 6 blocks."
+// nearBuilding()'s own radius (a guess of 3 until now) is now exactly 6.
 //
 // 1.35.0 (2026-09-09) -- follow-up live findings on "plant_sapling" (1.33.0/1.34.0), both from
 // the SAME 25-minute post-deploy watch: (1) Luke and Mayor failed to find ANY spot to plant,
@@ -1321,7 +1324,9 @@ function looksLikeBuilding(block) {
   return BUILDING_MATERIAL_SUFFIXES.some((suffix) => block.name.endsWith(suffix));
 }
 
-function nearBuilding(bot, pos, radius = 3) {
+// radius=6, direct request 2026-09-09 ("'near a building' is defined as 6 blocks") -- was 3
+// (a guess) until specified exactly.
+function nearBuilding(bot, pos, radius = 6) {
   for (let dx = -radius; dx <= radius; dx++) {
     for (let dy = -1; dy <= 2; dy++) {
       for (let dz = -radius; dz <= radius; dz++) {
