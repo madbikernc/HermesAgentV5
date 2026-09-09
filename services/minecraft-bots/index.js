@@ -1,4 +1,14 @@
-// Version: 2.45.0
+// Version: 2.46.0
+//
+// 2.46.0 (2026-09-09) -- direct request: "when they find saplings, they should plant them (1)
+// near other trees of the same variety if they can (2) in any free soil not directly adjacent
+// to a building if they can't." New checkSaplings() idle-tick reflex (same busy/acting pattern
+// as checkInventoryFull/checkInventoryInsurance): whenever she's carrying any sapling (an
+// incidental drop from mining/chopping trees, never something actively sought), runs actions.js's
+// new "plant_sapling" (1.33.0), which owns the actual WHERE logic. storeSurplusValuables() now
+// excludes saplings from its own "store whatever's largest" surplus pass -- otherwise a bot with
+// a near-full inventory would chest away her sapling stack before ever getting a chance to plant
+// it, since isEssentialItem()'s gear/fuel/food definition has no reason to protect them.
 //
 // 2.45.0 (2026-09-08) -- direct request: "give the mayor a default set of goals to try to
 // accomplish, starting with basic tools for everyone, then basic armor, then farming. he should
@@ -2487,7 +2497,12 @@ const INVENTORY_MAIN_HOTBAR_SLOTS = 36;
 // Extracted so checkInventoryInsurance() (below) can trigger the exact same store pass off a
 // different condition, instead of a second copy drifting out of sync.
 async function storeSurplusValuables(reason) {
-  const surplus = bot.inventory.items().filter((i) => !isEssentialItem(i.name));
+  // Saplings excluded, 2026-09-09: checkSaplings() (below) exists specifically to plant them,
+  // not warehouse them -- without this, a bot with a near-full inventory would chest away her
+  // largest sapling stack before ever getting a chance to plant it, since a sapling is otherwise
+  // just as "non-essential" as any other raw material by isEssentialItem()'s own gear/fuel/food
+  // definition.
+  const surplus = bot.inventory.items().filter((i) => !isEssentialItem(i.name) && !i.name.endsWith("_sapling"));
   if (!surplus.length) return; // genuinely nothing spare to store this tick
   surplus.sort((a, b) => b.count - a.count);
   const target = surplus[0];
@@ -2542,6 +2557,35 @@ setInterval(() => {
   checkInventoryInsurance().catch((err) =>
     console.error(`[${USERNAME}] checkInventoryInsurance error:`, err.message));
 }, INVENTORY_CHECK_MS);
+
+// Direct request, 2026-09-09 ("when they find saplings, they should plant them"). A reflex, same
+// idle-tick/busy-acting pattern as checkInventoryFull/checkInventoryInsurance -- fires whenever
+// she happens to be carrying ANY sapling (mining/chopping trees drops them incidentally, not
+// something she ever went looking for on purpose), not something a player/planner has to ask
+// for. actions.js's own "plant_sapling" (1.33.0) decides WHERE (near a same-species tree, else
+// open ground away from a building); this only decides WHETHER and WHICH.
+const SAPLING_CHECK_MS = parseInt(process.env.MC_SAPLING_CHECK_MS || "30000", 10);
+
+async function checkSaplings() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  const sapling = bot.inventory.items().find((i) => i.name.endsWith("_sapling"));
+  if (!sapling) return;
+
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
+  acting = true;
+  try {
+    const result = await performAction(bot, { type: "plant_sapling", item: sapling.name }, USERNAME);
+    console.log(`[${USERNAME}] sapling planting: ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] sapling check failed:`, err.message);
+  } finally {
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkSaplings().catch((err) => console.error(`[${USERNAME}] checkSaplings error:`, err.message));
+}, SAPLING_CHECK_MS);
 
 // Direct request, 2026-09-07 ("do 1-3" + "and 4" -> torch placement). Same idle-tick/busy-acting
 // pattern as everything else -- fires between discrete actions rather than interrupting an

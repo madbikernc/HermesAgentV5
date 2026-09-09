@@ -1,4 +1,17 @@
-// Version: 1.32.0
+// Version: 1.33.0
+//
+// 1.33.0 (2026-09-09) -- direct request: "when they find saplings, they should plant them (1)
+// near other trees of the same variety if they can (2) in any free soil not directly adjacent
+// to a building if they can't." New "plant_sapling" action (index.js's new checkSaplings() idle-
+// tick check is the one caller -- a reflex, not something a player/planner asks for). Rule 1
+// searches for an existing tree of the SAME species (action.item's own "_sapling" -> "_log"
+// mapping) and plants near it (findPlantableSpotNear(), a small ground-surface scan skipping the
+// trunk itself); rule 2 falls back to any grass/dirt with clear air above that isn't near a
+// "building" -- no real in-game flag for that, so looksLikeBuilding()/nearBuilding() use a
+// practical heuristic (any functional/crafted block via the existing isProtectedBlockName(), or
+// a common hand-placed construction material) rather than an exact detector. Bounded batch
+// (SAPLING_PLANT_BATCH_LIMIT=4) so a bot carrying a big stack of saplings doesn't turn one
+// action call into an unbounded planting spree.
 //
 // 1.32.0 (2026-09-08) -- direct request: "before they dig or destroy a block, they should make
 // sure it is not a functional block like a bed or a furnace, a book[shelf], a table, or any
@@ -596,6 +609,7 @@ export function isEssentialItem(itemName) {
 export const SKILL_ACTION_VERBS = new Set([
   "stop", "goto", "follow", "mine", "craft", "loot", "attack", "flee", "eat", "fish", "give",
   "sleep", "smelt", "place", "build", "store", "trade", "harvest", "breed", "enchant", "explore",
+  "plant_sapling",
 ]);
 
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
@@ -1253,6 +1267,62 @@ function bedNearHazard(bot, bedPos) {
     }
   }
   return false;
+}
+
+// Direct request, 2026-09-09 ("when they find saplings, they should plant them... in any free
+// soil not directly adjacent to a building if they can't [find same-variety trees]"). "A
+// building" has no real in-game flag to check -- this is a practical heuristic, not an exact
+// detector: any functional/crafted block (isProtectedBlockName() -- a chest, furnace, bed, etc.
+// sitting there is a very strong building signal) or a common hand-placed construction material
+// (planks/cobblestone/stone-family/glass/doors -- exactly the kind of block "build"'s own
+// material selection would have used) nearby counts as "a building." A false positive here just
+// means one more otherwise-fine spot gets skipped in favor of another -- cheap, since real
+// forests rarely run short of open ground.
+const BUILDING_MATERIAL_NAMES = ["cobblestone", "mossy_cobblestone", "stone", "smooth_stone",
+  "stone_bricks", "mossy_stone_bricks", "cracked_stone_bricks", "bricks", "glass", "glass_pane"];
+const BUILDING_MATERIAL_SUFFIXES = ["_planks", "_door", "_trapdoor", "_stairs", "_slab", "_fence",
+  "_fence_gate", "_stained_glass", "_stained_glass_pane"];
+
+function looksLikeBuilding(block) {
+  if (!block) return false;
+  if (isProtectedBlockName(block.name)) return true;
+  if (BUILDING_MATERIAL_NAMES.includes(block.name)) return true;
+  return BUILDING_MATERIAL_SUFFIXES.some((suffix) => block.name.endsWith(suffix));
+}
+
+function nearBuilding(bot, pos, radius = 3) {
+  for (let dx = -radius; dx <= radius; dx++) {
+    for (let dy = -1; dy <= 2; dy++) {
+      for (let dz = -radius; dz <= radius; dz++) {
+        if (looksLikeBuilding(bot.blockAt(pos.offset(dx, dy, dz)))) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Rule 1 of sapling planting: near other trees of the same variety, if any are reachable.
+// `center` is some log block belonging to that tree (findBlocks' own match, not necessarily the
+// trunk's base) -- real trunks are several blocks tall, so this scans a small vertical band
+// around center's own Y, not just center's exact level, to find the actual ground surface.
+// Skips the immediate trunk area (radius < 2) so the sapling doesn't get crammed right against
+// the tree it's supposed to be planted "near," not "inside."
+function findPlantableSpotNear(bot, center, radius) {
+  const groundIds = [bot.registry.blocksByName.grass_block?.id, bot.registry.blocksByName.dirt?.id]
+    .filter((id) => id !== undefined);
+  for (let dx = -radius; dx <= radius; dx++) {
+    for (let dz = -radius; dz <= radius; dz++) {
+      if (Math.abs(dx) < 2 && Math.abs(dz) < 2) continue;
+      for (let dy = 2; dy >= -2; dy--) {
+        const pos = center.offset(dx, dy, dz);
+        const ground = bot.blockAt(pos);
+        if (!ground || !groundIds.includes(ground.type)) continue;
+        if (bot.blockAt(pos.offset(0, 1, 0))?.boundingBox === "block") continue;
+        return pos;
+      }
+    }
+  }
+  return null;
 }
 
 // Item #4 of "fix all the above" (bed ownership) -- see "sleep"'s own changelog note below for
@@ -2411,6 +2481,73 @@ export async function performAction(bot, action, speaker) {
       if (!total) return stoppedEarly ? ok("stopped harvesting.") : fail("couldn't harvest any of the ripe crops found.");
       const summary = Object.entries(harvestedCounts).map(([name, n]) => `${n} ${name}`).join(", ");
       return ok(`harvested ${summary} (${replantedCount} replanted)${stoppedEarly ? ", stopped early" : ""}.`);
+    }
+
+    case "plant_sapling": {
+      // Direct request, 2026-09-09: "when they find saplings, they should plant them (1) near
+      // other trees of the same variety if they can (2) in any free soil not directly adjacent
+      // to a building if they can't." action.item is the specific sapling name (e.g.
+      // "oak_sapling") -- checkSaplings() (index.js) is the one caller, picking whichever
+      // sapling she's actually carrying, never invented.
+      const saplingItem = bot.inventory.items().find((i) => i.name === action.item);
+      if (!saplingItem) return fail(`don't have a ${action.item} to plant.`);
+
+      const SAPLING_PLANT_BATCH_LIMIT = 4;
+      const treeName = action.item.replace("_sapling", "_log"); // oak_sapling -> oak_log
+      const treeLogId = bot.registry.blocksByName[treeName]?.id;
+      const groundIds = [bot.registry.blocksByName.grass_block?.id, bot.registry.blocksByName.dirt?.id]
+        .filter((id) => id !== undefined);
+
+      let planted = 0;
+      for (let i = 0; i < SAPLING_PLANT_BATCH_LIMIT; i++) {
+        if (token.cancelled) break;
+        const current = bot.inventory.items().find((it) => it.name === action.item);
+        if (!current) break; // ran out of this sapling type
+
+        // Rule 1: near an existing tree of the same species, if one's reachable.
+        let targetPos = null;
+        if (treeLogId !== undefined) {
+          const treePositions = bot.findBlocks({ matching: [treeLogId], maxDistance: 32, count: 5 });
+          for (const treePos of treePositions) {
+            targetPos = findPlantableSpotNear(bot, treePos, 4);
+            if (targetPos) break;
+          }
+        }
+        // Rule 2: fall back to any free soil not directly adjacent to a building.
+        if (!targetPos) {
+          const positions = bot.findBlocks({
+            matching: (block) => groundIds.includes(block.type) &&
+              bot.blockAt(block.position.offset(0, 1, 0))?.boundingBox !== "block" &&
+              !nearBuilding(bot, block.position),
+            maxDistance: 32, count: 1,
+          });
+          targetPos = positions[0] || null;
+        }
+        if (!targetPos) break; // nowhere good found -- stop, don't force a bad spot
+
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 2)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        } catch {
+          if (token.cancelled) break;
+          break; // couldn't reach this one -- don't keep hunting for spots this call
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) break;
+
+        try {
+          await bot.equip(current, "hand");
+          await bot.placeBlock(bot.blockAt(targetPos), new Vec3(0, 1, 0));
+          planted++;
+        } catch (err) {
+          console.error(`plant_sapling: failed to plant at ${targetPos}:`, err.message);
+          break; // an unexpected placement failure -- don't loop on the same problem
+        }
+      }
+
+      if (!planted) return token.cancelled ? ok("stopped planting.") : fail(`couldn't find anywhere good to plant the ${action.item}.`);
+      return ok(`planted ${planted} ${action.item}${token.cancelled ? ", stopped early" : ""}.`);
     }
 
     case "breed": {
