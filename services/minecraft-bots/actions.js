@@ -1,4 +1,11 @@
-// Version: 1.36.0
+// Version: 1.37.0
+//
+// 1.37.0 (2026-09-09) -- real live gap found watching the new post-craft cleanup
+// (storeSurplusNearHome, index.js 2.47.0) fire: it failed twice, live, both times with
+// "found chests nearby, but couldn't store anything in any of them" and zero visibility into
+// why -- "store"'s own per-candidate deposit failure was silently swallowed (`catch { continue }`,
+// no log), the exact same gap "sleep" already found and fixed once before (2026-09-07) for its
+// own multi-candidate loop, never applied here. Now logged per candidate.
 //
 // 1.36.0 (2026-09-09) -- direct request: "'near a building' is defined as 6 blocks."
 // nearBuilding()'s own radius (a guess of 3 until now) is now exactly 6.
@@ -2293,6 +2300,12 @@ export async function performAction(bot, action, speaker) {
           await chest.deposit(itemDef.id, null, storeCount);
           await chest.close();
         } catch (err) {
+          // Real live gap found 2026-09-09 (storeSurplusNearHome's own post-craft cleanup
+          // failed twice, live, with zero visibility into why): silently swallowing this per-
+          // candidate reason meant "found chests nearby, but couldn't store anything in any of
+          // them" was undiagnosable from the log alone -- same lesson "sleep" already learned
+          // once (2026-09-07) for its own multi-candidate loop, never applied here until now.
+          console.log(`[store] couldn't deposit into chest at ${chestBlock.position}: ${err.message}`);
           continue; // couldn't open/deposit into this one -- try the next candidate
         }
         return ok(`stored ${storeCount} ${action.item} in a chest.`);
