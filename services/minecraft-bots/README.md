@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.18.0
+**Version:** 3.19.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -356,6 +356,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.19.0 | 2026-09-09 | Two more real bugs in sapling planting, found via a 25-minute post-deploy watch: Luke and Mayor never once found a spot to plant near their base (rule 2 had no wander fallback like every other search-based action already has -- fixed), and a real placement failure traced to the "air above" check being too loose (accepted a spot where a sapling/plant was already growing -- now requires real air). |
 | 3.18.0 | 2026-09-09 | After a successful craft or smelt, surplus materials are now stored in the chest nearest to the bot's own claimed bed ("home"), not just the nearest chest overall -- new `storeSurplusNearHome()` + `"store"`'s new `near` param. Also fixes a real live crash in the previous sapling-planting feature (an unguarded null `block.position` in its own chest/ground search, the same mineflayer edge case `findNearestShore()` had already hit once before). |
 | 3.17.0 | 2026-09-09 | Bots now plant any sapling they pick up (an incidental drop from mining/chopping trees) -- near an existing tree of the same species if one's reachable, otherwise on open ground that isn't next to a "building" (a practical heuristic: any functional/crafted block or common construction material nearby). New `checkSaplings()` idle-tick reflex and `"plant_sapling"` action. |
 | 3.16.0 | 2026-09-08 | Mayor now runs a fixed tech-tree curriculum (basic tools -> basic armor -> farming -> iron gear -> diamond gear -> enchanting) instead of freeform directives -- progress tracked via real, verified DONE items (his own gear checked directly, everyone else's via their own checked `DONE <item_id>` broadcasts), advancing the whole fleet together once everyone clears a stage. Persisted so a Mayor restart doesn't reset progress. |
