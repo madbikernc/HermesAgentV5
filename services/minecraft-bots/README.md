@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.15.0
+**Version:** 3.16.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -356,6 +356,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.16.0 | 2026-09-08 | Mayor now runs a fixed tech-tree curriculum (basic tools -> basic armor -> farming -> iron gear -> diamond gear -> enchanting) instead of freeform directives -- progress tracked via real, verified DONE items (his own gear checked directly, everyone else's via their own checked `DONE <item_id>` broadcasts), advancing the whole fleet together once everyone clears a stage. Persisted so a Mayor restart doesn't reset progress. |
 | 3.15.0 | 2026-09-08 | First live misbehavior review (25-minute capture via the new activity log) found and fixed a real bug: both actual deaths in the window lost gear recovery entirely to a token-update race between emergency handlers and `recover()`'s own single-shot goto -- now retries (bounded) on that specific failure. Also added diagnostic logging for the planner's still-recurring "couldn't decide what to do next" fallback. |
 | 3.14.0 | 2026-09-08 | New `infra/minecraft-bots-activity-log/` companion service -- a full, raw, durable `journalctl` mirror of all five bots (`activity.log`, daily-rotated) for later open-ended misbehavior review, separate from `hermes-minecraft-triage.py`'s own pattern-matched-only `triage.log`. Also added `infra/minecraft-bots/minecraft-bot-mayor.service` to the repo (deployed 2026-09-08, never previously committed). |
 | 3.13.0 | 2026-09-08 | Fixed hallucinated goal completions ("Mark and Luke claim they have bows"): a goal is only announced DONE after the specific item that proves it is verified against real inventory/equipped gear, not just on the model's own say-so. The existing "did any step ever succeed" check couldn't catch this -- an unrelated successful step elsewhere in the same goal was enough to pass it. |
