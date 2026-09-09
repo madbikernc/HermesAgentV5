@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.14.0
+**Version:** 3.15.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -356,6 +356,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.15.0 | 2026-09-08 | First live misbehavior review (25-minute capture via the new activity log) found and fixed a real bug: both actual deaths in the window lost gear recovery entirely to a token-update race between emergency handlers and `recover()`'s own single-shot goto -- now retries (bounded) on that specific failure. Also added diagnostic logging for the planner's still-recurring "couldn't decide what to do next" fallback. |
 | 3.14.0 | 2026-09-08 | New `infra/minecraft-bots-activity-log/` companion service -- a full, raw, durable `journalctl` mirror of all five bots (`activity.log`, daily-rotated) for later open-ended misbehavior review, separate from `hermes-minecraft-triage.py`'s own pattern-matched-only `triage.log`. Also added `infra/minecraft-bots/minecraft-bot-mayor.service` to the repo (deployed 2026-09-08, never previously committed). |
 | 3.13.0 | 2026-09-08 | Fixed hallucinated goal completions ("Mark and Luke claim they have bows"): a goal is only announced DONE after the specific item that proves it is verified against real inventory/equipped gear, not just on the model's own say-so. The existing "did any step ever succeed" check couldn't catch this -- an unrelated successful step elsewhere in the same goal was enough to pass it. |
 | 3.12.0 | 2026-09-08 | Functional/crafted blocks (bed, furnace, crafting table, bookshelf, etc.) can no longer be dug or destroyed -- `"mine"` refuses to deliberately target one by name, and `movements.blocksCantBreak` now protects them from the pathfinder auto-digging through one incidentally while routing around an obstacle (confirmed live: stock mineflayer-pathfinder only ever protects chests and non-diggable blocks by default). |
