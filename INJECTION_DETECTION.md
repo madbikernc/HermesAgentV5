@@ -26,26 +26,32 @@ one-time warning, not a hard failure.
 
 ## Layer 1: pattern categories
 
-Five independent regex categories, each returning matched snippets:
+Six independent regex categories, each returning matched snippets:
 
 | Category | Matches | Legitimate in `user` text? |
 |---|---|---|
-| `cmd_injection` | `$(...)`, backticks, `; rm/curl/wget/nc/bash/chmod/sudo`, `curl\|sh`, `nc -e`, `/etc/passwd`, `base64 -d \| sh` | Yes (debugging help) |
+| `cmd_injection` | `$(...)`, backticks, `; rm/curl/wget/nc/bash/chmod/sudo` (case-insensitive), `curl\|sh` (flags tolerated), `nc -e`, `/etc/passwd`, `base64 -d \| sh` | Yes (debugging help) |
 | `sql_injection` | `UNION...SELECT`, `' OR '1'='1`, `; DROP TABLE`, `xp_cmdshell`, `SLEEP()/BENCHMARK()`, `WAITFOR DELAY` | Yes (debugging help) |
-| `role_spoof` | Fake role tags (`system:`, `assistant:` at line start), `<\|im_start\|>`/`<\|im_end\|>`, `[INST]`/`[/INST]`, `<think>`, `### system` | **Never** |
-| `unicode_smuggling` | Bidi override chars, zero-width chars, Unicode tag block (ASCII smuggling) | **Never** |
-| `instruction_override` | "ignore previous/above/prior instructions", "disregard the system prompt", "new instructions:", "you are now X" | Ambiguous — see severity rule |
+| `role_spoof` | Fake role tags (`system:`/`assistant:`/`human:` at line start), `<\|im_start\|>`/`<\|im_end\|>`, `<\|system\|>`/`<\|user\|>`/`<\|assistant\|>`, `<<SYS>>`/`<</SYS>>`, `[INST]`/`[/INST]`, `<think>`, `### system` | **Never** |
+| `unicode_smuggling` | Bidi override + isolate chars, zero-width chars (incl. word joiner), Unicode tag block (ASCII smuggling) | **Never** |
+| `instruction_override` | "ignore previous/above/prior instructions", "ignore everything above", "forget your instructions", "disregard the system prompt", "new instructions:", "you are now X" | Ambiguous — see severity rule |
+| `prompt_exfiltration` | "repeat/print/reveal the text above", "what are your instructions", "reveal your (system) prompt" | Ambiguous — see severity rule |
+
+`prompt_exfiltration` is distinct from `instruction_override`: the latter
+is about getting the model to behave differently going forward, the
+former is about extracting the prompt/instructions verbatim. Both are
+treated the same way by severity — see below.
 
 ## Python pattern matching
 
 CMD_INJECTION = [
-    r'\$\([^)]+\)',                                    # $(...) command substitution
-    r'`[^`]+`',                                         # backtick substitution
-    r'[;&|]{1,2}\s*(rm|curl|wget|nc|bash|sh|python[23]?|chmod|chown|sudo|dd|mkfs)\b',
-    r'\b(curl|wget)\s+\S+\s*\|\s*(sh|bash)\b',          # curl|sh / wget|sh
-    r'\bnc\s+-e\b',                                     # netcat reverse shell
-    r'/etc/(passwd|shadow)\b',
-    r'\bbase64\s+-d\b.{0,20}\|\s*(sh|bash)',
+    r'(?i)\$\([^)]+\)',                                    # $(...) command substitution
+    r'(?i)`[^`]+`',                                         # backtick substitution
+    r'(?i)[;&|]{1,2}\s*(rm|curl|wget|nc|bash|sh|python[23]?|chmod|chown|sudo|dd|mkfs)\b',
+    r'(?i)\b(curl|wget)\s+\S+(?:\s+\S+){0,4}\s*\|\s*(sh|bash)\b',  # curl|sh / wget|sh, flags tolerated
+    r'(?i)\bnc\s+-e\b',                                     # netcat reverse shell
+    r'(?i)/etc/(passwd|shadow)\b',
+    r'(?i)\bbase64\s+-d\b.{0,20}\|\s*(sh|bash)',
 ]
 
 SQL_INJECTION = [
@@ -59,26 +65,79 @@ SQL_INJECTION = [
 
 ### Structural spoofing — never legitimate in a message's content string, regardless of what role sent it.
 ROLE_SPOOF = [
-    r"(?im)^\s*(system|user|assistant|tool)\s*:\s",     # fake role tag at line start
+    r"(?im)^\s*(system|user|assistant|tool|human)\s*:\s",  # fake role tag at line start
+                                                             # ("human" catches the classic
+                                                             # Anthropic completions-style
+                                                             # `\n\nHuman:` injection format)
     r"<\|im_start\|>|<\|im_end\|>",
+    r"<\|(system|user|assistant)\|>",                       # ChatML-adjacent role tags
+    r"<<SYS>>|<</SYS>>",                                    # Llama-2 system delimiters
     r"\[INST\]|\[/INST\]",
     r"</?think>",
     r"(?i)###\s*(system|instruction)\b",
 ]
 
 UNICODE_SMUGGLING = [
-    r"[‪-‮]",                  # bidi override chars
-    r"[​‌‍﻿]",       # zero-width chars
+    r"[\u202A-\u202E\u2066-\u2069]",     # bidi override + isolate chars
+    r"[\u200B-\u200D\u2060\uFEFF]",       # zero-width chars: ZWSP/ZWNJ/ZWJ/word-joiner/BOM
     r"[\U000E0000-\U000E007F]",          # Unicode tag block (ASCII smuggling)
 ]
 
-# Semantic-but-still-pattern-matchable phrasing — catches the unsophisticated, attacker before Layer 2 (Prompt Guard 2) would ever need to run.
+# Semantic-but-still-pattern-matchable phrasing — catches the unsophisticated attacker before Layer 2 (Prompt Guard 2) would ever need to run.
 INSTRUCTION_OVERRIDE = [
     r"(?i)\bignore\s+(all\s+)?(previous|above|prior)\s+instructions\b",
+    r"(?i)\bignore\s+(everything|all)\s+(above|before\s+this)\b",
     r"(?i)\bdisregard\s+(the\s+)?(system\s+)?prompt\b",
+    r"(?i)\bforget\s+(your|all|previous)\s+instructions\b",
     r"(?i)\bnew\s+instructions\s*:",
     r"(?i)\byou\s+are\s+now\s+\w+",
 ]
+
+# System-prompt / instruction exfiltration attempts — distinct from INSTRUCTION_OVERRIDE
+# (which is about behavior going forward, not extracting the prompt verbatim).
+PROMPT_EXFILTRATION = [
+    r"(?i)\b(repeat|print|output|show|reveal)\s+(the\s+)?(text|words|instructions|prompt|everything)\s+above\b",
+    r"(?i)\bwhat\s+(are|were)\s+your\s+(system\s+)?instructions\b",
+    r"(?i)\breveal\s+(your\s+)?(system\s+)?prompt\b",
+    r"(?i)\brepeat\s+(everything|all)\s+(above|before\s+this)\b",
+]
+
+## Layer 2: classifier implementation
+
+HermesAgentV5 runs Layer 2 as a small resident HTTP service wrapping
+Meta's **Llama-Prompt-Guard-2-22M**, stock weights, never fine-tuned or
+abliterated — deliberately: removing refusal disposition from the one
+component whose entire job is refusal-under-pressure would be
+self-defeating, so this is the one model in the stack that's never a
+candidate for that kind of modification.
+
+- **Architecture**: a DeBERTa-v2 sequence-classification head, not a
+  causal LM — it doesn't run on a causal-LM inference server; it's served
+  directly via `transformers` (`AutoModelForSequenceClassification`).
+  22M params, ~283MB.
+- **Compute**: CPU-only, deliberately. Classification takes low tens of
+  milliseconds even without a GPU, and keeping it off-GPU means Layer 2
+  costs zero accelerator/KV-cache headroom against whatever LLM backends
+  share the host.
+- **Output**: binary classifier per Meta's own model card — `MALICIOUS`
+  (an explicit attempt to override prior instructions) or `BENIGN`, each
+  with its own softmax probability as the score. No injection/jailbreak
+  sub-labels in this generation of the model (v1 had them; Meta found
+  that objective too broad to be useful). Note the checkpoint ships
+  generic `id2label` (`LABEL_0`/`LABEL_1`) rather than named labels —
+  normalize that mapping in the wrapper rather than trusting the model
+  config.
+- **Context window**: 512 tokens. Longer input is truncated, not split —
+  a guard that fails closed on long input is worse than one that screens
+  a truncated prefix. A caller wanting full-document coverage should
+  chunk before calling, same scoping rule Layer 1 uses per-message.
+- **Threshold**: a hit is `label == MALICIOUS and score >= THRESHOLD`,
+  threshold configurable, defaulting to 0.5.
+- **Service contract**: bearer-token-authenticated HTTP (`POST /classify`
+  with `{"text": ...}`, `GET /health`), token compared with a
+  constant-time check. The token is injected by a wrapper script that
+  pulls it from a secrets vault at process start — the classifier service
+  itself never has secrets touch disk.
 
 ## Severity: keyed by message role, not content alone
 
@@ -88,13 +147,13 @@ a shell script for review). The rule:
 - `role_spoof` / `unicode_smuggling` hits → **always block**, in any
   role's content. No honest reason for a bidi override or a fake role
   tag to appear inside a message body.
-- `cmd_injection` / `sql_injection` / `instruction_override` hits in a
-  **tool-originated** message (RAG chunk, fetched page, tool/broker
-  result — content the model is *reading*, not content a human typed on
-  purpose) → **block**. A retrieved webpage has no legitimate reason to
-  contain a reverse-shell one-liner or tell the model to ignore its
-  instructions. This is the "adversarial content retrieved by an agent"
-  case.
+- `cmd_injection` / `sql_injection` / `instruction_override` /
+  `prompt_exfiltration` hits in a **tool-originated** message (RAG chunk,
+  fetched page, tool/broker result — content the model is *reading*, not
+  content a human typed on purpose) → **block**. A retrieved webpage has
+  no legitimate reason to contain a reverse-shell one-liner, tell the
+  model to ignore its instructions, or ask it to repeat its system
+  prompt. This is the "adversarial content retrieved by an agent" case.
 - Same categories in a **user** message → **flag only**, never a hard
   block on this signal alone. Expected and often legitimate.
 
@@ -102,7 +161,7 @@ a shell script for review). The rule:
 severity(role, hits):
     if hits is empty: "clean"
     if hits ∩ {role_spoof, unicode_smuggling}: "block"
-    if role == "tool" and hits ∩ {cmd_injection, sql_injection, instruction_override}: "block"
+    if role == "tool" and hits ∩ {cmd_injection, sql_injection, instruction_override, prompt_exfiltration}: "block"
     else: "flag"
 ```
 
@@ -150,3 +209,19 @@ an operational digest without needing to query raw logs per host.
   it, this either blocks legitimate technical conversation or misses the
   actual attack surface (tool-retrieved content), depending on which way
   you tune it.
+- Watch the gap between Layer 1's and Layer 2's effective reach: Layer 1
+  scans the full text with no length limit, but a caller-side truncation
+  (e.g. ~4000 chars) plus the classifier's own token window (512 tokens,
+  roughly 2000-2600 chars) means Layer 2 only ever sees a prefix of a long
+  document. An attacker can pad a tool result with enough benign filler
+  to push a payload past Layer 2's real window while staying inside
+  Layer 1's unbounded reach — meaning the pattern scan is the sole
+  backstop for anything beyond roughly the first page of a long result.
+  Not fixed here; would require chunking and scanning each chunk.
+- Keep every category's patterns case-insensitive by default (`(?i)`) —
+  an inconsistency here (one category case-sensitive while its siblings
+  aren't) is a silent bypass, not a deliberate tightening.
+- All regexes here use bounded quantifiers (`{0,N}`, `{0,N}`-style repeat
+  counts) rather than unbounded nested repetition — deliberate, to keep
+  the scan free of catastrophic-backtracking (ReDoS) risk on adversarial
+  input. Preserve that property in any pattern you add.

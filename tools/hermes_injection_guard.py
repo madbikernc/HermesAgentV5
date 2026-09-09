@@ -1,11 +1,42 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
 """
 hermes_injection_guard.py — Heuristic (pattern-layer) prompt/command/SQL-injection
 scanner for hermes-router.py, plus a small persistent event log so the daily
 fleet-health report can summarize block/flag counts without needing SSH into
 each node (hermes-router.py exposes them over its own `/guard/stats` GET
 endpoint — see that file's 2.4.0 changelog entry).
+
+1.2.0 (2026-09-09): pattern-catalog hardening pass, no change to severity()/
+scan_messages()/the log schema -- catalog-level only:
+  - CMD_INJECTION patterns are now case-insensitive. Previously only
+    SQL_INJECTION and INSTRUCTION_OVERRIDE carried (?i); CMD_INJECTION didn't,
+    an inconsistency (not a deliberate choice) that let case variation alone
+    slip text past the cmd-injection category.
+  - curl/wget-pipe-to-shell now tolerates multiple flag tokens before the
+    pipe. The old pattern only matched a single token between the command and
+    `|` (`curl <url> | bash`), missing the far more common
+    `curl -fsSL <url> | bash` form (flags + URL = two tokens).
+  - New PROMPT_EXFILTRATION category: "repeat/print/reveal the text above",
+    "what are your instructions", etc. Distinct from INSTRUCTION_OVERRIDE
+    (which is about overriding behavior, not extracting the prompt) and was
+    previously not covered by any category. Tool-role-blocked, same as
+    cmd_injection/sql_injection/instruction_override.
+  - ROLE_SPOOF now also catches a bare `Human:` turn marker (the classic
+    Anthropic completions-style injection format -- the role-tag alternation
+    previously only covered system/user/assistant/tool), plus `<<SYS>>`/
+    `<</SYS>>` (Llama-2 system delimiters) and `<|system|>`/`<|user|>`/
+    `<|assistant|>` (ChatML variants beyond `<|im_start|>`).
+  - UNICODE_SMUGGLING's bidi character class extended to the isolate
+    characters (U+2066-U+2069: LRI/RLI/FSI/PDI), not just the older
+    override/embed set (U+202A-U+202E) -- isolates are the ones increasingly
+    seen in current ASCII-smuggling writeups. Also added the word joiner
+    (U+2060) to the zero-width set. Switched the bidi/zero-width classes from
+    literal embedded control characters to explicit \\u escapes so they
+    survive editing without corruption.
+  - INSTRUCTION_OVERRIDE broadened: "ignore everything/all above" (no
+    trailing "instructions" required) and "forget your/all/previous
+    instructions" phrasing.
 
 1.1.0 (2026-08-28): added log_event()/recent_counts(), a WAL-mode SQLite
 store, same shape as hermes_usage_log.py's (own DB file, not a shared table —
@@ -49,10 +80,14 @@ legitimately paste shell scripts and SQL for review). The asymmetry:
     not content a human typed on purpose. Nobody expects a webpage's body
     text to contain a reverse-shell one-liner -> "block". This is the
     concrete case the role-confusion paper calls "adversarial webpages in
-    tool-tagged data retrieved by agents."
-  - cmd_injection / sql_injection / instruction_override hits in a `user`
-    message: expected and often legitimate (debugging help) -> "flag" only,
-    never a hard block on this signal alone.
+    tool-tagged data retrieved by agents." instruction_override and
+    prompt_exfiltration hits in a `tool` message get the same treatment --
+    retrieved content telling the model to ignore its instructions or to
+    repeat its system prompt has no legitimate reading either.
+  - cmd_injection / sql_injection / instruction_override / prompt_exfiltration
+    hits in a `user` message: expected and often legitimate (debugging help,
+    or someone just asking what the model's instructions are) -> "flag"
+    only, never a hard block on this signal alone.
 
 This module makes no network calls itself. log_event() below does local
 disk I/O (SQLite) but no network I/O, and is wrapped best-effort — same
@@ -72,13 +107,13 @@ from pathlib import Path
 # retrieved/tool content; legitimate often in a user's own coding questions,
 # which is why severity() treats this category differently by role.
 CMD_INJECTION = [
-    r'\$\([^)]+\)',                                    # $(...) command substitution
-    r'`[^`]+`',                                         # backtick substitution
-    r'[;&|]{1,2}\s*(rm|curl|wget|nc|bash|sh|python[23]?|chmod|chown|sudo|dd|mkfs)\b',
-    r'\b(curl|wget)\s+\S+\s*\|\s*(sh|bash)\b',          # curl|sh / wget|sh
-    r'\bnc\s+-e\b',                                     # netcat reverse shell
-    r'/etc/(passwd|shadow)\b',
-    r'\bbase64\s+-d\b.{0,20}\|\s*(sh|bash)',
+    r'(?i)\$\([^)]+\)',                                    # $(...) command substitution
+    r'(?i)`[^`]+`',                                         # backtick substitution
+    r'(?i)[;&|]{1,2}\s*(rm|curl|wget|nc|bash|sh|python[23]?|chmod|chown|sudo|dd|mkfs)\b',
+    r'(?i)\b(curl|wget)\s+\S+(?:\s+\S+){0,4}\s*\|\s*(sh|bash)\b',  # curl|sh / wget|sh, flags tolerated
+    r'(?i)\bnc\s+-e\b',                                     # netcat reverse shell
+    r'(?i)/etc/(passwd|shadow)\b',
+    r'(?i)\bbase64\s+-d\b.{0,20}\|\s*(sh|bash)',
 ]
 
 SQL_INJECTION = [
@@ -93,16 +128,21 @@ SQL_INJECTION = [
 # Structural spoofing — never legitimate in a message's content string,
 # regardless of what role sent it.
 ROLE_SPOOF = [
-    r"(?im)^\s*(system|user|assistant|tool)\s*:\s",     # fake role tag at line start
+    r"(?im)^\s*(system|user|assistant|tool|human)\s*:\s",  # fake role tag at line start
+                                                             # ("human" catches the classic
+                                                             # Anthropic completions-style
+                                                             # `\n\nHuman:` injection format)
     r"<\|im_start\|>|<\|im_end\|>",
+    r"<\|(system|user|assistant)\|>",                       # ChatML-adjacent role tags
+    r"<<SYS>>|<</SYS>>",                                    # Llama-2 system delimiters
     r"\[INST\]|\[/INST\]",
     r"</?think>",
     r"(?i)###\s*(system|instruction)\b",
 ]
 
 UNICODE_SMUGGLING = [
-    r"[‪-‮]",                  # bidi override chars
-    r"[​‌‍﻿]",       # zero-width chars
+    r"[\u202A-\u202E\u2066-\u2069]",     # bidi override (202A-202E) + isolate (2066-2069) chars
+    r"[\u200B-\u200D\u2060\uFEFF]",       # zero-width chars: ZWSP/ZWNJ/ZWJ/word-joiner/BOM
     r"[\U000E0000-\U000E007F]",          # Unicode tag block (ASCII smuggling)
 ]
 
@@ -110,9 +150,24 @@ UNICODE_SMUGGLING = [
 # attacker before Layer 2 (Prompt Guard 2) would ever need to run.
 INSTRUCTION_OVERRIDE = [
     r"(?i)\bignore\s+(all\s+)?(previous|above|prior)\s+instructions\b",
+    r"(?i)\bignore\s+(everything|all)\s+(above|before\s+this)\b",
     r"(?i)\bdisregard\s+(the\s+)?(system\s+)?prompt\b",
+    r"(?i)\bforget\s+(your|all|previous)\s+instructions\b",
     r"(?i)\bnew\s+instructions\s*:",
     r"(?i)\byou\s+are\s+now\s+\w+",
+]
+
+# System-prompt / instruction exfiltration attempts. Distinct from
+# INSTRUCTION_OVERRIDE: that category is about getting the model to behave
+# differently going forward; this one is about extracting the prompt/
+# instructions verbatim. No legitimate reading in tool-originated content
+# (a retrieved document has no reason to ask the model to repeat its own
+# system prompt), same rationale as instruction_override.
+PROMPT_EXFILTRATION = [
+    r"(?i)\b(repeat|print|output|show|reveal)\s+(the\s+)?(text|words|instructions|prompt|everything)\s+above\b",
+    r"(?i)\bwhat\s+(are|were)\s+your\s+(system\s+)?instructions\b",
+    r"(?i)\breveal\s+(your\s+)?(system\s+)?prompt\b",
+    r"(?i)\brepeat\s+(everything|all)\s+(above|before\s+this)\b",
 ]
 
 _CATEGORIES = {
@@ -121,6 +176,7 @@ _CATEGORIES = {
     "role_spoof": ROLE_SPOOF,
     "unicode_smuggling": UNICODE_SMUGGLING,
     "instruction_override": INSTRUCTION_OVERRIDE,
+    "prompt_exfiltration": PROMPT_EXFILTRATION,
 }
 _COMPILED = {name: [re.compile(p) for p in pats] for name, pats in _CATEGORIES.items()}
 
@@ -128,10 +184,11 @@ _COMPILED = {name: [re.compile(p) for p in pats] for name, pats in _CATEGORIES.i
 _ALWAYS_BLOCK = {"role_spoof", "unicode_smuggling"}
 # Categories treated as adversarial-content signal only when the message
 # claims to be tool-originated (retrieved/tool-result text, not human-typed).
-# instruction_override belongs here too: retrieved content telling the model
-# to "ignore previous instructions" has no legitimate reading, unlike a user
-# saying it about their own prior turns.
-_TOOL_ROLE_BLOCK = {"cmd_injection", "sql_injection", "instruction_override"}
+# instruction_override and prompt_exfiltration belong here too: retrieved
+# content telling the model to "ignore previous instructions" or to repeat
+# its system prompt has no legitimate reading, unlike a user saying either
+# about their own conversation.
+_TOOL_ROLE_BLOCK = {"cmd_injection", "sql_injection", "instruction_override", "prompt_exfiltration"}
 
 
 def scan(text):
