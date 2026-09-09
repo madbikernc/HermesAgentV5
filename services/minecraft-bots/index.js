@@ -1,4 +1,19 @@
-// Version: 2.43.0
+// Version: 2.44.0
+//
+// 2.44.0 (2026-09-08) -- direct request: "watch their behavior for a while, look for
+// misbehaviors." A 25-minute live capture across all five bots (via the new activity.log
+// service) surfaced a real, twice-confirmed bug: BOTH actual deaths in the window (Mark, Luke,
+// each a creeper-plus-drowning combo) lost gear recovery entirely to the same failure --
+// checkSelfDefense/the oxygen- and health-emergency handlers call bot.pathfinder.setGoal(null)
+// DIRECTLY the instant a new threat appears, ahead of their own later performAction() call (the
+// one that actually runs stopCurrent() and updates the cancel token), so recover()'s in-flight
+// goto can reject before the token catches up -- it can't tell "legitimately interrupted" from
+// "genuinely failed," and being a strict single shot with no retry, the loot was just gone.
+// recover() now retries (bounded, MAX_RECOVERY_RETRIES=2) specifically on that one
+// distinguishable failure text, pausing for whatever interrupted it to actually resolve.
+// Also added a diagnostic log for parseGoalStep's "couldn't decide what to do next" fallback
+// (fired 4 times in the same capture, across 4 different bots, with zero visibility into the
+// raw reply that failed to parse) -- purely for future diagnosis, no behavior change.
 //
 // 2.43.0 (2026-09-08) -- direct live report ("Mark and Luke claim they have bows"), confirmed
 // real: Mark's "Secure a bow" goal was marked DONE and announced complete in chat after every
@@ -1400,6 +1415,14 @@ function parseGoalStep(text) {
       }
     }
   }
+  // Direct request, 2026-09-08 ("watch their behavior... look for misbehaviors"): this fallback
+  // still fired 4 times in one 25-minute live capture, across 4 different bots, even after the
+  // maxTokens bump to 500 (2026-09-07) meant to fix exactly this -- but nothing has ever logged
+  // the actual raw reply that failed to parse, so there was no way to tell whether that fix
+  // genuinely wasn't enough or something else entirely is going on. Logged here (truncated,
+  // real replies from a misbehaving planner could in principle be long) purely for future
+  // diagnosis -- this function still returns the same fallback either way.
+  console.log(`[${USERNAME}] unparseable planNextStep reply: ${text.slice(0, 300)}`);
   return { type: "blocked", reason: "couldn't decide what to do next" };
 }
 
@@ -2777,8 +2800,29 @@ bot.on("spawn", () => {
       acting = true;
       recovering = true;
       try {
-        const result = await performAction(bot, { type: "recover", position: recoverAt }, USERNAME);
-        console.log(`[${USERNAME}] recovery: ${result.text} (ok=${result.ok})`);
+        // Direct request, 2026-09-08 ("watch their behavior... look for misbehaviors"): a live
+        // 25-minute capture caught BOTH real deaths in the window (Mark, Luke -- each a
+        // creeper-plus-drowning combo) losing gear recovery outright, both to the exact same
+        // failure: "recovery: couldn't get back to where I died: The goal was changed before it
+        // could be completed!" Root cause: checkSelfDefense/the oxygen- and health-emergency
+        // handlers call bot.pathfinder.setGoal(null) DIRECTLY the instant a new threat appears,
+        // ahead of their own later performAction() call (the one that actually runs
+        // stopCurrent() and updates the cancel token) -- recover()'s in-flight goto can reject
+        // from that direct setGoal(null) BEFORE the token catches up, so it can't tell "was
+        // legitimately interrupted" from "genuinely failed" and reports a real failure instead
+        // of a graceful cancellation. recover() was also a strict single shot with no retry --
+        // exactly the wrong combination for a death that happens amid an active emergency, which
+        // is precisely when recovery matters most and a fresh threat is most likely to still be
+        // around a few seconds later. Retries (bounded) specifically on this one distinguishable
+        // failure text, with a short pause for whatever interrupted it to actually resolve.
+        const MAX_RECOVERY_RETRIES = 2;
+        let result;
+        for (let attempt = 0; attempt <= MAX_RECOVERY_RETRIES; attempt++) {
+          result = await performAction(bot, { type: "recover", position: recoverAt }, USERNAME);
+          console.log(`[${USERNAME}] recovery: ${result.text} (ok=${result.ok})`);
+          if (result.ok || !result.text.includes("The goal was changed")) break;
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        }
       } catch (err) {
         console.error(`[${USERNAME}] recovery failed:`, err.message);
       } finally {
