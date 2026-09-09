@@ -1,4 +1,18 @@
-// Version: 2.40.0
+// Version: 2.41.0
+//
+// 2.41.0 (2026-09-08) -- direct live report ("check the bots other than mayor, they are
+// stuck?"), confirmed real: Babs/Amy/Mark/Luke all sat completely idle for 3+ minutes after
+// their last goal ended, no self-proposed replacement, no errors logged at all -- eerily quiet
+// rather than obviously broken. Root cause: handleIncoming's lastActivityAt reset (used only to
+// gate IDLE_BEFORE_SELF_GOAL_MS, the "propose a new goal after 10 quiet minutes" timer) fired
+// for ANY message that reached this function, including Mayor's own isMayor() exception traffic
+// (2.36.0) -- and Mayor talks periodically on his own (every MAYOR_DIRECTIVE_MS, plus his own
+// self-proposed-goal chat), which kept perpetually restarting every other bot's 10-minute
+// countdown. Mayor's mere presence meant that clock could never actually elapse for anyone else,
+// unless Mayor happened to hand that SPECIFIC bot a directive or a real player intervened.
+// lastActivityAt now only resets for an actual real player (`!isAnotherBot(speaker)`) -- Mayor's
+// chat still reaches classifyIntent -> ACTION GOAL exactly as before, it just no longer also
+// gates everyone else's unrelated self-propose clock.
 //
 // 2.40.0 (2026-09-08) -- item #6 of "fix all the above" (squad response for Mark/Luke). Self-
 // defense was purely individual despite Mark/Luke's own "military... defending the spawn point"
@@ -2442,7 +2456,23 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   // bot.username check above in practice, kept explicit since this condition is the one place
   // that check is bypassed).
   if (isAnotherBot(speaker) && !(isMayor(speaker) && USERNAME !== MAYOR_USERNAME)) return;
-  lastActivityAt = Date.now(); // a real player is here -- the self-propose-a-goal idle clock resets
+  // Real live bug found 2026-09-08 ("check the bots other than mayor, they are stuck?"):
+  // isMayor()'s own exception above lets Mayor's chat reach this function (needed for his
+  // directives to reach classifyIntent -> ACTION GOAL), but this line used to reset
+  // lastActivityAt for ANY message that got this far, Mayor's included -- and Mayor talks
+  // periodically on his own (proposeDirectiveForOthers every MAYOR_DIRECTIVE_MS, his own
+  // self-proposed-goal chat), which kept perpetually restarting every other bot's
+  // IDLE_BEFORE_SELF_GOAL_MS countdown. Once a bot's own goal ended, she'd just stand there --
+  // Mayor's mere presence meant the 10-minute idle window needed to self-propose a new one
+  // could never actually elapse, unless he happened to specifically hand HER a new directive
+  // (proposeDirectiveForOthers only ever picks one bot at a time) or a real player intervened.
+  // Only an actual real player should count as "someone is here" for this specific clock --
+  // Mayor's own directive-assignment already has its own real mechanism (ACTION GOAL) for
+  // giving a bot something to do, it doesn't also need to gate everyone else's unrelated
+  // self-propose timer.
+  if (!isAnotherBot(speaker)) {
+    lastActivityAt = Date.now(); // a real player is here -- the self-propose-a-goal idle clock resets
+  }
   if (busy) {
     console.log(`[${USERNAME}] busy, dropping: <${speaker}> ${message}`);
     return;
