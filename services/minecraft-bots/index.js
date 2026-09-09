@@ -1,4 +1,18 @@
-// Version: 2.35.0
+// Version: 2.36.0
+//
+// 2.36.0 (2026-09-08) -- direct request: "add another bot, Mayor, whose personality is to be a
+// leader and set goals for the others. The others can defer to him when his instructions are
+// not in conflict. The Mayor perceives me as 'The President' and therefore his superior." New
+// isMayor() exception to isAnotherBot() -- Mayor's chat is the one bot-to-bot message that
+// actually needs to reach another bot's real decision loop (classifyIntent -> ACTION GOAL), the
+// same path a player's own instruction already takes, rather than staying coordinate-over-Buzz-
+// only like every other bot's chat. handleIncoming's own ACTION GOAL branch now defers to an
+// already-active REAL PLAYER goal over a new Mayor directive (never the reverse) -- the
+// hierarchy his own persona describes. New proposeDirectiveForOthers(): a Mayor-only (no-op for
+// every other bot) periodic behavior that picks whichever teammate has no active goal
+// (otherBotGoals, the same live signal arbitrateGoalConflict() already reads) and assigns one
+// via a real, addressed chat line -- no separate "assign a goal" mechanism, it flows through the
+// exact same pipeline a player's own command already uses.
 //
 // 2.35.0 (2026-09-08) -- direct report: "they still don't seem to react to a threatening
 // creature." Real, confirmed gap: checkSelfDefense() was gated on !acting, same as every other
@@ -610,11 +624,24 @@ function isBoss(speaker) {
 // bot-reacts-to-bot loop. Known bot identities are excluded from that pipeline entirely;
 // coordination between them happens over Buzz, not the in-game chat relevance/reply loop.
 const BOT_USERNAMES = new Set(
-  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke").split(",").map((s) => s.trim()).filter(Boolean),
+  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor").split(",").map((s) => s.trim()).filter(Boolean),
 );
 
 function isAnotherBot(speaker) {
   return BOT_USERNAMES.has(speaker) || speaker.startsWith("@mc-"); // Matrix bot identities
+}
+
+// Direct request, 2026-09-08 ("add another bot, Mayor, whose personality is to be a leader and
+// set goals for the others. The others can defer to him when his instructions are not in
+// conflict"). Every other bot's own chat stays coordinate-over-Buzz-not-chat (isAnotherBot's own
+// original reasoning, unchanged) -- Mayor is the one deliberate exception, since his whole
+// purpose requires a directive to actually reach the other bots' real decision loop
+// (classifyIntent -> ACTION GOAL), the same path a player's own instruction already takes.
+// Matches on both the plain in-game name and his Matrix identity (@mc-mayor:spark), the two
+// forms isAnotherBot() itself already recognizes.
+const MAYOR_USERNAME = process.env.MC_MAYOR_USERNAME || "Mayor";
+function isMayor(speaker) {
+  return speaker === MAYOR_USERNAME || speaker === `@mc-${MAYOR_USERNAME.toLowerCase()}:spark`;
 }
 
 // Autonomy (standing goals): a whole-bot kill switch, an idle-before-self-proposing-a-goal
@@ -1783,6 +1810,55 @@ setInterval(() => {
   goalTick().catch((err) => console.error(`[${USERNAME}] goalTick error:`, err.message));
 }, GOAL_TICK_MS);
 
+// Mayor-only autonomous behavior, 2026-09-08 ("add another bot, Mayor, whose personality is to
+// be a leader and set goals for the others"). A no-op check (USERNAME !== MAYOR_USERNAME) makes
+// this genuinely inert for every other bot's own process -- same file, same timer registration,
+// no separate build for "the other four" vs "Mayor." Picks whichever OTHER bot currently has NO
+// active goal (absent from otherBotGoals, the same live signal arbitrateGoalConflict() already
+// reads from the "minecraft-coordination" Buzz topic) rather than a random pick, matching the
+// persona's own "leads by competence" directive -- an idle teammate is the one who actually
+// needs direction. A cheap `muse` call in Mayor's own voice turns that into a real, addressed
+// in-game chat line, which then flows through the EXACT SAME classifyIntent -> ACTION GOAL path
+// a player's own instruction already takes (isMayor()'s own exception to isAnotherBot(), and the
+// priority check in handleIncoming's own ACTION GOAL branch, both above) -- no separate
+// "assign a goal to another bot" mechanism to build or keep in sync with the real one.
+const MAYOR_DIRECTIVE_MS = parseInt(process.env.MC_MAYOR_DIRECTIVE_MS || "300000", 10); // 5 min
+
+async function proposeDirectiveForOthers() {
+  if (USERNAME !== MAYOR_USERNAME || !AUTONOMY_ENABLED || busy || acting) return;
+  const idleBots = [...BOT_USERNAMES].filter((name) =>
+    name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${name.toLowerCase()}`));
+  if (!idleBots.length) return; // everyone already has something going -- nothing to assign
+  const target = idleBots[Math.floor(Math.random() * idleBots.length)];
+
+  busy = true;
+  try {
+    const reply = await callRole("muse", [
+      {
+        role: "system",
+        content: `${persona}\n\n---\n\n${target} currently has no active goal. Give ${target} ` +
+          `ONE short, specific, in-character task to work on -- a real Minecraft objective ` +
+          `(gear up, gather a resource, craft or smelt something), not vague encouragement. ` +
+          `Address ${target} by name, exactly like a real chat message you'd actually send. One ` +
+          `or two sentences, nothing else -- no quotes, no stage directions.`,
+      },
+      { role: "user", content: `What do you tell ${target}?` },
+    ], { maxTokens: 60, temperature: 0.9 });
+    if (reply) {
+      bot.chat(reply);
+      console.log(`[${USERNAME}] issued directive to ${target}: ${reply}`);
+    }
+  } catch (err) {
+    console.error(`[${USERNAME}] failed to issue a directive:`, err.message);
+  } finally {
+    busy = false;
+  }
+}
+
+setInterval(() => {
+  proposeDirectiveForOthers().catch((err) => console.error(`[${USERNAME}] proposeDirectiveForOthers error:`, err.message));
+}, MAYOR_DIRECTIVE_MS);
+
 // Direct request (2026-09-07): "the bots need to know to go to sleep at night." Deliberately a
 // plain deterministic check on its own timer, not folded into goalTick's model-driven loop --
 // "is it night" needs no reasoning, just bot.time.timeOfDay (the exact window bed.js's own
@@ -2203,7 +2279,11 @@ async function setNewGoal(description, speaker) {
 
 function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   if (speaker === bot.username || speaker === MATRIX_USER_ID) return;
-  if (isAnotherBot(speaker)) return; // another bot's own chat/Matrix message -- coordinate over Buzz, not here
+  // isMayor(speaker) exception, 2026-09-08: USERNAME !== MAYOR_USERNAME guards Mayor's own
+  // process from ever treating himself as "a player talking to him" (redundant with the
+  // bot.username check above in practice, kept explicit since this condition is the one place
+  // that check is bypassed).
+  if (isAnotherBot(speaker) && !(isMayor(speaker) && USERNAME !== MAYOR_USERNAME)) return;
   lastActivityAt = Date.now(); // a real player is here -- the self-propose-a-goal idle clock resets
   if (busy) {
     console.log(`[${USERNAME}] busy, dropping: <${speaker}> ${message}`);
@@ -2220,6 +2300,19 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
 
       if (type === "action") {
         if (intent.action.type === "goal") {
+          // Direct request, 2026-09-08 ("the others can defer to him when his instructions are
+          // not in conflict"): Mayor's own directive is the one goal-source that can be
+          // overridden by something already in place -- a REAL PLAYER's own assignment
+          // (source "user", set by anyone other than Mayor himself) outranks him, the same
+          // hierarchy his own persona describes (defer to The President completely). A
+          // self-proposed goal, an idle bot, or an earlier Mayor directive all yield to a new
+          // one from him -- only a live human instruction doesn't.
+          if (isMayor(speaker) && currentGoal?.source === "user" && currentGoal.setBy &&
+              !isMayor(currentGoal.setBy)) {
+            send(await narrateAction(
+              `already on something for ${currentGoal.setBy}, Mayor -- that comes first.`));
+            return;
+          }
           await setNewGoal(intent.action.description, speaker);
           send(await narrateAction(`new goal: ${intent.action.description}. I'll work on it.`));
           return;

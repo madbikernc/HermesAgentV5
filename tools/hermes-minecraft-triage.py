@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-09-08) — MC_BOT_UNITS default extended for the new fifth bot, Mayor (direct
+# request: "add another bot, Mayor, whose personality is to be a leader"), same real gap
+# 1.2.0 already fixed once for Mark/Luke: a bot unit missing from this list is invisible to
+# triage entirely.
 #
 # 1.2.0 (2026-09-07) — direct request: "leave the heap dump in place for now, and instrument
 # The Firmament to prioritize capturing those for later analysis." Two changes:
@@ -99,7 +104,8 @@
 #   TRIAGE_LOG_PATH     default /mnt/hermes-data/minecraft-memory/triage.log
 #   TRIAGE_COOLDOWN_S   default 300 (5 minutes per incident category)
 #   MC_BOT_UNITS        default minecraft-bot-babs.service,minecraft-bot-amy.service,
-#                               minecraft-bot-mark.service,minecraft-bot-luke.service
+#                               minecraft-bot-mark.service,minecraft-bot-luke.service,
+#                               minecraft-bot-mayor.service
 #   MC_HEAPDUMP_ROOT    default /mnt/hermes-data/minecraft-memory/heapdumps (must match
 #                               run-bot.sh's own --diagnostic-dir, one subfolder per bot)
 #
@@ -126,7 +132,8 @@ COOLDOWN_S = int(os.environ.get("TRIAGE_COOLDOWN_S", "300"))
 BOT_UNITS = os.environ.get(
     "MC_BOT_UNITS",
     "minecraft-bot-babs.service,minecraft-bot-amy.service,"
-    "minecraft-bot-mark.service,minecraft-bot-luke.service",
+    "minecraft-bot-mark.service,minecraft-bot-luke.service,"
+    "minecraft-bot-mayor.service",
 ).split(",")
 HEAPDUMP_ROOT = Path(os.environ.get("MC_HEAPDUMP_ROOT", "/mnt/hermes-data/minecraft-memory/heapdumps"))
 

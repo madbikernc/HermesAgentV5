@@ -1,7 +1,7 @@
 [Unit]
 Description=Firmament Minecraft bot log triage (coder/coder2 parallel diagnosis)
 Documentation=file:///home/pmoney/HermesAgentV5/infra/minecraft-bots-triage/README.md
-After=network-online.target hermes-router.service hermes-buzz.service minecraft-bot-babs.service minecraft-bot-amy.service minecraft-bot-mark.service minecraft-bot-luke.service
+After=network-online.target hermes-router.service hermes-buzz.service minecraft-bot-babs.service minecraft-bot-amy.service minecraft-bot-mark.service minecraft-bot-luke.service minecraft-bot-mayor.service
 Wants=network-online.target
 RequiresMountsFor=/mnt/hermes-data
 StartLimitIntervalSec=0
