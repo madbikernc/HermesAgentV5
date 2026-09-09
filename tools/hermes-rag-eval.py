@@ -50,7 +50,7 @@ HISTORY_PATH = Path.home() / ".hermes" / "state" / "rag-eval-history.jsonl"
 # ops/personal-kb are real but small (24/17 chunks live, 2026-08-31) — sampling more than exists
 # would just be the whole corpus with extra steps; capped per-corpus below, not forced uniform.
 DEFAULT_PER_CORPUS = 25
-CORPORA = ["fleet-docs", "podcasts", "ops", "personal-kb"]
+CORPORA = ["podcasts", "ops", "personal-kb"]
 
 QUESTION_PROMPT = (
     "You are building a retrieval-evaluation question. Given the excerpt below, write ONE "

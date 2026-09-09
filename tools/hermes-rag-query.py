@@ -18,7 +18,7 @@ as every other status/monitoring tool in this project (skills/*/SKILL.md
 document the exact command).
 
 Usage:
-    /opt/hermes/venvs/rag/bin/python3 hermes-rag-query.py "question text" [--corpus fleet-docs] [--top-k 5]
+    /opt/hermes/venvs/rag/bin/python3 hermes-rag-query.py "question text" [--corpus podcasts] [--top-k 5]
 """
 import argparse
 import json
@@ -36,7 +36,7 @@ def query(text: str, corpus: str, top_k: int):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("question")
-    ap.add_argument("--corpus", default=None, help="restrict to one corpus (e.g. fleet-docs)")
+    ap.add_argument("--corpus", default=None, help="restrict to one corpus (e.g. podcasts)")
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()

@@ -26,32 +26,53 @@ one-time warning, not a hard failure.
 
 ## Layer 1: pattern categories
 
-Six independent regex categories, each returning matched snippets:
+Seven independent regex categories, each returning matched snippets:
 
-| Category | Matches | Legitimate in `user` text? |
+| Category | Matches | Always block? |
 |---|---|---|
-| `cmd_injection` | `$(...)`, backticks, `; rm/curl/wget/nc/bash/chmod/sudo` (case-insensitive), `curl\|sh` (flags tolerated), `nc -e`, `/etc/passwd`, `base64 -d \| sh` | Yes (debugging help) |
-| `sql_injection` | `UNION...SELECT`, `' OR '1'='1`, `; DROP TABLE`, `xp_cmdshell`, `SLEEP()/BENCHMARK()`, `WAITFOR DELAY` | Yes (debugging help) |
-| `role_spoof` | Fake role tags (`system:`/`assistant:`/`human:` at line start), `<\|im_start\|>`/`<\|im_end\|>`, `<\|system\|>`/`<\|user\|>`/`<\|assistant\|>`, `<<SYS>>`/`<</SYS>>`, `[INST]`/`[/INST]`, `<think>`, `### system` | **Never** |
-| `unicode_smuggling` | Bidi override + isolate chars, zero-width chars (incl. word joiner), Unicode tag block (ASCII smuggling) | **Never** |
-| `instruction_override` | "ignore previous/above/prior instructions", "ignore everything above", "forget your instructions", "disregard the system prompt", "new instructions:", "you are now X" | Ambiguous — see severity rule |
-| `prompt_exfiltration` | "repeat/print/reveal the text above", "what are your instructions", "reveal your (system) prompt" | Ambiguous — see severity rule |
+| `cmd_injection` | `$(...)`/backticks **containing** a dangerous command, `; rm -rf`/`curl <arg>`/`bash -c`, `curl\|sh`, `nc -e`, `/dev/tcp` reverse shell, `/etc/shadow`, `base64 -d \| sh` | Tool roles only |
+| `sql_injection` | `UNION...SELECT`, `' OR '1'='1`, `; DROP TABLE`, `xp_cmdshell`, `SLEEP()/BENCHMARK()`, `WAITFOR DELAY` | Tool roles only |
+| `role_spoof` | Chat-template control tokens: `<\|im_start\|>`/`<\|im_end\|>`, `<\|system\|>`/`<\|user\|>`/`<\|assistant\|>`, `<<SYS>>`/`<</SYS>>`, `[INST]`/`[/INST]`, `<think>` | **Yes** |
+| `role_tag_text` | Plain-text turn marker at column 0, capitalized (`Human:`/`Assistant:`/`System:`), `### system` | Tool roles only |
+| `unicode_smuggling` | Bidi override/isolate chars, **runs of 3+** zero-width chars, mid-text BOM, Unicode tag block | **Yes** |
+| `instruction_override` | "ignore previous/everything above", "forget your instructions", "disregard the system prompt", "new instructions:", explicit persona-switch framing | Tool roles only |
+| `prompt_exfiltration` | "repeat/print/reveal the text above", "what are your instructions", "reveal your (system) prompt" | Tool roles only |
 
-`prompt_exfiltration` is distinct from `instruction_override`: the latter
-is about getting the model to behave differently going forward, the
-former is about extracting the prompt/instructions verbatim. Both are
-treated the same way by severity — see below.
+Two distinctions worth keeping straight. `prompt_exfiltration` vs.
+`instruction_override`: the latter is about getting the model to behave
+differently going forward, the former about extracting the prompt
+verbatim. `role_spoof` vs. `role_tag_text`: a control token is a
+tokenizer-level delimiter that never legitimately appears in message
+content, so it always blocks; a plain-text `Human:` is also just how
+transcripts and chat logs are written, so it only blocks in tool-
+originated content.
 
 ## Python pattern matching
 
+The live catalog, copied verbatim from `tools/hermes_injection_guard.py`:
+
+```python
+_DANGEROUS = r"(?:rm\s+-[a-z]*[rf]|curl|wget|nc\s|netcat|bash|/bin/sh|chmod\s+[0-7]{3,4}|chown|dd\s+if=|mkfs|eval\s|/etc/(?:passwd|shadow))"
+
 CMD_INJECTION = [
-    r'(?i)\$\([^)]+\)',                                    # $(...) command substitution
-    r'(?i)`[^`]+`',                                         # backtick substitution
-    r'(?i)[;&|]{1,2}\s*(rm|curl|wget|nc|bash|sh|python[23]?|chmod|chown|sudo|dd|mkfs)\b',
+    # Command substitution, but only when it carries something dangerous --
+    # `$(date)` and a markdown span like `ls -la` are not injection. Newlines
+    # excluded on purpose: a real substitution is one line, while allowing
+    # them made a ```bash fenced code block match its own language tag.
+    rf'(?i)\$\([^)\n]*{_DANGEROUS}[^)\n]*\)',
+    rf'(?i)`[^`\n]*{_DANGEROUS}[^`\n]*`',
+    # Chained/backgrounded execution of a destructive or fetching command.
+    # Each alternative requires a real argument rather than ending at a word
+    # boundary: `| bash |` in a markdown table row is a table cell, not a
+    # pipeline, and a trailing \b here also silently failed to match `rm -rf`
+    # (the boundary after `-r` falls mid-word). See the 1.3.0 changelog.
+    r'(?i)[;&|]{1,2}\s*(rm\s+-[a-z]*[rf]|curl\s+[^\s|]|wget\s+[^\s|]|nc\s+-|bash\s+[-/]'
+    r'|/bin/sh\b|chmod\s+[0-7]{3,4}|chown\s+\S|dd\s+if=|mkfs\b|sudo\s+rm\b)',
     r'(?i)\b(curl|wget)\s+\S+(?:\s+\S+){0,4}\s*\|\s*(sh|bash)\b',  # curl|sh / wget|sh, flags tolerated
     r'(?i)\bnc\s+-e\b',                                     # netcat reverse shell
-    r'(?i)/etc/(passwd|shadow)\b',
-    r'(?i)\bbase64\s+-d\b.{0,20}\|\s*(sh|bash)',
+    r'(?i)\b(bash|sh)\s+-i\s+>&\s*/dev/tcp/',               # bash /dev/tcp reverse shell
+    r'(?i)/etc/shadow\b',                                   # /etc/passwd alone is too common in docs
+    r'(?i)\bbase64\s+(-d|--decode)\b.{0,20}\|\s*(sh|bash)',
 ]
 
 SQL_INJECTION = [
@@ -63,44 +84,72 @@ SQL_INJECTION = [
     r"(?i)\bwaitfor\s+delay\b",
 ]
 
-### Structural spoofing — never legitimate in a message's content string, regardless of what role sent it.
+# Structural spoofing — chat-template control tokens. Never legitimate in a
+# message's content string regardless of role: these are tokenizer-level
+# delimiters, not something prose or documentation contains.
 ROLE_SPOOF = [
-    r"(?im)^\s*(system|user|assistant|tool|human)\s*:\s",  # fake role tag at line start
-                                                             # ("human" catches the classic
-                                                             # Anthropic completions-style
-                                                             # `\n\nHuman:` injection format)
     r"<\|im_start\|>|<\|im_end\|>",
     r"<\|(system|user|assistant)\|>",                       # ChatML-adjacent role tags
     r"<<SYS>>|<</SYS>>",                                    # Llama-2 system delimiters
     r"\[INST\]|\[/INST\]",
     r"</?think>",
+]
+
+# A plain-text turn marker (`\n\nHuman:`) is a weaker signal than a control
+# token -- it is also just how transcripts, chat logs and YAML are written.
+# Deliberately NOT in _ALWAYS_BLOCK; see the 1.3.0 changelog. Column-0 and
+# capitalized on purpose: that is the completions-API turn format, and it is
+# what separates an injected turn marker from an indented lowercase
+# `  user: root` in a compose file.
+ROLE_TAG_TEXT = [
+    r"(?m)^(Human|Assistant|System)\s*:\s",
     r"(?i)###\s*(system|instruction)\b",
 ]
 
 UNICODE_SMUGGLING = [
-    r"[\u202A-\u202E\u2066-\u2069]",     # bidi override + isolate chars
-    r"[\u200B-\u200D\u2060\uFEFF]",       # zero-width chars: ZWSP/ZWNJ/ZWJ/word-joiner/BOM
-    r"[\U000E0000-\U000E007F]",          # Unicode tag block (ASCII smuggling)
+    r"[\u202A-\u202E\u2066-\u2069]",     # bidi override/isolate: Trojan-Source style spoofing
+    # A single invisible character is encoding noise, not an attack -- PDF and
+    # HTML extraction emit ZWSP constantly (118k occurrences across this
+    # fleet's own podcast corpus, every one of them isolated). Concealment
+    # needs a RUN: encoding a payload in zero-width characters takes dozens of
+    # them in a row. Measured on 79,878 live chunks: max legitimate run = 2,
+    # zero runs of 3+. So {3,} costs no real detection and clears every one of
+    # those false positives. ZWJ (200D) and ZWNJ (200C) are excluded entirely --
+    # ZWJ joins emoji sequences, and both are required for correct
+    # Persian/Arabic/Indic rendering. See the 1.3.0 changelog.
+    r"[\u200B\u2060]{3,}",
+    r"(?<!\A)\uFEFF",                    # BOM mid-text is anomalous; a leading BOM is just file encoding
+    r"[\U000E0000-\U000E007F]",          # Unicode tag block (ASCII smuggling) -- never legitimate, no threshold
 ]
 
-# Semantic-but-still-pattern-matchable phrasing — catches the unsophisticated attacker before Layer 2 (Prompt Guard 2) would ever need to run.
+# Semantic-but-still-pattern-matchable phrasing — catches the unsophisticated
+# attacker before Layer 2 (Prompt Guard 2) would ever need to run.
 INSTRUCTION_OVERRIDE = [
     r"(?i)\bignore\s+(all\s+)?(previous|above|prior)\s+instructions\b",
     r"(?i)\bignore\s+(everything|all)\s+(above|before\s+this)\b",
     r"(?i)\bdisregard\s+(the\s+)?(system\s+)?prompt\b",
     r"(?i)\bforget\s+(your|all|previous)\s+instructions\b",
     r"(?i)\bnew\s+instructions\s*:",
-    r"(?i)\byou\s+are\s+now\s+\w+",
+    # Persona-switch framing. Narrowed from a bare `you are now \w+`, which
+    # fired on ordinary tutorial prose ("You are now ready to deploy") -- the
+    # open-ended version of this belongs to Layer 2, which can read intent.
+    r"(?i)\byou\s+are\s+now\s+(a\s+|an\s+|in\s+)?(dan\b|jailbroken|unrestricted|uncensored|developer\s+mode|god\s+mode|do\s+anything)",
+    r"(?i)\b(pretend|act)\s+(you\s+(are|have)|as\s+if)\b.{0,40}\b(no\s+(restrictions|rules|filter)|unrestricted|jailbroken)",
 ]
 
-# System-prompt / instruction exfiltration attempts — distinct from INSTRUCTION_OVERRIDE
-# (which is about behavior going forward, not extracting the prompt verbatim).
+# System-prompt / instruction exfiltration attempts. Distinct from
+# INSTRUCTION_OVERRIDE: that category is about getting the model to behave
+# differently going forward; this one is about extracting the prompt/
+# instructions verbatim. No legitimate reading in tool-originated content
+# (a retrieved document has no reason to ask the model to repeat its own
+# system prompt), same rationale as instruction_override.
 PROMPT_EXFILTRATION = [
     r"(?i)\b(repeat|print|output|show|reveal)\s+(the\s+)?(text|words|instructions|prompt|everything)\s+above\b",
     r"(?i)\bwhat\s+(are|were)\s+your\s+(system\s+)?instructions\b",
     r"(?i)\breveal\s+(your\s+)?(system\s+)?prompt\b",
     r"(?i)\brepeat\s+(everything|all)\s+(above|before\s+this)\b",
 ]
+```
 
 ## Layer 2: classifier implementation
 
@@ -148,20 +197,27 @@ a shell script for review). The rule:
   role's content. No honest reason for a bidi override or a fake role
   tag to appear inside a message body.
 - `cmd_injection` / `sql_injection` / `instruction_override` /
-  `prompt_exfiltration` hits in a **tool-originated** message (RAG chunk,
-  fetched page, tool/broker result — content the model is *reading*, not
-  content a human typed on purpose) → **block**. A retrieved webpage has
-  no legitimate reason to contain a reverse-shell one-liner, tell the
-  model to ignore its instructions, or ask it to repeat its system
-  prompt. This is the "adversarial content retrieved by an agent" case.
+  `prompt_exfiltration` / `role_tag_text` hits in a **tool-originated**
+  message (RAG chunk, fetched page, tool/broker result — content the model
+  is *reading*, not content a human typed on purpose) → **block**. A
+  retrieved webpage has no legitimate reason to contain a reverse-shell
+  one-liner, tell the model to ignore its instructions, or ask it to
+  repeat its system prompt. This is the "adversarial content retrieved by
+  an agent" case.
 - Same categories in a **user** message → **flag only**, never a hard
   block on this signal alone. Expected and often legitimate.
+
+"Tool-originated" must mean a *set* of role names, not the literal string
+`tool` — `function` and `ipython` are both real tool-result role names,
+and matching only `tool` lets a client relabel a message to get flag-only
+treatment for content that would otherwise block.
 
 ```
 severity(role, hits):
     if hits is empty: "clean"
     if hits ∩ {role_spoof, unicode_smuggling}: "block"
-    if role == "tool" and hits ∩ {cmd_injection, sql_injection, instruction_override, prompt_exfiltration}: "block"
+    if role in {tool, function, ipython} and hits ∩ {cmd_injection, sql_injection,
+            instruction_override, prompt_exfiltration, role_tag_text}: "block"
     else: "flag"
 ```
 
@@ -221,6 +277,32 @@ an operational digest without needing to query raw logs per host.
 - Keep every category's patterns case-insensitive by default (`(?i)`) —
   an inconsistency here (one category case-sensitive while its siblings
   aren't) is a silent bypass, not a deliberate tightening.
+- **Match the dangerous construct, never the syntax that could carry
+  one.** This is the single most important rule here, and violating it is
+  how this catalog once blocked 96% of ordinary documentation. A backtick
+  is not command substitution; it is also every markdown inline code
+  span. A `|` is not a pipeline; it is also a table cell delimiter. A
+  zero-width character is not concealment; it is also what every PDF text
+  extractor emits. In each case the fix is the same: require the payload
+  (a dangerous command inside the substitution, a real argument after the
+  metacharacter, a *run* of invisible characters rather than one).
+- **Measure a pattern against the corpus it will actually run on before
+  shipping it.** A pattern set written to scan chat messages — where
+  shell syntax is anomalous — inverts its base rate the moment you point
+  it at retrieved documents, where technical content is *supposed* to
+  contain code. Both numbers are cheap to get: run the scanner over real
+  indexed content and count blocks per category. Do it every time the
+  catalog changes; a category that suddenly accounts for most of the
+  blocks is a false-positive source, not a detection win.
+- Thresholds should come from measurement, not intuition. The zero-width
+  run-length cutoff of 3 was chosen by scanning 79,878 live chunks: max
+  legitimate run was 2, and there were zero runs of 3+, so the threshold
+  costs nothing real while still catching an encoded payload (which needs
+  dozens of characters in a row).
+- Accepted limitation: text that *quotes* an attack still matches, because
+  the quote and the attack are the same string. Security documentation
+  will trip `instruction_override`. Layer 2 has the same property. Don't
+  contort the regex to fix this — exempt the source, or accept it.
 - All regexes here use bounded quantifiers (`{0,N}`, `{0,N}`-style repeat
   counts) rather than unbounded nested repetition — deliberate, to keep
   the scan free of catastrophic-backtracking (ReDoS) risk on adversarial

@@ -1,11 +1,64 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
 """
 hermes_injection_guard.py — Heuristic (pattern-layer) prompt/command/SQL-injection
 scanner for hermes-router.py, plus a small persistent event log so the daily
 fleet-health report can summarize block/flag counts without needing SSH into
 each node (hermes-router.py exposes them over its own `/guard/stats` GET
 endpoint — see that file's 2.4.0 changelog entry).
+
+1.3.0 (2026-09-09): false-positive correction. 1.2.0 widened this catalog
+without ever measuring it against the content it actually runs on, and the
+result was a guard that blocked almost everything: 96.3% of this repo's own
+markdown, and 1,530 of the 79,878 chunks in the live RAG index, were being
+hard-blocked at role="tool". A live rag_search returned 5/5 results redacted.
+The mistake was categorical, not a bad regex: this catalog was written to
+scan chat messages arriving at a router, where shell syntax in a message is
+anomalous, and was then applied unchanged to retrieved document chunks, where
+technical documentation is *supposed* to contain code. The rule this version
+applies throughout: match the dangerous CONSTRUCT, never the syntax that could
+carry one.
+
+  - cmd_injection: a bare `$(...)` or backtick span is no longer a hit. Both
+    now require a dangerous payload inside (see _DANGEROUS) and may not span
+    newlines. The bare-backtick pattern alone was responsible for 779 of the
+    791 blocked doc chunks -- it matched every markdown inline code span in
+    existence. The chained-execution pattern now requires a real argument per
+    alternative (`| bash |` is a markdown table cell, not a pipeline), and its
+    trailing \\b -- which silently prevented `rm -rf` from ever matching -- is
+    gone. `/etc/passwd` dropped as a standalone signal (ordinary in docs);
+    `/etc/shadow` kept. Added the `/dev/tcp` reverse-shell form.
+  - unicode_smuggling: presence of an invisible character is not concealment.
+    Measured on all 79,878 live chunks: 118,176 zero-width occurrences, every
+    single one isolated, max run length 2, zero runs of 3+ -- they come from
+    PDF/HTML text extraction, not attacks. ZWSP/word-joiner now require a run
+    of 3+, which clears all 1,393 false positives at no detection cost, since
+    encoding a payload in zero-width characters takes dozens in a row. ZWJ and
+    ZWNJ removed entirely: ZWJ joins emoji sequences (any family/profession
+    emoji was a hard block) and both are required for correct Persian, Arabic
+    and Indic rendering. A leading BOM is now file encoding, not a hit.
+  - role_spoof split. It keeps only chat-template control tokens, which are
+    genuinely never legitimate in message content and stay always-block. The
+    plain-text turn marker moved to a new role_tag_text category that is
+    tool-role-blocked rather than always-blocked: 1.2.0's version hard-blocked
+    `user: root` in any compose file and any quoted `Human:`/`Assistant:`
+    transcript, in every role. It is now column-0 and capitalized, which is
+    the completions-API turn format and not an indented lowercase YAML key.
+  - instruction_override: `you are now \\w+` fired on "You are now ready to
+    deploy" and is narrowed to explicit persona-switch framing. Open-ended
+    persona manipulation is Layer 2's job -- it can read intent; a regex
+    cannot.
+  - severity() now treats `function` and `ipython` as tool-like alongside
+    `tool`. Matching the literal string "tool" let a client relabel a message
+    with either real-world tool-result role name and get flag-only treatment
+    for content that would otherwise block.
+
+  Net, measured: live index 1,530 -> 29 blocked (1.92% -> 0.04%); this repo's
+  markdown 779 -> 42 of 809 chunks; 20/20 attack samples still detected.
+  Known and accepted limitation: text *quoting* an attack ("attackers type:
+  ignore previous instructions") still matches. That is inherent to pattern
+  matching -- the quote and the attack are the same string -- and Layer 2 has
+  the same property. Security documentation is expected to trip this.
 
 1.2.0 (2026-09-09): pattern-catalog hardening pass, no change to severity()/
 scan_messages()/the log schema -- catalog-level only:
@@ -73,8 +126,11 @@ scanning role-blind would false-positive-block `coder`'s actual job (people
 legitimately paste shell scripts and SQL for review). The asymmetry:
 
   - role_spoof / unicode_smuggling hits: never legitimate in ANY role text
-    content (a real user role tag or bidi override has no honest reason to
-    appear inside a message's `content` string) -> always "block".
+    content (a chat-template control token or a bidi override has no honest
+    reason to appear inside a message's `content` string) -> always "block".
+    Note this is the narrow set: a plain-text `Human:` turn marker is
+    role_tag_text, not role_spoof, and is NOT always-blocked -- quoting a
+    transcript is ordinary document content. See the 1.3.0 changelog.
   - cmd_injection / sql_injection hits in a `tool` message: this is content
     the persona is *reading* (RAG chunk, fetched page, broker/tool result),
     not content a human typed on purpose. Nobody expects a webpage's body
@@ -85,9 +141,13 @@ legitimately paste shell scripts and SQL for review). The asymmetry:
     retrieved content telling the model to ignore its instructions or to
     repeat its system prompt has no legitimate reading either.
   - cmd_injection / sql_injection / instruction_override / prompt_exfiltration
-    hits in a `user` message: expected and often legitimate (debugging help,
-    or someone just asking what the model's instructions are) -> "flag"
-    only, never a hard block on this signal alone.
+    / role_tag_text hits in a `user` message: expected and often legitimate
+    (debugging help, quoting a transcript, or someone just asking what the
+    model's instructions are) -> "flag" only, never a hard block on this
+    signal alone.
+
+"Tool-originated" means any role in _TOOL_LIKE_ROLES (`tool`, `function`,
+`ipython`), not the literal string "tool" -- see the 1.3.0 changelog.
 
 This module makes no network calls itself. log_event() below does local
 disk I/O (SQLite) but no network I/O, and is wrapped best-effort — same
@@ -106,14 +166,32 @@ from pathlib import Path
 # Literal downstream-execution payloads. Legitimate almost nowhere in
 # retrieved/tool content; legitimate often in a user's own coding questions,
 # which is why severity() treats this category differently by role.
+# A shell metacharacter is NOT by itself a signal here -- see the 1.3.0
+# changelog. Every pattern below requires an actual dangerous construct, not
+# just the syntax that could carry one. `_DANGEROUS` is the payload half,
+# reused by the substitution patterns so a bare `$(date)` or an inline
+# markdown code span doesn't fire.
+_DANGEROUS = r"(?:rm\s+-[a-z]*[rf]|curl|wget|nc\s|netcat|bash|/bin/sh|chmod\s+[0-7]{3,4}|chown|dd\s+if=|mkfs|eval\s|/etc/(?:passwd|shadow))"
+
 CMD_INJECTION = [
-    r'(?i)\$\([^)]+\)',                                    # $(...) command substitution
-    r'(?i)`[^`]+`',                                         # backtick substitution
-    r'(?i)[;&|]{1,2}\s*(rm|curl|wget|nc|bash|sh|python[23]?|chmod|chown|sudo|dd|mkfs)\b',
+    # Command substitution, but only when it carries something dangerous --
+    # `$(date)` and a markdown span like `ls -la` are not injection. Newlines
+    # excluded on purpose: a real substitution is one line, while allowing
+    # them made a ```bash fenced code block match its own language tag.
+    rf'(?i)\$\([^)\n]*{_DANGEROUS}[^)\n]*\)',
+    rf'(?i)`[^`\n]*{_DANGEROUS}[^`\n]*`',
+    # Chained/backgrounded execution of a destructive or fetching command.
+    # Each alternative requires a real argument rather than ending at a word
+    # boundary: `| bash |` in a markdown table row is a table cell, not a
+    # pipeline, and a trailing \b here also silently failed to match `rm -rf`
+    # (the boundary after `-r` falls mid-word). See the 1.3.0 changelog.
+    r'(?i)[;&|]{1,2}\s*(rm\s+-[a-z]*[rf]|curl\s+[^\s|]|wget\s+[^\s|]|nc\s+-|bash\s+[-/]'
+    r'|/bin/sh\b|chmod\s+[0-7]{3,4}|chown\s+\S|dd\s+if=|mkfs\b|sudo\s+rm\b)',
     r'(?i)\b(curl|wget)\s+\S+(?:\s+\S+){0,4}\s*\|\s*(sh|bash)\b',  # curl|sh / wget|sh, flags tolerated
     r'(?i)\bnc\s+-e\b',                                     # netcat reverse shell
-    r'(?i)/etc/(passwd|shadow)\b',
-    r'(?i)\bbase64\s+-d\b.{0,20}\|\s*(sh|bash)',
+    r'(?i)\b(bash|sh)\s+-i\s+>&\s*/dev/tcp/',               # bash /dev/tcp reverse shell
+    r'(?i)/etc/shadow\b',                                   # /etc/passwd alone is too common in docs
+    r'(?i)\bbase64\s+(-d|--decode)\b.{0,20}\|\s*(sh|bash)',
 ]
 
 SQL_INJECTION = [
@@ -125,25 +203,42 @@ SQL_INJECTION = [
     r"(?i)\bwaitfor\s+delay\b",
 ]
 
-# Structural spoofing — never legitimate in a message's content string,
-# regardless of what role sent it.
+# Structural spoofing — chat-template control tokens. Never legitimate in a
+# message's content string regardless of role: these are tokenizer-level
+# delimiters, not something prose or documentation contains.
 ROLE_SPOOF = [
-    r"(?im)^\s*(system|user|assistant|tool|human)\s*:\s",  # fake role tag at line start
-                                                             # ("human" catches the classic
-                                                             # Anthropic completions-style
-                                                             # `\n\nHuman:` injection format)
     r"<\|im_start\|>|<\|im_end\|>",
     r"<\|(system|user|assistant)\|>",                       # ChatML-adjacent role tags
     r"<<SYS>>|<</SYS>>",                                    # Llama-2 system delimiters
     r"\[INST\]|\[/INST\]",
     r"</?think>",
+]
+
+# A plain-text turn marker (`\n\nHuman:`) is a weaker signal than a control
+# token -- it is also just how transcripts, chat logs and YAML are written.
+# Deliberately NOT in _ALWAYS_BLOCK; see the 1.3.0 changelog. Column-0 and
+# capitalized on purpose: that is the completions-API turn format, and it is
+# what separates an injected turn marker from an indented lowercase
+# `  user: root` in a compose file.
+ROLE_TAG_TEXT = [
+    r"(?m)^(Human|Assistant|System)\s*:\s",
     r"(?i)###\s*(system|instruction)\b",
 ]
 
 UNICODE_SMUGGLING = [
-    r"[\u202A-\u202E\u2066-\u2069]",     # bidi override (202A-202E) + isolate (2066-2069) chars
-    r"[\u200B-\u200D\u2060\uFEFF]",       # zero-width chars: ZWSP/ZWNJ/ZWJ/word-joiner/BOM
-    r"[\U000E0000-\U000E007F]",          # Unicode tag block (ASCII smuggling)
+    r"[\u202A-\u202E\u2066-\u2069]",     # bidi override/isolate: Trojan-Source style spoofing
+    # A single invisible character is encoding noise, not an attack -- PDF and
+    # HTML extraction emit ZWSP constantly (118k occurrences across this
+    # fleet's own podcast corpus, every one of them isolated). Concealment
+    # needs a RUN: encoding a payload in zero-width characters takes dozens of
+    # them in a row. Measured on 79,878 live chunks: max legitimate run = 2,
+    # zero runs of 3+. So {3,} costs no real detection and clears every one of
+    # those false positives. ZWJ (200D) and ZWNJ (200C) are excluded entirely --
+    # ZWJ joins emoji sequences, and both are required for correct
+    # Persian/Arabic/Indic rendering. See the 1.3.0 changelog.
+    r"[\u200B\u2060]{3,}",
+    r"(?<!\A)\uFEFF",                    # BOM mid-text is anomalous; a leading BOM is just file encoding
+    r"[\U000E0000-\U000E007F]",          # Unicode tag block (ASCII smuggling) -- never legitimate, no threshold
 ]
 
 # Semantic-but-still-pattern-matchable phrasing — catches the unsophisticated
@@ -154,7 +249,11 @@ INSTRUCTION_OVERRIDE = [
     r"(?i)\bdisregard\s+(the\s+)?(system\s+)?prompt\b",
     r"(?i)\bforget\s+(your|all|previous)\s+instructions\b",
     r"(?i)\bnew\s+instructions\s*:",
-    r"(?i)\byou\s+are\s+now\s+\w+",
+    # Persona-switch framing. Narrowed from a bare `you are now \w+`, which
+    # fired on ordinary tutorial prose ("You are now ready to deploy") -- the
+    # open-ended version of this belongs to Layer 2, which can read intent.
+    r"(?i)\byou\s+are\s+now\s+(a\s+|an\s+|in\s+)?(dan\b|jailbroken|unrestricted|uncensored|developer\s+mode|god\s+mode|do\s+anything)",
+    r"(?i)\b(pretend|act)\s+(you\s+(are|have)|as\s+if)\b.{0,40}\b(no\s+(restrictions|rules|filter)|unrestricted|jailbroken)",
 ]
 
 # System-prompt / instruction exfiltration attempts. Distinct from
@@ -174,6 +273,7 @@ _CATEGORIES = {
     "cmd_injection": CMD_INJECTION,
     "sql_injection": SQL_INJECTION,
     "role_spoof": ROLE_SPOOF,
+    "role_tag_text": ROLE_TAG_TEXT,
     "unicode_smuggling": UNICODE_SMUGGLING,
     "instruction_override": INSTRUCTION_OVERRIDE,
     "prompt_exfiltration": PROMPT_EXFILTRATION,
@@ -187,8 +287,16 @@ _ALWAYS_BLOCK = {"role_spoof", "unicode_smuggling"}
 # instruction_override and prompt_exfiltration belong here too: retrieved
 # content telling the model to "ignore previous instructions" or to repeat
 # its system prompt has no legitimate reading, unlike a user saying either
-# about their own conversation.
-_TOOL_ROLE_BLOCK = {"cmd_injection", "sql_injection", "instruction_override", "prompt_exfiltration"}
+# about their own conversation. role_tag_text is here rather than in
+# _ALWAYS_BLOCK because a quoted transcript is ordinary document content.
+_TOOL_ROLE_BLOCK = {"cmd_injection", "sql_injection", "instruction_override",
+                    "prompt_exfiltration", "role_tag_text"}
+
+# Roles whose content the model is *reading* rather than a human typing it.
+# Matching only the literal string "tool" let a client relabel a message
+# `function`/`ipython` (both real tool-result role names in the wild) and get
+# flag-only treatment for content that would otherwise block -- see 1.3.0.
+_TOOL_LIKE_ROLES = {"tool", "function", "ipython"}
 
 
 def scan(text):
@@ -211,7 +319,7 @@ def severity(role, hits):
         return "clean"
     if _ALWAYS_BLOCK & hits.keys():
         return "block"
-    if role == "tool" and (_TOOL_ROLE_BLOCK & hits.keys()):
+    if role in _TOOL_LIKE_ROLES and (_TOOL_ROLE_BLOCK & hits.keys()):
         return "block"
     return "flag"
 

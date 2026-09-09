@@ -18,8 +18,9 @@ prerequisites:
 **Version:** 2.0.0
 
 Retrieval-augmented search over the fleet's indexed corpora (Phase 30,
-`IMPLEMENTATION_PLAN.md` §7). Four corpora, all live as of this build:
-- `fleet-docs` — this project's own documentation.
+`IMPLEMENTATION_PLAN.md` §7). Three corpora, all live as of this build
+(`fleet-docs`, this repo's own documentation, was retired 2026-09-09 — it
+is no longer a RAG target and its chunks are purged from the index):
 - `podcasts` — Security Now! and Intelligent Machines transcripts (~1150
   episodes), plus Tech Brew Ride Home's per-episode story-links
   citation list (no transcript exists for that show) — growing via a daily
@@ -43,12 +44,11 @@ match — only return real indexed text with its real source citation.
 Use the **shared venv's** `python3`, not the system one:
 
 ```bash
-/opt/hermes/venvs/rag/bin/python3 ~/HermesAgentV5/tools/hermes-rag-query.py "your question" [--corpus fleet-docs|podcasts|ops|personal-kb] [--top-k 5]
+/opt/hermes/venvs/rag/bin/python3 ~/HermesAgentV5/tools/hermes-rag-query.py "your question" [--corpus podcasts|ops|personal-kb] [--top-k 5]
 ```
 
 Omit `--corpus` to search everything indexed. Each result prints its citation
-directly above the matched text — a doc section (`file — section`) for
-`fleet-docs`, a show/episode/date for `podcasts` (with a `(part N/M)` suffix
+directly above the matched text — a show/episode/date for `podcasts` (with a `(part N/M)` suffix
 for a multi-chunk episode), `Node health — <node> — <section> (as of
 <timestamp>)` for `ops`, or the relative file path for `personal-kb` — always
 relay that citation alongside anything quoted from a result, so whoever reads
@@ -59,7 +59,7 @@ saying so.
 ## What it can't do
 
 - No write path — this tool never modifies the index. Ingestion is separate,
-  pmoney-run tooling (`hermes-rag-ingest-docs.py`, `hermes-rag-ingest-podcasts.py`,
+  pmoney-run tooling (`hermes-rag-ingest-podcasts.py`,
   `hermes-rag-ingest-ops.py`, `hermes-rag-ingest-kb.py`).
 - No cross-corpus judgment or summarization — it returns raw matched chunks,
   not a synthesized answer. If a task needs a synthesized brief from matched

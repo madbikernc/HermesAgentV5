@@ -22,7 +22,6 @@ LUKS container.
 | `hermes-embed.service` | Spark | Resident llama.cpp server, Qwen3-Embedding-8B-Q8_0 (2026-09-04, up from 0.6B), `127.0.0.1:8092` — query-time embedding for every reader (query tool, news digest, all ingesters running on the Spark) |
 | `hermes-embed-homed13.service` | HomeD13 | A second, independent instance of the **same model** (must track the Spark's choice exactly — see §3), own build (x86_64+CUDA vs. the Spark's aarch64), CPU-only (VRAM conflict with ComfyUI's resident SDXL checkpoint) — bulk-ingestion embedding for the podcast backfill, kept off the Spark's shared bus |
 | `hermes-embed-worker.service` | HomeD13 | Pulls `embed`-typed jobs from the broker, calls the HomeD13 backend above, reports back — the only consumer of `hermes-embed-homed13.service` |
-| `hermes-rag-ingest-docs.{service,timer}` | Spark | 30b — fleet-docs corpus (this repo's own `.md` files) |
 | `hermes-rag-ingest-podcasts.{service,timer}` | Spark | 30c — podcast-archive corpus, broker-routed bulk embedding to HomeD13 |
 | `hermes-rag-ingest-ops.{service,timer}` | Spark | 30e — ops corpus (`hermes-node-health.py`'s own latest snapshot per identity) |
 | `hermes-rag-ingest-kb.{service,timer}` | Spark | 30f — personal-KB corpus, `RAGDocs` NAS share |
@@ -139,20 +138,19 @@ once, not a hang.
 Each ingester is a `Type=oneshot` service plus a daily catch-up `.timer`. Install both together per corpus:
 
 ```bash
-for name in hermes-rag-ingest-docs hermes-rag-ingest-podcasts hermes-rag-ingest-ops hermes-rag-ingest-kb; do
+for name in hermes-rag-ingest-podcasts hermes-rag-ingest-ops hermes-rag-ingest-kb; do
   sudo cp "$name.service" "$name.timer" /etc/systemd/system/
 done
 sudo systemctl daemon-reload
 sudo systemctl enable --now \
-  hermes-rag-ingest-docs.timer hermes-rag-ingest-podcasts.timer \
+  hermes-rag-ingest-podcasts.timer \
   hermes-rag-ingest-ops.timer hermes-rag-ingest-kb.timer
 ```
 
-Staggered on purpose (06:45 / 06:50 / 06:57 / 06:59) — sequential, not simultaneous, since they share one
+Staggered on purpose (06:50 / 06:57 / 06:59) — sequential, not simultaneous, since they share one
 `vectors.db` and one embedding backend. Run any one manually first to confirm before trusting the timer:
 
 ```bash
-sudo -u pmoney /opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-rag-ingest-docs.py --repo /home/pmoney/HermesAgentV5 --dry-run
 ```
 
 **`hermes-rag-ingest-podcasts.service` needs `TimeoutStartSec=21600`** (6 hours) — a full backfill run over
@@ -226,7 +224,7 @@ No service — a CLI, or `skills/rag-query/SKILL.md`'s pointer for either person
 
 ```bash
 /opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-rag-query.py \
-  "what does the fleet do about session-length caps" --corpus fleet-docs --top-k 5
+  "what did Security Now say about passkeys" --corpus podcasts --top-k 5
 ```
 
 ## 8. Verify
@@ -318,6 +316,7 @@ ssh <host-alias> /opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/to
 
 | Version | Date | Change |
 |---|---|---|
+| 1.4.0 | 2026-09-09 | Direct request: the `fleet-docs` corpus is retired — this repo's own documentation is no longer a RAG target. That corpus had exactly one source (`hermes-rag-ingest-docs.py --repo ~/HermesAgentV5`), so the ingester and its `.service`/`.timer` are deleted rather than disabled, `fleet-docs` is dropped from `hermes-rag-mcp.py`'s `CORPORA` and `hermes-rag-eval.py`'s corpus list, and the 946 already-indexed chunks (79 sources) are purged from `vectors.db` — a corpus removed from `CORPORA` but left in the table would still be reachable by a `corpus=None` search. |
 | 1.3.0 | 2026-09-04 | §3 rewritten for the embed swap (Qwen3-Embedding-0.6B -> 8B, model-review finding: #1 on a Jan 2026 MTEB English snapshot). New §3a: `hermes_rag_common.py` 1.7.0 / `hermes-memory.py` 1.4.0 self-migrate `vec_chunks`/`vec_turns` on dimension mismatch (drop, recreate, re-embed every existing row) — documented as required-but-automatic, plus the two things worth doing by hand (restart both embed backends together first; smoke-test before trusting it, since `ggml-org/llama.cpp#26044`'s Volta NaN-embedding bug is architecturally unlikely but not live-verified against this fleet's GB10/Blackwell hardware). HomeD13's instance moved to CPU-only — the 8B model doesn't fit alongside ComfyUI's resident SDXL checkpoint in 12GB VRAM. |
 | 1.2.0 | 2026-09-04 | `rag_reindex` rebuilt fire-and-forget plus a new `rag_reindex_progress` tool, direct request ("the mcp should have a 'rag reindex progress' as well") — the original blocking design (1.1.0) could exceed an MCP client's own tool-call timeout on a large podcast catch-up. Job state now on disk under `~/.hermes/state/rag-reindex/`, checkable from a different MCP session or client machine than the one that started the run. Verified live: start/already-running-refusal/poll-to-completion, plus a real (non-dry-run) fleet-docs reindex through the tool itself to pick up this same file's own 1.1.0 edit. |
 | 1.1.0 | 2026-09-04 | Adds §9, `hermes-rag-mcp.py` — MCP server exposing search/reindex over stdio, portable across client machines via SSH (direct request: "the MCP ability needs to be portable enough between at least two machines"). Two-layer injection screening on every returned string per a second direct request ("always do injection protection at every possible interaction"), verified live end-to-end (initialize/tools-list/tools-call handshake, plus a real query that triggered a genuine Layer 1 block). |

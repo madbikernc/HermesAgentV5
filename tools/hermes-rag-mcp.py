@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-09-09) — direct request: the fleet-docs corpus is retired, and this
+# server no longer exposes it. That corpus was sourced entirely from this repo's
+# own documentation (hermes-rag-ingest-docs.py's --repo defaulted to
+# ~/HermesAgentV5), so retiring it and retiring that ingester are the same
+# change; the ingester and its systemd unit/timer are deleted, not just
+# disabled. Tool descriptions here now name the corpora that actually exist
+# (podcasts/personal-kb/ops/minecraft -- `minecraft` was already in CORPORA but
+# had never been added to these strings). The 946 already-indexed fleet-docs
+# chunks are purged from vectors.db separately; a corpus removed from CORPORA
+# but left in the table would still be reachable by a corpus=None search.
 #
 # 1.1.0 (2026-09-04) — direct request: "the mcp should have a 'rag reindex
 # progress' as well." rag_reindex's original shape (this same version's
@@ -119,12 +130,6 @@ CORPORA = {
         "description": ("Security Now, Intelligent Machines, This Week in Tech, Tech Brew "
                          "Ride Home, and Dan Carlin's shows -- transcripts and story-link citations."),
         "script": "hermes-rag-ingest-podcasts.py",
-    },
-    "fleet-docs": {
-        "description": ("This fleet's own docs: IMPLEMENTATION_PLAN.md, LESSONS_LEARNED.md, "
-                         "README.md, CLAUDE.md, persona SOUL.md files, skills/*/SKILL.md, "
-                         "infra/*/README.md."),
-        "script": "hermes-rag-ingest-docs.py",
     },
     "personal-kb": {
         "description": ("Personal notes/reference material under RAGDocs -- markdown, text, "
@@ -291,7 +296,7 @@ mcp = MCPServer(
     name="hermes-rag",
     version="1.1.0",
     instructions=(
-        "Search and reindex this fleet's RAG corpora (podcasts, fleet-docs, personal-kb, ops). "
+        "Search and reindex this fleet's RAG corpora (podcasts, personal-kb, ops, minecraft). "
         "Search is read-only. Reindex re-runs the existing, already-scheduled ingest pipeline "
         "for one corpus in the background and returns immediately -- it does not accept "
         "arbitrary writes to the index, and does not block waiting for the run to finish; call "
@@ -305,7 +310,7 @@ mcp = MCPServer(
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False))
 def rag_search(query: str, corpus: str | None = None, top_k: int = 5) -> dict:
     """Search the RAG index (cosine similarity + cross-encoder rerank). `corpus`: one of
-    podcasts/fleet-docs/personal-kb/ops, or omit to search across all of them. `top_k`: 1-20,
+    podcasts/personal-kb/ops/minecraft, or omit to search across all of them. `top_k`: 1-20,
     default 5. Every result is screened for prompt-injection content (pattern scan, plus a real
     ML classifier for the chunk text itself) before being returned; a blocked result has its
     text withheld but its citation and block reason are still reported so an operator can
@@ -363,7 +368,7 @@ def rag_list_corpora() -> dict:
 def rag_reindex(corpus: str, dry_run: bool = False) -> dict:
     """Start a catch-up reindex for one corpus in the background by running its existing ingest
     script -- the same script its own daily timer already runs, never a direct write to the
-    vector store. `corpus`: one of podcasts/fleet-docs/personal-kb/ops. `dry_run`: report what
+    vector store. `corpus`: one of podcasts/personal-kb/ops/minecraft. `dry_run`: report what
     would change without embedding anything.
 
     Returns immediately -- this does NOT wait for the run to finish. Podcasts especially can take
@@ -463,8 +468,8 @@ def _one_corpus_progress(corpus: str) -> dict:
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False))
 def rag_reindex_progress(corpus: str | None = None) -> dict:
-    """Check on a reindex started by rag_reindex. `corpus`: one of podcasts/fleet-docs/
-    personal-kb/ops, or omit to report on all four at once. `status` is one of: never_run (no
+    """Check on a reindex started by rag_reindex. `corpus`: one of podcasts/personal-kb/
+    ops/minecraft, or omit to report on all of them at once. `status` is one of: never_run (no
     reindex has ever been started for this corpus through this tool), running, done, failed (the
     script ran and exited non-zero), or unknown (the process is gone but never wrote a normal
     exit code -- killed outright, e.g. an OOM or a host reboot mid-run). Includes up to the last
