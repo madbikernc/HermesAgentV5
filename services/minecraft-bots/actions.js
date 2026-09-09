@@ -1,4 +1,19 @@
-// Version: 1.34.0
+// Version: 1.35.0
+//
+// 1.35.0 (2026-09-09) -- follow-up live findings on "plant_sapling" (1.33.0/1.34.0), both from
+// the SAME 25-minute post-deploy watch: (1) Luke and Mayor failed to find ANY spot to plant,
+// every single retry, for the entire window -- rule 2 only ever checked within a fixed 32 blocks
+// of wherever the bot currently stood, with no fallback (unlike "mine"/"store"/harvest's own
+// till-from-scratch fallback, all of which already reach for wanderAndRetryFind() when a local
+// search comes up empty). Near a base this is a real, expected failure mode: most nearby open
+// ground legitimately IS "near a building" by design, since that's the whole point of a base --
+// this needed the same directed-wander capability every other search-based action already has to
+// reach open ground beyond the immediate settled area. Now wired in. (2) A real placement
+// failure ("Server refused to place dark_oak_sapling ... the block is still dark_oak_sapling")
+// traced to the "air above" check being too loose -- `boundingBox !== "block"` also accepts a
+// spot where a sapling/tall-grass/flower is ALREADY growing (none of those are "block" either),
+// so a target could get picked that wasn't actually plantable. Both findPlantableSpotNear() and
+// rule 2's own matcher now require real `name === "air"` instead.
 //
 // 1.34.0 (2026-09-09) -- two changes shipped together. (1) Fixed a real live crash in
 // "plant_sapling" (1.33.0), found minutes after it first deployed: rule 2's own findBlocks()
@@ -1333,7 +1348,11 @@ function findPlantableSpotNear(bot, center, radius) {
         const pos = center.offset(dx, dy, dz);
         const ground = bot.blockAt(pos);
         if (!ground || !groundIds.includes(ground.type)) continue;
-        if (bot.blockAt(pos.offset(0, 1, 0))?.boundingBox === "block") continue;
+        // Real "air", not just non-solid -- a pre-existing sapling/tall-grass/flower isn't
+        // "block" either, and planting into one is a real placement failure (found live,
+        // 2026-09-09: "Server refused to place dark_oak_sapling ... the block is still
+        // dark_oak_sapling").
+        if (bot.blockAt(pos.offset(0, 1, 0))?.name !== "air") continue;
         return pos;
       }
     }
@@ -2544,19 +2563,34 @@ export async function performAction(bot, action, speaker) {
         }
         // Rule 2: fall back to any free soil not directly adjacent to a building.
         if (!targetPos) {
-          const positions = bot.findBlocks({
+          // Real live gap found 2026-09-09, minutes after this first deployed: Luke and Mayor
+          // both failed to find ANY spot, every single retry, for the entire 25-minute window --
+          // rule 2 only ever checked within a fixed 32 blocks of wherever the bot currently
+          // stood, with no fallback if that came up empty (unlike "mine"/"store"/harvest's own
+          // till-from-scratch fallback, all of which already reach for wanderAndRetryFind()).
+          // Near a base, most nearby open ground legitimately IS near a building by design
+          // (that's the whole point of a base) -- this needs the same directed-wander capability
+          // every other search-based action already has to reach open, unclaimed ground beyond
+          // the immediate settled area.
+          const groundFindOptions = {
             // Real live crash, 2026-09-09: a findBlocks() matcher candidate can have a null
             // .position despite the block itself being non-null -- the exact same mineflayer
             // edge case findNearestShore() (index.js) already found and guarded against; this
             // matcher hit it too ("sapling check failed: Cannot read properties of null
             // (reading 'offset')", repeating every idle tick for any bot carrying a sapling).
+            // Also tightened here to real "air" (not just a non-solid bounding box) -- a
+            // pre-existing sapling/tall-grass/flower already occupying that space isn't "block"
+            // either, and a real live placement failure ("Server refused to place
+            // dark_oak_sapling ... the block is still dark_oak_sapling") traced to exactly that.
             matching: (block) => {
               if (!block?.position || !groundIds.includes(block.type)) return false;
-              if (bot.blockAt(block.position.offset(0, 1, 0))?.boundingBox === "block") return false;
+              if (bot.blockAt(block.position.offset(0, 1, 0))?.name !== "air") return false;
               return !nearBuilding(bot, block.position);
             },
             maxDistance: 32, count: 1,
-          });
+          };
+          let positions = bot.findBlocks(groundFindOptions);
+          if (!positions.length) positions = await wanderAndRetryFind(bot, token, groundFindOptions);
           targetPos = positions[0] || null;
         }
         if (!targetPos) break; // nowhere good found -- stop, don't force a bad spot
