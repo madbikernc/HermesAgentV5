@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.22.0
+**Version:** 3.23.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -356,6 +356,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.23.0 | 2026-09-09 | Live monitoring caught a real loophole in DONE item-verification: the model could dodge it entirely by answering `DONE NONE` even on a goal that plainly named a specific item ("mine some iron" marked complete with zero real progress). Now rejected the same way a false item claim is. Also: `storeSurplusNearHome()` no longer aborts its whole batch over one item-specific failure. |
 | 3.22.0 | 2026-09-09 | Post-craft home storage confirmed working live (20 successful stores across all five bots). The one real failure observed showed no diagnostic line at all, revealing "store" had two MORE silent chest-candidate skip points (obstruction check, pathfinder-unreachable) beyond the deposit failure just fixed -- all three now logged. |
 | 3.21.0 | 2026-09-09 | The new post-craft home-storage cleanup failed twice, live, both times with no visible reason ("store"'s per-chest-candidate deposit failure was silently swallowed, never logged). Now logged per candidate so the real reason is diagnosable next time it happens. |
 | 3.20.0 | 2026-09-09 | "Near a building" (sapling planting's rule 2) is now exactly 6 blocks, was a guess of 3. |
