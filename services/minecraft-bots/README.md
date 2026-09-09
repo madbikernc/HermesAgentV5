@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.20.0
+**Version:** 3.21.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -356,6 +356,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.21.0 | 2026-09-09 | The new post-craft home-storage cleanup failed twice, live, both times with no visible reason ("store"'s per-chest-candidate deposit failure was silently swallowed, never logged). Now logged per candidate so the real reason is diagnosable next time it happens. |
 | 3.20.0 | 2026-09-09 | "Near a building" (sapling planting's rule 2) is now exactly 6 blocks, was a guess of 3. |
 | 3.19.0 | 2026-09-09 | Two more real bugs in sapling planting, found via a 25-minute post-deploy watch: Luke and Mayor never once found a spot to plant near their base (rule 2 had no wander fallback like every other search-based action already has -- fixed), and a real placement failure traced to the "air above" check being too loose (accepted a spot where a sapling/plant was already growing -- now requires real air). |
 | 3.18.0 | 2026-09-09 | After a successful craft or smelt, surplus materials are now stored in the chest nearest to the bot's own claimed bed ("home"), not just the nearest chest overall -- new `storeSurplusNearHome()` + `"store"`'s new `near` param. Also fixes a real live crash in the previous sapling-planting feature (an unguarded null `block.position` in its own chest/ground search, the same mineflayer edge case `findNearestShore()` had already hit once before). |
