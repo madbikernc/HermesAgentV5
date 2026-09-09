@@ -1,4 +1,26 @@
 #!/usr/bin/env bash
+# Version: 1.6.0 (2026-09-09 — real outage found live: a fleet-wide service restart made
+# hermes-router unreachable for ~10 minutes. Root cause traced with controlled live tests, not
+# guessed: this script's slow path and tools/hermes-vault-agent.py's persistent session share ONE
+# local `bw` CLI profile (the default data.json), and that profile can only back one valid
+# unlocked session at a time. Proved incrementally: a bare `bw lock` broke the agent's next fetch;
+# then, with lock/logout removed from the test entirely, a bare `bw unlock` (no sync, no get, no
+# lock) STILL broke it in ~3s. So the earlier theory -- "stop calling lock/logout when the agent is
+# present" -- is wrong and was never applied: it would not have fixed anything, since the slow
+# path's very first `bw unlock` call (required to fetch anything at all) evicts the agent's session
+# regardless of what happens at the end of the script. Under load (ten services restarting at once,
+# each racing to the agent's fast path, many falling through to this slow path) that turned into a
+# live-lock: every slow-path unlock evicted the agent, forcing its next fetch to pay a full re-auth
+# while holding its own internal lock, which made more fast-path callers time out and fall through,
+# which evicted it again. Fixed by giving this script's own `bw` CLI its own isolated profile via
+# BITWARDENCLI_APPDATA_DIR (a real, tested `bw` env var -- confirmed live it creates a fully
+# independent data.json) rather than sharing the agent's default one. Verified live: a full
+# login/unlock/sync/get/lock cycle in the isolated profile succeeds, and immediately after, the
+# agent's own fetch stays at its normal ~3.8s with no re-auth logged -- the two profiles never
+# collide because neither's `bw unlock` touches the other's file. The flock below is unchanged in
+# purpose (still serializes concurrent slow-path callers against each other) but now scopes to this
+# script's own isolated profile rather than the one it used to share with the agent.
+#
 # Version: 1.5.0 (2026-09-06 — real bug found live while verifying the Reolink Hub integration:
 # `bw get item/username/password <name>` matches by substring, not exact-first, so once an item
 # named 'Hermes Reolink Mail' existed alongside 'Hermes Reolink', every by-name lookup for the
@@ -69,7 +91,10 @@
 # Usage: vault-get-secret.sh <item-name> [password|username|notes|<custom-field-name>]
 #
 # Requires, per-node, already in place (see IMPLEMENTATION_PLAN.md §2b):
-#   - `bw` CLI installed and `bw config server https://10.129.1.167:8222` already set
+#   - `bw` CLI installed, with the default profile's server already set (`bw config server
+#     https://10.129.1.167:8222`) -- this script reads that URL once, on first run, to bootstrap
+#     its OWN isolated profile below (1.6.0). It never logs into or unlocks the default profile
+#     itself; that profile only needs its server URL configured so there's something to copy.
 #   - /etc/hermes/vw-lan.crt (Vaultwarden's self-signed LAN cert, for NODE_EXTRA_CA_CERTS)
 #   - /etc/credstore.encrypted/vaultwarden-<node>-apikey  (systemd-creds sealed: BW_CLIENTID/BW_CLIENTSECRET)
 #   - /etc/credstore.encrypted/vaultwarden-<node>-masterpw (systemd-creds sealed: BW_PASSWORD)
@@ -116,16 +141,36 @@ fi
 
 export NODE_EXTRA_CA_CERTS="${VAULT_CA_CERT:-/etc/hermes/vw-lan.crt}"
 
-# Serialize the whole fetch against any other vault-get-secret.sh call
-# running as this same Unix user -- they all share one local `bw` CLI
-# profile under $HOME, and concurrent login/unlock/get/logout cycles race
-# on it (see 1.3.0 note above). 120s covers this fleet's own documented
-# worst-case real Vaultwarden latency (15-90s) plus queuing behind another
-# caller's full retry loop.
+# Serialize the whole fetch against any other vault-get-secret.sh call running as this same Unix
+# user -- they all share one local `bw` CLI profile, THIS script's own isolated one (see 1.6.0
+# below), and concurrent login/unlock/get/logout cycles race on it same as before (see 1.3.0 note
+# above). 120s covers this fleet's own documented worst-case real Vaultwarden latency (15-90s) plus
+# queuing behind another caller's full retry loop.
 LOCK_FILE="${HOME}/.hermes/vault-cli.lock"
 mkdir -p "$(dirname "$LOCK_FILE")"
 exec 9>"$LOCK_FILE"
 flock -w 120 9 || { echo "[vault-get-secret] ERROR: timed out waiting for another vault-get-secret.sh call to finish (lock: $LOCK_FILE)" >&2; exit 1; }
+
+# 1.6.0: this script's OWN `bw` CLI profile, isolated from tools/hermes-vault-agent.py's default
+# one. Confirmed live (see 1.6.0 changelog above) that a fresh `bw unlock` invalidates whatever
+# session another process was already holding when both share a profile -- lock/logout hygiene at
+# the end of this script never mattered, because the very next unlock is what evicts the other
+# side. Two separate `data.json` files under two separate profiles never touch each other, so the
+# agent's long-lived session and this script's own short-lived one can coexist indefinitely.
+export BITWARDENCLI_APPDATA_DIR="${HOME}/.hermes/bw-slowpath-appdata"
+mkdir -p "$BITWARDENCLI_APPDATA_DIR"
+if [ ! -f "$BITWARDENCLI_APPDATA_DIR/data.json" ]; then
+  # One-time bootstrap: copy the server URL from the default profile (already configured per the
+  # Requires section above) into this isolated one. Reads BITWARDENCLI_APPDATA_DIR-unset here on
+  # purpose -- unset the override for this one call so `bw config server` (no args, a read) queries
+  # the DEFAULT profile, not the isolated one we're about to create.
+  DEFAULT_SERVER="$(env -u BITWARDENCLI_APPDATA_DIR bw config server 2>/dev/null)" || DEFAULT_SERVER=""
+  if [ -z "$DEFAULT_SERVER" ]; then
+    echo "[vault-get-secret] ERROR: default bw profile has no server configured -- run 'bw config server <url>' first (see Requires above)" >&2
+    exit 1
+  fi
+  bw config server "$DEFAULT_SERVER" >/dev/null 2>&1 || true
+fi
 
 APIKEY_CRED="/etc/credstore.encrypted/vaultwarden-${NODE}-apikey"
 MASTERPW_CRED="/etc/credstore.encrypted/vaultwarden-${NODE}-masterpw"
