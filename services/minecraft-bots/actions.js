@@ -1,4 +1,10 @@
-// Version: 1.39.0
+// Version: 1.40.0
+//
+// 1.40.0 (2026-09-10) -- Phase 1 of the approved per-bot coherence arbiter plan (see
+// arbiter.js's own header for the full account). stopCurrent()'s real body moved to arbiter.js's
+// cancelAndRotate() -- this function is now a one-line delegate. Zero behavior change in this
+// phase: nothing yet calls arbiter.requestControl() ahead of a performAction() call, so every
+// action still unconditionally cancels-and-rotates exactly as before.
 //
 // 1.39.0 (2026-09-10) -- direct request: "fix the lighting logic," following a confirmed live
 // incident (1260+ deaths in ~26h, root-caused live: the shared base sat pitch dark at ground
@@ -569,6 +575,7 @@ import { Vec3 } from "vec3";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipment.js";
+import { cancelAndRotate } from "./arbiter.js";
 
 const { goals } = pathfinderPkg;
 
@@ -1430,31 +1437,18 @@ async function saveClaimedBed(bot, position) {
   }
 }
 
-let cancelToken = { cancelled: false };
-
+// Direct request, 2026-09-10 ("write up a plan for that single arbiter..." -> the approved
+// per-bot coherence arbiter plan, Phase 1 of its migration). This function's own real body (the
+// 4 cancel primitives + token rotation + sleep-interrupt) now lives in arbiter.js's own
+// cancelAndRotate() -- moved, not duplicated, so index.js's reflex handlers (self-defense, the
+// health/breath emergencies, squad response, etc.) can eventually share the exact same token
+// instead of index.js maintaining its own, separate raw setGoal(null) calls that this file's own
+// cancelToken never knew about (the confirmed root cause of the recover()-retry bug arbiter.js's
+// own header documents). Zero behavior change in this phase: every performAction() call still
+// unconditionally cancels-and-rotates exactly as before, since nothing yet calls
+// arbiter.requestControl() ahead of it.
 function stopCurrent(bot) {
-  cancelToken.cancelled = true;
-  cancelToken = { cancelled: false };
-  bot.pathfinder.setGoal(null);
-  if (bot.pvp.target) bot.pvp.stop();
-  bot.collectBlock.cancelTask(); // real cancellation, not just how we interpret the eventual result
-  // Real bug found live, 2026-09-07 (chasing an all-day recurring OOM crash the coder/coder2
-  // triage service kept flagging but never pinpointed): confirmed against mineflayer-collectblock's
-  // own source that cancelTask() ONLY calls bot.pathfinder.stop() -- collectBlock's mineBlock()
-  // calls the CORE bot.dig() directly, entirely outside pathfinder's control, so cancelTask() does
-  // nothing to an in-flight dig. mineflayer's own dig.js registers a per-block
-  // `blockUpdate:${position}` listener that only ever gets removed by that exact dig completing
-  // or by bot.stopDigging() -- neither happens here, so every action interrupted mid-dig (this
-  // function runs before EVERY new action, including the frequent self-defense/emergency
-  // interrupts) orphaned that listener and its pending promise permanently. bot.stopDigging() is
-  // its own safe no-op when nothing is currently being dug (checked internally against
-  // bot.targetDigBlock), so this is harmless to call unconditionally.
-  bot.stopDigging();
-  // Any new action (a direct command, or the goal loop wanting to do something else) should
-  // interrupt a night's sleep rather than queue up behind it -- every performAction() call
-  // starts here, so this is the one place that's guaranteed to run before anything else happens.
-  if (bot.isSleeping) bot.wake().catch((err) => console.error("stopCurrent: wake failed:", err.message));
-  return cancelToken;
+  return cancelAndRotate(bot);
 }
 
 export async function performAction(bot, action, speaker) {
