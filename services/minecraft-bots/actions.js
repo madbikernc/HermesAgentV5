@@ -1,4 +1,16 @@
-// Version: 1.42.0
+// Version: 1.43.0
+//
+// 1.43.0 (2026-09-10) -- direct live report: "they don't seem to be able to fight, or run
+// from, phantoms." Real bug, confirmed against minecraft-data's own entity registry directly:
+// nearestHostile()'s "hostile" type requirement (added in 1.42.0's own predecessor fix) is wrong
+// for phantom, ghast, slime, and shulker -- all four carry entity.type "mob", not "hostile",
+// despite minecraft-data's own separate "category" field correctly listing all four as "Hostile
+// mobs." Self-defense/checkSleepingThreat/"attack"/"flee" targeting never even saw a nearby
+// phantom as a threat at all -- a silent detection failure, not a combat or targeting bug. The
+// "hostile" type check added no real safety on top of the already-curated HOSTILE_MOBS name
+// allowlist (nothing outside that deliberate list was ever going to match by name); it only
+// excluded entries whose real type field happens to disagree with minecraft-data's own category
+// field. HOSTILE_MOBS.has(e.name) alone is now the sole condition.
 //
 // 1.42.0 (2026-09-10) -- direct live report: "they're still not fighting back or running."
 // Real bug, confirmed by reading the actually-installed mineflayer-pvp 1.3.2 source directly
@@ -679,12 +691,24 @@ const HOSTILE_MOBS = new Set([
 // hostile mob (zombie, skeleton, creeper, or anything else in HOSTILE_MOBS below), on any
 // version of this codebase, since the day it was written. Not a timing/gating bug -- every
 // caller (checkSelfDefense, checkSleepingThreat, "attack"/"flee" targeting) was working from a
-// function that always returned undefined. This future version's entity type taxonomy is more
-// granular than whatever assumption "mob" was originally based on (the real, confirmed set on
-// this server: player/animal/passive/mob/hostile/ambient/other) -- HOSTILE_MOBS' own explicit
-// name allowlist is kept as a real safety net alongside the corrected type check, not removed.
+// function that always returned undefined.
+//
+// Second real bug found live 2026-09-10 (direct report: "they don't seem to be able to fight,
+// or run from, phantoms"): the "hostile" requirement added above is ITSELF wrong for a real
+// subset of HOSTILE_MOBS -- confirmed directly against minecraft-data's own entity registry
+// (mineflayer's entity.type is populated straight from this same field, lib/plugins/entities.js):
+// phantom, ghast, slime, and shulker all carry type "mob", not "hostile", despite minecraft-data's
+// own SEPARATE "category" field correctly listing all four as "Hostile mobs" -- an inconsistency
+// within minecraft-data itself between its coarse `type` and its more specific `category`. Adding
+// the "hostile" type check on top of the already-curated HOSTILE_MOBS name allowlist didn't add
+// real safety (nothing outside this deliberate list was ever going to match by name), it just
+// silently excluded every entry whose real `type` field happens not to be "hostile" -- self-
+// defense/flee never even saw a nearby phantom as a threat, not a targeting or combat failure,
+// a detection failure with no error to show for it. HOSTILE_MOBS.has(e.name) alone is the correct,
+// sufficient condition: it's already the deliberate, curated "treat this as a threat" list this
+// function exists to check against.
 export function nearestHostile(bot, maxDistance = 16) {
-  return bot.nearestEntity((e) => e.type === "hostile" && HOSTILE_MOBS.has(e.name) &&
+  return bot.nearestEntity((e) => HOSTILE_MOBS.has(e.name) &&
     e.position.distanceTo(bot.entity.position) <= maxDistance);
 }
 
