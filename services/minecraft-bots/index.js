@@ -1,4 +1,12 @@
-// Version: 2.48.0
+// Version: 2.49.0
+//
+// 2.49.0 (2026-09-10) -- direct request: "fix the lighting logic," following a confirmed live
+// incident (1260+ deaths in ~26h -- see actions.js 1.39.0's own header for the full root-cause
+// account). New checkHomeLighting(): a real proactive area sweep around her own claimed bed
+// (loadClaimedBed(), 90s interval -- a real sweep, not a per-tile reflex, so a longer interval
+// than checkLighting's own 20s), running actions.js's new "light_area". checkLighting() itself
+// is unchanged, still the fast per-tile reflex for wherever she happens to be standing.
+// DARK_LIGHT_LEVEL moved to actions.js (now imported, not a second local copy).
 //
 // 2.48.0 (2026-09-09) -- direct request: "monitor their behavior, look for issues." Found and
 // closed a real loophole in the DONE item-verification fix (2.43.0): nothing stopped the model
@@ -729,7 +737,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL } from "./actions.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements } from "./swim-movements.js";
@@ -2709,7 +2717,8 @@ setInterval(() => {
 // 0-15; under 8 is the common threshold below which hostile mobs can spawn, the same heuristic
 // most mineflayer bots use since there's no simpler "is this dark" signal exposed directly.
 const LIGHTING_CHECK_MS = parseInt(process.env.MC_LIGHTING_CHECK_MS || "20000", 10);
-const DARK_LIGHT_LEVEL = 8;
+// DARK_LIGHT_LEVEL now lives in actions.js (2026-09-10), shared with the new "light_area" action
+// below rather than kept as a second, driftable copy here.
 
 async function checkLighting() {
   if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping || !bot.entity) return;
@@ -2732,6 +2741,41 @@ async function checkLighting() {
 setInterval(() => {
   checkLighting().catch((err) => console.error(`[${USERNAME}] checkLighting error:`, err.message));
 }, LIGHTING_CHECK_MS);
+
+// Direct request, 2026-09-10 ("fix the lighting logic"), following a confirmed live incident:
+// 1260+ deaths in ~26h traced to the shared base sitting in pitch dark at ground level with an
+// uncapped nightly mob buildup (dozens of hostiles counted within 80 blocks at once) -- a single
+// bot's self-defense fighting one threat at a time was never going to survive an actual swarm.
+// checkLighting() above only ever reacted to wherever a bot personally happened to be standing
+// the moment its own tile went dark -- nothing proactively lit up the area bots actually live
+// and sleep in. New checkHomeLighting(): when she's carrying torches and has a claimed bed
+// (loadClaimedBed(), the same real "home" storeSurplusNearHome already uses), runs actions.js's
+// new "light_area" centered on that position -- a real area sweep, not a per-tile reflex, so a
+// longer interval than checkLighting's own 20s is appropriate. Self-limiting across the whole
+// fleet by construction (see light_area's own header): no explicit cross-bot coordination needed.
+const HOME_LIGHTING_CHECK_MS = parseInt(process.env.MC_HOME_LIGHTING_CHECK_MS || "90000", 10);
+
+async function checkHomeLighting() {
+  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (!bot.inventory.items().some((i) => i.name === "torch")) return;
+  const home = await loadClaimedBed(bot);
+  if (!home) return; // no claimed bed yet -- no real "home" to light up around
+
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
+  acting = true;
+  try {
+    const result = await performAction(bot, { type: "light_area", near: home }, USERNAME);
+    console.log(`[${USERNAME}] home lighting: ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] home lighting check failed:`, err.message);
+  } finally {
+    acting = false;
+  }
+}
+
+setInterval(() => {
+  checkHomeLighting().catch((err) => console.error(`[${USERNAME}] checkHomeLighting error:`, err.message));
+}, HOME_LIGHTING_CHECK_MS);
 
 // Direct request, 2026-09-07 ("what else can we add" -> stuck-detection): robustness, not new
 // capability -- a periodic check for "hasn't moved at all in a long time," regardless of

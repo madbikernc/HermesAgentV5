@@ -1,4 +1,19 @@
-// Version: 1.38.0
+// Version: 1.39.0
+//
+// 1.39.0 (2026-09-10) -- direct request: "fix the lighting logic," following a confirmed live
+// incident (1260+ deaths in ~26h, root-caused live: the shared base sat pitch dark at ground
+// level with an uncapped nightly mob buildup -- dozens of hostiles counted within 80 blocks at
+// once, well beyond what a single bot's one-threat-at-a-time self-defense could ever survive).
+// New "light_area" action -- a real area sweep (bounded batch, LIGHT_AREA_RADIUS=10,
+// LIGHT_AREA_BATCH_LIMIT=6) around a real anchor point (action.near), not the existing "place a
+// torch wherever I happen to be standing" reflex (index.js's checkLighting, unchanged). Finds
+// dark (light < DARK_LIGHT_LEVEL, now exported here rather than duplicated in index.js),
+// mob-spawn-capable spots (solid ground below, non-functional-block below per
+// isProtectedBlockName -- never torch on top of someone's chest/furnace/bed) via the same live
+// findBlocks() function-matcher pattern plant_sapling/findNearestShore already use, paths to
+// each, places a torch. Re-checks each spot's light level immediately before placing (another
+// bot, or an earlier step in this same sweep, may have already lit it) so the whole fleet
+// converges on "fully lit" without needing explicit coordination.
 //
 // 1.38.0 (2026-09-09) -- follow-up to 1.37.0's own deposit-failure logging: watched it live and
 // the one real failure that occurred ("found chests nearby, but couldn't store anything in any
@@ -582,6 +597,14 @@ const FISH_TIMEOUT_MS = 90_000;
 // cost to economize on.
 const SMELT_TIMEOUT_MS = 3 * 60_000;
 
+// Exported (2026-09-10) so "light_area" (its own real bug fix -- see that case's own header) and
+// index.js's checkLighting()/checkHomeLighting() share exactly one definition instead of two
+// copies drifting apart. block.light (confirmed against prismarine-block source) is the real
+// per-position light value, 0-15; under 8 is the common threshold below which hostile mobs can
+// spawn, the same heuristic most mineflayer bots use since there's no simpler "is this dark"
+// signal exposed directly.
+export const DARK_LIGHT_LEVEL = 8;
+
 const HOSTILE_MOBS = new Set([
   "zombie", "husk", "drowned", "zombie_villager", "skeleton", "stray", "spider", "cave_spider",
   "creeper", "enderman", "witch", "phantom", "slime", "magma_cube", "silverfish", "blaze",
@@ -656,7 +679,7 @@ export function isEssentialItem(itemName) {
 export const SKILL_ACTION_VERBS = new Set([
   "stop", "goto", "follow", "mine", "craft", "loot", "attack", "flee", "eat", "fish", "give",
   "sleep", "smelt", "place", "build", "store", "trade", "harvest", "breed", "enchant", "explore",
-  "plant_sapling",
+  "plant_sapling", "light_area",
 ]);
 
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
@@ -2168,6 +2191,74 @@ export async function performAction(bot, action, speaker) {
         return fail(`couldn't place the ${action.item}: ${err.message}`);
       }
       return ok(`placed a ${action.item}.`);
+    }
+
+    case "light_area": {
+      // Direct request, 2026-09-10 ("fix the lighting logic"), following a real live incident:
+      // 1260+ deaths in ~26h traced to the shared base sitting in pitch dark (light=0 at ground
+      // level, confirmed live) with an uncapped nightly mob buildup (dozens of hostiles counted
+      // within 80 blocks at once) -- self-defense fighting one threat at a time was never going
+      // to survive an actual swarm. The existing "place a torch" logic (checkLighting, index.js)
+      // only ever reacted to wherever a bot personally happened to be standing at the moment its
+      // own tile went dark -- nothing ever proactively lit up the AREA bots actually live in.
+      // This is that: walks to each dark, mob-spawn-capable spot near a real anchor point
+      // (action.near -- checkHomeLighting's own claimed-bed position) and places a torch there.
+      // Self-limiting by construction, no cross-bot coordination needed: a placed torch persists
+      // in the world and clears that spot for every bot's next sweep, not just this one's -- five
+      // bots independently sweeping the same shared base converges on "fully lit," it doesn't
+      // duplicate work forever.
+      const torchLit = bot.inventory.items().find((i) => i.name === "torch");
+      if (!torchLit) return fail("don't have any torches to light the area with.");
+
+      const LIGHT_AREA_RADIUS = 10;
+      const LIGHT_AREA_BATCH_LIMIT = 6;
+      const positions = bot.findBlocks({
+        point: action.near,
+        matching: (block) => {
+          if (!block?.position || block.boundingBox === "block" || block.light === undefined ||
+              block.light >= DARK_LIGHT_LEVEL) return false;
+          const below = bot.blockAt(block.position.offset(0, -1, 0));
+          return !!below && below.boundingBox === "block" && !isProtectedBlockName(below.name);
+        },
+        maxDistance: LIGHT_AREA_RADIUS,
+        count: LIGHT_AREA_BATCH_LIMIT,
+      });
+      if (!positions.length) return ok("area's already lit up -- nothing dark found nearby.");
+
+      let placed = 0;
+      for (const pos of positions) {
+        if (token.cancelled) break;
+        const current = bot.inventory.items().find((i) => i.name === "torch");
+        if (!current) break; // ran out of torches partway through the sweep
+
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        } catch {
+          if (token.cancelled) break;
+          continue; // couldn't reach this one -- try the next dark spot
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) break;
+
+        // Re-check: another bot (or this one, via an earlier iteration) may have already lit
+        // this exact spot since the batch was found.
+        const ground = bot.blockAt(pos.offset(0, -1, 0));
+        const spaceNow = bot.blockAt(pos);
+        if (!ground || ground.boundingBox !== "block" || spaceNow?.light >= DARK_LIGHT_LEVEL) continue;
+
+        try {
+          await bot.equip(current, "hand");
+          await bot.placeBlock(ground, new Vec3(0, 1, 0));
+          placed++;
+        } catch (err) {
+          console.error(`light_area: failed to place a torch at ${pos}:`, err.message);
+        }
+      }
+
+      if (!placed) return token.cancelled ? ok("stopped lighting the area.") : fail("found dark spots but couldn't light any of them.");
+      return ok(`lit up ${placed} dark spot(s)${token.cancelled ? ", stopped early" : ""}.`);
     }
 
     case "build": {
