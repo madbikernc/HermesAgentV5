@@ -1,4 +1,38 @@
-// Version: 1.41.0
+// Version: 1.42.0
+//
+// 1.42.0 (2026-09-10) -- direct live report: "they're still not fighting back or running."
+// Real bug, confirmed by reading the actually-installed mineflayer-pvp 1.3.2 source directly
+// (lib/PVP.js): "attack"'s own long-standing comment claiming bot.pvp.attack() "resolves its own
+// promise once the target is dead or lost" was simply wrong for this version -- it only sets up
+// the chase (this.target + a fresh pathfinder GoalFollow) and returns almost immediately; combat
+// itself runs forever off the library's own internal physicTick listener, independent of that
+// promise. Every checkSelfDefense cycle (2s) was therefore reporting "took care of it" the
+// instant the chase was merely STARTED, and since arbiter.js's cancelPhysical() unconditionally
+// calls bot.pvp.stop() at the top of every requestControl() acquisition (even a same-owner,
+// same-target reacquisition), the next 2s tick kept restarting the same chase from scratch before
+// it ever had time to close distance or land a hit -- confirmed live: Mark and Luke both reported
+// "took care of it" against the same still-alive zombie_villager every single tick for 20+
+// seconds with zero health change on either side, visually indistinguishable from not responding
+// at all.
+//
+// A first fix attempt (waiting on the library's own 'stoppedAttacking' event instead) was ALSO
+// wrong, confirmed live a second time against Luke fighting a creeper: that event fires for ANY
+// stop() call, including cancelPhysical()'s own fire-and-forget bot.pvp.stop() -- called at the
+// top of the VERY SAME requestControl() acquisition that's about to start this fight. That call's
+// own cleanup was still asynchronously in flight (it awaits the pathfinder's own internal
+// 'path_stop' event before it finishes) when this fight's fresh listener attached moments later,
+// so its stale, unrelated emission was mistaken for "the fight just ended" -- reproducing the
+// exact same instant-"took care of it" symptom via a different mechanism.
+//
+// The actual fix: poll the target's own real, unambiguous state (is it still a tracked entity at
+// all, i.e. bot.entities[target.id]) instead of inferring anything from a shared/ambiguous event
+// -- the same "check the real thing directly" approach every OTHER cancellable action in this
+// file already uses (token.cancelled checked against real pathfinder/collectBlock rejection,
+// never guessed at from an event). Also aborts promptly on a genuine higher-priority preemption
+// (token.cancelled) rather than only on the full ACTION_TIMEOUT_MS ceiling. This also
+// structurally fixes the restart-loop as a side effect: checkSelfDefense's own performAction()
+// call (and its selfDefenseInFlight guard) now correctly blocks for the fight's real duration
+// instead of returning after ~0ms.
 //
 // 1.41.0 (2026-09-10) -- Phase 2 follow-up, real bug caught live while migrating the first
 // reflex handler (checkSelfDefense, index.js 2.50.0): performAction()'s own stopCurrent() call
@@ -1824,17 +1858,43 @@ export async function performAction(bot, action, speaker) {
           console.error("attack: failed to equip shield:", err.message);
         }
       }
-      // bot.pvp.attack() resolves its own promise once the target is dead or lost -- no need
-      // for a manually-wired event listener (confirmed against mineflayer-pvp's own .d.ts).
+      // Real live bug found 2026-09-10 (direct report: "they're still not fighting back or
+      // running"), confirmed by reading the actually-installed mineflayer-pvp 1.3.2 source
+      // (lib/PVP.js) directly: the comment this replaces was WRONG for this version --
+      // bot.pvp.attack() does NOT wait for the target to die or be lost. It only sets
+      // this.target and a fresh pathfinder GoalFollow, then returns almost immediately; the real
+      // attacking (chase + swing) runs separately, forever, off the library's own internal
+      // physicTick listener.
+      //
+      // A FIRST fix attempt (waiting on the library's own 'stoppedAttacking' event instead) was
+      // ALSO wrong, confirmed live a second time: that event fires for ANY stop() call, including
+      // arbiter.js's own cancelPhysical() -- called unconditionally and fire-and-forget at the top
+      // of every requestControl() acquisition, even a same-owner reacquisition against the SAME
+      // still-alive target. That prior cycle's own cleanup stop() was still asynchronously
+      // in-flight (it awaits the pathfinder's own 'path_stop' event internally) when this fight's
+      // fresh listener attached a moment later, so its STALE emission -- completely unrelated to
+      // this fight -- was mistaken for "the fight just ended," reproducing the exact same
+      // instant-"took care of it" symptom as the original bug.
+      //
+      // Polling the target's own real, unambiguous state -- is it still a tracked entity at all --
+      // sidesteps both promises entirely, matching the "don't infer from a shared/ambiguous event"
+      // approach every OTHER cancellable action in this file already uses (token.cancelled checked
+      // directly against real pathfinder/collectBlock rejection, never guessed at). Also aborts
+      // promptly on a genuine higher-priority preemption (token.cancelled) rather than only on the
+      // full ACTION_TIMEOUT_MS ceiling.
+      const FIGHT_POLL_MS = 250;
+      const deadline = Date.now() + ACTION_TIMEOUT_MS;
       try {
-        await withTimeout(bot.pvp.attack(target), ACTION_TIMEOUT_MS, () => bot.pvp.stop());
-      } catch (err) {
-        if (token.cancelled) return ok("broke off the fight.");
-        return fail("gave up on the fight -- took too long.");
+        while (bot.entities[target.id] && !token.cancelled && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, FIGHT_POLL_MS));
+        }
       } finally {
         await refreshGear(bot); // mob drops may include something worth wearing/wielding
       }
-      return token.cancelled ? ok("broke off the fight.") : ok("took care of it.");
+      if (token.cancelled) return ok("broke off the fight.");
+      if (!bot.entities[target.id]) return ok("took care of it.");
+      bot.pvp.stop();
+      return fail("gave up on the fight -- took too long.");
     }
 
     case "flee": {
