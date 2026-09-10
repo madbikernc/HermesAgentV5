@@ -1,4 +1,13 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-09-10) -- Phase 2 follow-up, both changes made while migrating the first 5 real
+// callers (index.js 2.50.0): (1) OWNERS values are now self-describing {name, priority}
+// descriptors instead of bare numbers -- requestControl(bot, ownerDescriptor) takes ONE thing
+// (e.g. OWNERS.SELF_DEFENSE) instead of a caller having to separately pass a name string AND
+// look up its own priority number for the same tier. (2) new currentToken() export, needed by
+// actions.js's own stopCurrent() to reuse an already-current token instead of rotating a new one
+// out from under a caller who already acquired control via requestControl() -- see actions.js's
+// own 1.41.0 changelog for the real bug this closes.
 //
 // 1.0.0 (2026-09-10) -- direct request: "write up a plan for that single arbiter, consider a
 // single arbiter for the entire population, and a single arbiter PER bot" (following a "look at
@@ -55,23 +64,35 @@
 // usually running right after a respawn, but a live squad call or fresh threat should still
 // legitimately interrupt an in-progress recovery walk -- the exact drowning-loop scenario
 // recoveryAttempts/MAX_RECOVERY_ATTEMPTS already exists to survive.
+// Each value is a self-describing {name, priority} descriptor (not a bare number) -- so a
+// caller passes exactly ONE thing, OWNERS.SELF_DEFENSE, to requestControl() rather than having to
+// separately look up a name string AND a priority number for the same tier and pass both.
+function owner(name, priority) { return Object.freeze({ name, priority }); }
+
 export const OWNERS = Object.freeze({
-  ROUTINE: 0,           // idle-tick checks: inventory, saplings, lighting, hunger, give-requests,
-                         // checkSleep, checkDusk, checkStuck's own routine (non-teleport) work
-  GOAL_STEP: 0,          // goalTick's own physical-action span -- same tier as ROUTINE, matching
-                         // today's code (both already just check `!busy && !acting`, no
-                         // hierarchy between them, and this preserves that rather than inventing
-                         // a distinction the current code never needed)
-  DIRECT_COMMAND: 10,    // runAction() -- a live player asked for this by name; "a live player
-                         // command always wins immediately" per goalTick's own existing comment
-  RECOVERY: 15,          // post-death gear recovery
-  SQUAD_RESPONSE: 20,    // respondToSquadCall()
-  SELF_DEFENSE: 30,      // checkSelfDefense(); checkSleepingThreat()'s post-wake response reuses
-                         // this same tier -- mechanically identical decision, just reached via a
-                         // different trigger (asleep+threat vs. awake+idle-tick)
-  DROWNING: 40,          // bot.on("breath") emergency surface
-  HEALTH_CRITICAL: 50,   // bot.on("health") emergency flee
-  TELEPORT_HOME: 60,     // checkStuck's teleport escalation -- cancel-only, never blocks or waits
+  ROUTINE: owner("ROUTINE", 0),             // idle-tick checks: inventory, saplings, lighting,
+                                             // hunger, give-requests, checkSleep, checkDusk,
+                                             // checkStuck's own routine (non-teleport) work
+  GOAL_STEP: owner("GOAL_STEP", 0),         // goalTick's own physical-action span -- same tier as
+                                             // ROUTINE, matching today's code (both already just
+                                             // check `!busy && !acting`, no hierarchy between
+                                             // them, and this preserves that rather than
+                                             // inventing a distinction the current code never
+                                             // needed)
+  DIRECT_COMMAND: owner("DIRECT_COMMAND", 10), // runAction() -- a live player asked for this by
+                                             // name; "a live player command always wins
+                                             // immediately" per goalTick's own existing comment
+  RECOVERY: owner("RECOVERY", 15),          // post-death gear recovery
+  SQUAD_RESPONSE: owner("SQUAD_RESPONSE", 20), // respondToSquadCall()
+  SELF_DEFENSE: owner("SELF_DEFENSE", 30),  // checkSelfDefense(); checkSleepingThreat()'s
+                                             // post-wake response reuses this same tier --
+                                             // mechanically identical decision, just reached via
+                                             // a different trigger (asleep+threat vs.
+                                             // awake+idle-tick)
+  DROWNING: owner("DROWNING", 40),          // bot.on("breath") emergency surface
+  HEALTH_CRITICAL: owner("HEALTH_CRITICAL", 50), // bot.on("health") emergency flee
+  TELEPORT_HOME: owner("TELEPORT_HOME", 60), // checkStuck's teleport escalation -- cancel-only,
+                                             // never blocks or waits
 });
 
 const DEFAULT_WAIT_MS = 3000;
@@ -113,47 +134,61 @@ export function cancelAndRotate(bot) {
   cancelPhysical(bot);
   if (current) current.token.cancelled = true;
   const token = { cancelled: false, preempted: false, preemptedBy: null };
-  current = { owner: OWNERS.ROUTINE, priority: OWNERS.ROUTINE, token };
+  current = { owner: OWNERS.ROUTINE, token };
   return token;
 }
 
 /**
- * Requests control of the bot's physical actions. Force-cancels whatever's currently running IF
- * the requester's priority is >= the current holder's, marking the PREVIOUS holder's token as
- * genuinely preempted (not just cancelled) so callers like recover() can tell "I was legitimately
- * preempted" from "I genuinely failed" -- see this file's own header on why that distinction was
- * the confirmed root cause of a real bug. Waits up to opts.waitMs (default 3000) for a
- * lower-or-equal priority holder to release cleanly before force-cancelling anyway, matching
- * every existing reflex handler's own current 3000ms/100ms polling shape (now one implementation
- * instead of four).
+ * Requests control of the bot's physical actions. `ownerDescriptor` is one of the OWNERS values
+ * above (a {name, priority} pair -- pass it as-is, e.g. `arbiter.OWNERS.SELF_DEFENSE`). Force-
+ * cancels whatever's currently running once the requester's priority is >= the current holder's,
+ * marking the PREVIOUS holder's token as genuinely preempted (not just cancelled) so callers like
+ * recover() can tell "I was legitimately preempted" from "I genuinely failed" -- see this file's
+ * own header on why that distinction was the confirmed root cause of a real bug. Waits up to
+ * opts.waitMs (default 3000) for a lower-or-equal priority holder to release cleanly before
+ * force-cancelling anyway, matching every existing reflex handler's own current 3000ms/100ms
+ * polling shape (now one implementation instead of four).
  *
- * Returns a handle ({ owner, priority, token, release }) on success, or null if a STRICTLY
- * HIGHER-priority owner still holds control after waitMs -- callers should treat null as
- * "something more urgent is happening, bail cleanly," exactly like today's reflex handlers
- * already do when their own wait loop times out with busy/acting still held.
+ * Returns a handle ({ owner, token, release }) on success, or null if a STRICTLY HIGHER-priority
+ * owner still holds control after waitMs -- callers should treat null as "something more urgent
+ * is happening, bail cleanly," exactly like today's reflex handlers already do when their own
+ * wait loop times out with busy/acting still held.
  */
-export async function requestControl(bot, owner, priority, opts = {}) {
+export async function requestControl(bot, ownerDescriptor, opts = {}) {
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
   const deadline = Date.now() + waitMs;
-  while (current && current.priority > priority && Date.now() < deadline) {
+  while (current && current.owner.priority > ownerDescriptor.priority && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
-  if (current && current.priority > priority) return null; // still held by something more urgent
+  // still held by something more urgent
+  if (current && current.owner.priority > ownerDescriptor.priority) return null;
 
   if (current) {
     current.token.cancelled = true;
     current.token.preempted = true;
-    current.token.preemptedBy = owner;
+    current.token.preemptedBy = ownerDescriptor.name;
   }
   cancelPhysical(bot);
   const token = { cancelled: false, preempted: false, preemptedBy: null };
-  const record = { owner, priority, token };
+  const record = { owner: ownerDescriptor, token };
   current = record;
   // Captures `record` (this call's own stable object), not the mutable `current` variable --
   // by the time release() actually runs, `current` may already point at a later, unrelated
   // caller's own record, and releaseControl() must only ever clear a record it's actually still
   // holding (its own token-identity check already guards this too, this is defense in depth).
-  return { owner, priority, token, release: () => releaseControl(record) };
+  return { owner: ownerDescriptor, token, release: () => releaseControl(record) };
+}
+
+// Direct request, 2026-09-10 (Phase 2 migration): exported so actions.js's own stopCurrent()
+// delegate can tell "a caller already acquired legitimate control via requestControl() before
+// calling performAction()" from "nobody has, fall back to the legacy unconditional cancel." Real
+// bug caught while implementing this exact phase: without this check, performAction()'s own
+// unconditional cancelAndRotate() call would immediately stomp a reflex handler's own just-
+// acquired handle (marking its token cancelled and rotating `current` out from under it) the
+// instant that handler went on to call performAction() itself -- the arbiter would have
+// "acquired" control for a split second and then immediately lost track of its own ownership.
+export function currentToken() {
+  return current?.token ?? null;
 }
 
 /** Releases a handle acquired via requestControl(). No-op if already released/superseded. */
@@ -166,7 +201,7 @@ export function isBusy() {
   return current !== null;
 }
 
-/** Current holder's owner name (an OWNERS key), or null. */
+/** Current holder's owner name (an OWNERS key's `.name`), or null. */
 export function currentOwner() {
-  return current?.owner ?? null;
+  return current?.owner?.name ?? null;
 }

@@ -1,4 +1,15 @@
-// Version: 2.49.0
+// Version: 2.50.0
+//
+// 2.50.0 (2026-09-10) -- Phase 2 of the approved per-bot coherence arbiter plan (see arbiter.js's
+// own header for the full account). Migrated the 4 duplicated force-cancel-then-wait-then-acquire
+// reflex handlers -- checkSelfDefense, respondToSquadCall, the bot.on("health") emergency
+// handler, the bot.on("breath") drowning handler -- plus checkSleepingThreat's own near-variant,
+// to arbiter.requestControl()/handle.release() instead of each hand-rolling its own copy of the
+// 4-primitive cancel + busy||acting poll loop. Closes a real, live inconsistency as a direct
+// consequence: the health-emergency handler was missing bot.stopDigging() entirely --
+// arbiter.requestControl() always includes it. Per-owner priority (HEALTH_CRITICAL > DROWNING >
+// SELF_DEFENSE > SQUAD_RESPONSE) now decides who wins when two of these fire close together,
+// replacing whatever the timing of five independent busy/acting polls happened to produce.
 //
 // 2.49.0 (2026-09-10) -- direct request: "fix the lighting logic," following a confirmed live
 // incident (1260+ deaths in ~26h -- see actions.js 1.39.0's own header for the full root-cause
@@ -738,6 +749,7 @@ import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
 import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL } from "./actions.js";
+import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements } from "./swim-movements.js";
@@ -2395,6 +2407,10 @@ let squadResponseInFlight = false;
 // one case nothing else can reach in time.
 let selfDefenseInFlight = false;
 
+// Direct request, 2026-09-10 ("write up a plan for that single arbiter..." -> the approved
+// per-bot coherence arbiter plan, Phase 2 of its migration). The old inline 4-primitive cancel +
+// busy||acting poll loop is now arbiter.requestControl() -- see arbiter.js's own header for why
+// this specific handler was one of the 4 duplicated, drifted copies this phase closes.
 async function checkSelfDefense() {
   if (!AUTONOMY_ENABLED || selfDefenseInFlight || bot.isSleeping) return;
   const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
@@ -2407,32 +2423,25 @@ async function checkSelfDefense() {
     lastSquadAlertAt = Date.now();
     broadcastThreatAlert(threat.name);
   }
-  // Same interruption primitives actions.js's own stopCurrent() uses.
-  bot.pathfinder.setGoal(null);
-  if (bot.pvp.target) bot.pvp.stop();
-  bot.collectBlock.cancelTask();
-  bot.stopDigging();
 
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.SELF_DEFENSE);
+  if (!handle) {
+    console.log(`[${USERNAME}] self-defense: yielded to something more urgent ` +
+                `(${arbiter.currentOwner()})`);
+    selfDefenseInFlight = false;
+    return;
+  }
   try {
-    const deadline = Date.now() + 3000;
-    while ((busy || acting) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-    acting = true;
-    try {
-      const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
-      console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
-      // action.target: the already-found entity, not re-derived -- see actions.js's own
-      // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.
-      const result = await performAction(bot, { type, target: threat }, USERNAME);
-      console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
-    } finally {
-      acting = false;
-    }
+    const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
+    console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
+    // action.target: the already-found entity, not re-derived -- see actions.js's own
+    // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.
+    const result = await performAction(bot, { type, target: threat }, USERNAME);
+    console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] self-defense check failed:`, err.message);
   } finally {
+    handle.release();
     selfDefenseInFlight = false;
   }
 }
@@ -2451,42 +2460,43 @@ setInterval(() => {
 // nothing left to do, a good outcome, not a failure.
 const SQUAD_RESPONSE_TRAVEL_TIMEOUT_MS = 20_000;
 
+// Direct request, 2026-09-10 (coherence-arbiter Phase 2 -- see checkSelfDefense's own migration
+// note just above). The internal `bot.pathfinder.goto(...)` travel step's own manual
+// setTimeout/setGoal(null) pair is UNTOUCHED -- that's this action's own per-step timeout escape
+// hatch (the same pattern every actions.js case already uses for its own internal travel legs),
+// structurally unrelated to the outer "acquire control from whatever else is happening" problem
+// the arbiter solves.
 async function respondToSquadCall(payload) {
   squadResponseInFlight = true;
-  bot.pathfinder.setGoal(null);
-  if (bot.pvp.target) bot.pvp.stop();
-  bot.collectBlock.cancelTask();
-  bot.stopDigging();
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.SQUAD_RESPONSE);
+  if (!handle) {
+    console.log(`[${USERNAME}] squad response: yielded to something more urgent ` +
+                `(${arbiter.currentOwner()})`);
+    squadResponseInFlight = false;
+    return;
+  }
   try {
-    const deadline = Date.now() + 3000;
-    while ((busy || acting) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    acting = true;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; bot.pathfinder.setGoal(null); },
+      SQUAD_RESPONSE_TRAVEL_TIMEOUT_MS);
     try {
-      let timedOut = false;
-      const timer = setTimeout(() => { timedOut = true; bot.pathfinder.setGoal(null); },
-        SQUAD_RESPONSE_TRAVEL_TIMEOUT_MS);
-      try {
-        await bot.pathfinder.goto(new goals.GoalNear(payload.x, payload.y, payload.z, 4));
-      } catch (err) {
-        if (!timedOut) console.error(`[${USERNAME}] squad response travel failed:`, err.message);
-      } finally {
-        clearTimeout(timer);
-        bot.pathfinder.setGoal(null);
-      }
-
-      const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
-      if (!threat) {
-        console.log(`[${USERNAME}] squad response: arrived, nothing left to fight.`);
-      } else {
-        const result = await performAction(bot, { type: "attack", target: threat }, USERNAME);
-        console.log(`[${USERNAME}] squad response result: ${result.text} (ok=${result.ok})`);
-      }
+      await bot.pathfinder.goto(new goals.GoalNear(payload.x, payload.y, payload.z, 4));
+    } catch (err) {
+      if (!timedOut) console.error(`[${USERNAME}] squad response travel failed:`, err.message);
     } finally {
-      acting = false;
+      clearTimeout(timer);
+      bot.pathfinder.setGoal(null);
+    }
+
+    const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
+    if (!threat) {
+      console.log(`[${USERNAME}] squad response: arrived, nothing left to fight.`);
+    } else {
+      const result = await performAction(bot, { type: "attack", target: threat }, USERNAME);
+      console.log(`[${USERNAME}] squad response result: ${result.text} (ok=${result.ok})`);
     }
   } finally {
+    handle.release();
     squadResponseInFlight = false;
   }
 }
@@ -3219,34 +3229,37 @@ bot.on("health", () => {
   emergencyInFlight = true;
   console.log(`[${USERNAME}] EMERGENCY: health critical (${bot.health}) with ${threat.name} ` +
               `nearby -- force-cancelling current action to flee`);
-  bot.pathfinder.setGoal(null);
-  if (bot.pvp.target) bot.pvp.stop();
-  bot.collectBlock.cancelTask();
   // Real gap found live, 2026-09-07 ("they don't seem to be fighting back... when woken up from
-  // sleeping"): none of the above touches sleep. The in-flight "sleep" performAction call holds
-  // busy/acting for its ENTIRE duration (until the real 'wake' event or SLEEP_TIMEOUT_MS, up to
-  // 15 minutes) -- while she's actually asleep, a forced flee attempt can't move her (the avatar
-  // is pinned in bed), and this handler's own wait-then-force-through logic below would just
-  // collide with sleep's own still-pending cleanup instead of freeing it. bot.wake() lets sleep's
-  // own existing bot.once("wake", finish) listener resolve it and release busy/acting normally.
+  // sleeping"): the force-cancel primitives alone don't touch sleep. The in-flight "sleep"
+  // performAction call holds control for its ENTIRE duration (until the real 'wake' event or
+  // SLEEP_TIMEOUT_MS, up to 15 minutes) -- while she's actually asleep, a forced flee attempt
+  // can't move her (the avatar is pinned in bed), and this handler's own wait-then-force-through
+  // logic below would just collide with sleep's own still-pending cleanup instead of freeing it.
+  // bot.wake() lets sleep's own existing bot.once("wake", finish) listener resolve it and
+  // release control normally.
   if (bot.isSleeping) {
     bot.wake().catch((err) => console.error(`[${USERNAME}] emergency wake failed:`, err.message));
   }
 
+  // Direct request, 2026-09-10 (coherence-arbiter Phase 2). This was the one duplicated copy of
+  // the 4-primitive cancel block that was missing bot.stopDigging() -- arbiter.requestControl()
+  // always includes it (see arbiter.js's own cancelPhysical()), closing that real, live
+  // inconsistency as a direct consequence of migrating rather than a separate fix.
   (async () => {
-    const deadline = Date.now() + 3000;
-    while ((busy || acting) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
+    const handle = await arbiter.requestControl(bot, arbiter.OWNERS.HEALTH_CRITICAL);
+    if (!handle) {
+      console.log(`[${USERNAME}] EMERGENCY: yielded to something more urgent ` +
+                  `(${arbiter.currentOwner()})`);
+      emergencyInFlight = false;
+      return;
     }
-    // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-    acting = true;
     try {
       const result = await performAction(bot, { type: "flee", target: threat }, USERNAME);
       console.log(`[${USERNAME}] emergency flee: ${result.text} (ok=${result.ok})`);
     } catch (err) {
       console.error(`[${USERNAME}] emergency flee failed:`, err.message);
     } finally {
-      acting = false;
+      handle.release();
       emergencyInFlight = false;
     }
   })();
@@ -3318,19 +3331,20 @@ bot.on("breath", () => {
   drowningInFlight = true;
   console.log(`[${USERNAME}] EMERGENCY: oxygen critical (${bot.oxygenLevel}) -- force-cancelling ` +
               `current action to surface`);
-  // Same interruption primitives actions.js's own stopCurrent() uses.
-  bot.pathfinder.setGoal(null);
-  if (bot.pvp.target) bot.pvp.stop();
-  bot.collectBlock.cancelTask();
-  bot.stopDigging();
 
+  // Direct request, 2026-09-10 (coherence-arbiter Phase 2 -- see checkSelfDefense's own
+  // migration note above for the full account). DROWNING sits below HEALTH_CRITICAL in the
+  // arbiter's own priority order: oxygen-critical banks several real seconds of margin before
+  // drowning damage actually starts (this handler's own DROWNING_OXYGEN_THRESHOLD comment), so a
+  // brief wait behind a genuine near-death flee costs nothing real.
   (async () => {
-    const deadline = Date.now() + 3000;
-    while ((busy || acting) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
+    const handle = await arbiter.requestControl(bot, arbiter.OWNERS.DROWNING);
+    if (!handle) {
+      console.log(`[${USERNAME}] EMERGENCY: oxygen response yielded to something more urgent ` +
+                  `(${arbiter.currentOwner()})`);
+      drowningInFlight = false;
+      return;
     }
-    // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-    acting = true;
     try {
       bot.setControlState("jump", true);
       const surfaceDeadline = Date.now() + SURFACE_SWIM_TIMEOUT_MS;
@@ -3369,7 +3383,7 @@ bot.on("breath", () => {
       console.error(`[${USERNAME}] surfacing failed:`, err.message);
     } finally {
       bot.setControlState("jump", false);
-      acting = false;
+      handle.release();
       drowningInFlight = false;
     }
   })();
@@ -3400,14 +3414,18 @@ async function checkSleepingThreat() {
     console.error(`[${USERNAME}] force-wake failed:`, err.message);
     return;
   }
-  // The in-flight "sleep" action's own wake listener resolves it and releases busy/acting
-  // naturally within the same tick -- give it a brief moment before acting ourselves so this
-  // doesn't collide with that cleanup still finishing.
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  if (busy || acting) return; // sleep's own cleanup is still finishing -- the next tick will catch it
-
-  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  // Direct request, 2026-09-10 (coherence-arbiter Phase 2). requestControl() itself replaces the
+  // old fixed-250ms-pause-then-single-check -- the in-flight "sleep" action's own wake listener
+  // needs a moment to resolve and release control naturally, and requestControl()'s own
+  // wait-and-retry loop (up to 3000ms) is a real robustness improvement over a single check that
+  // just gave up if sleep's cleanup hadn't finished in exactly 250ms. Reuses SELF_DEFENSE's own
+  // tier -- mechanically identical attack/flee decision, just reached via a different trigger.
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.SELF_DEFENSE);
+  if (!handle) {
+    console.log(`[${USERNAME}] post-wake defense: yielded to something more urgent ` +
+                `(${arbiter.currentOwner()})`);
+    return;
+  }
   try {
     const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
     const result = await performAction(bot, { type, target: threat }, USERNAME);
@@ -3415,7 +3433,7 @@ async function checkSleepingThreat() {
   } catch (err) {
     console.error(`[${USERNAME}] post-wake defense failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 

@@ -1,4 +1,18 @@
-// Version: 1.40.0
+// Version: 1.41.0
+//
+// 1.41.0 (2026-09-10) -- Phase 2 follow-up, real bug caught live while migrating the first
+// reflex handler (checkSelfDefense, index.js 2.50.0): performAction()'s own stopCurrent() call
+// was unconditionally cancelling-and-rotating on EVERY call, which would immediately stomp a
+// caller's own just-acquired arbiter.requestControl() handle (marking its token cancelled,
+// rotating `current` out from under it) the instant that caller went on to call performAction()
+// itself. stopCurrent() now reuses the already-current token when one exists (arbiter.isBusy())
+// instead of rotating a new one; performAction() itself now releases that token in a finally
+// block, but ONLY when IT was the one that acquired it (tracked via `alreadyHeld`, checked before
+// stopCurrent() runs) -- a caller that already held a handle before calling in still owns release
+// via its own handle.release(), untouched by this. Without this, arbiter.isBusy() would report
+// true forever after the very first action any bot ever ran (nothing releasing on behalf of the
+// many not-yet-migrated callers), permanently disabling stopCurrent()'s own
+// cancel-before-every-new-action behavior for every action after that one.
 //
 // 1.40.0 (2026-09-10) -- Phase 1 of the approved per-bot coherence arbiter plan (see
 // arbiter.js's own header for the full account). stopCurrent()'s real body moved to arbiter.js's
@@ -575,7 +589,7 @@ import { Vec3 } from "vec3";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipment.js";
-import { cancelAndRotate } from "./arbiter.js";
+import { cancelAndRotate, isBusy, currentToken, releaseControl } from "./arbiter.js";
 
 const { goals } = pathfinderPkg;
 
@@ -1438,24 +1452,46 @@ async function saveClaimedBed(bot, position) {
 }
 
 // Direct request, 2026-09-10 ("write up a plan for that single arbiter..." -> the approved
-// per-bot coherence arbiter plan, Phase 1 of its migration). This function's own real body (the
-// 4 cancel primitives + token rotation + sleep-interrupt) now lives in arbiter.js's own
-// cancelAndRotate() -- moved, not duplicated, so index.js's reflex handlers (self-defense, the
-// health/breath emergencies, squad response, etc.) can eventually share the exact same token
-// instead of index.js maintaining its own, separate raw setGoal(null) calls that this file's own
-// cancelToken never knew about (the confirmed root cause of the recover()-retry bug arbiter.js's
-// own header documents). Zero behavior change in this phase: every performAction() call still
-// unconditionally cancels-and-rotates exactly as before, since nothing yet calls
-// arbiter.requestControl() ahead of it.
+// per-bot coherence arbiter plan). This function's own real body (the 4 cancel primitives +
+// token rotation + sleep-interrupt) now lives in arbiter.js's own cancelAndRotate() -- moved, not
+// duplicated, so index.js's reflex handlers (self-defense, the health/breath emergencies, squad
+// response, etc.) share the exact same token instead of index.js maintaining its own, separate
+// raw setGoal(null) calls that this file's own cancelToken never knew about (the confirmed root
+// cause of the recover()-retry bug arbiter.js's own header documents).
+//
+// Phase 2 addition, real bug caught live while migrating the first reflex handler: if a caller
+// already acquired legitimate control via arbiter.requestControl() before calling
+// performAction(), this must NOT unconditionally cancelAndRotate() again -- that would
+// immediately stomp the caller's own just-acquired token (marking it cancelled, rotating
+// `current` out from under it) the instant the caller went on to run its actual action. Reuses
+// the already-current token instead whenever one exists; falls back to the original unconditional
+// cancel-and-rotate for every NOT-yet-migrated caller (goalTick, runAction, and every routine
+// idle-tick check still call performAction() directly with no prior requestControl()), so this
+// stays zero behavior change for all of them until their own later migration phases.
 function stopCurrent(bot) {
+  if (isBusy()) return currentToken();
   return cancelAndRotate(bot);
 }
 
 export async function performAction(bot, action, speaker) {
+  // Direct request, 2026-09-10 (Phase 2 of the approved coherence-arbiter plan). Real bug caught
+  // live while migrating the first reflex handler: `current` must actually clear once THIS call
+  // is done, for a caller that acquired it here (the common, not-yet-migrated case -- goalTick,
+  // runAction, every routine idle-tick check still call performAction() with no prior
+  // requestControl()) -- otherwise arbiter.isBusy() would report true forever after the very
+  // first action any bot ever runs, permanently short-circuiting stopCurrent()'s own
+  // cancel-before-every-new-action behavior for every action after that one. `alreadyHeld`
+  // records whether a caller had ALREADY acquired legitimate control (via requestControl(), e.g.
+  // checkSelfDefense) before calling in -- if so, releasing here would be wrong: that caller owns
+  // release via its own handle.release(), not this function. The try/finally wraps the whole
+  // switch below WITHOUT re-indenting it, a deliberate, minimal-diff choice over reformatting
+  // ~1400 existing lines for a change that doesn't touch any of their own logic.
+  const alreadyHeld = isBusy();
   const token = stopCurrent(bot);
   const ok = (text) => ({ ok: true, text });
   const fail = (text) => ({ ok: false, text });
 
+  try {
   switch (action.type) {
     case "stop":
       return ok("stopped.");
@@ -2856,5 +2892,11 @@ export async function performAction(bot, action, speaker) {
 
     default:
       return fail("not sure how to do that yet.");
+  }
+  } finally {
+    // Only release if THIS call is the one that acquired (via stopCurrent()'s own legacy
+    // cancelAndRotate() path) -- a caller that already held a handle before calling in still
+    // owns its own release via handle.release(), unaffected by this.
+    if (!alreadyHeld) releaseControl({ token });
   }
 }
