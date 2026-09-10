@@ -1,4 +1,16 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-09-10) -- Phase 3/4: migrated runAction, goalTick's physical-action span,
+// teleportToSpawn (cancel-only, via cancelAndRotate -- never acquires/holds), the post-death
+// recovery block, and all ~10 remaining ROUTINE-tier idle-tick checks (the last callers of the old
+// index.js busy/acting flags for PHYSICAL actions -- busy itself stays, guarding LLM-call
+// reentrancy, an unrelated concern this file was never meant to absorb). requestControl()'s wait
+// condition fixed from strict `>` to `>=` -- see its own updated docstring for the real thundering-
+// herd bug this closes, only exposed now that multiple ROUTINE-tier callers genuinely contend for
+// the first time. recover()'s retry loop now checks the real `handle.token.preempted` flag
+// (re-requesting RECOVERY-tier control fresh on each retry) instead of text-matching
+// result.text for "The goal was changed" -- the fix the whole recover()-heuristic problem in this
+// file's own 1.0.0 header was written to eventually enable.
 //
 // 1.1.0 (2026-09-10) -- Phase 2 follow-up, both changes made while migrating the first 5 real
 // callers (index.js 2.50.0): (1) OWNERS values are now self-describing {name, priority}
@@ -141,27 +153,38 @@ export function cancelAndRotate(bot) {
 /**
  * Requests control of the bot's physical actions. `ownerDescriptor` is one of the OWNERS values
  * above (a {name, priority} pair -- pass it as-is, e.g. `arbiter.OWNERS.SELF_DEFENSE`). Force-
- * cancels whatever's currently running once the requester's priority is >= the current holder's,
- * marking the PREVIOUS holder's token as genuinely preempted (not just cancelled) so callers like
- * recover() can tell "I was legitimately preempted" from "I genuinely failed" -- see this file's
- * own header on why that distinction was the confirmed root cause of a real bug. Waits up to
- * opts.waitMs (default 3000) for a lower-or-equal priority holder to release cleanly before
- * force-cancelling anyway, matching every existing reflex handler's own current 3000ms/100ms
+ * cancels whatever's currently running only once the requester's priority is STRICTLY HIGHER than
+ * the current holder's, marking the PREVIOUS holder's token as genuinely preempted (not just
+ * cancelled) so callers like recover() can tell "I was legitimately preempted" from "I genuinely
+ * failed" -- see this file's own header on why that distinction was the confirmed root cause of a
+ * real bug. Waits up to opts.waitMs (default 3000) for a same-or-higher-priority holder to release
+ * cleanly before giving up, matching every existing reflex handler's own current 3000ms/100ms
  * polling shape (now one implementation instead of four).
  *
- * Returns a handle ({ owner, token, release }) on success, or null if a STRICTLY HIGHER-priority
- * owner still holds control after waitMs -- callers should treat null as "something more urgent
- * is happening, bail cleanly," exactly like today's reflex handlers already do when their own
- * wait loop times out with busy/acting still held.
+ * Real bug caught while migrating Phase 3/4's ~10 ROUTINE-tier callers (index.js 2.51.0): this
+ * used to compare with a strict `>` (wait only if the holder is HIGHER priority), so two
+ * EQUAL-priority requesters -- never a real scenario before this phase, since every Phase 1/2
+ * caller sat at its own distinct tier -- would instantly steal control from each other with zero
+ * mutual exclusion, exactly the thundering-herd problem the old `acting` boolean flag was there to
+ * prevent (checkHunger's "eat" instantly cancelled mid-flight by checkLighting's "place torch"
+ * landing the same tick, rather than checkLighting just skipping this tick like `acting` used to
+ * make it do). Comparing with `>=` restores that: same-or-higher-priority holders are waited out
+ * (and yielded to, not stolen from) exactly like a strictly-higher one already was.
+ *
+ * Returns a handle ({ owner, token, release }) on success, or null if a SAME-OR-HIGHER-priority
+ * owner still holds control after waitMs -- callers should treat null as "something else is
+ * already using this tier (or something more urgent is happening), bail cleanly," exactly like
+ * today's reflex handlers already do when their own wait loop times out with busy/acting still
+ * held.
  */
 export async function requestControl(bot, ownerDescriptor, opts = {}) {
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
   const deadline = Date.now() + waitMs;
-  while (current && current.owner.priority > ownerDescriptor.priority && Date.now() < deadline) {
+  while (current && current.owner.priority >= ownerDescriptor.priority && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
-  // still held by something more urgent
-  if (current && current.owner.priority > ownerDescriptor.priority) return null;
+  // still held by something equally or more urgent
+  if (current && current.owner.priority >= ownerDescriptor.priority) return null;
 
   if (current) {
     current.token.cancelled = true;

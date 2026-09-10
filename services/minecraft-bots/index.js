@@ -1,4 +1,21 @@
-// Version: 2.50.0
+// Version: 2.51.0
+//
+// 2.51.0 (2026-09-10) -- Phase 3/4 of the approved coherence arbiter plan (see arbiter.js's own
+// 1.2.0 header). Migrated every remaining physical-action call site off the old `acting` flag:
+// runAction (OWNERS.DIRECT_COMMAND), goalTick's physical-action span (OWNERS.GOAL_STEP),
+// teleportToSpawn (cancel-only via arbiter.cancelAndRotate() -- never acquires/holds, matching
+// TELEPORT_HOME's own "sits above everything" design), the post-death recovery block
+// (OWNERS.RECOVERY, now re-requesting control fresh on each retry), and all ~10 remaining
+// ROUTINE-tier idle-tick checks (checkSleep, checkDusk, checkHunger, checkPendingGiveRequests,
+// storeSurplusValuables/storeSurplusNearHome, checkSaplings, checkLighting, checkHomeLighting,
+// plus checkCurriculumAdvance/proposeDirectiveForOthers' own early-bail guard -- checkStuck's own
+// jump-nudge stays deliberately ungated, unchanged, exactly as documented). recover()'s retry
+// loop now checks the real `handle.token.preempted` flag instead of text-matching result.text for
+// "The goal was changed" -- see arbiter.js's own requestControl() docstring for the real
+// thundering-herd bug this phase also found and fixed (equal-priority ROUTINE callers used to
+// instantly steal control from each other instead of waiting, once more than one of them existed
+// for the first time). The old `acting` module-level flag is deleted; `busy` stays -- it guards a
+// genuinely separate concern (LLM-call reentrancy), never part of the arbiter's own scope.
 //
 // 2.50.0 (2026-09-10) -- Phase 2 of the approved per-bot coherence arbiter plan (see arbiter.js's
 // own header for the full account). Migrated the 4 duplicated force-cancel-then-wait-then-acquire
@@ -1007,11 +1024,19 @@ setInterval(() => {
               `${(mem.arrayBuffers / 1048576).toFixed(1)}MB chunks=${columns}`);
 }, 15_000);
 
+// Guards LLM-call reentrancy only (classify/muse/planNextStep generating a reply or a plan) --
+// a genuinely separate concern from physical-action coherence, which is why it was never folded
+// into the arbiter migration below. See goalTick's own "busy deliberately not held" comments,
+// scattered across every idle-tick check, for why: an in-flight physical action must never block
+// handleIncoming from at least classifying a live chat message, only from acting on it twice at
+// once.
 let busy = false;
-// True for the whole span of a directly-requested action (runAction), not just the fast
-// classify step `busy` already guards -- the goal loop must never issue its own step while a
-// player-requested mine/craft/loot/attack/goto/follow is actually running underneath it.
-let acting = false;
+// The old `acting` flag (true for the whole span of a directly-requested/routine physical
+// action, guarding the goal loop and every idle-tick check from starting a second one
+// concurrently) is gone as of the coherence arbiter's Phase 3/4 migration (2026-09-10, see
+// arbiter.js's own header) -- arbiter.isBusy()/requestControl()/release() is the one remaining
+// source of truth for "is something physically happening right now," replacing 20+ independent
+// reads of a bare boolean with a single, testable, priority-ordered module.
 let currentGoal = null;
 // Updated on every real chat/whisper/Matrix line and every goal set by a player -- the goal
 // loop only ever proposes her own goal after this has been quiet a while (IDLE_BEFORE_SELF_GOAL_MS).
@@ -1392,7 +1417,18 @@ async function runAction(action, speaker, message, send) {
     : action.type === "store" ? `store ${action.item}`
     : action.type === "breed" ? `breed ${action.species}`
     : action.type === "enchant" ? `enchant ${action.item}` : action.type;
-  acting = true; // blocks the goal loop from stepping until this direct command is done
+  // Coherence arbiter Phase 3 (2026-09-10): a live player asked for this by name, so it should
+  // win over any routine/goal-step activity but still legitimately yield to a genuine emergency
+  // (self-defense, health, drowning) already in flight -- OWNERS.DIRECT_COMMAND sits above
+  // ROUTINE/GOAL_STEP for exactly that "a live player command always wins immediately" reason
+  // (goalTick's own long-standing comment), while still ranking below the reflex tiers.
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.DIRECT_COMMAND);
+  if (!handle) {
+    console.log(`[${USERNAME}] action '${action.type}' yielded to something more urgent ` +
+                `(${arbiter.currentOwner()})`);
+    send(`hang on, I'm dealing with something urgent first.`);
+    return;
+  }
   // Same post-craft-cleanup trigger as goalTick's own -- see storeSurplusNearHome's header.
   let craftedOk = false;
   try {
@@ -1421,7 +1457,7 @@ async function runAction(action, speaker, message, send) {
     console.error(`[${USERNAME}] action '${action.type}' failed:`, err.message);
     send(`something went wrong trying to do that.`);
   } finally {
-    acting = false;
+    handle.release();
     if (craftedOk) {
       storeSurplusNearHome("post-craft cleanup").catch((err) =>
         console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
@@ -1780,7 +1816,7 @@ async function proposeOwnGoal() {
 // exactly one place goal-loop-vs-live-command precedence is decided, not two that could drift
 // out of sync.
 async function goalTick() {
-  if (!AUTONOMY_ENABLED || busy || acting) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
 
   if (!currentGoal) {
     if (!SELF_PROPOSE_GOALS || Date.now() - lastActivityAt < IDLE_BEFORE_SELF_GOAL_MS) return;
@@ -1795,11 +1831,17 @@ async function goalTick() {
     return;
   }
 
-  acting = true;
+  // Coherence arbiter Phase 3 (2026-09-10): OWNERS.GOAL_STEP sits at the same tier as ROUTINE
+  // (see arbiter.js's own OWNERS comment -- today's code never distinguished them either), so a
+  // requestControl() failure here means another ROUTINE/GOAL_STEP-tier action is already running
+  // this tick -- exactly the old `acting` check's own early-bail, just moved to the point where
+  // an async acquisition can actually happen instead of a synchronous flag read.
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.GOAL_STEP);
+  if (!handle) return;
   // Direct request, 2026-09-09 ("after any crafting activity, surplus materials should be
   // stored in a chest as close to their sleeping home as possible"). Declared at function scope
   // (not inside the try below) so the goalTick's own outer `finally` can fire the cleanup AFTER
-  // acting is released, rather than racing storeSurplusNearHome's own acting=true against this
+  // control is released, rather than racing storeSurplusNearHome's own acquisition against this
   // function's -- see its own header for why an early `return` elsewhere in this function
   // (DONE/BLOCKED/etc.) never touches this flag and so never triggers it, correctly, since those
   // paths never actually ran a craft/smelt step.
@@ -2079,7 +2121,7 @@ async function goalTick() {
   } catch (err) {
     console.error(`[${USERNAME}] goal tick failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
     if (craftedOk) {
       storeSurplusNearHome("post-craft cleanup").catch((err) =>
         console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
@@ -2211,7 +2253,7 @@ async function checkCurriculumAdvance() {
 }
 
 async function proposeDirectiveForOthers() {
-  if (USERNAME !== MAYOR_USERNAME || !AUTONOMY_ENABLED || busy || acting) return;
+  if (USERNAME !== MAYOR_USERNAME || !AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
   await checkCurriculumAdvance();
   const idleBots = [...BOT_USERNAMES].filter((name) =>
     name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${name.toLowerCase()}`));
@@ -2271,7 +2313,7 @@ const SLEEP_CHECK_MS = parseInt(process.env.MC_SLEEP_CHECK_MS || "30000", 10);
 let sleepAttemptedThisNight = false;
 
 async function checkSleep() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
 
   const thunderstorm = bot.isRaining && bot.thunderState > 0;
   const isNight = thunderstorm || (bot.time.timeOfDay >= 12541 && bot.time.timeOfDay <= 23458);
@@ -2283,9 +2325,11 @@ async function checkSleep() {
   sleepAttemptedThisNight = true;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note on why an
-  // idle-tick physical action shouldn't block handleIncoming's `busy` check. acting alone
-  // still prevents another idle-tick action from starting while this one runs.
-  acting = true;
+  // idle-tick physical action shouldn't block handleIncoming's `busy` check. The arbiter's
+  // OWNERS.ROUTINE tier alone still prevents another idle-tick action from starting while this
+  // one runs (coherence arbiter Phase 4, 2026-09-10).
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
   try {
     bot.chat(await narrateAction("getting sleepy -- heading to bed."));
     const result = await performAction(bot, { type: "sleep" }, USERNAME);
@@ -2294,7 +2338,7 @@ async function checkSleep() {
   } catch (err) {
     console.error(`[${USERNAME}] sleep check failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 
@@ -2320,7 +2364,7 @@ const DUSK_START_TICK = parseInt(process.env.MC_DUSK_START_TICK || "10000", 10);
 let wentHomeTonight = false;
 
 async function checkDusk() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping || !bot.time) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping || !bot.time) return;
   const t = bot.time.timeOfDay;
   if (t < DUSK_START_TICK) {
     wentHomeTonight = false;
@@ -2339,7 +2383,8 @@ async function checkDusk() {
   }
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
   try {
     bot.chat(await narrateAction("sun's getting low -- heading home before dark."));
     const result = await performAction(bot, { type: "gohome" }, USERNAME);
@@ -2347,7 +2392,7 @@ async function checkDusk() {
   } catch (err) {
     console.error(`[${USERNAME}] heading home failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 
@@ -2509,11 +2554,12 @@ const HUNGER_CHECK_MS = parseInt(process.env.MC_HUNGER_CHECK_MS || "15000", 10);
 const HUNGER_THRESHOLD = 18; // out of a max of 20
 
 async function checkHunger() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
   if (bot.food >= HUNGER_THRESHOLD) return;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
   try {
     const result = await performAction(bot, { type: "eat" }, USERNAME);
     if (result.ok) {
@@ -2531,7 +2577,7 @@ async function checkHunger() {
   } catch (err) {
     console.error(`[${USERNAME}] hunger check failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 
@@ -2547,12 +2593,19 @@ setInterval(() => {
 const GIVE_CHECK_MS = parseInt(process.env.MC_GIVE_CHECK_MS || "10000", 10);
 
 async function checkPendingGiveRequests() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping || !pendingGiveRequest) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping || !pendingGiveRequest) return;
   const { forPlayer, item, count } = pendingGiveRequest;
   pendingGiveRequest = null;
 
-  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note. Restores the
+  // popped request on a failed acquisition (coherence arbiter Phase 4, 2026-09-10) -- unlike
+  // checkSleep/checkDusk's own one-shot-per-night flags, silently dropping a promise already
+  // made to a specific player is a real regression, not a harmless "try again next tick."
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) {
+    pendingGiveRequest = { forPlayer, item, count };
+    return;
+  }
   try {
     console.log(`[${USERNAME}] fulfilling request: giving ${count} ${item} to ${forPlayer}`);
     const result = await performAction(bot, { type: "give", player: forPlayer, item, count }, USERNAME);
@@ -2561,7 +2614,7 @@ async function checkPendingGiveRequests() {
   } catch (err) {
     console.error(`[${USERNAME}] give check failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 
@@ -2594,14 +2647,15 @@ async function storeSurplusValuables(reason) {
   const target = surplus[0];
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
   try {
     const result = await performAction(bot, { type: "store", item: target.name, count: target.count }, USERNAME);
     console.log(`[${USERNAME}] ${reason}: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] ${reason} failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 
@@ -2625,8 +2679,11 @@ async function storeSurplusNearHome(reason) {
   if (!surplusNames.length) return;
   const home = await loadClaimedBed(bot);
 
-  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note. Called
+  // fire-and-forget after the caller (runAction/goalTick) has already released its own handle,
+  // so this acquires a fresh one of its own -- see runAction/goalTick's post-craft cleanup note.
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
   try {
     for (const name of surplusNames) {
       // Infinity: "store" already caps at however much she actually has via Math.min() --
@@ -2645,12 +2702,12 @@ async function storeSurplusNearHome(reason) {
   } catch (err) {
     console.error(`[${USERNAME}] ${reason} failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 
 async function checkInventoryFull() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
   const emptySlots = INVENTORY_MAIN_HOTBAR_SLOTS - bot.inventory.items().length;
   if (emptySlots > INVENTORY_FULL_SLOTS) return;
   await storeSurplusValuables("inventory management");
@@ -2676,7 +2733,7 @@ const INSURANCE_COOLDOWN_MS = 120_000;
 let lastInsuranceAttemptAt = 0;
 
 async function checkInventoryInsurance() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
   if (bot.health > INSURANCE_HEALTH_THRESHOLD) return;
   if (Date.now() - lastInsuranceAttemptAt < INSURANCE_COOLDOWN_MS) return;
   lastInsuranceAttemptAt = Date.now();
@@ -2697,19 +2754,20 @@ setInterval(() => {
 const SAPLING_CHECK_MS = parseInt(process.env.MC_SAPLING_CHECK_MS || "30000", 10);
 
 async function checkSaplings() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
   const sapling = bot.inventory.items().find((i) => i.name.endsWith("_sapling"));
   if (!sapling) return;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
   try {
     const result = await performAction(bot, { type: "plant_sapling", item: sapling.name }, USERNAME);
     console.log(`[${USERNAME}] sapling planting: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] sapling check failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 
@@ -2731,20 +2789,21 @@ const LIGHTING_CHECK_MS = parseInt(process.env.MC_LIGHTING_CHECK_MS || "20000", 
 // below rather than kept as a second, driftable copy here.
 
 async function checkLighting() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping || !bot.entity) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping || !bot.entity) return;
   if (!bot.inventory.items().some((i) => i.name === "torch")) return;
   const block = bot.blockAt(bot.entity.position);
   if (!block || block.light >= DARK_LIGHT_LEVEL) return;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
   try {
     const result = await performAction(bot, { type: "place", item: "torch" }, USERNAME);
     if (result.ok) console.log(`[${USERNAME}] lighting: ${result.text} (light was ${block.light})`);
   } catch (err) {
     console.error(`[${USERNAME}] lighting check failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 
@@ -2766,20 +2825,21 @@ setInterval(() => {
 const HOME_LIGHTING_CHECK_MS = parseInt(process.env.MC_HOME_LIGHTING_CHECK_MS || "90000", 10);
 
 async function checkHomeLighting() {
-  if (!AUTONOMY_ENABLED || busy || acting || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
   if (!bot.inventory.items().some((i) => i.name === "torch")) return;
   const home = await loadClaimedBed(bot);
   if (!home) return; // no claimed bed yet -- no real "home" to light up around
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  acting = true;
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
   try {
     const result = await performAction(bot, { type: "light_area", near: home }, USERNAME);
     console.log(`[${USERNAME}] home lighting: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] home lighting check failed:`, err.message);
   } finally {
-    acting = false;
+    handle.release();
   }
 }
 
@@ -2832,13 +2892,14 @@ async function teleportToSpawn(reason) {
     return;
   }
   console.log(`[${USERNAME}] TELEPORT: ${reason} -- heading back to spawn ${dest}`);
-  // Same interruption primitives actions.js's own stopCurrent() uses (kept local to that file,
-  // called at the top of every performAction) -- whatever she's doing physically is about to be
-  // invalidated by teleporting, so stop it cleanly first rather than leaving it to dangle.
-  bot.pathfinder.setGoal(null);
-  if (bot.pvp.target) bot.pvp.stop();
-  bot.collectBlock.cancelTask();
-  bot.stopDigging();
+  // Coherence arbiter Phase 3 (2026-09-10): OWNERS.TELEPORT_HOME sits above every other tier and
+  // is cancel-only -- never acquire-and-hold (see arbiter.js's own OWNERS comment on why: a
+  // genuinely wedged bot can't perform ANY physical action anyway, so nothing is lost by not
+  // holding control afterward). cancelAndRotate() is the same unconditional physical-interrupt
+  // primitive actions.js's own stopCurrent() delegates to -- whatever she's doing physically is
+  // about to be invalidated by teleporting, so stop it cleanly first rather than leaving it to
+  // dangle, and always wins regardless of who currently holds control.
+  arbiter.cancelAndRotate(bot);
   bot.chat(`/tp ${dest.x.toFixed(2)} ${dest.y.toFixed(2)} ${dest.z.toFixed(2)}`);
   // Whatever her standing goal assumed about her surroundings is now stale, same reasoning as
   // death/respawn.
@@ -3170,37 +3231,53 @@ bot.on("spawn", () => {
         `succession, accepting the loss for now.`);
     } else if (recoverAt && AUTONOMY_ENABLED) {
       // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-      acting = true;
       recovering = true;
       try {
         // Direct request, 2026-09-08 ("watch their behavior... look for misbehaviors"): a live
         // 25-minute capture caught BOTH real deaths in the window (Mark, Luke -- each a
         // creeper-plus-drowning combo) losing gear recovery outright, both to the exact same
         // failure: "recovery: couldn't get back to where I died: The goal was changed before it
-        // could be completed!" Root cause: checkSelfDefense/the oxygen- and health-emergency
-        // handlers call bot.pathfinder.setGoal(null) DIRECTLY the instant a new threat appears,
-        // ahead of their own later performAction() call (the one that actually runs
-        // stopCurrent() and updates the cancel token) -- recover()'s in-flight goto can reject
-        // from that direct setGoal(null) BEFORE the token catches up, so it can't tell "was
-        // legitimately interrupted" from "genuinely failed" and reports a real failure instead
+        // could be completed!" Root cause (original diagnosis, pre-arbiter): checkSelfDefense/
+        // the oxygen- and health-emergency handlers called bot.pathfinder.setGoal(null) DIRECTLY
+        // the instant a new threat appeared, ahead of their own later performAction() call (the
+        // one that actually rotated the cancel token) -- recover()'s in-flight goto could reject
+        // from that direct setGoal(null) BEFORE the token caught up, so it couldn't tell "was
+        // legitimately interrupted" from "genuinely failed" and reported a real failure instead
         // of a graceful cancellation. recover() was also a strict single shot with no retry --
         // exactly the wrong combination for a death that happens amid an active emergency, which
         // is precisely when recovery matters most and a fresh threat is most likely to still be
-        // around a few seconds later. Retries (bounded) specifically on this one distinguishable
-        // failure text, with a short pause for whatever interrupted it to actually resolve.
+        // around a few seconds later.
+        //
+        // Direct request, 2026-09-10 ("write up a plan for that single arbiter..." -> the
+        // approved coherence arbiter plan, Phase 3): the text-matching heuristic this comment
+        // used to describe (`result.text.includes("The goal was changed")`) is gone -- the
+        // arbiter's own token now carries a real `preempted` flag, set directly by whichever
+        // higher-priority requestControl() call actually interrupted this attempt, so there's no
+        // more guessing from English error text. Re-requests RECOVERY-tier control fresh on each
+        // retry (rather than once outside the loop) so a retry that follows a genuine preemption
+        // correctly re-establishes its own priority instead of running "loose."
         const MAX_RECOVERY_RETRIES = 2;
         let result;
         for (let attempt = 0; attempt <= MAX_RECOVERY_RETRIES; attempt++) {
-          result = await performAction(bot, { type: "recover", position: recoverAt }, USERNAME);
-          console.log(`[${USERNAME}] recovery: ${result.text} (ok=${result.ok})`);
-          if (result.ok || !result.text.includes("The goal was changed")) break;
+          const handle = await arbiter.requestControl(bot, arbiter.OWNERS.RECOVERY);
+          if (!handle) {
+            console.log(`[${USERNAME}] recovery: yielded to something more urgent ` +
+                        `(${arbiter.currentOwner()})`);
+            break;
+          }
+          try {
+            result = await performAction(bot, { type: "recover", position: recoverAt }, USERNAME);
+            console.log(`[${USERNAME}] recovery: ${result.text} (ok=${result.ok})`);
+            if (result.ok || !handle.token.preempted) break;
+          } finally {
+            handle.release();
+          }
           await new Promise((resolve) => setTimeout(resolve, 3000));
         }
       } catch (err) {
         console.error(`[${USERNAME}] recovery failed:`, err.message);
       } finally {
         recovering = false;
-        acting = false;
       }
     }
   })().catch((err) => console.error(`[${USERNAME}] post-respawn handling failed:`, err.message));
