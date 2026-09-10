@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.24.0
+**Version:** 3.26.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -356,6 +356,8 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.26.0 | 2026-09-10 | Coherence arbiter Phase 2: `checkSelfDefense`, `respondToSquadCall`, `bot.on("health")`, `bot.on("breath")`, and `checkSleepingThreat` migrated to `arbiter.requestControl()`/`release()` instead of each inlining its own copy of the 4-primitive cancel + `busy`/`acting` poll. Closes a real, confirmed drift bug (the health-emergency handler was missing `bot.stopDigging()` that the other three copies had). Live-verified: 2 min capture across all 5 bots, 0 errors, 0 priority-starvation events, 147 self-defense resolutions. |
+| 3.25.0 | 2026-09-10 | Coherence arbiter Phase 1 (new `arbiter.js`, zero behavior change): a single per-bot, in-process, priority-ordered arbiter (`OWNERS` tiers `ROUTINE`..`TELEPORT_HOME`) replaces the two separate, independently-drifted interrupt systems (index.js's inline `busy`/`acting` poll, actions.js's own `cancelToken`). Population-wide arbiter considered and rejected -- each bot is already a fully separate OS process, no cross-bot race was ever observed, and a synchronous cross-process dependency would add real latency/availability risk to the most safety-critical paths (health/breath emergencies) for a race that doesn't exist. Motivated by Project Sid's (Altera.AL, arXiv:2411.00114) "coherence problem" matching bugs already found in this exact codebase. `actions.js`'s `stopCurrent()` now delegates to the arbiter. |
 | 3.24.0 | 2026-09-10 | Root-caused a live 1260-death incident (~26h post-reinit) to the shared base sitting pitch dark with an uncapped nightly mob buildup -- self-defense can't survive an actual swarm. New proactive `checkHomeLighting()` + `"light_area"` action sweep dark, mob-spawn-capable ground near each bot's claimed bed and light it, self-limiting across the fleet since a placed torch clears that spot for everyone's next sweep. |
 | 3.23.0 | 2026-09-09 | Live monitoring caught a real loophole in DONE item-verification: the model could dodge it entirely by answering `DONE NONE` even on a goal that plainly named a specific item ("mine some iron" marked complete with zero real progress). Now rejected the same way a false item claim is. Also: `storeSurplusNearHome()` no longer aborts its whole batch over one item-specific failure. |
 | 3.22.0 | 2026-09-09 | Post-craft home storage confirmed working live (20 successful stores across all five bots). The one real failure observed showed no diagnostic line at all, revealing "store" had two MORE silent chest-candidate skip points (obstruction check, pathfinder-unreachable) beyond the deposit failure just fixed -- all three now logged. |
