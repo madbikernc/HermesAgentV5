@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.31.0
+**Version:** 3.32.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -356,6 +356,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.32.0 | 2026-09-11 | Shared resource-location memory across the fleet (direct request: a bot looking for a specific resource should look near itself, ask the others to look near themselves too, and use that shared knowledge before wandering blindly). New `noteNearbyResources()` scans nearby ground for common raw materials and writes a world-memory note per find; called directly when a "mine" step exhausts its local search (before a new "scout" Buzz broadcast asks the rest of the fleet to do the same) and by every other bot on receiving that broadcast. `findRememberedLocation()` tries a remembered position between "mine"'s local search and the existing blind wander fallback -- a direct trip on a hit, no regression on a miss. Non-blocking throughout, matching the existing item-request precedent. |
 | 3.31.0 | 2026-09-11 | Fixed bots unable to reach drowned mobs during attack (direct live report: "what's wrong with the bots now"). Root cause, confirmed against mineflayer-pvp's own source: its `attack()` silently overwrites the bot's swim-aware `SwimMovements` with its own generic default Movements on every call, so a drowned mob living underwater was never actually reachable during attack specifically -- explaining why the "gave up on the fight" pattern only ever showed up against drowned, never land mobs. `bot.pvp.movements` now points at the same SwimMovements instance the rest of the bot already uses. |
 | 3.30.0 | 2026-09-10 | Direct follow-up to 3.29.0, same report ("can't fight, or run from, phantoms"): fixing detection alone wasn't enough. Confirmed live that once self-defense could finally see a phantom, its "attack" choice held SELF_DEFENSE-tier arbiter control for the full 90s ACTION_TIMEOUT_MS ceiling every time -- a ground bot's pathfinder can never actually close to melee range against a flyer -- blocking every other self-defense/squad-response/recovery attempt for that whole span, repeating every re-trigger. New `FLEE_ONLY_MOBS` (phantom, ghast) always flees, never melee-attacks, regardless of health. |
 | 3.29.0 | 2026-09-10 | Fixed `nearestHostile()` never detecting phantom/ghast/slime/shulker (direct live report: "they don't seem to be able to fight, or run from, phantoms"). Confirmed against minecraft-data's own entity registry: all four carry `entity.type` "mob", not "hostile", despite minecraft-data's own separate "category" field correctly listing them as "Hostile mobs" -- self-defense never even saw them as a threat. The "hostile" type check added no real safety on top of the already-curated `HOSTILE_MOBS` name allowlist; dropped in favor of that allowlist alone. |
