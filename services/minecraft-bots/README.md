@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 3.30.0
+**Version:** 3.31.0
 
 Mineflayer-based bot runtime for the Firmament's interactive Minecraft bots. See
 `../../MINECRAFT_BOTS_DESIGN.md` for the full design. This is the fleet's first Node.js
@@ -356,6 +356,7 @@ persona's "Boss" behavioral modifiers apply to.
 
 | Version | Date | Change |
 |---|---|---|
+| 3.31.0 | 2026-09-11 | Fixed bots unable to reach drowned mobs during attack (direct live report: "what's wrong with the bots now"). Root cause, confirmed against mineflayer-pvp's own source: its `attack()` silently overwrites the bot's swim-aware `SwimMovements` with its own generic default Movements on every call, so a drowned mob living underwater was never actually reachable during attack specifically -- explaining why the "gave up on the fight" pattern only ever showed up against drowned, never land mobs. `bot.pvp.movements` now points at the same SwimMovements instance the rest of the bot already uses. |
 | 3.30.0 | 2026-09-10 | Direct follow-up to 3.29.0, same report ("can't fight, or run from, phantoms"): fixing detection alone wasn't enough. Confirmed live that once self-defense could finally see a phantom, its "attack" choice held SELF_DEFENSE-tier arbiter control for the full 90s ACTION_TIMEOUT_MS ceiling every time -- a ground bot's pathfinder can never actually close to melee range against a flyer -- blocking every other self-defense/squad-response/recovery attempt for that whole span, repeating every re-trigger. New `FLEE_ONLY_MOBS` (phantom, ghast) always flees, never melee-attacks, regardless of health. |
 | 3.29.0 | 2026-09-10 | Fixed `nearestHostile()` never detecting phantom/ghast/slime/shulker (direct live report: "they don't seem to be able to fight, or run from, phantoms"). Confirmed against minecraft-data's own entity registry: all four carry `entity.type` "mob", not "hostile", despite minecraft-data's own separate "category" field correctly listing them as "Hostile mobs" -- self-defense never even saw them as a threat. The "hostile" type check added no real safety on top of the already-curated `HOSTILE_MOBS` name allowlist; dropped in favor of that allowlist alone. |
 | 3.28.0 | 2026-09-10 | Fixed bots never actually landing combat (direct live report: "they're still not fighting back or running"). Root cause, confirmed by reading the installed mineflayer-pvp 1.3.2 source directly: `bot.pvp.attack()`'s promise resolves once the chase is merely set up, not once the fight ends -- every 2s self-defense cycle was reporting "took care of it" instantly, then the arbiter's own unconditional cancel-on-acquire restarted the same chase from scratch before it could ever land a hit. A first fix (waiting on the library's 'stoppedAttacking' event) was also wrong -- that event fires for the arbiter's own unrelated cleanup call too. Final fix polls the target's own real tracked-entity state directly. Live-verified: three bots each fought a real mob for a real, variable duration (17s/9s/3s) and resolved with a genuine kill. |
