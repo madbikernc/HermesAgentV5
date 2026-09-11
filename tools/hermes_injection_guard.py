@@ -1,11 +1,63 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
 """
 hermes_injection_guard.py — Heuristic (pattern-layer) prompt/command/SQL-injection
 scanner for hermes-router.py, plus a small persistent event log so the daily
 fleet-health report can summarize block/flag counts without needing SSH into
 each node (hermes-router.py exposes them over its own `/guard/stats` GET
 endpoint — see that file's 2.4.0 changelog entry).
+
+1.4.0 (2026-09-11): real false positive, found live and traced to a specific file: a "check
+reolink cameras" request blocked with cmd_injection on the newest tool message (a read of
+tools/hermes-reolink.py) even after hermes-router.py 2.11.0's newest-message-only fix -- the
+Layer 1 catalog itself had a real bug, not a scoping one. _DANGEROUS's component tokens
+(rm/curl/wget/nc/netcat/bash/chmod/chown/dd/mkfs/eval) had no \\b word boundaries, so they matched
+as bare substrings anywhere a dangerous token's letters happened to appear, not just as whole
+command names. The actual trigger: hermes-reolink.py's own docstring contains the backtick-wrapped
+markdown reference `` `async def` `` (async Python code, documented as such) -- "async " contains
+the literal substring "nc " (...asy-NC-space...), which matched the unguarded `nc\\s` token.
+Probed for siblings before shipping the fix (the same discipline 1.3.0 should have applied to this
+component specifically): `curl` also matched inside "curly", `bash` inside "bashful", `dd if=`
+inside "add if=", `chown` inside "chowning". All four are exactly the kind of ordinary
+English/code substring a command name can hide inside, and none of them are remotely rare in real
+prose or code comments. Fixed by wrapping every literal command-name token in `_DANGEROUS` with
+`\\b` (a real command name is a whole token, never embedded inside another word) -- verified 12
+false-positive probes across all four collisions now clean, and all 14 original true-positive
+probes (rm -rf, curl <url>, nc -e, dd if=, etc.) still match unchanged. No other pattern in this
+catalog uses `_DANGEROUS` without also requiring a preceding shell metacharacter (the
+chained-execution pattern) or being scoped to a single already-\\b-bounded literal (the standalone
+nc -e / base64 patterns), so this was the only unguarded surface.
+
+Same incident, second bug: re-ran 1.3.0's own "measure before shipping" corpus check (this time
+including tools/*.py, the actual attack surface a file-read tool result represents, which the
+1.3.0 measurement never included) and it caught two more real false positives, both in
+hermes-router.py itself: SQL_INJECTION's `(sleep|benchmark)\\s*\\(\\s*\\d+` pattern matched ordinary
+`time.sleep(2)`/`asyncio.sleep(5)` calls (routine polling code throughout this fleet) and the
+English word "benchmark" followed by this project's own changelog convention of a parenthetical
+date citation, e.g. "benchmark (2026-08-26 -- ...)". Fixed with two real differentiators instead
+of a blanket word match: `sleep` now excludes a preceding `.` (a negative lookbehind), since every
+legitimate call site is a namespaced method call (`time.sleep(`, `asyncio.sleep(`) while a real
+SQLi payload's SLEEP() is bare; `benchmark` now requires a trailing comma before its next argument,
+since MySQL's BENCHMARK(count, expr) always takes exactly two comma-separated arguments and no
+English usage of the word "benchmark" followed by a parenthetical naturally produces that shape.
+
+Same incident, third bug, same corpus check: `_DANGEROUS`'s bare `curl`/`wget` tokens were the
+single largest false-positive source measured (24 of ~50 blocked chunks across this repo's own
+markdown+tools/*.py) -- any backtick-wrapped mention of curl/wget at all counted as "dangerous",
+including completely benign ops documentation like `` `curl http://host:port/health` ``, which
+this fleet's own docs use constantly for verification snippets. Removed both from `_DANGEROUS`
+entirely rather than trying to further qualify them: they were redundant there in the first place,
+since the real curl/wget threats (piped to a shell, or chained after a `;`/`&`/`|`) are already
+caught unconditionally by CMD_INJECTION's own dedicated curl/wget-pipe-to-shell pattern and the
+chained-execution pattern, neither of which depends on `_DANGEROUS` or backtick-wrapping at all --
+verified live that `` `curl ... | bash` ``, bare `curl ... | sh`, and `; curl ...` all still block
+exactly as before, while a bare backtick-wrapped `curl <url>` health-check example is now clean.
+Also tightened `eval` in the same pass: `\\beval\\s` matched the bare word "eval" as AI/ML jargon
+shorthand for "evaluation" (this repo's own IMPLEMENTATION_PLAN.md: "eval set", "eval harness",
+"eval results" -- 22 matches checked, all 22 false positives, zero real `eval(...)` calls) any time
+it was followed by whitespace. Now requires an actual invocation shape after it -- `\\beval\\s*[("'$]`
+-- matching `eval(`, `eval (`, `eval "..."`, and the `eval $(...)` shell idiom, while "eval harness"
+and "a duplicate eval for..." no longer match.
 
 1.3.0 (2026-09-09): false-positive correction. 1.2.0 widened this catalog
 without ever measuring it against the content it actually runs on, and the
@@ -171,7 +223,7 @@ from pathlib import Path
 # just the syntax that could carry one. `_DANGEROUS` is the payload half,
 # reused by the substitution patterns so a bare `$(date)` or an inline
 # markdown code span doesn't fire.
-_DANGEROUS = r"(?:rm\s+-[a-z]*[rf]|curl|wget|nc\s|netcat|bash|/bin/sh|chmod\s+[0-7]{3,4}|chown|dd\s+if=|mkfs|eval\s|/etc/(?:passwd|shadow))"
+_DANGEROUS = r'(?:\brm\s+-[a-z]*[rf]\b|\bnc\b|\bnetcat\b|\bbash\b|/bin/sh\b|\bchmod\s+[0-7]{3,4}\b|\bchown\b|\bdd\s+if=|\bmkfs\b|\beval\s*[("\'$]|/etc/(?:passwd|shadow))'
 
 CMD_INJECTION = [
     # Command substitution, but only when it carries something dangerous --
@@ -199,7 +251,11 @@ SQL_INJECTION = [
     r"(?i)['\"]\s*or\s+['\"]?\d+['\"]?\s*=\s*['\"]?\d+['\"]?",   # ' OR '1'='1
     r"(?i);\s*drop\s+table\b",
     r"(?i)\bxp_cmdshell\b",
-    r"(?i)\b(sleep|benchmark)\s*\(\s*\d+",
+    r"(?i)(?<!\.)\bsleep\s*\(\s*\d+",              # excludes time.sleep(/asyncio.sleep( method calls
+    r"(?i)\bbenchmark\s*\(\s*\d+\s*,",             # MySQL BENCHMARK(count, expr) always takes 2 args --
+                                                    # excludes the English word "benchmark" followed by
+                                                    # a parenthetical, e.g. this project's own changelog
+                                                    # convention "benchmark (2026-08-26 -- ...)"
     r"(?i)\bwaitfor\s+delay\b",
 ]
 
