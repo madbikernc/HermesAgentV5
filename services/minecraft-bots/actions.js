@@ -1,4 +1,17 @@
-// Version: 1.44.0
+// Version: 1.45.0
+//
+// 1.45.0 (2026-09-11) -- direct request: "if one bot is looking for a specific resource, it
+// should look near itself (current understanding added to global world memory), ask the other
+// bots to look near themselves (they add/update world memory too), then use global world memory
+// to gather a resource if it's not in its own immediate vicinity." This file's own half: "mine"
+// now tries a remembered position (new findRememberedLocation(), parsing the existing
+// "near (x, y, z)" note format explore's own success note already used) between its local
+// findBlocks() and the existing blind wanderAndRetryFind() fallback -- cheap (one RAG query, no
+// movement) and, on a hit, a direct trip instead of a directionless search; a stale/wrong note
+// just falls through to the unchanged wander fallback. EXPLORE_TARGET_NAMES hoisted to module
+// scope and exported so index.js's new noteNearbyResources() (the "look near itself"/"ask the
+// fleet" half, and the new "scout" Buzz payload) scans the exact same curated resource list
+// "explore" already does, not a second independently-drifting one.
 //
 // 1.44.0 (2026-09-10) -- direct live follow-up to 1.43.0's own detection fix, same report
 // ("they don't seem to be able to fight, or run from, phantoms"): fixing detection alone wasn't
@@ -648,6 +661,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipment.js";
 import { cancelAndRotate, isBusy, currentToken, releaseControl } from "./arbiter.js";
+import { searchMemory } from "./longterm.js";
 
 const { goals } = pathfinderPkg;
 
@@ -964,6 +978,52 @@ const EXPLORE_DISTANCE = 40;
 const EXPLORE_TIMEOUT_MS = 15_000;
 const EXTENDED_SEARCH_DISTANCE = 150;
 const MAX_DIRECTED_HOPS = 4;
+
+// Hoisted to module scope (was a local const inside "explore" alone) and exported, 2026-09-11
+// (direct request: "ask the other bots to look near themselves... they add/update their
+// knowledge of nearby resources into global world memory") -- index.js's new noteNearbyResources()
+// scans this SAME curated "common raw materials" list so a scout request and an ordinary explore
+// success note stay in exactly one vocabulary; one bot's "mine" query can match another bot's
+// incidental discovery either way, not two independently-drifting lists.
+export const EXPLORE_TARGET_NAMES = ["oak_log", "coal_ore", "iron_ore", "copper_ore"];
+
+// Direct request, 2026-09-11 ("if one bot is looking for a specific resource... each bot uses the
+// global world memory to gather a resource it needs, if it's not in their immediate vicinity").
+// Memory notes have no structured position field (longterm.js's own writeMemoryNote just stores
+// free text) -- every existing position-bearing note already uses the one real format,
+// "near (x, y, z)" (explore's own success note, index.js's goalTick), so parsing that back out
+// reuses an existing convention rather than inventing a new structured schema.
+const MEMORY_POSITION_PATTERN = /near \((-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\)/;
+
+async function findRememberedLocation(resourceName) {
+  const hits = await searchMemory(`${resourceName} location nearby`, { topK: 5 });
+  for (const hit of hits) {
+    // searchMemory is semantic/fuzzy -- a hit about an unrelated resource can still score close
+    // enough to come back, so a real substring check on the resource name is worth keeping on
+    // top of whatever ranking the search itself already did.
+    if (!hit.text || !hit.text.toLowerCase().includes(resourceName.toLowerCase())) continue;
+    const match = hit.text.match(MEMORY_POSITION_PATTERN);
+    if (match) return new Vec3(Number(match[1]), Number(match[2]), Number(match[3]));
+  }
+  return null;
+}
+
+// One bounded hop toward a remembered position, same shape as wanderAndRetryFind's own per-hop
+// goto (EXPLORE_TIMEOUT_MS, cancel-on-token, best-effort if she can't fully reach it) -- worth
+// checking from wherever she actually ends up even on a partial path, same reasoning as that
+// function's own catch block.
+async function gotoRememberedSpot(bot, token, pos) {
+  if (token.cancelled) return;
+  try {
+    await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 4)),
+      EXPLORE_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+  } catch {
+    // Couldn't fully reach it (stale note, terrain changed, whatever) -- still worth a local
+    // findBlocks from wherever she ended up rather than giving up on the memory hit entirely.
+  } finally {
+    bot.pathfinder.setGoal(null);
+  }
+}
 
 async function wanderAndRetryFind(bot, token, findOptions) {
   if (token.cancelled) return [];
@@ -1629,6 +1689,21 @@ export async function performAction(bot, action, speaker) {
       const wantCount = action.count || 1;
       const findOptions = { matching: blockIds, maxDistance: 32, count: wantCount * CONTENTION_SEARCH_OVERFETCH };
       let positions = bot.findBlocks(findOptions);
+      // Direct request, 2026-09-11 ("each bot uses the global world memory to gather a resource
+      // it needs, if it's not in their immediate vicinity"): a remembered position -- her own
+      // earlier scan, or another bot's, either written directly or in response to a "scout"
+      // broadcast (see index.js's noteNearbyResources()/the "scout" Buzz payload) -- is worth
+      // trying BEFORE the blind extended wander below: cheap (one RAG query, no movement) and,
+      // when it hits, a direct trip instead of a directionless search. A stale/wrong note just
+      // falls through to the exact same wander fallback that already existed, no worse off than
+      // before this existed.
+      if (!positions.length) {
+        const remembered = await findRememberedLocation(action.block).catch(() => null);
+        if (remembered) {
+          await gotoRememberedSpot(bot, token, remembered);
+          positions = bot.findBlocks(findOptions);
+        }
+      }
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
       if (!positions.length) return fail(`couldn't find any ${action.block} nearby, even after looking around.`);
       positions = filterAwayFromOtherBots(bot, positions).slice(0, wantCount);
@@ -1680,7 +1755,6 @@ export async function performAction(bot, action, speaker) {
       // whatever's found first, not just enough for right now -- the travel is the real cost
       // here, not the extra inventory slots, so "find resources for later" means actually
       // stockpiling while she's already out looking, not just solving today's shortage.
-      const EXPLORE_TARGET_NAMES = ["oak_log", "coal_ore", "iron_ore", "copper_ore"];
       const blockIds = [...new Set(EXPLORE_TARGET_NAMES.flatMap((name) => resolveBlockFamily(bot, name)))];
 
       // Direct request, 2026-09-08 ("if a resource is in a nearby chest, they should not mine

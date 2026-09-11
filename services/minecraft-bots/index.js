@@ -1,4 +1,18 @@
-// Version: 2.53.0
+// Version: 2.54.0
+//
+// 2.54.0 (2026-09-11) -- direct request: shared resource-location memory across the fleet (see
+// actions.js's own 1.45.0 header for the full quote and the other half of this feature). New
+// noteNearbyResources() scans actions.js's EXPLORE_TARGET_NAMES locally (no movement, safe to
+// run fire-and-forget without the arbiter) and writes a world-memory note per resource found,
+// in the same "near (x, y, z)" format explore's own success note already used -- called (1)
+// directly, right before publishing, whenever a "mine" step exhausts its own local search (the
+// "look near itself" half), and (2) by every other bot on a new "scout" minecraft-coordination
+// Buzz payload (the "ask the other bots to look near themselves" half). No direct reply channel
+// needed -- every bot writes to the one shared world-memory corpus, so the asker's own next
+// "mine" attempt (actions.js's new findRememberedLocation()) picks up whatever anyone wrote,
+// exactly as if she'd found it herself. Deliberately non-blocking, matching the existing item
+// "request" step's own precedent: publish, let this tick's failure stand, and rely on a LATER
+// goal tick to benefit from whatever the fleet reports back in the meantime.
 //
 // 2.53.0 (2026-09-11) -- direct live report: "what's wrong with the bots now," found via a fresh
 // live log review. Repeated "self-defense result: gave up on the fight -- took too long" against
@@ -781,7 +795,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, EXPLORE_TARGET_NAMES } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -1134,6 +1148,36 @@ async function broadcastThreatAlert(threatName) {
     }));
   } catch (err) {
     console.error(`[${USERNAME}] threat alert broadcast failed:`, err.message);
+  }
+}
+
+// Direct request, 2026-09-11: "if one bot is looking for a specific resource, it should (1) look
+// near itself, current understanding of nearby resources added to global world memory; (2) ask
+// the other bots to look near themselves, they add/update their knowledge into global world
+// memory; (3) each bot uses the global world memory to gather a resource it needs, if it's not
+// in their immediate vicinity." This function covers (1) and the "add/update" half of (2) -- a
+// pure read (bot.findBlocks never moves her), so it's safe to run fire-and-forget, without
+// acquiring the arbiter, from either her own "mine" failure (see goalTick below) or another
+// bot's "scout" broadcast (see the minecraft-coordination listener below): never interrupts
+// whatever she's actually doing. Scans actions.js's own EXPLORE_TARGET_NAMES (the same curated
+// "common raw materials" list "explore" already searches) so a scout note and an ordinary
+// explore success note stay in exactly one vocabulary -- one bot's "mine" query can match
+// another bot's incidental discovery either way, not two independently-drifting lists. Position
+// format ("near (x, y, z)") matches explore's own success note exactly -- see actions.js's own
+// findRememberedLocation() for the parser that reads it back out. writeMemoryNote's own
+// near-duplicate check (longterm.js) keeps repeated scans of an already-noted spot cheap and
+// harmless rather than piling up redundant notes.
+async function noteNearbyResources(reason) {
+  for (const name of EXPLORE_TARGET_NAMES) {
+    const positions = bot.findBlocks({ matching: (block) => block.name === name, maxDistance: 24, count: 1 });
+    if (!positions.length) continue;
+    try {
+      const pos = positions[0];
+      await writeMemoryNote({ scope: "world", persona: PERSONA_NAME,
+        text: `Found ${name} near (${pos.x}, ${pos.y}, ${pos.z}), as of ${new Date().toISOString()}.` });
+    } catch (err) {
+      console.error(`[${USERNAME}] nearby-resource memory write failed (${name}, ${reason}):`, err.message);
+    }
   }
 }
 
@@ -2112,6 +2156,23 @@ async function goalTick() {
                 `wandering to look, as of ${new Date().toISOString()}.` });
       } catch (err) {
         console.error(`[${USERNAME}] environmental memory write failed:`, err.message);
+      }
+      // Direct request, 2026-09-11 ("ask the other bots to look near themselves"): "mine"
+      // specifically (a single named target), not "explore" (already a broad multi-resource
+      // scan of its own -- a scout request for "explore" wouldn't even name one resource to
+      // ask about). Fire-and-forget, same reasoning as the item "request" step just below this
+      // one: publish and let this tick's own failure stand, a LATER goal tick's own
+      // findRememberedLocation() (actions.js) is what actually benefits from whatever the fleet
+      // reports back in the meantime -- no new blocking/waiting primitive needed.
+      if (parsed.action.type === "mine") {
+        noteNearbyResources("before asking the fleet to scout").catch((err) =>
+          console.error(`[${USERNAME}] nearby-resource scan failed:`, err.message));
+        try {
+          await buzzPublish(AGENT_ID, "minecraft-coordination",
+            JSON.stringify({ type: "scout", resource: parsed.action.block }));
+        } catch (err) {
+          console.error(`[${USERNAME}] scout request publish failed:`, err.message);
+        }
       }
     }
 
@@ -3184,6 +3245,16 @@ bot.once("spawn", () => {
           console.log(`[${USERNAME}] can fulfill ${msg.from_agent}'s request for ` +
                       `${payload.count} ${payload.item}`);
         }
+      } else if (payload.type === "scout") {
+        // Direct request, 2026-09-11 ("ask the other bots to look near themselves... they
+        // add/update their knowledge of nearby resources into global world memory"). Same
+        // fire-and-forget, no-arbiter-needed reasoning as noteNearbyResources()'s own header --
+        // never interrupts whatever she's actually doing, and never replies directly to
+        // msg.from_agent either: every bot (asker included) writes to the one shared world-
+        // memory corpus, so the asker's own later findRememberedLocation() (actions.js) picks
+        // up whatever anyone wrote, same as if she'd stumbled onto it herself.
+        noteNearbyResources(`${msg.from_agent}'s scout request for ${payload.resource}`).catch((err) =>
+          console.error(`[${USERNAME}] scout response failed:`, err.message));
       }
     },
   });
