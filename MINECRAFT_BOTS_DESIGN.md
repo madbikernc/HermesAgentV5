@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots — Design
 
-**Version:** 1.12.0
+**Version:** 1.13.0
 **Status:** Design only — nothing in this document is built. Status legend (same convention as
 `firmament-fleet-target-architecture.md`): `[DECIDED]` — operator made an explicit choice · `[PROPOSED]` —
 design recommendation, not yet ratified · `[UNKNOWN]` — needs discovery before build · `[RISK]` — flagged
@@ -218,14 +218,29 @@ moving/mining/fighting/crafting/looting.
   room (§10) — worth a quick real-world test once bots exist, since it's the one piece of this design with
   no existing fleet precedent to copy.
 
-## 14. Dynamic skill library (2026-09-08) — `[PROPOSED]`, a plan only, nothing built
+## 14. Dynamic skill library (2026-09-08) — built and live; this section was badly stale
 
-Direct request: "plan out" a Voyager-style skill library, following a web-research gap analysis
-against other LLM-driven Minecraft agents. Voyager's own distinctive idea: rather than an LLM
-re-deriving a plan from scratch every decision point (today's `goalTick`/`planNextStep`, §12),
-successful multi-step behaviors get **compiled into a reusable, retrievable skill** once, then
-looked up by embedding similarity next time a similar situation comes up — skills compound over
-time instead of each attempt starting cold.
+`[CORRECTED 2026-09-11]` Every status marker in this section used to say `[PROPOSED]`/"not
+started"/"if greenlit." That was **wrong** — `skills.js` (1.1.0), its two dedicated RAG scripts,
+and `goalTick`'s own skill-retrieval call were all real and already running before that operator
+correction, dated 2026-09-08, the same day as this section's own header. Nobody had gone back and
+updated this doc as the build actually happened, so it sat describing a plan for something that
+already existed. Caught only because a direct request ("fix ... the dynamic skill library")
+prompted actually re-reading the code instead of trusting the doc's own claim — worth naming as a
+process lesson, not just a content fix: **a design doc's own status tags can go stale exactly like
+any other doc**, and repeating one without checking the code (as this file's own §15 summary did,
+one turn earlier in the same session) reproduces the staleness forward. Verified live on `spark`
+while fixing this: 86 real skills already exist in the corpus (grown organically, well past the
+20-skill sample `skills.js`'s own threshold-recalibration comment describes), and a live search
+query ("get iron armor") returned three genuinely relevant matches at real, sane distances
+(0.38–0.51, comfortably under the 0.78 match threshold) — this isn't dormant, it's in active use.
+
+Direct request, 2026-09-08 (before any of this was built): "plan out" a Voyager-style skill
+library, following a web-research gap analysis against other LLM-driven Minecraft agents.
+Voyager's own distinctive idea: rather than an LLM re-deriving a plan from scratch every decision
+point (`goalTick`/`planNextStep`, §12), successful multi-step behaviors get **compiled into a
+reusable, retrievable skill** once, then looked up by embedding similarity next time a similar
+situation comes up — skills compound over time instead of each attempt starting cold.
 
 **Deliberate deviation from Voyager's own architecture, not a gap to close later:** Voyager has
 its LLM write and `eval()` raw JavaScript directly against the game API. That's the wrong shape
@@ -235,10 +250,12 @@ this project's whole existing design (the tool-tier gate, `busy`/`acting` discip
 to keep a bot's behavior predictable and safe to interrupt. Arbitrary LLM-authored code eval'd
 against a live `bot` object would bypass every one of those guarantees at once. **A skill here
 should be a bounded, declarative sequence of the *existing, already-verified* action verbs
-(`performAction()`'s own 22-verb vocabulary, actions.js) — never raw code, never direct
-mineflayer API access.** This is a smaller, safer idea than Voyager's own, chosen on purpose.
+(`performAction()`'s own vocabulary, actions.js — grown well past its original ~22 verbs since
+this was written, tracked precisely by `SKILL_ACTION_VERBS`, not a number worth re-stating here
+every time a verb is added) — never raw code, never direct mineflayer API access.** This is a
+smaller, safer idea than Voyager's own, chosen on purpose.
 
-### Shape of a skill
+### Shape of a skill `[BUILT]`
 
 A skill is data, not code: `{ name, description, steps: [{ action, args }, ...] }` — `action`
 must be one of `performAction()`'s existing verb names, checked against a real allowlist before
@@ -249,17 +266,21 @@ else in this codebase) keeps a stored skill from ever becoming an unbounded prog
 branching/looping primitives beyond "stop this skill early if a step comes back `ok: false`" —
 Voyager's own iterative self-correction happens at the *authoring* step below, not at *runtime*.
 
-### Storage and retrieval — reuses hermes-rag, no new infrastructure
+### Storage and retrieval — reuses hermes-rag, no new infrastructure `[BUILT]`
 
-A new `minecraft-skills` hermes-rag corpus, the same two-script bridge pattern
-`tools/hermes-rag-ingest-minecraft.py`/`hermes-rag-search-minecraft.py` already established for
-the `minecraft`/`minecraft-world` corpora (§7) — indexed on `description`, not the raw step
-list, so retrieval is "what is this skill *for*," matching how `longterm.js`'s own dedup check
-(1.1.0) already uses `hermes_rag_common.search()`'s real cosine distance with an empirically
-calibrated threshold. World-scoped like `minecraft-world` (§7), not per-bot: a skill one bot
-worked out should immediately benefit all four, and any future bot, without re-deriving it.
+A dedicated `minecraft-skills` corpus with its own two-script bridge pair —
+`tools/hermes-rag-ingest-minecraft-skills.py`/`hermes-rag-search-minecraft-skills.py` — a real,
+separate pair from `minecraft`/`minecraft-world`'s own scripts (§7), not a reuse of them the way
+this section originally assumed; skills turned out to want their own ingest/search rather than
+sharing the world-facts pair. Indexed on `description`, not the raw step list, so retrieval is
+"what is this skill *for*," matching how `longterm.js`'s own dedup check (1.1.0) already uses
+`hermes_rag_common.search()`'s real cosine distance with an empirically calibrated threshold
+(`MATCH_DISTANCE_THRESHOLD`, recalibrated live 0.7 → 0.78 once a real ~20-skill corpus existed to
+test against — see `skills.js`'s own comment for the measured distances that drove it). World-
+scoped, not per-bot: a skill one bot worked out immediately benefits every other bot and any
+future one, without re-deriving it — `SKILLS_DIR` is one shared directory, not one per persona.
 
-### Authoring — a new, occasional `coder` call, not a new per-tick cost
+### Authoring — a new, occasional `coder` call, not a new per-tick cost `[BUILT]`
 
 When `goalTick`'s planner (§12) is about to attempt a step and no stored skill's description is
 a close enough match (same distance-threshold pattern as `longterm.js`'s dedup check), it
@@ -271,7 +292,7 @@ call, not a per-tick one: "rare, not per-tick"). The compressed skill is validat
 real action-verb allowlist and step-count cap before it's ever written to the corpus — an
 invalid skill is discarded, not stored broken.
 
-### Retrieval and execution — folds into the existing pipeline, not a parallel one
+### Retrieval and execution — folds into the existing pipeline, not a parallel one `[BUILT]`
 
 Before `planNextStep`'s own per-tick call, a cheap `hermes-rag-search-minecraft.py` query against
 `minecraft-skills` (reusing `searchMemory()`, `longterm.js`) checks for a close-enough match to
@@ -282,7 +303,7 @@ and every action's own existing safety behavior for free, specifically *because*
 separate execution path. A live player command still interrupts a running skill immediately, the
 same way it already interrupts a running goal step today (§12) — nothing new to build for that.
 
-### Trust and decay — bounded, matching this codebase's own conventions everywhere else
+### Trust and decay — bounded, matching this codebase's own conventions everywhere else `[BUILT]`
 
 A skill that fails (a step comes back `ok: false`) when replayed gets a failure recorded against
 it (reusing the same `consecutiveFailures`-style counter `goals.js` already tracks per-goal); a
@@ -290,25 +311,40 @@ skill crossing a small fixed failure threshold is treated as untrusted and skipp
 (not deleted outright — a skill that fails in one biome/situation may still be right in another,
 and outright deletion risks losing something a future fix could revalidate).
 
-### What this buys, concretely
+### What this buys, concretely — realized, not hypothetical
 
-Real, already-observed evidence this would help: multiple bots independently reasoning through
-the identical "I need a pickaxe, which needs planks, which needs logs" chain from scratch, per
-bot, per goal, tonight — a stored `get_first_pickaxe` skill would let every bot skip straight to
-executing it the next time, not re-derive it. This is the same benefit Voyager's own skill
-library demonstrates (63 unique items discovered 3.3x faster than prior approaches) without
-adopting its riskiest architectural choice (arbitrary code execution).
+The original motivating evidence (2026-09-08): multiple bots independently reasoning through the
+identical "I need a pickaxe, which needs planks, which needs logs" chain from scratch, per bot,
+per goal, that same night — the same benefit Voyager's own skill library demonstrates (63 unique
+items discovered 3.3x faster than prior approaches) without adopting its riskiest architectural
+choice (arbitrary code execution). As of 2026-09-11 this is no longer a projection: the corpus
+has grown to 86 real skills (`craft-iron-armor`, `mine-loot-mine`, `loot-iron-armor`,
+`copper-smelting`, and dozens more), authored organically by `authorSkillFromGoal()` across
+however many goals actually completed from scratch, and retrieval genuinely returns relevant
+matches at real, sane distances on a live query — confirmed directly, not assumed.
 
-### Build sequence, if greenlit — not started
+### Build sequence — completed, 2026-09-08, same day as this section's own header
 
-1. A minimal skill-runner: given `{steps}`, calls `performAction()` for each in order, stopping
-   early (and reporting how far it got) on the first `ok: false` — no new safety primitive, just
-   a loop over the existing one.
-2. `minecraft-skills` hermes-rag corpus + its own ingest/search script pair (§7's own pattern).
-3. Wire retrieval into `goalTick` as a first-choice check before per-tick planning (§12).
-4. Wire authoring: one `coder` call on goal completion, gated on "wasn't already served by a
-   skill," with real allowlist/step-count validation before storage.
-5. Trust/decay counter, reusing `goals.js`'s own `consecutiveFailures` shape.
+1. `[DONE]` A minimal skill-runner (`runSkill()`, `skills.js`): given `{steps}`, calls
+   `performAction()` for each in order, stopping early (and reporting how far it got) on the
+   first `ok: false` — no new safety primitive, just a loop over the existing one.
+2. `[DONE]` `minecraft-skills` corpus + its own dedicated ingest/search script pair (a real
+   deviation from §7's exact pattern — its own scripts, not a reuse of `minecraft`/
+   `minecraft-world`'s, per the Storage section above).
+3. `[DONE]` Retrieval wired into `goalTick` as a first-choice check before per-tick planning
+   (§12) — `findSkill()`/`runSkill()`, checked once per goal via `servedBySkill`.
+4. `[DONE]` Authoring wired: one `coder` call on goal completion (`authorSkillFromGoal()`), gated
+   on "wasn't already served by a skill," with real allowlist/step-count validation
+   (`isValidSkill()`) before storage.
+5. `[DONE]` Trust/decay counter (`recordSkillOutcome()`), reusing `goals.js`'s own
+   `consecutiveFailures` shape.
+6. `[FIXED 2026-09-11]` One real integration gap found while verifying this section, not present
+   at original build time: every action verb added *this session* (`repair_terrain`,
+   `harvest_hive`, `shear`, `milk`, `build_pen`, `herd_to_pen`) had been left out of
+   `SKILL_ACTION_VERBS` entirely — meaning none of them could ever be compressed into a skill.
+   Five of six added (`actions.js` 1.50.0); `repair_terrain` deliberately still excluded, same
+   reasoning as this section's own `gohome`/`recover` exclusion — its position is a live-discovered
+   pit a stored skill has no way to reconstruct.
 
 ## 15. Role-based dispatch/priority (2026-09-11) — deployed and live
 
@@ -605,8 +641,13 @@ Core Directive, now also visible to Mayor's role-aware directive content, §15.5
   §15.9.
 - `[RESOLVED, operator]` Leader's single-point-of-failure question — Mark now carries Leader as a
   secondary specifically to cover it; §15.5(d) scopes the (not-yet-built) failover mechanism.
-- `[RISK, still open]` §15.6's "shelter" completion signal (`hasShelterNearHome()`'s own 80%-solid
-  geometry re-check is a reasonable proxy, not a guaranteed-correct one — unchanged from 1.6.0).
+- `[FIXED]` §15.6's "shelter" completion signal had a real, concrete bug, not just an abstract
+  imprecision: `hasShelterNearHome()` checked ONLY `bot.spawnPoint.floored()` exactly, but
+  `gohome` walks there via `GoalNear(..., 3)` — a 3-block-radius goal — so a real, successfully
+  built shelter could sit up to 3 blocks off spawn and never be recognized, looping the same
+  directive forever. Now slides the candidate anchor across a small search radius and also
+  requires a genuinely hollow interior (not just wall/roof solidity), closing the false-positive
+  side (a coincidentally-shaped hill) the old check was also exposed to. `index.js` 2.61.0.
 - `[RESOLVED]` whether Miner/Artist/Explorer/Soldier get their own `priorities` lists — yes, as
   advisory text, not Builder's deterministic shape; see §15.6's own updated note above.
 - `[RESOLVED, operator]` Farmer/Herder went to a new 6th bot, Bob (Farmer primary/Herder
@@ -616,10 +657,13 @@ Core Directive, now also visible to Mayor's role-aware directive content, §15.5
 - `[RESOLVED]` §15.11's pen/fence and shear/milk verb shapes — `build_pen` (a fixed 5x5 fence
   perimeter + gate, its own dedicated verb rather than folded into `build`) and `shear`/`milk`
   (both `bot.activateEntity()`, the same primitive `breed` already uses), `actions.js` 1.49.0.
-- `[UNKNOWN, still open]` `build_pen` places the structure but doesn't move an animal INTO it —
-  a bred cow/sheep/pig/chicken still has to wander in on its own. Luring one in (food-based, the
-  same `activateEntity`-adjacent mechanic `breed` already demonstrates) or a dedicated step is
-  real, unbuilt follow-up work, not assumed solved by this pass.
+- `[FIXED]` `build_pen` used to place the structure without moving an animal INTO it. New
+  `herd_to_pen` case (`actions.js` 1.50.0): leans on vanilla's own TemptGoal follow-behavior (the
+  same food-attraction `breed` already uses) to lead an animal toward the pen in short, bounded
+  hops, checking real live distance each step rather than assuming she's still following. New
+  `loadPenLocation()`/`savePenLocation()` so `build_pen`'s own gate position survives to be found
+  later. Genuinely bounded, not guaranteed: an animal that stops following partway is reported as
+  a real, honest failure with how far it got, not silently retried forever.
 - `[RESOLVED]` Bob is deployed — running live on `spark2`, not `spark` (§15's own intro above has
   the full story: `spark`'s real headroom was checked live and found too tight, `spark2` had
   ~40Gi available and was set up fresh for him). Real Matrix account, joined to the shared room;
@@ -802,3 +846,4 @@ running 6th bot process (systemd unit, Matrix account, `MC_BOT_USERNAMES`/Buzz r
 | 1.10.0 | 2026-09-11 | Direct follow-up ("nest" again -> "all 3"): `harvest_hive` (actions.js 1.48.0) gained an explicit `action.tool` choice — bottle (honey, calm) or shears (honeycomb, angers the bees but the only path to crafting a *new* beehive) — wired into both vocabularies (`index.js` 2.58.0). Confirmed (not assumed) `craft`/`place` needed zero changes to handle a beehive, both already fully generic. §15.6's Builder priority ladder gained a 6th item (a placed beehive) once that became genuinely reachable, deliberately ordered after the operator's original five. |
 | 1.11.0 | 2026-09-11 | Direct follow-up ("what's next" -> "2", closing gaps before deploying): §15.11 fully closed — new `shear`/`milk`/`build_pen` verbs (`actions.js` 1.49.0), wired into both vocabularies (`index.js` 2.59.0); pen containment resolved as its own dedicated verb rather than folded into `build`. §15.6/§15.8: Miner/Artist/Explorer/Soldier each gained an advisory (not deterministic — see §15.6's own reasoning) `priorities` array (`roles.js` 1.2.0), folded into `proposeOwnGoal()`'s prompt via new `priorityListNote()` (`index.js` 2.60.0). §15.8 also corrected: Bob's repo-side infra (service unit, `MC_BOT_USERNAMES`, Buzz `KNOWN_AGENTS`) was already landed in 1.8.0, a previous revision's open-questions list understated that. |
 | 1.12.0 | 2026-09-11 | Direct request "deploy bob" -> "restart the other bots": §15 is now deployed, not just built. Bob went live on `spark2` (not `spark` as §4 originally envisioned) after live inspection showed `spark` genuinely tight on memory (LLM model stack, not the bots) and `spark2` had real headroom — a live architecture decision made during deployment, not assumed in advance. `hermes-buzz.service` restarted on `spark` for `mc-bob`; Babs/Amy/Mark/Luke/Mayor restarted one at a time and each verified clean, so the whole 6-bot fleet now runs this section's code for the first time. New open item: `build_pen` places a structure but doesn't herd an animal into it. |
+| 1.13.0 | 2026-09-11 | Direct request "fix the shelter check, the pen herding, and the dynamic skill library": (1) real bug fixed in `hasShelterNearHome()` — it assumed an exact `bot.spawnPoint` anchor, but `gohome`'s own 3-block-radius goal meant a real shelter could go unrecognized; now searches a small radius and checks for a hollow interior too (`index.js` 2.61.0). (2) New `herd_to_pen` verb closes the animal-containment gap opened in 1.12.0, reusing vanilla's own tempt-follow AI (`actions.js` 1.50.0). (3) §14 turned out to be badly stale — the skill library was already fully built and live (86 real skills, verified via a live search query) before this session even started; corrected every status tag in that section from `[PROPOSED]`/"not started" to `[BUILT]`, and fixed the one real integration bug found (`SKILL_ACTION_VERBS` was missing every verb this session added). |

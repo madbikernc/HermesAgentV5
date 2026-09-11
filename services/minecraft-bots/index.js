@@ -1,4 +1,21 @@
-// Version: 2.60.0
+// Version: 2.61.0
+//
+// 2.61.0 (2026-09-11) -- direct request "fix the shelter check, the pen herding, and the dynamic
+// skill library". (1) Real bug fixed in hasShelterNearHome(): it checked ONLY
+// bot.spawnPoint.floored() itself, but "gohome" (actions.js) walks there via GoalNear(..., 3) --
+// a 3-block-radius goal, not the exact block -- so a shelter built right after nextBuilderPriority
+// (§15.6)'s own "go home and build a small shelter there" directive could legitimately sit up to
+// 3 blocks off spawnPoint and never be recognized as built, looping the same directive forever.
+// Now slides the candidate anchor across a small search radius and also checks for a genuinely
+// hollow interior (not just wall/roof solidity), so a coincidentally-shaped hill or outcrop can't
+// false-positive as "shelter exists" either. (2) Wired actions.js's new "herd_to_pen" case (1.50.0)
+// into both vocabularies, same two-place pattern every verb here gets -- closes the design doc's
+// own "build_pen doesn't herd" gap. (3) Investigated §14's dynamic skill library after the
+// design doc turned out to be badly stale (claiming "a plan only, nothing built" when skills.js,
+// its two RAG scripts, and goalTick's own skill-retrieval call were all already real, dated
+// 2026-09-08 -- built before this session, just never reflected in the doc). The one real
+// integration bug found: every verb added THIS session was missing from SKILL_ACTION_VERBS
+// (actions.js 1.50.0), fixed there, not here.
 //
 // 2.60.0 (2026-09-11) -- direct follow-up ("what's next" -> "2"), second half: closes §15.8's
 // "do the other roles get their own priorities lists" open question for Miner/Artist/Explorer/
@@ -1395,6 +1412,9 @@ async function classifyIntent(speaker, message) {
           `ACTION MILK - asks ${USERNAME} to milk a nearby cow, if she has an empty bucket\n` +
           `ACTION BUILD_PEN - asks ${USERNAME} to fence in a small pen (with a gate) around ` +
           `herself, if she has fence blocks and a fence gate. No parameters.\n` +
+          `ACTION HERD_TO_PEN <species> - asks ${USERNAME} to lure a nearby loose animal (e.g. ` +
+          `cow, sheep, pig, chicken) into the already-built pen using the right food. Only if a ` +
+          `pen already exists and she has that food.\n` +
           `ACTION ENCHANT <item_id> - asks ${USERNAME} to enchant an item she's carrying at a ` +
           `nearby enchanting table (needs lapis lazuli)\n` +
           `ACTION CRAFT <item_id> <count> - asks ${USERNAME} to craft/make an item, ONLY if a ` +
@@ -1477,6 +1497,10 @@ async function classifyIntent(speaker, message) {
     if (verb === "SHEAR") return { type: "action", action: { type: "shear" } };
     if (verb === "MILK") return { type: "action", action: { type: "milk" } };
     if (verb === "BUILD_PEN") return { type: "action", action: { type: "build_pen" } };
+    if (verb === "HERD_TO_PEN") {
+      const species = (parts[2] || "").toLowerCase();
+      if (species) return { type: "action", action: { type: "herd_to_pen", species } };
+    }
     if (verb === "ENCHANT") {
       const item = (parts[2] || "").toLowerCase();
       if (item) return { type: "action", action: { type: "enchant", item } };
@@ -1757,6 +1781,10 @@ function parseGoalStep(text) {
       if (verb === "SHEAR") return { type: "step", action: { type: "shear" } };
       if (verb === "MILK") return { type: "step", action: { type: "milk" } };
       if (verb === "BUILD_PEN") return { type: "step", action: { type: "build_pen" } };
+      if (verb === "HERD_TO_PEN") {
+        const species = (parts[2] || "").toLowerCase();
+        if (species) return { type: "step", action: { type: "herd_to_pen", species } };
+      }
       if (verb === "ENCHANT") {
         const item = (parts[2] || "").toLowerCase();
         if (item) return { type: "step", action: { type: "enchant", item } };
@@ -1889,6 +1917,8 @@ async function planNextStep(goal) {
           `ACTION MILK - milk a nearby cow, if the goal is about milk/food and she has an empty bucket\n` +
           `ACTION BUILD_PEN - fence in a small pen (with a gate) around herself, if the goal is ` +
           `about containing/keeping animals and she has fence blocks and a fence gate\n` +
+          `ACTION HERD_TO_PEN <species> - lure a nearby loose animal into the already-built pen ` +
+          `using the right food, if the goal is about penning/containing that species\n` +
           `ACTION ENCHANT <item_id> - enchant an item she's carrying at a nearby enchanting table ` +
           `(needs lapis lazuli and enough XP levels), if the goal is about gear upgrades\n` +
           `ACTION FISH - fish at nearby water with a fishing rod, if the goal is about food and ` +
@@ -2004,22 +2034,56 @@ function countNearHome(names, filterFn) {
 // before ACTION BUILD, so a real attempt lands there. Allows some gaps (80% solid) rather than
 // requiring a pixel-perfect match to the exact geometry a live placement attempt (partial
 // failures, terrain already solid in spots) may not have reproduced exactly.
-function hasShelterNearHome() {
-  if (!bot.spawnPoint) return false;
-  const base = bot.spawnPoint.floored();
-  const positions = [];
+// Real bug found 2026-09-11 (direct request "fix the shelter check"): this used to check ONLY
+// bot.spawnPoint.floored() itself, but "gohome" (actions.js) walks to bot.spawnPoint via
+// GoalNear(..., 3) -- a 3-block-radius goal, not the exact block -- so a shelter actually built
+// right after "go home and build a small shelter there" (nextBuilderPriority's own directive) can
+// legitimately sit up to 3 blocks off spawnPoint. The old fixed-anchor check would then almost
+// always report "no shelter" even after a real, successful build, since it was checking the wrong
+// 3x3 footprint. Now slides the candidate anchor across a small search radius (matching gohome's
+// own tolerance plus a margin) and accepts the first one that passes.
+function shelterGeometryPositions(base) {
+  const wallAndRoof = [];
   for (let dx = -1; dx <= 1; dx++) {
     for (let dz = -1; dz <= 1; dz++) {
       if (Math.abs(dx) !== 1 && Math.abs(dz) !== 1) continue; // interior column -- no wall here
       if (dx === 0 && dz === 1) continue; // doorway column -- never required solid
-      for (let dy = 0; dy <= 2; dy++) positions.push(base.offset(dx, dy, dz));
+      for (let dy = 0; dy <= 2; dy++) wallAndRoof.push(base.offset(dx, dy, dz));
     }
   }
   for (let dx = -1; dx <= 1; dx++) {
-    for (let dz = -1; dz <= 1; dz++) positions.push(base.offset(dx, 3, dz));
+    for (let dz = -1; dz <= 1; dz++) wallAndRoof.push(base.offset(dx, 3, dz));
   }
-  const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
-  return solid >= positions.length * 0.8;
+  return wallAndRoof;
+}
+
+// The single most distinguishing feature of an actual SHELTER (a hollow room) versus a solid
+// mass of terrain that coincidentally passes the wall/roof solidity threshold (a small hill, a
+// rock outcrop) -- checked in addition to, not instead of, the solidity count. Real, cheap: only
+// 3 air-space checks (the interior column, feet/head height, matching the doorway's own opening).
+function hasHollowInterior(base) {
+  const interior = [base.offset(0, 0, 0), base.offset(0, 1, 0)];
+  return interior.every((pos) => bot.blockAt(pos)?.boundingBox !== "block");
+}
+
+function hasShelterNearHome() {
+  if (!bot.spawnPoint) return false;
+  const center = bot.spawnPoint.floored();
+  // Horizontal only, not vertical: gohome's GoalNear(..., 3) tolerance is 3D, but Y-slop near a
+  // built-up home is usually just terrain-following, not meaningful horizontal wandering -- kept
+  // to one dimension deliberately, matching this codebase's "bounded, not unbounded" search
+  // philosophy rather than multiplying the already-real cost (81 candidate anchors x 30 blockAt
+  // calls each) by a third axis for a much smaller real-world benefit.
+  const SHELTER_SEARCH_RADIUS = 4; // gohome's own GoalNear(..., 3) tolerance, plus a 1-block margin
+  for (let dx = -SHELTER_SEARCH_RADIUS; dx <= SHELTER_SEARCH_RADIUS; dx++) {
+    for (let dz = -SHELTER_SEARCH_RADIUS; dz <= SHELTER_SEARCH_RADIUS; dz++) {
+      const base = center.offset(dx, 0, dz);
+      const positions = shelterGeometryPositions(base);
+      const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
+      if (solid >= positions.length * 0.8 && hasHollowInterior(base)) return true;
+    }
+  }
+  return false;
 }
 
 function nextBuilderPriority() {

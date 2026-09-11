@@ -1,4 +1,21 @@
-// Version: 1.49.0
+// Version: 1.50.0
+//
+// 1.50.0 (2026-09-11) -- direct request "fix ... the pen herding [and] the dynamic skill
+// library". (1) New "herd_to_pen" case: build_pen (1.49.0) only ever placed the fence structure,
+// never moved an animal into it -- a real, separate gap this file's own design doc flagged the
+// day it shipped. Reuses vanilla's own TemptGoal follow-behavior (the same food/BREEDING_FOOD
+// relationship "breed" already leans on) rather than inventing a new mechanic, walked in short
+// bounded hops so the animal's own AI can keep pace, with a real per-step distance check (not
+// assumed) for whether she's still following. New loadPenLocation()/savePenLocation() (build_pen
+// now persists its own gate+center on success, only once the gate specifically went in) so
+// herd_to_pen can find a pen built in an earlier goal/session. BREEDING_FOOD hoisted from
+// "breed"'s own case block to module scope so both verbs share one definition. (2)
+// SKILL_ACTION_VERBS gained harvest_hive/shear/milk/build_pen/herd_to_pen -- every verb built
+// this session had been left out of the skill-library's own allowlist entirely, meaning none of
+// them could ever be compressed into a reusable skill despite being self-contained the same way
+// breed/harvest already are. repair_terrain deliberately still excluded, same reasoning as
+// gohome/recover's own existing exclusion (see that comment) -- its position is a live-discovered
+// pit a stored skill has no way to reconstruct.
 //
 // 1.49.0 (2026-09-11) -- direct follow-up ("what's next" -> "2", closing §15.11's remaining
 // Herder/pen gaps rather than deploying yet). New "shear" (sheep -> wool) and "milk" (cow ->
@@ -839,10 +856,20 @@ export function isEssentialItem(itemName) {
 // by index.js's own timers/handlers with context a stored skill has no way to reconstruct
 // (bot.spawnPoint, a captured death position) -- they never appear in a goal's own step log a
 // skill would be compressed from, so leaving them out costs nothing real.
+//
+// Real gap found live 2026-09-11 (direct request "fix ... the dynamic skill library"): every verb
+// added THIS session (repair_terrain, harvest_hive, shear, milk, build_pen, herd_to_pen) had been
+// left out of this set entirely -- not a deliberate exclusion, just never wired through, meaning
+// none of them could ever be captured into a reusable skill even though five of the six are
+// perfectly self-contained the same way breed/harvest already are. harvest_hive/shear/milk/
+// build_pen/herd_to_pen added now. repair_terrain deliberately still excluded, same reasoning as
+// gohome/recover above: action.position is a specific pit location index.js's own
+// checkTerrainDamage() discovers fresh each time via a live world scan -- a stored skill has no
+// way to reconstruct which pit that was.
 export const SKILL_ACTION_VERBS = new Set([
   "stop", "goto", "follow", "mine", "craft", "loot", "attack", "flee", "eat", "fish", "give",
   "sleep", "smelt", "place", "build", "store", "trade", "harvest", "breed", "enchant", "explore",
-  "plant_sapling", "light_area",
+  "plant_sapling", "light_area", "harvest_hive", "shear", "milk", "build_pen", "herd_to_pen",
 ]);
 
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
@@ -1617,6 +1644,50 @@ function findPlantableSpotNear(bot, center, radius) {
 // already uses for exactly this "small, durable, per-process state that must survive a restart"
 // need.
 const BEDS_DIR = "/mnt/hermes-data/minecraft-memory/beds";
+
+// Hoisted to module scope 2026-09-11 (direct request "fix the pen herding") so both "breed" and
+// the new "herd_to_pen" case below can share one definition -- it used to live only inside
+// "breed"'s own case block, which meant the herding verb would otherwise need a second,
+// independently-drifting copy of which food tempts which species.
+const BREEDING_FOOD = {
+  cow: ["wheat"], sheep: ["wheat"], pig: ["carrot", "potato", "beetroot"],
+  chicken: ["wheat_seeds", "pumpkin_seeds", "melon_seeds", "beetroot_seeds"],
+  // Added 2026-09-11 ("bee nests/hives") -- real vanilla bees breed on any flower, not one
+  // specific item, so this lists every common flower id rather than picking a single canonical
+  // one the way cow/sheep/pig/chicken each have.
+  bee: ["poppy", "dandelion", "blue_orchid", "allium", "azure_bluet", "red_tulip",
+        "orange_tulip", "white_tulip", "pink_tulip", "oxeye_daisy", "cornflower",
+        "lily_of_the_valley", "sunflower", "lilac", "rose_bush", "peony"],
+};
+
+// Direct request, 2026-09-11 ("fix the pen herding"): a pen built by "build_pen" needs to be
+// FOUND again later by "herd_to_pen" -- one small shared file, same durable-mount pattern
+// loadClaimedBed/saveClaimedBed just below already uses. Deliberately ONE shared pen, not
+// per-bot: unlike a bed (personal, claimed), a pen is fleet infrastructure -- the same "shared,
+// not per-bot" reasoning MINECRAFT_BOTS_DESIGN.md §15.6 already gives for the crafting
+// table/furnace/chest.
+const PEN_FILE = "/mnt/hermes-data/minecraft-memory/pen.json";
+
+async function loadPenLocation() {
+  try {
+    const data = JSON.parse(await readFile(PEN_FILE, "utf8"));
+    return { center: new Vec3(data.center.x, data.center.y, data.center.z), gate: new Vec3(data.gate.x, data.gate.y, data.gate.z) };
+  } catch {
+    return null; // no pen built yet, or the file's gone/corrupt
+  }
+}
+
+async function savePenLocation(center, gate) {
+  try {
+    await mkdir(path.dirname(PEN_FILE), { recursive: true });
+    await writeFile(PEN_FILE, JSON.stringify({
+      center: { x: center.x, y: center.y, z: center.z },
+      gate: { x: gate.x, y: gate.y, z: gate.z },
+    }), "utf8");
+  } catch (err) {
+    console.error("build_pen: failed to persist pen location:", err.message);
+  }
+}
 
 // Exported 2026-09-09 so index.js's storeSurplusNearHome() ("after any crafting activity,
 // surplus materials should be stored in a chest as close to their sleeping home as possible")
@@ -2634,26 +2705,28 @@ export async function performAction(bot, action, speaker) {
       let placed = 0;
       async function placeAt(pos, item) {
         const existing = bot.blockAt(pos);
-        if (existing?.boundingBox === "block") { placed++; return; }
+        if (existing?.boundingBox === "block") { placed++; return true; }
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
             ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
         } catch {
-          return; // couldn't reach this one -- skip, matches "build"'s own tolerance for gaps
+          return false; // couldn't reach this one -- skip, matches "build"'s own tolerance for gaps
         } finally {
           bot.pathfinder.setGoal(null);
         }
-        if (token.cancelled) return;
+        if (token.cancelled) return false;
         const below = bot.blockAt(pos.offset(0, -1, 0));
-        if (!below || below.boundingBox !== "block") return; // no ground to reference off yet
+        if (!below || below.boundingBox !== "block") return false; // no ground to reference off yet
         const current = bot.inventory.items().find((i) => i.name === item.name);
-        if (!current) return;
+        if (!current) return false;
         try {
           await bot.equip(current, "hand");
           await bot.placeBlock(below, new Vec3(0, 1, 0));
           placed++;
+          return true;
         } catch (err) {
           console.error(`build_pen: placement failed at ${pos}:`, err.message);
+          return false;
         }
       }
 
@@ -2661,11 +2734,122 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) break;
         await placeAt(pos, fence);
       }
-      if (!token.cancelled) await placeAt(gatePos, gate);
+      const gatePlaced = token.cancelled ? false : await placeAt(gatePos, gate);
 
       if (token.cancelled) return ok(`stopped building the pen (${placed}/${PEN_TOTAL} placed).`);
       if (!placed) return fail("couldn't place any of the pen.");
-      return ok(`built a small pen out of ${fence.name} with a ${gate.name} (${placed}/${PEN_TOTAL} placed).`);
+      // Direct request, 2026-09-11 ("fix the pen herding"): only remember this pen's location if
+      // the GATE specifically went in -- herd_to_pen needs a real, known entry point, and a
+      // fence-without-a-gate isn't a usable pen regardless of how many wall segments landed.
+      if (gatePlaced) await savePenLocation(base, gatePos);
+      return ok(`built a small pen out of ${fence.name} with a ${gate.name} (${placed}/${PEN_TOTAL} placed).` +
+        (gatePlaced ? "" : " gate didn't go in -- not usable for herding yet."));
+    }
+
+    case "herd_to_pen": {
+      // Direct request, 2026-09-11 ("fix the pen herding"): build_pen (above) only ever placed
+      // the STRUCTURE -- the design doc's own §15.8 flagged this as a real, separate gap the day
+      // it shipped ("build_pen places the structure but doesn't move an animal INTO it"). Reuses
+      // a real vanilla mechanic rather than inventing one: an adult animal already follows
+      // whoever's holding its tempting food (vanilla's own TemptGoal AI) once close enough --
+      // exactly the same food/BREEDING_FOOD relationship "breed" already leans on, just used for
+      // movement instead of feeding. Walks toward the pen in short, bounded hops (not one long
+      // goto) specifically so the animal's own AI has a real chance to keep pace -- covering the
+      // whole distance in one pathfinder goal would very likely outrun her and break the tempt
+      // range partway there, with no way to notice until arrival.
+      const pen = await loadPenLocation();
+      if (!pen) return fail("no pen built yet -- build one first.");
+
+      const foods = BREEDING_FOOD[action.species];
+      if (!foods) return fail(`don't know what tempts a ${action.species}.`);
+      const foodItem = bot.inventory.items().find((i) => foods.includes(i.name));
+      if (!foodItem) return fail(`don't have the right food to lure a ${action.species} (need ${foods[0]}).`);
+
+      const animal = Object.values(bot.entities)
+        .filter((e) => e.name === action.species &&
+          e.position.distanceTo(pen.center) > 4 && // not already in/near the pen
+          e.position.distanceTo(bot.entity.position) <= 32)
+        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+      if (!animal) return fail(`no loose ${action.species} nearby to herd.`);
+
+      try {
+        await bot.equip(foodItem, "hand");
+      } catch (err) {
+        return fail(`couldn't hold the ${foodItem.name}: ${err.message}`);
+      }
+
+      // Close enough to trigger the animal's own tempt-follow behavior before leading it anywhere.
+      try {
+        await withTimeout(
+          bot.pathfinder.goto(new goals.GoalNear(animal.position.x, animal.position.y, animal.position.z, 3)),
+          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped before reaching the animal.");
+        return fail(`couldn't reach the ${action.species}: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped before herding.");
+
+      const HERD_STEP_DISTANCE = 3;
+      const HERD_MAX_STEPS = 15;
+      const HERD_FOLLOW_RANGE = 8; // generous margin over vanilla TemptGoal's own real tempt radius
+      let steps = 0;
+      while (steps < HERD_MAX_STEPS) {
+        if (token.cancelled) return ok(`stopped herding partway (${steps} steps).`);
+        // Real, checked distance every step -- never assumed still-following just because the
+        // bot itself kept moving toward the pen.
+        const liveAnimal = bot.entities[animal.id];
+        if (!liveAnimal) return fail(`lost track of the ${action.species} -- it may have died or unloaded.`);
+        if (liveAnimal.position.distanceTo(bot.entity.position) > HERD_FOLLOW_RANGE) {
+          return fail(`the ${action.species} stopped following -- fell too far behind (${steps} steps in).`);
+        }
+
+        const toGate = pen.gate.minus(bot.entity.position);
+        const dist = toGate.norm();
+        if (dist < 1.5) break; // reached the gate
+
+        const target = bot.entity.position.plus(toGate.normalize().scale(Math.min(HERD_STEP_DISTANCE, dist)));
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 1)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        } catch {
+          if (token.cancelled) return ok(`stopped herding partway (${steps} steps).`);
+          // couldn't complete this one short step -- not necessarily fatal, the animal-distance
+          // check at the top of the next iteration is the real judge of whether to keep going
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        steps++;
+      }
+
+      // Final leg: through the gate and into the pen's own interior.
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pen.center.x, pen.center.y, pen.center.z, 1)),
+          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+      } catch {
+        // best effort -- the real success check below decides regardless of how this leg went
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+
+      const finalAnimal = bot.entities[animal.id];
+      if (!finalAnimal || finalAnimal.position.distanceTo(pen.center) > 4) {
+        return fail(`reached the pen, but the ${action.species} didn't follow all the way in.`);
+      }
+
+      // Close the gate behind her -- only toggle if it's actually open, never blind-toggle one
+      // that's already shut (activateBlock on a fence gate flips its open/closed state).
+      const gateBlock = bot.blockAt(pen.gate);
+      if (gateBlock?.getProperties?.().open) {
+        try {
+          await bot.activateBlock(gateBlock);
+        } catch (err) {
+          console.error("herd_to_pen: couldn't close the gate:", err.message);
+        }
+      }
+
+      return ok(`herded a ${action.species} into the pen.`);
     }
 
     case "repair_terrain": {
@@ -3142,16 +3326,7 @@ export async function performAction(bot, action, speaker) {
       // of a sustainable food source). Built on mineflayer's own activateEntity() (core --
       // confirmed against inventory.js source: right-clicks the entity while holding whatever's
       // equipped, exactly vanilla's own feed-to-breed mechanic, no dedicated "breed" API needed).
-      const BREEDING_FOOD = {
-        cow: ["wheat"], sheep: ["wheat"], pig: ["carrot", "potato", "beetroot"],
-        chicken: ["wheat_seeds", "pumpkin_seeds", "melon_seeds", "beetroot_seeds"],
-        // Added 2026-09-11 ("bee nests/hives") -- real vanilla bees breed on any flower, not one
-        // specific item, so this lists every common flower id rather than picking a single
-        // canonical one the way cow/sheep/pig/chicken each have.
-        bee: ["poppy", "dandelion", "blue_orchid", "allium", "azure_bluet", "red_tulip",
-              "orange_tulip", "white_tulip", "pink_tulip", "oxeye_daisy", "cornflower",
-              "lily_of_the_valley", "sunflower", "lilac", "rose_bush", "peony"],
-      };
+      // BREEDING_FOOD hoisted to module scope 2026-09-11 -- see its own comment above.
       const foods = BREEDING_FOOD[action.species];
       if (!foods) return fail(`don't know how to breed a ${action.species}.`);
       const foodItem = bot.inventory.items().find((i) => foods.includes(i.name));
