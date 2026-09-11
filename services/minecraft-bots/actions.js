@@ -1,4 +1,16 @@
-// Version: 1.43.0
+// Version: 1.44.0
+//
+// 1.44.0 (2026-09-10) -- direct live follow-up to 1.43.0's own detection fix, same report
+// ("they don't seem to be able to fight, or run from, phantoms"): fixing detection alone wasn't
+// enough. Confirmed live, unambiguously: once self-defense could finally SEE a phantom, its
+// "attack" choice held SELF_DEFENSE-tier arbiter control for the full 90s ACTION_TIMEOUT_MS
+// ceiling every single time, because a ground-bound bot's pathfinder can never actually close to
+// melee range against something flying overhead -- during that entire 90s span, every other
+// self-defense re-trigger, squad response, and recovery attempt correctly reported "yielded to
+// something more urgent (SELF_DEFENSE)," repeating every time the doomed chase re-triggered.
+// That's exactly what "can't fight or run" looks like live. New FLEE_ONLY_MOBS (phantom, ghast --
+// both flyers) always flees, never melee-attacks, regardless of health; fleeing doesn't need to
+// reach the target and was already confirmed live to genuinely create real distance every cycle.
 //
 // 1.43.0 (2026-09-10) -- direct live report: "they don't seem to be able to fight, or run
 // from, phantoms." Real bug, confirmed against minecraft-data's own entity registry directly:
@@ -711,6 +723,22 @@ export function nearestHostile(bot, maxDistance = 16) {
   return bot.nearestEntity((e) => HOSTILE_MOBS.has(e.name) &&
     e.position.distanceTo(bot.entity.position) <= maxDistance);
 }
+
+// Real bug found live 2026-09-10 (direct report: "they don't seem to be able to fight, or run
+// from, phantoms"), AFTER both the detection gap above (1.43.0) and the combat-resolution bug
+// (1.42.0) were already fixed: a ground-bound bot's "attack" (bot.pvp.attack() -> a pathfinder
+// GoalFollow within 2 blocks) can never actually close to melee range against a mob that flies
+// well above pathfinding reach. Confirmed live via a direct, unambiguous read: Luke's own
+// checkSelfDefense "attack" against a phantom held SELF_DEFENSE-tier arbiter control
+// CONTINUOUSLY for the full 90s ACTION_TIMEOUT_MS ceiling -- during which every other
+// self-defense re-trigger, squad response, and recovery attempt correctly reported "yielded to
+// something more urgent (SELF_DEFENSE)" for the entire span, repeating every time the doomed
+// chase re-triggered. That's exactly what "can't fight or run" looks like live, even though both
+// prior fixes are individually correct and working. Fleeing, unlike attacking, never needs to
+// reach the target -- already confirmed live to genuinely create real distance every cycle. Mobs
+// in this set are always fled from, never melee-attacked, regardless of health -- ghast included
+// on the same reasoning (also a flyer, also effectively unreachable on foot).
+export const FLEE_ONLY_MOBS = new Set(["phantom", "ghast"]);
 
 // Direct request, 2026-09-07 ("look for more ways to improve their autonomy" -> hunger). Checked
 // live: minecraft-data's own item registry carries no food/nutrition field at all (bread/apple

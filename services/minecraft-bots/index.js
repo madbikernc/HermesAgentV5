@@ -1,4 +1,11 @@
-// Version: 2.51.0
+// Version: 2.52.0
+//
+// 2.52.0 (2026-09-10) -- direct live report: "they don't seem to be able to fight, or run from,
+// phantoms." checkSelfDefense, checkSleepingThreat, and respondToSquadCall now check
+// actions.js's new FLEE_ONLY_MOBS before deciding attack vs. flee -- see that file's own 1.44.0
+// header for the confirmed live root cause (a melee "attack" against a flying phantom can never
+// land, holding SELF_DEFENSE-tier arbiter control for the full 90s ACTION_TIMEOUT_MS every time,
+// blocking everything else self-defense-tier-and-below for that whole span).
 //
 // 2.51.0 (2026-09-10) -- Phase 3/4 of the approved coherence arbiter plan (see arbiter.js's own
 // 1.2.0 header). Migrated every remaining physical-action call site off the old `acting` flag:
@@ -765,7 +772,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -2477,7 +2484,14 @@ async function checkSelfDefense() {
     return;
   }
   try {
-    const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
+    // Direct request, 2026-09-10 (direct report: "can't fight, or run from, phantoms" -- see
+    // actions.js's own FLEE_ONLY_MOBS header for the confirmed live root cause: melee-attacking
+    // a flyer can never actually land, holding SELF_DEFENSE-tier control for the full 90s
+    // ACTION_TIMEOUT_MS every single time and blocking everything else for that whole span).
+    // Checked ahead of the health threshold -- a flyer is never worth attacking regardless of
+    // how much health is left to spend on a doomed chase.
+    const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH
+      ? "flee" : "attack";
     console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
     // action.target: the already-found entity, not re-derived -- see actions.js's own
     // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.
@@ -2536,6 +2550,11 @@ async function respondToSquadCall(payload) {
     const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
     if (!threat) {
       console.log(`[${USERNAME}] squad response: arrived, nothing left to fight.`);
+    } else if (FLEE_ONLY_MOBS.has(threat.name)) {
+      // See actions.js's own FLEE_ONLY_MOBS header -- attacking a flyer would just hang here
+      // for the full 90s ACTION_TIMEOUT_MS holding SQUAD_RESPONSE control the whole time,
+      // for no real chance of ever landing a hit.
+      console.log(`[${USERNAME}] squad response: arrived, but a ${threat.name} isn't worth chasing on foot.`);
     } else {
       const result = await performAction(bot, { type: "attack", target: threat }, USERNAME);
       console.log(`[${USERNAME}] squad response result: ${result.text} (ok=${result.ok})`);
@@ -3504,7 +3523,10 @@ async function checkSleepingThreat() {
     return;
   }
   try {
-    const type = bot.health <= SELF_DEFENSE_FLEE_HEALTH ? "flee" : "attack";
+    // See checkSelfDefense's own 2026-09-10 note (actions.js's FLEE_ONLY_MOBS header) -- a
+    // flyer is never worth attacking, regardless of health.
+    const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH
+      ? "flee" : "attack";
     const result = await performAction(bot, { type, target: threat }, USERNAME);
     console.log(`[${USERNAME}] post-wake defense: ${type} -> ${result.text} (ok=${result.ok})`);
   } catch (err) {
