@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-# Version: 2.10.0
+# Version: 2.11.0
+#
+# 2.11.0 (2026-09-11) — real incident, traced live: a "Camera check" request got a 400 from
+# Layer 1 for a conversation with nothing actually wrong in it. Layer 1 was scanning
+# payload["messages"] in full on every single call -- callers resend the whole conversation every
+# turn, so one tool-role message anywhere in an 80-message history that matched any block category
+# poisoned every subsequent turn of that conversation permanently, with no client-side recovery
+# short of starting a new conversation. Layer 2 never had this bug: its own 2.6.0 entry already
+# states the right principle ("every prior turn already passed screening the request it first
+# arrived in"). Fixed by giving Layer 1 the identical newest-user/tool-message-only scoping Layer 2
+# already used -- the two now share one newest_idx/newest computation instead of each doing its
+# own pass over messages. No change to hermes_injection_guard.py itself; scan()/severity() were
+# already per-message primitives, scan_messages() (the full-list wrapper this call site used to
+# call) just isn't the right tool for a resent-every-turn payload. Known, accepted limitation
+# carried over unchanged from Layer 2's own design: a turn that appends more than one new tool-role
+# message (a multi-tool round) only has its single newest message screened, same gap Layer 2 has
+# always had -- not introduced here, and not what this fix addresses.
 #
 # 2.10.0 (2026-09-05) — new `coder2` role (Muse Glimmer 30B, Meta, stock/Apache-2.0, port 8099 on
 # spark-2), the dual-coder review orchestrator's second reviewer -- real bake-off findings showed
@@ -486,7 +502,31 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         messages = payload.get("messages") or []
-        guard_hits = hermes_injection_guard.scan_messages(messages)
+
+        # 2.11.0: Layer 1 now scans only the newest user/tool message, same scoping Layer 2 below
+        # already used (see that comment for the full rationale) -- a real incident traced live
+        # 2026-09-11: a "Camera check" request got a 400 from a conversation that had nothing wrong
+        # with it. Root cause was this scan running over payload["messages"] in full on every call:
+        # callers resend the whole conversation every turn, so a single tool-role message anywhere
+        # in an 80-message history that matched any block category poisoned every subsequent turn
+        # of that conversation permanently, with no way for the client to recover except starting a
+        # new conversation. Layer 2 never had this bug -- its own 2.6.0 comment already states the
+        # right principle ("every prior turn already passed screening the request it first arrived
+        # in"). This just brings Layer 1 in line with a rule that was already correct one layer
+        # down. newest_idx/newest are now computed once, here, and reused by Layer 2 below instead
+        # of being recomputed.
+        newest_idx, newest = next(
+            ((i, m) for i, m in reversed(list(enumerate(messages)))
+             if isinstance(m, dict) and m.get("role") in ("user", "tool")
+             and isinstance(m.get("content"), str) and m["content"].strip()),
+            (None, None),
+        )
+        guard_hits = []
+        if newest is not None:
+            hits = hermes_injection_guard.scan(newest["content"])
+            sev = hermes_injection_guard.severity(newest["role"], hits)
+            if sev != "clean":
+                guard_hits = [{"index": newest_idx, "role": newest["role"], "hits": hits, "severity": sev}]
         guard_severity = hermes_injection_guard.overall_severity(guard_hits)
         if guard_severity == "block":
             categories = sorted({cat for r in guard_hits for cat in r["hits"]})
@@ -517,10 +557,8 @@ class Handler(BaseHTTPRequestHandler):
         # Layer 2 (IMPLEMENTATION_PLAN.md S5): only the newest user/tool message, not the whole
         # history — callers resend the full conversation every request, and every prior turn
         # already passed screening the request it first arrived in. Runs whether Layer 1 was
-        # clean or only flagged; never runs if Layer 1 already blocked (returned above).
-        newest = next((m for m in reversed(messages)
-                       if isinstance(m, dict) and m.get("role") in ("user", "tool")
-                       and isinstance(m.get("content"), str) and m["content"].strip()), None)
+        # clean or only flagged; never runs if Layer 1 already blocked (returned above). `newest`
+        # is the same message Layer 1 just scanned above (2.11.0) -- computed once, reused here.
         if newest is not None:
             verdict = guard_classify(newest["content"])
             if verdict and verdict.get("hit"):
