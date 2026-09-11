@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots — Design
 
-**Version:** 1.11.0
+**Version:** 1.12.0
 **Status:** Design only — nothing in this document is built. Status legend (same convention as
 `firmament-fleet-target-architecture.md`): `[DECIDED]` — operator made an explicit choice · `[PROPOSED]` —
 design recommendation, not yet ratified · `[UNKNOWN]` — needs discovery before build · `[RISK]` — flagged
@@ -310,7 +310,7 @@ adopting its riskiest architectural choice (arbitrary code execution).
    skill," with real allowlist/step-count validation before storage.
 5. Trust/decay counter, reusing `goals.js`'s own `consecutiveFailures` shape.
 
-## 15. Role-based dispatch/priority (2026-09-11) — code landed, not yet deployed
+## 15. Role-based dispatch/priority (2026-09-11) — deployed and live
 
 Direct request: "re-imagine the per-bot dispatch/priority system based on bot roles." Two
 operator decisions made before drafting this section: (1) design a proposal here first, don't
@@ -324,12 +324,26 @@ all, for Farmer/Herder).
 Mark's fallback), and §15.10's `repair_terrain` verb + `checkTerrainDamage()` are now real code —
 `services/minecraft-bots/roles.js`, `index.js` 2.56.0, `actions.js` 1.46.0. Bob's persona
 (§15.12) and repo-side infra (`infra/minecraft-bots/minecraft-bot-bob.service`,
-`MC_BOT_USERNAMES`/Buzz `KNOWN_AGENTS` updated) also landed. **None of this is deployed** — no
-process has been restarted, no systemd unit enabled, no Matrix/Buzz credentials issued; it's
-sitting in the repo ready for that step, same as every other change in this file's own history
-before a `git pull` + `systemctl restart` actually ships it. Individual `[PROPOSED]` tags below
-are left as-is (they still accurately describe what wasn't ratified as a *design decision* before
-being built) rather than mechanically flipped to `[DECIDED]` throughout.
+`MC_BOT_USERNAMES`/Buzz `KNOWN_AGENTS` updated) also landed.
+
+**Deployment (2026-09-11, "deploy bob" -> "restart the other bots"):** commit `493645d` pushed
+and pulled on both hosts. Bob is a real 6th bot, **on `spark2`, not `spark`** — a deliberate
+deviation from §4's original architecture (bot orchestrator "runs on spark, same host as Buzz/
+memory/dispatch") made live during deployment: `spark` was found to have only 3.7Gi free RAM and
+87% swap use (the LLM model stack, not the bots, per live process inspection — each bot process
+is only ~200-400MB), while `spark2` had ~40Gi available and had never run a bot before. Node.js
+22.23.2 installed there to match `spark` exactly; `/mnt/hermes-data/minecraft-memory` (local disk,
+confirmed NOT shared between hosts — a real check made before assuming otherwise) created with
+correct ownership; `@mc-bob:spark` registered on Continuwuity (registration briefly reopened per
+`infra/continuwuity/README.md`'s own documented procedure, then locked again, verified closed) and
+joined to the shared room. `hermes-buzz.service` restarted on `spark` for `mc-bob`'s `KNOWN_AGENTS`
+entry. Babs/Amy/Mark/Luke/Mayor were then restarted too (one at a time, each verified via
+`journalctl` for a clean persona-load + spawn) so the whole 6-bot fleet runs this section's code
+for the first time — a real, if incidental, benefit: Mayor's process had grown to 2.3GB over 7
+hours of uptime (the leak `run-bot.sh`'s own changelog already documents) and dropped to 160MB on
+restart. Individual `[PROPOSED]` tags below are left as-is (they still accurately describe what
+wasn't ratified as a *design decision* before being built) rather than mechanically flipped to
+`[DECIDED]` throughout.
 
 ### 15.1 What "dispatch" and "priority" mean here — and what they deliberately don't
 
@@ -602,13 +616,16 @@ Core Directive, now also visible to Mayor's role-aware directive content, §15.5
 - `[RESOLVED]` §15.11's pen/fence and shear/milk verb shapes — `build_pen` (a fixed 5x5 fence
   perimeter + gate, its own dedicated verb rather than folded into `build`) and `shear`/`milk`
   (both `bot.activateEntity()`, the same primitive `breed` already uses), `actions.js` 1.49.0.
-- `[UNKNOWN, corrected]` Bob is designed (persona, role mapping) AND has repo-side infra
-  (`infra/minecraft-bots/minecraft-bot-bob.service`, `MC_BOT_USERNAMES` defaults, Buzz
-  `mc-bob` in `KNOWN_AGENTS` — landed 1.8.0, this bullet previously understated that). Still
-  **not deployed**: the systemd unit isn't enabled/started anywhere, no Matrix account/token
-  exists for him, and `spark`'s memory headroom for a 6th continuous bot process is unverified
-  (§15.3's `[RISK]` note above). Actual deployment remains a separate, explicit step outside
-  what's reachable from a repo-editing session.
+- `[UNKNOWN, still open]` `build_pen` places the structure but doesn't move an animal INTO it —
+  a bred cow/sheep/pig/chicken still has to wander in on its own. Luring one in (food-based, the
+  same `activateEntity`-adjacent mechanic `breed` already demonstrates) or a dedicated step is
+  real, unbuilt follow-up work, not assumed solved by this pass.
+- `[RESOLVED]` Bob is deployed — running live on `spark2`, not `spark` (§15's own intro above has
+  the full story: `spark`'s real headroom was checked live and found too tight, `spark2` had
+  ~40Gi available and was set up fresh for him). Real Matrix account, joined to the shared room;
+  `hermes-buzz.service` restarted on `spark` for his `KNOWN_AGENTS` entry; verified via
+  `journalctl` (persona loaded, spawned, hearing the other bots' Buzz goal broadcasts with no
+  errors).
 
 ### 15.9 Persona depth — Babs/Amy brought to Mark/Luke's level `[PROPOSED text drafted, ready to land]`
 
@@ -784,3 +801,4 @@ running 6th bot process (systemd unit, Matrix account, `MC_BOT_USERNAMES`/Buzz r
 | 1.9.0 | 2026-09-11 | Direct follow-up ("nest" -> "bee nests/hives"): §15.11 updated — bees are now a closed sub-case of Herder's capability gap, not an open one. New `harvest_hive` verb (`actions.js` 1.47.0) collects honey from a full beehive/bee nest via a glass bottle (never shears, to avoid angering the bees), wired into both direct-command and goal-planner vocabularies (`index.js` 2.57.0); `breed`'s own `BREEDING_FOOD` map gained a `bee` entry (any common flower). `roles.js` (1.1.0) HERDER domain text updated to name this. Pen/fence containment and shear/milk for non-bee livestock remain open, unchanged from 1.6.0. |
 | 1.10.0 | 2026-09-11 | Direct follow-up ("nest" again -> "all 3"): `harvest_hive` (actions.js 1.48.0) gained an explicit `action.tool` choice — bottle (honey, calm) or shears (honeycomb, angers the bees but the only path to crafting a *new* beehive) — wired into both vocabularies (`index.js` 2.58.0). Confirmed (not assumed) `craft`/`place` needed zero changes to handle a beehive, both already fully generic. §15.6's Builder priority ladder gained a 6th item (a placed beehive) once that became genuinely reachable, deliberately ordered after the operator's original five. |
 | 1.11.0 | 2026-09-11 | Direct follow-up ("what's next" -> "2", closing gaps before deploying): §15.11 fully closed — new `shear`/`milk`/`build_pen` verbs (`actions.js` 1.49.0), wired into both vocabularies (`index.js` 2.59.0); pen containment resolved as its own dedicated verb rather than folded into `build`. §15.6/§15.8: Miner/Artist/Explorer/Soldier each gained an advisory (not deterministic — see §15.6's own reasoning) `priorities` array (`roles.js` 1.2.0), folded into `proposeOwnGoal()`'s prompt via new `priorityListNote()` (`index.js` 2.60.0). §15.8 also corrected: Bob's repo-side infra (service unit, `MC_BOT_USERNAMES`, Buzz `KNOWN_AGENTS`) was already landed in 1.8.0, a previous revision's open-questions list understated that. |
+| 1.12.0 | 2026-09-11 | Direct request "deploy bob" -> "restart the other bots": §15 is now deployed, not just built. Bob went live on `spark2` (not `spark` as §4 originally envisioned) after live inspection showed `spark` genuinely tight on memory (LLM model stack, not the bots) and `spark2` had real headroom — a live architecture decision made during deployment, not assumed in advance. `hermes-buzz.service` restarted on `spark` for `mc-bob`; Babs/Amy/Mark/Luke/Mayor restarted one at a time and each verified clean, so the whole 6-bot fleet now runs this section's code for the first time. New open item: `build_pen` places a structure but doesn't herd an animal into it. |
