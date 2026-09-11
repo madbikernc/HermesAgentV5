@@ -1,4 +1,13 @@
-// Version: 2.52.0
+// Version: 2.53.0
+//
+// 2.53.0 (2026-09-11) -- direct live report: "what's wrong with the bots now," found via a fresh
+// live log review. Repeated "self-defense result: gave up on the fight -- took too long" against
+// drowned specifically (never zombies/skeletons/creepers) traced to mineflayer-pvp's own
+// attack() silently overwriting the bot's swim-aware SwimMovements with its own generic default
+// Movements on every call (confirmed against its source, lib/PVP.js). bot.pvp.movements now
+// points at the same SwimMovements instance the rest of the bot already uses, so attack() can
+// actually path down to a target underwater instead of being stuck using land-only movement the
+// whole fight.
 //
 // 2.52.0 (2026-09-10) -- direct live report: "they don't seem to be able to fight, or run from,
 // phantoms." checkSelfDefense, checkSleepingThreat, and respondToSquadCall now check
@@ -914,6 +923,20 @@ bot.once("spawn", async () => {
     if (isProtectedBlockName(block.name)) movements.blocksCantBreak.add(block.id);
   }
   bot.pathfinder.setMovements(movements);
+  // Real bug found live 2026-09-11 (direct report: "what's wrong with the bots now" -> repeated
+  // "self-defense result: gave up on the fight -- took too long" against drowned specifically).
+  // Confirmed by reading mineflayer-pvp's own source (lib/PVP.js, already read in full for the
+  // 1.42.0 attack-resolution fix): its constructor builds its OWN separate, generic
+  // `this.movements = new Movements(bot, mcData)`, and attack() calls
+  // `pathfinder.setMovements(this.movements)` on every single invocation -- silently swapping the
+  // bot's own swim-aware `movements` (set just above) back out for stock Movements, which "can
+  // walk across open water but can never change depth once already in it" (swim-movements.js's
+  // own header). A drowned mob living underwater was therefore never actually reachable during
+  // "attack" specifically, even though every other action (goto, mine, flee, sleep) already used
+  // the correct swim-aware movements the whole time -- explains why this pattern never showed up
+  // against zombies/skeletons/creepers, only drowned. Pointing bot.pvp's own movements reference
+  // at the SAME SwimMovements instance makes every future attack() call re-apply the correct one.
+  bot.pvp.movements = movements;
 
   // Direct follow-up to "what other logic enhancements are available" -> cave-pathfinding cap:
   // real evidence from tonight's own OOM crashes (hermes-minecraft-triage.py's own log) traced
