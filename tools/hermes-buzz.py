@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 2.0.21
+# Version: 2.0.22
+#
+# 2.0.22 (2026-09-11) — added `mc-bob` to `KNOWN_AGENTS`, ahead of the new sixth Minecraft bot
+# (direct request: "add a new bot, Bob, for the farmer/herder roles" -> "go", building out
+# MINECRAFT_BOTS_DESIGN.md §15.12's persona). Same convention as `mc-babs`/`mc-amy`/`mc-mark`/
+# `mc-luke`/`mc-mayor` — no new topics needed, reuses `minecraft`/`minecraft-coordination`.
+# Proactive, matching every entry below this one's own reasoning: Bob's own service unit
+# (infra/minecraft-bots/minecraft-bot-bob.service) is a repo-side file only, not yet deployed —
+# this still gets added now so a future real deploy doesn't hit the "forgot the new sender
+# identity" bug class this file's own 2.0.3 note documents.
 #
 # 2.0.21 (2026-09-09) — added `gameadmin` to `KNOWN_AGENTS` (which folds into `KNOWN_TOPICS` via
 # the union just below). Real gap found live enabling hermes-game-admin.service for the first
@@ -222,7 +231,7 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "mc-mark", "mc-luke", "mc-mayor", "minecraft-triage", "gameadmin"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "mc-mark", "mc-luke", "mc-mayor", "mc-bob", "minecraft-triage", "gameadmin"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1) plus
 # `minecraft` (shared broadcast topic for the bot coordination traffic KNOWN_AGENTS' mc-babs/

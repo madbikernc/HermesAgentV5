@@ -1,4 +1,93 @@
-// Version: 2.54.0
+// Version: 2.60.0
+//
+// 2.60.0 (2026-09-11) -- direct follow-up ("what's next" -> "2"), second half: closes §15.8's
+// "do the other roles get their own priorities lists" open question for Miner/Artist/Explorer/
+// Soldier (roles.js 1.2.0's new advisory `priorities` arrays) -- new priorityListNote(), folded
+// into roleBiasNote()'s existing text for both a bot's primary AND secondary role. Deliberately
+// NOT the same shape as Builder's own nextBuilderPriority() ladder just above: these four were
+// never operator-specified with concrete checkable items the way Builder's was, so this stays
+// plain advisory text in the freeform prompt rather than a deterministic, world-checked override
+// -- see roles.js's own 1.2.0 header for the full reasoning.
+//
+// 2.59.0 (2026-09-11) -- direct follow-up ("what's next" -> "2"): wired actions.js's new "shear",
+// "milk", and "build_pen" cases (1.49.0) into both classifyIntent and planNextStep/parseGoalStep,
+// same two-place, no-parameters pattern as every other simple verb here (BUILD, EXPLORE, etc.).
+// Closes MINECRAFT_BOTS_DESIGN.md §15.11's pen/fence and shear/milk `[UNKNOWN]`s.
+//
+// 2.58.0 (2026-09-11) -- direct follow-up ("nest" again -> "all 3" of: craft/place a beehive
+// [already fully supported by the existing generic "craft"/"place" cases, confirmed, zero code
+// change needed here], honeycomb via shears too, wire honey/wax into a priority list). (1)
+// ACTION HARVEST_HIVE's vocabulary/parser (both classifyIntent and planNextStep/parseGoalStep)
+// now carry a <tool> param ("bottle"/"shears") matching actions.js's own new choice (1.48.0). (2)
+// nextBuilderPriority() (§15.6) gained a 6th, later item: a beehive, checked the same
+// countNearHome() way as crafting_table/furnace/chest, but placed AFTER the operator's original
+// five rather than among them -- a nice-to-have, not core survival infra, so it never reorders
+// what was actually specified.
+//
+// 2.57.0 (2026-09-11) -- direct follow-up ("nest" -> "bee nests/hives"): wired actions.js's new
+// "harvest_hive" case (1.47.0) into both classifyIntent (player-facing "ACTION HARVEST_HIVE") and
+// planNextStep/parseGoalStep (the goal-step planner's own vocabulary), same two-place wiring
+// every other action verb here already gets. "ACTION BREED <species>" vocabulary text updated to
+// mention bee alongside cow/sheep/pig/chicken now that actions.js's BREEDING_FOOD map covers it.
+//
+// 2.56.0 (2026-09-11) -- direct follow-up ("go"): the two pieces of §15 scoped out of 2.55.0's
+// build. (1) §15.10's terrain-repair duty: new checkTerrainDamage(), same idle-tick shape as
+// checkHomeLighting() (ROUTINE-tier arbiter control, try/finally release, its own interval) --
+// findTerrainDamage() sparsely samples column surface heights within TERRAIN_REPAIR_RADIUS of
+// bot.spawnPoint (never anywhere else -- the design doc's own [RISK] note on false positives),
+// flags a column as damage only within a bounded depth band (TERRAIN_REPAIR_MIN_DEPTH..
+// TERRAIN_REPAIR_MAX_DEPTH -- shallow dips aren't worth a trip, and anything deeper looks
+// deliberately dug, e.g. a mineshaft, not incidental damage). terrainRepairMaterial() implements
+// the "guided by function" override: if plantable ground (grass_block/dirt, the exact set
+// actions.js's own plant_sapling groundIds already recognizes) borders the pit, forces "dirt"
+// regardless of what the majority neighbor material is; otherwise leaves it null so actions.js's
+// new "repair_terrain" case (1.46.0) samples the neighborhood itself. Gated to a bot whose
+// primary OR secondary role is Builder or Artist (today: Amy on both). (2) Bob's repo-side infra:
+// infra/minecraft-bots/minecraft-bot-bob.service (mirrors the other five units exactly) and Bob
+// added to MC_BOT_USERNAMES' own default list -- NOT a live deployment (no systemd enable/start
+// here, no Matrix account/token, no Buzz KNOWN_AGENTS entry -- those need the actual spark/
+// muncraft hosts and real secrets, out of reach from this session).
+//
+// 2.55.0 (2026-09-11) -- direct request: "start building" MINECRAFT_BOTS_DESIGN.md §15's role
+// system (roles.js + wiring into index.js, scoped down from the full §15 by direct operator
+// choice -- the terrain-repair verb and Bob's live deployment are separate follow-ups, not
+// touched here). New services/minecraft-bots/roles.js (ROLES/BOT_ROLES, §15.4) imported as
+// `myRole`. Three wiring points, each additive to an existing function rather than a new
+// pipeline:
+// (1) proposeOwnGoal() now folds a role-bias note (primary/secondary domain, a lean not a hard
+//     filter) into its freeform prompt (§15.5(a)) -- and, for a Builder-primary bot specifically,
+//     checks a new nextBuilderPriority() ladder FIRST, deterministically (no LLM call for the
+//     decision itself, only to phrase the announcement in voice via the existing narrateAction()
+//     helper) -- crafting table -> furnace -> chest -> 6+ beds -> shelter (§15.6), the operator's
+//     own specified order. Checked via real bot.findBlocks()/blockAt() world-state queries near
+//     bot.spawnPoint (the same "home" anchor gohome/teleportToSpawn already use) -- same "check
+//     reality, don't trust a self-report" discipline TECH_TREE_STAGES' own mayorHasStageItem()
+//     already established, not a new pattern. hasShelterNearHome() mirrors (does not import --
+//     a deliberate small duplication of pure position math, not worth a cross-module refactor for
+//     one caller) actions.js's own "build" case geometry (3x3 footprint, 3 walls, a doorway, a
+//     roof), anchored at bot.spawnPoint since the deterministic directive always sends her home
+//     first via ACTION GOHOME before ACTION BUILD.
+// (2) proposeDirectiveForOthers() (Mayor's own, unchanged in every other respect): idle-target
+//     selection's previous purely-random fallback is now pickIdleTarget(), a light role-aware
+//     tiebreak (whichever idle bot's role was least recently assigned something, via a small
+//     in-memory lastRoleAssignedAt map -- no new persistence, lost on restart same as
+//     recentGoalOutcomes already is). The post-curriculum directive-content branch now folds the
+//     target's own BOT_ROLES entry into the muse prompt ("assign something in their wheelhouse")
+//     instead of fully freeform improvising with no notion of who the target actually is.
+// (3) New proposeFallbackDirective() + its own setInterval, DELIBERATELY a separate function from
+//     proposeDirectiveForOthers() rather than a branch threaded through it -- Mayor's own path is
+//     well-exercised and this keeps zero risk of changing his behavior. Fires only for a bot whose
+//     BOT_ROLES secondary is LEADER (today: Mark) and only once Mayor's gone quiet for
+//     MAYOR_LIVENESS_TIMEOUT_MS (3x MAYOR_DIRECTIVE_MS) -- liveness tracked via a new
+//     lastMayorSeenAt timestamp, updated in handleIncoming() the same real place Mayor's own chat
+//     already has to pass through to reach another bot's decision loop (isMayor()'s own existing
+//     exception to isAnotherBot(), 2.36.0), so no new heartbeat/infra was needed. Deliberately
+//     does NOT touch curriculumStageIndex/stageProgress at all (Mayor-only, avoids any write race
+//     on mayor-curriculum.json) -- a fallback directive is always freeform-style, never
+//     curriculum-stage-aware, a smaller and safer scope than §15.5(d)'s original full proposal.
+//     Checked fresh every tick (not latched): the instant real Mayor traffic is seen again,
+//     lastMayorSeenAt updates and this function goes back to a no-op on its very next run, no
+//     hand-back step to get wrong.
 //
 // 2.54.0 (2026-09-11) -- direct request: shared resource-location memory across the fleet (see
 // actions.js's own 1.45.0 header for the full quote and the other half of this feature). New
@@ -801,6 +890,8 @@ import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements } from "./swim-movements.js";
 import { findSkill, runSkill, recordSkillOutcome, authorSkillFromGoal } from "./skills.js";
+import { ROLES, BOT_ROLES } from "./roles.js";
+import { Vec3 } from "vec3";
 
 const { pathfinder, goals } = pathfinderPkg;
 
@@ -829,8 +920,12 @@ function isBoss(speaker) {
 // listener and send her down the normal human-reply pipeline, and vice versa: an endless
 // bot-reacts-to-bot loop. Known bot identities are excluded from that pipeline entirely;
 // coordination between them happens over Buzz, not the in-game chat relevance/reply loop.
+// "Bob" added to the default list 2026-09-11 (§15.3/§15.12) alongside his own persona/role
+// entries -- harmless for the 5 bots actually running today (an unset MC_BOT_USERNAMES env var
+// on a live unit still won't spawn a 6th process; this only changes what a FRESH deploy defaults
+// to), but keeps this list in sync with roles.js's own BOT_ROLES rather than silently drifting.
 const BOT_USERNAMES = new Set(
-  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor").split(",").map((s) => s.trim()).filter(Boolean),
+  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor,Bob").split(",").map((s) => s.trim()).filter(Boolean),
 );
 
 function isAnotherBot(speaker) {
@@ -885,6 +980,39 @@ function convId(speaker) {
 
 const persona = loadPersona(PERSONA_NAME);
 console.log(`[${USERNAME}] loaded persona '${PERSONA_NAME}' (${persona.length} chars)`);
+
+// §15.4: this bot's own role entry, or null for a bot not yet in BOT_ROLES. Looked up once at
+// startup, matching persona's own load-once pattern -- a role reassignment means editing
+// roles.js and restarting, the same "edit the file, restart the process" model every other piece
+// of per-bot config here already uses.
+const myRole = BOT_ROLES[PERSONA_NAME] || null;
+
+// §15.5(a): additive text folded into proposeOwnGoal()'s freeform prompt -- a lean, not a hard
+// filter. Empty string for a bot with no role entry yet, so this is a no-op until every bot has
+// one.
+// roles.js 1.2.0: an optional advisory `priorities` list on a role -- an ordered SUGGESTION, not
+// a hard filter or a checked-against-reality ladder the way Builder's own §15.6 checklist is
+// (that one lives in this file's own nextBuilderPriority(), deliberately separate and
+// deterministic). Formatted here as plain numbered text folded into the same prompt -- the model
+// is free to ignore it if something better fits what's actually in front of her right now.
+function priorityListNote(role) {
+  if (!role?.priorities?.length) return "";
+  const lines = role.priorities.map((p, i) => `${i + 1}. ${p}`).join("\n");
+  return `\n\nSuggested priority order for ${role.name} (not a strict requirement, just a lean):\n${lines}`;
+}
+
+function roleBiasNote() {
+  if (!myRole) return "";
+  const secondary = myRole.secondary
+    ? ` Your secondary focus is ${myRole.secondary.name} (${myRole.secondary.domain}).`
+    : "";
+  return `\n\nYour primary role is ${myRole.primary.name} (${myRole.primary.domain}).` +
+    `${secondary} Usually propose something in your primary's lane; your secondary is fair game ` +
+    `too, especially if primary opportunities are thin nearby or something secondary-shaped is ` +
+    `right in front of you. Universal needs (hunger, gear, safety) still come first regardless ` +
+    `of role, exactly as before.` +
+    `${priorityListNote(myRole.primary)}${priorityListNote(myRole.secondary)}`;
+}
 
 const bot = mineflayer.createBot({
   host: HOST,
@@ -1085,6 +1213,13 @@ let currentGoal = null;
 // Updated on every real chat/whisper/Matrix line and every goal set by a player -- the goal
 // loop only ever proposes her own goal after this has been quiet a while (IDLE_BEFORE_SELF_GOAL_MS).
 let lastActivityAt = Date.now();
+// §15.5(d): updated in handleIncoming() whenever Mayor's own chat reaches this process (the same
+// isMayor() exception to isAnotherBot() his directives already need to reach classifyIntent) --
+// the liveness signal proposeFallbackDirective() uses to decide whether a Leader-secondary bot
+// should step up. 0 means "never heard from Mayor this process," deliberately distinct from "he
+// went quiet a while ago" -- see proposeFallbackDirective's own comment on why a fresh process
+// with no baseline yet doesn't activate the fallback immediately.
+let lastMayorSeenAt = 0;
 // Real gap found live (2026-09-07): with no memory of what she just gave up on, proposeOwnGoal
 // kept re-picking the same goal (e.g. "smelt some copper") immediately after giving up on it for
 // an environmental reason that hadn't changed (no unoccupied furnace nearby) -- an unproductive
@@ -1252,7 +1387,14 @@ async function classifyIntent(speaker, message) {
           `ACTION EXPLORE - asks ${USERNAME} to go looking for any useful raw material (wood, ` +
           `ore) when no specific one was named. No parameters.\n` +
           `ACTION BREED <species> - asks ${USERNAME} to breed two nearby animals of the same ` +
-          `kind (e.g. cow, sheep, pig, chicken) using the right food\n` +
+          `kind (e.g. cow, sheep, pig, chicken, bee) using the right food\n` +
+          `ACTION HARVEST_HIVE <tool> - asks ${USERNAME} to collect from a nearby full beehive/` +
+          `bee nest. <tool> is "bottle" (default, honey, calm) or "shears" (honeycomb, but ` +
+          `angers the bees) -- only use shears if honeycomb was specifically asked for.\n` +
+          `ACTION SHEAR - asks ${USERNAME} to shear a nearby sheep for wool, if she has shears\n` +
+          `ACTION MILK - asks ${USERNAME} to milk a nearby cow, if she has an empty bucket\n` +
+          `ACTION BUILD_PEN - asks ${USERNAME} to fence in a small pen (with a gate) around ` +
+          `herself, if she has fence blocks and a fence gate. No parameters.\n` +
           `ACTION ENCHANT <item_id> - asks ${USERNAME} to enchant an item she's carrying at a ` +
           `nearby enchanting table (needs lapis lazuli)\n` +
           `ACTION CRAFT <item_id> <count> - asks ${USERNAME} to craft/make an item, ONLY if a ` +
@@ -1328,6 +1470,13 @@ async function classifyIntent(speaker, message) {
       const species = (parts[2] || "").toLowerCase();
       if (species) return { type: "action", action: { type: "breed", species } };
     }
+    if (verb === "HARVEST_HIVE") {
+      const tool = (parts[2] || "bottle").toLowerCase();
+      return { type: "action", action: { type: "harvest_hive", tool } };
+    }
+    if (verb === "SHEAR") return { type: "action", action: { type: "shear" } };
+    if (verb === "MILK") return { type: "action", action: { type: "milk" } };
+    if (verb === "BUILD_PEN") return { type: "action", action: { type: "build_pen" } };
     if (verb === "ENCHANT") {
       const item = (parts[2] || "").toLowerCase();
       if (item) return { type: "action", action: { type: "enchant", item } };
@@ -1601,6 +1750,13 @@ function parseGoalStep(text) {
         const species = (parts[2] || "").toLowerCase();
         if (species) return { type: "step", action: { type: "breed", species } };
       }
+      if (verb === "HARVEST_HIVE") {
+        const tool = (parts[2] || "bottle").toLowerCase();
+        return { type: "step", action: { type: "harvest_hive", tool } };
+      }
+      if (verb === "SHEAR") return { type: "step", action: { type: "shear" } };
+      if (verb === "MILK") return { type: "step", action: { type: "milk" } };
+      if (verb === "BUILD_PEN") return { type: "step", action: { type: "build_pen" } };
       if (verb === "ENCHANT") {
         const item = (parts[2] || "").toLowerCase();
         if (item) return { type: "step", action: { type: "enchant", item } };
@@ -1725,7 +1881,14 @@ async function planNextStep(goal) {
           `ACTION HARVEST - pick a ripe crop nearby and replant it, or till open ground and plant ` +
           `seeds to start a new farm if nothing is ripe yet, if the goal is about food or farming\n` +
           `ACTION BREED <species> - breed two nearby animals of the same kind (cow, sheep, pig, ` +
-          `or chicken) using the right food, if the goal is about animals or farming\n` +
+          `chicken, or bee) using the right food, if the goal is about animals or farming\n` +
+          `ACTION HARVEST_HIVE <tool> - collect from a nearby full beehive/bee nest, if the goal ` +
+          `is about honey/bees/beeswax. <tool> is "bottle" (default, honey, calm) or "shears" ` +
+          `(honeycomb -- needed to ever craft a NEW beehive -- but angers the bees).\n` +
+          `ACTION SHEAR - shear a nearby sheep for wool, if the goal is about wool and she has shears\n` +
+          `ACTION MILK - milk a nearby cow, if the goal is about milk/food and she has an empty bucket\n` +
+          `ACTION BUILD_PEN - fence in a small pen (with a gate) around herself, if the goal is ` +
+          `about containing/keeping animals and she has fence blocks and a fence gate\n` +
           `ACTION ENCHANT <item_id> - enchant an item she's carrying at a nearby enchanting table ` +
           `(needs lapis lazuli and enough XP levels), if the goal is about gear upgrades\n` +
           `ACTION FISH - fish at nearby water with a fishing rod, if the goal is about food and ` +
@@ -1812,7 +1975,104 @@ async function arbitrateGoalConflict(proposedDescription) {
   }
 }
 
+// §15.6: Builder's own infrastructure priority ladder -- crafting table -> furnace -> chest ->
+// 6+ beds -> shelter, the operator's own specified order, checked via real bot.findBlocks()/
+// blockAt() world-state queries near bot.spawnPoint (the same "home" anchor gohome/
+// teleportToSpawn already use, not any one bot's own claimed bed -- claiming a bed depends on a
+// bed already existing, so this checklist is what gets the FIRST ones built). Same "check
+// reality, don't trust a self-report" discipline TECH_TREE_STAGES' own mayorHasStageItem()
+// already established for the fleet-wide curriculum, applied here to one role's own checklist.
+const BUILDER_PRIORITY_RADIUS = 24;
+
+function blockIdsByName(names) {
+  return names.map((n) => bot.registry.blocksByName[n]?.id).filter((id) => id !== undefined);
+}
+
+function countNearHome(names, filterFn) {
+  if (!bot.spawnPoint) return 0;
+  const ids = blockIdsByName(names);
+  if (!ids.length) return 0;
+  const positions = bot.findBlocks({ point: bot.spawnPoint, matching: ids, maxDistance: BUILDER_PRIORITY_RADIUS, count: 64 });
+  if (!filterFn) return positions.length;
+  return positions.filter((pos) => filterFn(bot.blockAt(pos))).length;
+}
+
+// Mirrors (does not import -- a deliberate small duplication of pure position math, not worth a
+// cross-module refactor for one caller) actions.js's own "build" case geometry: a 3x3 footprint,
+// three walls tall, one doorway (never required solid), a roof. Anchored at bot.spawnPoint since
+// nextBuilderPriority()'s own "shelter" directive always sends her home first via ACTION GOHOME
+// before ACTION BUILD, so a real attempt lands there. Allows some gaps (80% solid) rather than
+// requiring a pixel-perfect match to the exact geometry a live placement attempt (partial
+// failures, terrain already solid in spots) may not have reproduced exactly.
+function hasShelterNearHome() {
+  if (!bot.spawnPoint) return false;
+  const base = bot.spawnPoint.floored();
+  const positions = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      if (Math.abs(dx) !== 1 && Math.abs(dz) !== 1) continue; // interior column -- no wall here
+      if (dx === 0 && dz === 1) continue; // doorway column -- never required solid
+      for (let dy = 0; dy <= 2; dy++) positions.push(base.offset(dx, dy, dz));
+    }
+  }
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) positions.push(base.offset(dx, 3, dz));
+  }
+  const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
+  return solid >= positions.length * 0.8;
+}
+
+function nextBuilderPriority() {
+  if (countNearHome(["crafting_table"]) < 1) {
+    return { name: "crafting_table", directive: "go home and place a crafting table there" };
+  }
+  if (countNearHome(["furnace"]) < 1) {
+    return { name: "furnace", directive: "go home and place a furnace there" };
+  }
+  if (countNearHome(["chest"]) < 1) {
+    return { name: "chest", directive: "go home and place a chest there" };
+  }
+  const bedNames = Object.keys(bot.registry.blocksByName).filter((n) => n.endsWith("_bed"));
+  const bedCount = countNearHome(bedNames, (block) => block?.getProperties?.().part === "head");
+  if (bedCount < 6) {
+    return { name: "beds", directive: `go home and set up more beds there -- we have ${bedCount}, need at least 6` };
+  }
+  if (!hasShelterNearHome()) {
+    return { name: "shelter", directive: "go home and build a small shelter there" };
+  }
+  // Added 2026-09-11 ("nest" again -> "wire honey/wax into Builder's ... priority list"). Sits
+  // AFTER the operator's original five (crafting table/furnace/chest/beds/shelter) rather than
+  // among them -- a beehive is a nice-to-have sustainable resource, not core survival infra, so
+  // it shouldn't reorder anything the operator actually specified. Real dependency, not a bug:
+  // crafting a NEW beehive needs honeycomb, which only comes from shearing an existing hive
+  // (actions.js's "harvest_hive" with tool: "shears") -- this item may sit unsatisfied for a
+  // while if no wild bee_nest/honeycomb has been found yet, same as "shelter" can sit unsatisfied
+  // without enough building material. That's fine; the next tick just re-checks.
+  if (countNearHome(["beehive"]) < 1) {
+    return { name: "beehive", directive: "craft a beehive (needs planks and honeycomb) and place it near home" };
+  }
+  return null; // checklist complete -- proposeOwnGoal falls through to its normal freeform reasoning
+}
+
 async function proposeOwnGoal() {
+  // §15.6: for a Builder-primary bot, the infrastructure checklist runs AHEAD of freeform
+  // self-propose reasoning -- it's shared infrastructure other bots' own progress benefits from
+  // having early, not personal gear that would compete with it (§15.5's general "role bias only
+  // kicks in post-curriculum" rule is deliberately NOT applied here). Deterministic: no LLM call
+  // decides WHAT to build, only narrateAction() below phrases the announcement in her own voice --
+  // matching how proposeDirectiveForOthers' own curriculum branch phrases a fixed directive.
+  if (myRole?.primary === ROLES.BUILDER) {
+    const priority = nextBuilderPriority();
+    if (priority) {
+      currentGoal = newGoal({ description: priority.directive, source: "self" });
+      await saveGoal(PERSONA_NAME, currentGoal);
+      await broadcastGoalState("active", priority.directive);
+      console.log(`[${USERNAME}] Builder priority goal (${priority.name}): ${priority.directive}`);
+      bot.chat(await narrateAction(`getting the basics set up: ${priority.directive}.`));
+      return;
+    }
+  }
+
   const gearNote = describeGear(bot);
   let memoryNote = "";
   try {
@@ -1866,7 +2126,7 @@ async function proposeOwnGoal() {
           `there might work -- but naming smelting/crafting as part of it is fine now, unlike ` +
           `building, which is never possible. Respond with ONLY a short phrase naming the goal, ` +
           `in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}` +
-          `${recentOutcomesNote}${otherGoalNote}`,
+          `${recentOutcomesNote}${otherGoalNote}${roleBiasNote()}`,
       },
       { role: "user", content: "What's your goal?" },
     ],
@@ -2343,6 +2603,29 @@ async function checkCurriculumAdvance() {
     : `everyone's cleared the whole starting curriculum -- "${stage.name}" was the last of it. Good work, all of you.`));
 }
 
+// §15.5(b): role -> last-assignment-timestamp, an in-memory-only tiebreak (lost on restart, same
+// as recentGoalOutcomes already is -- no new persistence for something this low-stakes) used by
+// pickIdleTarget() below whenever more than one bot is idle at once. Updated by both
+// proposeDirectiveForOthers() and proposeFallbackDirective() so the two don't defeat each other's
+// own bookkeeping.
+const lastRoleAssignedAt = new Map();
+
+function pickIdleTarget(idleBots) {
+  if (idleBots.length <= 1) return idleBots[0];
+  return idleBots.slice().sort((a, b) => {
+    const roleA = BOT_ROLES[a.toLowerCase()]?.primary?.name;
+    const roleB = BOT_ROLES[b.toLowerCase()]?.primary?.name;
+    const atA = roleA ? (lastRoleAssignedAt.get(roleA) ?? 0) : 0;
+    const atB = roleB ? (lastRoleAssignedAt.get(roleB) ?? 0) : 0;
+    return atA - atB; // whichever role was least recently assigned something, first
+  })[0];
+}
+
+function markRoleAssigned(target) {
+  const roleName = BOT_ROLES[target.toLowerCase()]?.primary?.name;
+  if (roleName) lastRoleAssignedAt.set(roleName, Date.now());
+}
+
 async function proposeDirectiveForOthers() {
   if (USERNAME !== MAYOR_USERNAME || !AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
   await checkCurriculumAdvance();
@@ -2351,9 +2634,10 @@ async function proposeDirectiveForOthers() {
   if (!idleBots.length) return; // everyone already has something going -- nothing to assign
   // Prefer an idle bot who still needs the current stage over one who's already cleared it --
   // matching "increasingly useful larger goals as they successfully meet earlier goals" means
-  // pushing the ones behind, not re-nagging someone already done.
-  const target = idleBots.find((name) => !stageProgress.has(name)) ||
-    idleBots[Math.floor(Math.random() * idleBots.length)];
+  // pushing the ones behind, not re-nagging someone already done. §15.5(b): the final fallback
+  // (nobody's behind, or the whole curriculum's cleared) is now role-aware, not purely random.
+  const target = idleBots.find((name) => !stageProgress.has(name)) || pickIdleTarget(idleBots);
+  const targetRole = BOT_ROLES[target.toLowerCase()];
   const stage = curriculumStageIndex < TECH_TREE_STAGES.length ? TECH_TREE_STAGES[curriculumStageIndex] : null;
 
   busy = true;
@@ -2367,17 +2651,28 @@ async function proposeDirectiveForOthers() {
             `exactly that, in your own voice -- don't invent a different objective. Address ` +
             `${target} by name, exactly like a real chat message you'd actually send. One or ` +
             `two sentences, nothing else -- no quotes, no stage directions.`
+          // §15.5(b): role folded into the post-curriculum branch, replacing the previous fully
+          // role-blind "invent a task" prompt -- Mayor now knows what ${target} actually does.
           : `${persona}\n\n---\n\n${target} currently has no active goal, and the fleet has ` +
             `already cleared the whole starting curriculum (basic tools, armor, farming, iron, ` +
-            `diamonds, enchanting). Give ${target} ONE short, specific, in-character task that ` +
-            `pushes further -- a real, more advanced Minecraft objective, not vague ` +
-            `encouragement. Address ${target} by name, exactly like a real chat message you'd ` +
-            `actually send. One or two sentences, nothing else -- no quotes, no stage directions.`,
+            `diamonds, enchanting). ` +
+            (targetRole
+              ? `${target}'s role is ${targetRole.primary.name} (${targetRole.primary.domain})` +
+                (targetRole.secondary ? `, secondarily ${targetRole.secondary.name} ` +
+                  `(${targetRole.secondary.domain})` : "") +
+                ` -- assign something in their wheelhouse, or their secondary if that fits ` +
+                `better right now. `
+              : "") +
+            `Give ${target} ONE short, specific, in-character task that pushes further -- a ` +
+            `real, more advanced Minecraft objective, not vague encouragement. Address ` +
+            `${target} by name, exactly like a real chat message you'd actually send. One or ` +
+            `two sentences, nothing else -- no quotes, no stage directions.`,
       },
       { role: "user", content: `What do you tell ${target}?` },
     ], { maxTokens: 60, temperature: 0.9 });
     if (reply) {
       bot.chat(reply);
+      markRoleAssigned(target);
       console.log(`[${USERNAME}] issued directive to ${target} (stage: ${stage?.name ?? "post-curriculum"}): ${reply}`);
     }
   } catch (err) {
@@ -2389,6 +2684,63 @@ async function proposeDirectiveForOthers() {
 
 setInterval(() => {
   proposeDirectiveForOthers().catch((err) => console.error(`[${USERNAME}] proposeDirectiveForOthers error:`, err.message));
+}, MAYOR_DIRECTIVE_MS);
+
+// §15.5(d): Mark's Leader secondary -- fallback coordination only, never a standing second voice.
+// Deliberately a SEPARATE function from proposeDirectiveForOthers() above (Mayor's own, untouched
+// by this whole change) rather than a branch threaded through it -- Mayor's path is well-exercised
+// and this keeps zero risk of changing his behavior. Never touches curriculumStageIndex/
+// stageProgress/mayor-curriculum.json at all (Mayor-only state) -- a fallback directive is always
+// freeform-style, never curriculum-stage-aware, a smaller and safer scope than §15.5(d)'s
+// original full proposal.
+const MAYOR_LIVENESS_TIMEOUT_MS = MAYOR_DIRECTIVE_MS * 3;
+
+async function proposeFallbackDirective() {
+  if (USERNAME === MAYOR_USERNAME || myRole?.secondary !== ROLES.LEADER) return;
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
+  // lastMayorSeenAt === 0 means "never heard from Mayor this process," deliberately distinct
+  // from "he went quiet a while ago" -- a fresh process with no baseline yet doesn't activate the
+  // fallback immediately (avoids every bot racing to coordinate on a simultaneous fresh boot
+  // before anyone's actually heard Mayor at all).
+  if (lastMayorSeenAt === 0 || Date.now() - lastMayorSeenAt < MAYOR_LIVENESS_TIMEOUT_MS) return;
+
+  const idleBots = [...BOT_USERNAMES].filter((name) =>
+    name !== USERNAME && name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${name.toLowerCase()}`));
+  if (!idleBots.length) return;
+  const target = pickIdleTarget(idleBots);
+  const targetRole = BOT_ROLES[target.toLowerCase()];
+
+  busy = true;
+  try {
+    const reply = await callRole("muse", [
+      {
+        role: "system",
+        content: `${persona}\n\n---\n\nMayor's been unreachable for a while, and you carry ` +
+          `Leader as a secondary role -- step up and coordinate, plainly, without claiming to ` +
+          `BE Mayor or making a big deal of it. ${target} currently has no active goal` +
+          (targetRole ? `, and their role is ${targetRole.primary.name} ` +
+            `(${targetRole.primary.domain})` : "") +
+          `. Give ${target} ONE short, specific, in-character task fitting their role -- a real ` +
+          `Minecraft objective, not vague encouragement. Address ${target} by name, exactly ` +
+          `like a real chat message you'd actually send. One or two sentences, nothing else -- ` +
+          `no quotes, no stage directions.`,
+      },
+      { role: "user", content: `What do you tell ${target}?` },
+    ], { maxTokens: 60, temperature: 0.9 });
+    if (reply) {
+      bot.chat(reply);
+      markRoleAssigned(target);
+      console.log(`[${USERNAME}] issued fallback directive to ${target} (Mayor unreachable): ${reply}`);
+    }
+  } catch (err) {
+    console.error(`[${USERNAME}] failed to issue a fallback directive:`, err.message);
+  } finally {
+    busy = false;
+  }
+}
+
+setInterval(() => {
+  proposeFallbackDirective().catch((err) => console.error(`[${USERNAME}] proposeFallbackDirective error:`, err.message));
 }, MAYOR_DIRECTIVE_MS);
 
 // Direct request (2026-09-07): "the bots need to know to go to sleep at night." Deliberately a
@@ -2950,6 +3302,100 @@ setInterval(() => {
   checkHomeLighting().catch((err) => console.error(`[${USERNAME}] checkHomeLighting error:`, err.message));
 }, HOME_LIGHTING_CHECK_MS);
 
+// §15.10: Builder/Artist terrain-repair duty. Deliberately scoped tight (design doc's own [RISK]
+// note on false positives -- filling in an intentional feature like a mine entrance or a
+// foundation dug for tomorrow's build): only ever scans within TERRAIN_REPAIR_RADIUS of
+// bot.spawnPoint, never anywhere else, and only flags a column within a bounded depth band --
+// shallower than TERRAIN_REPAIR_MIN_DEPTH isn't worth a trip, deeper than TERRAIN_REPAIR_MAX_DEPTH
+// looks deliberately dug (a vertical shaft), not incidental damage.
+const TERRAIN_REPAIR_RADIUS = 10;
+const TERRAIN_REPAIR_GRID_STEP = 2;
+const TERRAIN_REPAIR_MIN_DEPTH = 2;
+const TERRAIN_REPAIR_MAX_DEPTH = 4;
+const TERRAIN_REPAIR_CHECK_MS = parseInt(process.env.MC_TERRAIN_REPAIR_CHECK_MS || "300000", 10); // 5 min
+
+// Topmost solid block in this column, scanning down from a fixed height above aroundY -- the
+// same "scan down to find the real surface" shape checkStuck/findPlantableSpotNear-style checks
+// elsewhere in this codebase already use, just walked here rather than via findBlocks() since a
+// per-column scan (not a matching-block search) is what a surface-height comparison needs.
+function surfaceY(x, z, aroundY) {
+  for (let y = aroundY + 8; y >= aroundY - 12; y--) {
+    if (bot.blockAt(new Vec3(x, y, z))?.boundingBox === "block") return y;
+  }
+  return null;
+}
+
+function findTerrainDamage() {
+  if (!bot.spawnPoint) return null;
+  const cx = Math.floor(bot.spawnPoint.x);
+  const cz = Math.floor(bot.spawnPoint.z);
+  const cy = bot.spawnPoint.y;
+  const columns = [];
+  for (let dx = -TERRAIN_REPAIR_RADIUS; dx <= TERRAIN_REPAIR_RADIUS; dx += TERRAIN_REPAIR_GRID_STEP) {
+    for (let dz = -TERRAIN_REPAIR_RADIUS; dz <= TERRAIN_REPAIR_RADIUS; dz += TERRAIN_REPAIR_GRID_STEP) {
+      const x = cx + dx, z = cz + dz;
+      const y = surfaceY(x, z, cy);
+      if (y !== null) columns.push({ x, z, y });
+    }
+  }
+  for (const col of columns) {
+    const neighbors = columns.filter((c) => c !== col &&
+      Math.abs(c.x - col.x) <= TERRAIN_REPAIR_GRID_STEP * 2 && Math.abs(c.z - col.z) <= TERRAIN_REPAIR_GRID_STEP * 2);
+    if (neighbors.length < 2) continue; // not enough context around this one to judge it
+    const avgY = Math.round(neighbors.reduce((sum, c) => sum + c.y, 0) / neighbors.length);
+    const depth = avgY - col.y;
+    if (depth >= TERRAIN_REPAIR_MIN_DEPTH && depth <= TERRAIN_REPAIR_MAX_DEPTH) {
+      return { x: col.x, y: col.y + 1, z: col.z, targetY: avgY };
+    }
+  }
+  return null;
+}
+
+// §15.10's "guided by function" override: if plantable ground (grass_block/dirt -- the exact set
+// actions.js's own plant_sapling case already treats as soil via its groundIds check, reused here
+// rather than a second definition) borders the pit, force "dirt" regardless of what the majority
+// neighbor material actually is, so a later planting attempt there doesn't fail for a reason
+// repair itself could have prevented. Returns null (no override) when nothing plantable borders
+// it -- actions.js's own "repair_terrain" case then samples the neighborhood itself.
+function terrainRepairMaterial(spot) {
+  const rimOffsets = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+                       [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1]];
+  const plantableNearby = rimOffsets.some(([dx, , dz]) => {
+    const block = bot.blockAt(new Vec3(spot.x + dx, spot.y - 1, spot.z + dz));
+    return block && (block.name === "grass_block" || block.name === "dirt");
+  });
+  return plantableNearby ? "dirt" : null;
+}
+
+function hasTerrainRepairRole() {
+  return myRole?.primary === ROLES.BUILDER || myRole?.secondary === ROLES.BUILDER ||
+    myRole?.primary === ROLES.ARTIST || myRole?.secondary === ROLES.ARTIST;
+}
+
+async function checkTerrainDamage() {
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || !hasTerrainRepairRole()) return;
+  const spot = findTerrainDamage();
+  if (!spot) return;
+  const material = terrainRepairMaterial(spot);
+
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note (checkHomeLighting
+  // follows the same convention just above).
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
+  try {
+    const result = await performAction(bot, { type: "repair_terrain", position: spot, material }, USERNAME);
+    console.log(`[${USERNAME}] terrain repair: ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] terrain repair check failed:`, err.message);
+  } finally {
+    handle.release();
+  }
+}
+
+setInterval(() => {
+  checkTerrainDamage().catch((err) => console.error(`[${USERNAME}] checkTerrainDamage error:`, err.message));
+}, TERRAIN_REPAIR_CHECK_MS);
+
 // Direct request, 2026-09-07 ("what else can we add" -> stuck-detection): robustness, not new
 // capability -- a periodic check for "hasn't moved at all in a long time," regardless of
 // busy/acting (deliberately NOT gated the same way as everything else: the whole point is to
@@ -3066,6 +3512,12 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   // bot.username check above in practice, kept explicit since this condition is the one place
   // that check is bypassed).
   if (isAnotherBot(speaker) && !(isMayor(speaker) && USERNAME !== MAYOR_USERNAME)) return;
+  // §15.5(d): a real, already-arriving signal that Mayor is alive -- reuses the isMayor()
+  // exception above rather than adding a new heartbeat. USERNAME !== MAYOR_USERNAME guards
+  // Mayor's own process from tracking his own liveness (moot for him, and this condition is
+  // already unreachable there in practice since his own messages never reach his own "chat"
+  // listener -- kept explicit anyway, matching the same guard's existing precedent one line up).
+  if (isMayor(speaker) && USERNAME !== MAYOR_USERNAME) lastMayorSeenAt = Date.now();
   // Real live bug found 2026-09-08 ("check the bots other than mayor, they are stuck?"):
   // isMayor()'s own exception above lets Mayor's chat reach this function (needed for his
   // directives to reach classifyIntent -> ACTION GOAL), but this line used to reset

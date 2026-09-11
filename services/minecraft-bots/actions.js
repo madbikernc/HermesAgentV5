@@ -1,4 +1,46 @@
-// Version: 1.45.0
+// Version: 1.49.0
+//
+// 1.49.0 (2026-09-11) -- direct follow-up ("what's next" -> "2", closing §15.11's remaining
+// Herder/pen gaps rather than deploying yet). New "shear" (sheep -> wool) and "milk" (cow ->
+// milk_bucket) cases -- both bot.activateEntity() while holding the right tool, the same
+// generic right-click primitive "breed" already uses to feed an animal, no dedicated API for
+// either. Neither pre-checks "already sheared"/cooldown state (mineflayer's own entity-metadata
+// index for that isn't confirmed stable across versions) -- just tries, same discipline "breed"
+// already applies to a cooldown it also doesn't pre-check. New "build_pen" case: one fixed 5x5
+// fence-perimeter-plus-gate shape, same "small fixed shape, not a general planner" philosophy as
+// "build"'s own shelter -- closes the design doc's own pen/fence `[UNKNOWN]`, resolved in favor
+// of a dedicated verb (not folded into "build"'s existing vocabulary) since a pen's shape
+// (fence blocks, open top, a gate) doesn't share geometry with a shelter's (solid walls, a roof).
+//
+// 1.48.0 (2026-09-11) -- direct follow-up ("nest" again -> "honeycomb via shears too"):
+// "harvest_hive" (1.47.0) now takes action.tool -- "bottle" (default, honey, never angers the
+// bees at full honey_level) or "shears" (honeycomb, always angers them, but the only real path
+// to enough honeycomb to ever craft a NEW beehive -- "craft"/"place" were both already fully
+// generic against bot.registry/bot.recipesFor and needed zero changes to handle a beehive once
+// the ingredient exists). The tradeoff is exposed explicitly, not hidden behind a single
+// "best" choice -- a caller who specifically needs honeycomb accepts the risk on purpose.
+//
+// 1.47.0 (2026-09-11) -- direct follow-up ("nest" -> "bee nests/hives"): new "harvest_hive" case,
+// closing part of §15.11's Herder capability gap (pen/fence containment for other animals is
+// still open -- this is scoped to bees). Collects honey via bot.activateBlock() while holding a
+// glass bottle against a full (honey_level >= 5) beehive/bee_nest -- deliberately never shears
+// (honeycomb), since a bottle harvest at full level doesn't anger the bees the way shearing
+// always does. Also added "bee" to the existing "breed" case's own BREEDING_FOOD map (any common
+// flower item, matching real vanilla bee-breeding mechanics) -- bees were breedable with zero new
+// code before this, just an unlisted species.
+//
+// 1.46.0 (2026-09-11) -- direct request: "start building" the rest of MINECRAFT_BOTS_DESIGN.md
+// §15.10 (Builder/Artist terrain repair -- "pits should be filled to level ground with the most
+// appropriate material, mostly determined by matching the nearby ground blocks, but also guided
+// by function -- plants cannot be placed in stone"). New "repair_terrain" case: fills ONE column
+// (bottom-up, same "each new block references an already-placed block below it" ordering "build"
+// above already established, for the same reason) at a position index.js's new
+// checkTerrainDamage() supplies -- this file does the FILLING, not the scanning/detection, same
+// division of labor as "light_area" (index.js finds dark spots, this file lights them). Material:
+// an explicit action.material override (checkTerrainDamage sets this to "dirt" specifically when
+// plantable ground -- grass_block/dirt -- is found among the pit's own rim neighbors, the
+// function-over-appearance case from the design doc) takes precedence over sampling the
+// neighborhood's most common solid block, the "match nearby ground" default case.
 //
 // 1.45.0 (2026-09-11) -- direct request: "if one bot is looking for a specific resource, it
 // should look near itself (current understanding added to global world memory), ask the other
@@ -1433,8 +1475,10 @@ async function tryTakeFromNearbyChest(bot, token, itemNames, wantCount) {
 // something this bot can just see. Independent small env-derived roster, same pattern
 // index.js's own BOT_USERNAMES already uses -- actions.js stays a leaf module with no import from
 // index.js (this file's own header: "index.js does the mutating," never the reverse).
+// "Bob" added 2026-09-11 alongside index.js's own BOT_USERNAMES default -- kept in sync since
+// this really is an independent duplicate of that same roster, not a second source of truth.
 const OTHER_BOT_USERNAMES = new Set(
-  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor").split(",").map((s) => s.trim()).filter(Boolean),
+  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor,Bob").split(",").map((s) => s.trim()).filter(Boolean),
 );
 const BOT_PROXIMITY_AVOID_DISTANCE = 6;
 // How many extra candidates to fetch beyond what's actually needed, so filtering out ones too
@@ -2563,6 +2607,138 @@ export async function performAction(bot, action, speaker) {
       return ok(`built a small shelter out of ${material.name} (${placed}/${needed} blocks placed).`);
     }
 
+    case "build_pen": {
+      // Direct request, 2026-09-11 (§15.11 follow-up -- pen/fence containment for bred animals).
+      // Deliberately one fixed, small shape, same philosophy as "build"'s own shelter above: a
+      // 5x5 fence perimeter (open top -- fences already block ground-bound animals without
+      // needing a roof) with ONE fence_gate replacing a perimeter block so she isn't sealing
+      // anything in without a way through. Not a general planner -- even "build" above isn't
+      // one, see this file's own header on why.
+      const fence = bot.inventory.items().find((i) => i.name.endsWith("_fence") && !i.name.endsWith("_fence_gate"));
+      const gate = bot.inventory.items().find((i) => i.name.endsWith("_fence_gate"));
+      if (!fence) return fail("don't have any fence blocks for a pen.");
+      if (!gate) return fail("don't have a fence gate for a pen.");
+
+      const base = bot.entity.position.floored();
+      const perimeter = [];
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dz = -2; dz <= 2; dz++) {
+          if (Math.abs(dx) !== 2 && Math.abs(dz) !== 2) continue; // interior -- open pen floor, no fence here
+          perimeter.push(base.offset(dx, 0, dz));
+        }
+      }
+      const gatePos = base.offset(0, 0, 2); // south edge, middle -- the gate, matching "build"'s own doorway convention
+      const fencePositions = perimeter.filter((p) => !(p.x === gatePos.x && p.y === gatePos.y && p.z === gatePos.z));
+      const PEN_TOTAL = perimeter.length; // small fixed shape -- no extra batch cap needed
+
+      let placed = 0;
+      async function placeAt(pos, item) {
+        const existing = bot.blockAt(pos);
+        if (existing?.boundingBox === "block") { placed++; return; }
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        } catch {
+          return; // couldn't reach this one -- skip, matches "build"'s own tolerance for gaps
+        } finally {
+          bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) return;
+        const below = bot.blockAt(pos.offset(0, -1, 0));
+        if (!below || below.boundingBox !== "block") return; // no ground to reference off yet
+        const current = bot.inventory.items().find((i) => i.name === item.name);
+        if (!current) return;
+        try {
+          await bot.equip(current, "hand");
+          await bot.placeBlock(below, new Vec3(0, 1, 0));
+          placed++;
+        } catch (err) {
+          console.error(`build_pen: placement failed at ${pos}:`, err.message);
+        }
+      }
+
+      for (const pos of fencePositions) {
+        if (token.cancelled) break;
+        await placeAt(pos, fence);
+      }
+      if (!token.cancelled) await placeAt(gatePos, gate);
+
+      if (token.cancelled) return ok(`stopped building the pen (${placed}/${PEN_TOTAL} placed).`);
+      if (!placed) return fail("couldn't place any of the pen.");
+      return ok(`built a small pen out of ${fence.name} with a ${gate.name} (${placed}/${PEN_TOTAL} placed).`);
+    }
+
+    case "repair_terrain": {
+      // §15.10: fills action.position (the pit's lowest empty spot, as {x, y, z, targetY} --
+      // index.js's checkTerrainDamage() found and validated this, not decided here) one block at
+      // a time, bottom-up, up to targetY -- the fleet's own home-level grade.
+      const { x, y, z, targetY } = action.position;
+      const PIT_FILL_BATCH_LIMIT = 8;
+      const columnBase = new Vec3(x, y, z);
+
+      // Material: an explicit override (action.material) wins -- checkTerrainDamage sets this
+      // only when the spot needs to stay plantable (§15.10's "guided by function" case).
+      // Otherwise sample the solid blocks immediately surrounding the pit's rim and fill with
+      // whichever is most common -- cosmetic repair blends into what's already there.
+      let materialName = action.material;
+      if (!materialName) {
+        const rimOffsets = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
+                             [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1]];
+        const counts = new Map();
+        for (const [dx, dy, dz] of rimOffsets) {
+          const block = bot.blockAt(columnBase.offset(dx, dy, dz));
+          if (block?.boundingBox === "block" && !isProtectedBlockName(block.name)) {
+            counts.set(block.name, (counts.get(block.name) || 0) + 1);
+          }
+        }
+        let bestCount = 0;
+        for (const [name, count] of counts) {
+          if (count > bestCount) { materialName = name; bestCount = count; }
+        }
+      }
+      if (!materialName) return fail("couldn't tell what material belongs here -- no solid neighbors to match.");
+
+      const materialItem = bot.inventory.items().find((i) => i.name === materialName);
+      if (!materialItem) return fail(`need ${materialName} to fill this in -- don't have any.`);
+
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(x, y, z, 3)), ACTION_TIMEOUT_MS,
+                           () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way to the repair site.");
+        return fail(`couldn't reach the spot to repair: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped before repairing.");
+
+      let placed = 0;
+      for (let dy = 0; dy <= targetY - y && placed < PIT_FILL_BATCH_LIMIT; dy++) {
+        if (token.cancelled) break;
+        const pos = columnBase.offset(0, dy, 0);
+        const existing = bot.blockAt(pos);
+        if (existing?.boundingBox === "block") continue; // already solid -- a lower layer, or someone beat her to it
+
+        const below = bot.blockAt(pos.offset(0, -1, 0));
+        if (!below || below.boundingBox !== "block") break; // nothing to reference off yet -- next visit catches it once the layer below is filled
+
+        const item = bot.inventory.items().find((i) => i.name === materialName);
+        if (!item) break; // ran out mid-fill
+        try {
+          await bot.equip(item, "hand");
+          await bot.placeBlock(below, new Vec3(0, 1, 0));
+          placed++;
+        } catch (err) {
+          console.error(`repair_terrain: placement failed at ${pos}:`, err.message);
+          break;
+        }
+      }
+
+      if (token.cancelled) return ok(`stopped repairing (${placed} block(s) filled).`);
+      if (!placed) return fail("couldn't fill in the damage -- nothing placed.");
+      return ok(`filled in ${placed} block(s) of damage with ${materialName}.`);
+    }
+
     case "store": {
       // Direct request, 2026-09-07 ("do all" -> base/chest storage): the inverse of "loot" --
       // deposit an item into the nearest chest instead of withdrawing from it. Same multi-
@@ -2969,6 +3145,12 @@ export async function performAction(bot, action, speaker) {
       const BREEDING_FOOD = {
         cow: ["wheat"], sheep: ["wheat"], pig: ["carrot", "potato", "beetroot"],
         chicken: ["wheat_seeds", "pumpkin_seeds", "melon_seeds", "beetroot_seeds"],
+        // Added 2026-09-11 ("bee nests/hives") -- real vanilla bees breed on any flower, not one
+        // specific item, so this lists every common flower id rather than picking a single
+        // canonical one the way cow/sheep/pig/chicken each have.
+        bee: ["poppy", "dandelion", "blue_orchid", "allium", "azure_bluet", "red_tulip",
+              "orange_tulip", "white_tulip", "pink_tulip", "oxeye_daisy", "cornflower",
+              "lily_of_the_valley", "sunflower", "lilac", "rose_bush", "peony"],
       };
       const foods = BREEDING_FOOD[action.species];
       if (!foods) return fail(`don't know how to breed a ${action.species}.`);
@@ -3004,6 +3186,131 @@ export async function performAction(bot, action, speaker) {
       }
       if (!fed) return fail(`couldn't get close enough to feed any ${action.species}s.`);
       return ok(`fed ${fed} ${action.species}${fed > 1 ? "s" : ""} -- hopefully a baby soon.`);
+    }
+
+    case "harvest_hive": {
+      // Direct request, 2026-09-11 ("bee nests/hives") -- honey output for the Herder role,
+      // narrowing (not closing -- pen/fence containment for other animals is still open, §15.11)
+      // the gap that section flagged. Real vanilla beehive/bee_nest interaction has no dedicated
+      // mineflayer API, same as "harvest"'s own tilling step above -- bot.activateBlock() while
+      // holding the right item is the same "simulate a real client interaction" primitive.
+      //
+      // Direct follow-up, same day ("nest" again -> "honeycomb via shears too"): action.tool
+      // picks the real tradeoff explicitly rather than hiding it -- "bottle" (default, honey)
+      // never angers the bees at full honey_level; "shears" (honeycomb, the ONLY path to enough
+      // honeycomb to ever craft a NEW beehive -- see the "craft"/"place" cases above, both
+      // already fully generic, no code change needed there) always does, regardless of level.
+      // Defaulting to bottle keeps every self-directed hive visit calm unless a caller
+      // specifically needs honeycomb badly enough to accept the risk.
+      const useShears = action.tool === "shears";
+      const toolName = useShears ? "shears" : "glass_bottle";
+      const tool = bot.inventory.items().find((i) => i.name === toolName);
+      if (!tool) {
+        return fail(`don't have ${useShears ? "shears" : "a glass bottle"} to collect ` +
+          `${useShears ? "honeycomb" : "honey"} with.`);
+      }
+
+      const hiveIds = [bot.registry.blocksByName.beehive?.id, bot.registry.blocksByName.bee_nest?.id]
+        .filter((id) => id !== undefined);
+      if (!hiveIds.length) return fail("don't know how to recognize a beehive here.");
+
+      const positions = bot.findBlocks({ matching: hiveIds, maxDistance: 32, count: 10 });
+      const fullHive = positions.map((pos) => bot.blockAt(pos))
+        .find((block) => block && Number(block.getProperties?.().honey_level) >= 5);
+      if (!fullHive) return fail("no full beehive/bee nest nearby -- nothing ready to collect yet.");
+
+      try {
+        await withTimeout(
+          bot.pathfinder.goto(new goals.GoalNear(fullHive.position.x, fullHive.position.y, fullHive.position.z, 2)),
+          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way to the hive.");
+        return fail(`couldn't reach the hive: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped before collecting.");
+
+      try {
+        await bot.equip(tool, "hand");
+        await bot.activateBlock(bot.blockAt(fullHive.position));
+      } catch (err) {
+        return fail(`couldn't collect ${useShears ? "honeycomb" : "honey"}: ${err.message}`);
+      }
+      await refreshGear(bot);
+      return ok(useShears
+        ? "took honeycomb from the hive -- might have upset the bees."
+        : "collected a bottle of honey from the hive.");
+    }
+
+    case "shear": {
+      // Direct request, 2026-09-11 (§15.11 follow-up -- "shear/milk verb for non-bee animals").
+      // Real vanilla shearing has no dedicated mineflayer API beyond the generic right-click
+      // primitive -- bot.activateEntity() (core, the same primitive "breed" already uses to feed
+      // an animal) simulates it here too. No pre-check for "already sheared, wool hasn't regrown
+      // yet" -- mineflayer's own entity-metadata index for that flag isn't confirmed stable
+      // across versions, so this just tries and lets the server be the source of truth, same
+      // discipline "breed" already applies to a cooldown it also doesn't pre-check.
+      const shears = bot.inventory.items().find((i) => i.name === "shears");
+      if (!shears) return fail("don't have shears.");
+
+      const sheep = Object.values(bot.entities)
+        .filter((e) => e.name === "sheep" && e.position.distanceTo(bot.entity.position) <= 24)
+        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+      if (!sheep) return fail("no sheep nearby to shear.");
+
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(sheep, 2)), ACTION_TIMEOUT_MS,
+          () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way to the sheep.");
+        return fail(`couldn't reach the sheep: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped before shearing.");
+
+      try {
+        await bot.equip(shears, "hand");
+        await bot.activateEntity(sheep);
+      } catch (err) {
+        return fail(`couldn't shear the sheep: ${err.message}`);
+      }
+      await refreshGear(bot);
+      return ok("sheared a sheep for wool.");
+    }
+
+    case "milk": {
+      // Same primitive as "shear" just above, different tool/species -- an empty bucket
+      // right-clicked on a cow (core bot.activateEntity()) returns a filled milk_bucket, real
+      // vanilla mechanic, no dedicated API.
+      const bucket = bot.inventory.items().find((i) => i.name === "bucket");
+      if (!bucket) return fail("don't have an empty bucket.");
+
+      const cow = Object.values(bot.entities)
+        .filter((e) => e.name === "cow" && e.position.distanceTo(bot.entity.position) <= 24)
+        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+      if (!cow) return fail("no cow nearby to milk.");
+
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(cow, 2)), ACTION_TIMEOUT_MS,
+          () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way to the cow.");
+        return fail(`couldn't reach the cow: ${err.message}`);
+      } finally {
+        bot.pathfinder.setGoal(null);
+      }
+      if (token.cancelled) return ok("stopped before milking.");
+
+      try {
+        await bot.equip(bucket, "hand");
+        await bot.activateEntity(cow);
+      } catch (err) {
+        return fail(`couldn't milk the cow: ${err.message}`);
+      }
+      await refreshGear(bot);
+      return ok("milked a cow.");
     }
 
     case "enchant": {
