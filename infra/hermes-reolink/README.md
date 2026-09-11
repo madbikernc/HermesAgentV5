@@ -1,6 +1,6 @@
 # hermes-reolink — recreate checklist
 
-**Version:** 2.2.0
+**Version:** 2.3.0
 
 Reolink camera agent (`tools/hermes-reolink.py`) — owns the Buzz `reolink` topic (on-demand "check
 the camera" from Matrix chat) and runs an AI-detection poll loop (person/vehicle/pet, email-
@@ -52,6 +52,25 @@ types are being watched (`AI_LABELS` expanded to all six in 2.1.0). **With this 
 `hermes-reolink-mail-watch.service` was disabled and stopped on spark-2 2026-09-07** — its
 AI-detection alerting is now fully redundant. The file itself is untouched, kept for reference per
 this project's norm; don't delete it.
+
+**Third camera paired and all three renamed, 2026-09-11.** The Hub now reports three real channels:
+`0=garden`, `1=housefront`, `2=Driveway` (`Host.channels` returns `[0, 1, 2]`). The vault's
+`channels` field first came back as `{"0": "Driveway", "1": "housefront", "2": "garden"}` — **0 and
+2 swapped relative to reality.** Caught by fetching a real snapshot for each channel and reading the
+camera's own on-screen name overlay burned into the frame (the most authoritative source available,
+set by the device itself, not by any config this project controls) — channel 0's frame is
+watermarked "garden", channel 2's is watermarked "Driveway". Cross-checked twice, corrected in
+Vaultwarden to `{"0": "garden", "1": "housefront", "2": "Driveway"}`. **Note for next time:** a
+`vault-get-secret.sh`/`hermes-vault-agent.py` read taken shortly after a Vaultwarden edit can still
+reflect the pre-edit value — the vault-agent's own background refresh is 10 minutes
+(`VAULT_AGENT_REFRESH_SECONDS`), separate from the session-sharing bug fixed in 1.6.0. Restarting
+`hermes-vault-agent.service` forces an immediate resync and is the fast way to confirm a just-made
+edit actually landed, without waiting out the refresh interval. Re-verified live post-fix: standalone
+snapshot/AI-state for all three channels, and both on-demand routing cases ("check the driveway" →
+Driveway alone; "check the camera" → all three, labeled). One oddity, unrelated to the config:
+`garden` (channel 0) is currently pointed at what looks like an indoor hallway, not an outdoor
+garden — possibly a glass door/window reflecting the IR illuminator at night, or the camera may
+need physical repositioning; not a software issue.
 
 **Update 2026-09-02:** `reolink_aio`'s method names/signatures (`login()`, `get_host_data()`,
 `get_snapshot(channel)`, `get_ai_state(channel)`, `logout()`) were confirmed correct by installing
@@ -182,6 +201,7 @@ password to avoid this becoming a real problem later.
 
 | Version | Date | Change |
 |---|---|---|
+| 2.3.0 | 2026-09-11 | Third camera ("Driveway") paired to the Hub and all three renamed (`garden`, `housefront`, `Driveway`); real channels now `[0, 1, 2]`. Caught and fixed a real channel/name mismatch: the vault's `channels` field initially had 0 and 2 swapped relative to what the cameras' own on-screen overlays show — confirmed by pulling real snapshots and reading each camera's burned-in name, not just trusting metadata. Also documented that a vault read shortly after an edit can reflect the pre-edit value for up to `VAULT_AGENT_REFRESH_SECONDS` (10 min) — restarting `hermes-vault-agent.service` forces an immediate resync. Re-verified live post-fix: snapshot/AI-state for all three channels, both on-demand routing cases with real camera names. |
 | 2.2.0 | 2026-09-07 | Verification complete: a real, unprompted vehicle + person walk-by on cam2 confirmed rising-edge detection, per-channel cooldown suppression (23s/32s repeats correctly dropped and logged), and accurate alert emails. `hermes-reolink-mail-watch.service` disabled and stopped on spark-2 — fully redundant now that this path is confirmed live end to end (login, snapshot, both on-demand routing cases, AI-detection). |
 | 2.1.0 | 2026-09-07 | Live-verified against the real Hub: login/snapshot/AI-state work for the two actually-paired cameras (cam1, cam2); the third camera ("Driveway") isn't paired to the Hub yet and was dropped from the vault config until it is. Real `get_ai_state()` keys are `('dog_cat', 'face', 'package', 'people', 'vehicle', 'other')` — three more than assumed — so `AI_LABELS` in `hermes-reolink.py` was expanded to all six. Both on-demand routing cases confirmed live end to end. Found (non-blocking): `reolink_aio` warns the Hub account's password has a character outside its preferred set. Still open: a real AI-detection walk-by test, which gates disabling `hermes-reolink-mail-watch.service`. |
 | 2.0.0 | 2026-09-06 | A Reolink Home Hub was purchased and three cameras paired to it, unblocking `hermes-reolink.py`'s local-API design. Bumped the file to 2.0.0 for multi-camera support: `channels` (channel-number → camera-name JSON map) replaces the single `channel` field, AI-detection polling loops every channel each cycle, and on-demand chat requests resolve to named camera(s) or, if none is named, all of them combined (direct decision — keeps "check the camera" meaningful as camera count grows). Verification checklist rewritten for multiple cameras and all three on-demand routing cases; added a step to disable `hermes-reolink-mail-watch.service` once this path is verified live, since it becomes redundant. |
