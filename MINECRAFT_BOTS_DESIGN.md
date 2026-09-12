@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots — Design
 
-**Version:** 1.13.0
+**Version:** 1.14.0
 **Status:** Design only — nothing in this document is built. Status legend (same convention as
 `firmament-fleet-target-architecture.md`): `[DECIDED]` — operator made an explicit choice · `[PROPOSED]` —
 design recommendation, not yet ratified · `[UNKNOWN]` — needs discovery before build · `[RISK]` — flagged
@@ -825,9 +825,72 @@ Soldier, and relationship rows to the bots he actually depends on/feeds).
   validation for it.
 
 Landed directly in `agents/minecraft-bob/PROMPT.md` (1.0.0) alongside this design-doc update.
-**Design/persona only** — §15.8's open questions list what's still needed before Bob is a real,
-running 6th bot process (systemd unit, Matrix account, `MC_BOT_USERNAMES`/Buzz registration,
-`spark` headroom check).
+**Deployed** (§15's own intro has the full story) — running live on `spark2` since 2026-09-11,
+Matrix account and Buzz registration both real, not the design/persona-only state this paragraph
+originally described.
+
+## 16. Project Sid-informed enhancements (2026-09-11) — built and live
+
+Direct follow-up to "any other ideas from Project Sid or similar research" (Altera.AL,
+*Project Sid: Many-agent simulations toward AI civilization*, arXiv:2411.00114) — a second pass
+past the PIANO architecture's own "coherence" problem, which `arbiter.js`'s coherence-arbiter
+consolidation had already mined for physical-action interrupts. Two more genuine analogs found;
+economy/trading and government/voting were considered and deliberately not pursued (see below).
+
+### 16.1 Chat/action coherence — closing the one reply path with no grounding
+
+Sid's Cognitive Controller broadcasts its own real decisions to "condition talk-related modules,"
+specifically to stop agents promising things they never act on. This codebase already grounds its
+*action*-classified chat replies in reality (`classifyIntent`'s ACTION/GOAL branches only ever
+fire alongside a real queued goal) — but `generateReply()`, the plain-CHAT path for anything
+`classifyIntent` scores as non-actionable, had no equivalent check. A borderline request the
+classifier under-scored as CHAT could still get an in-character "sure, I'll get right on that!"
+with nothing ever actually queued — the exact talk-vs-action mismatch Sid's own architecture
+exists to prevent, just never audited for here until asked to look.
+
+`[BUILT]` New `currentActivityNote()` (`index.js` 2.62.0) folds the bot's real, live goal state
+(or its real absence) into every CHAT reply's own prompt — the same "ground every claim in real
+state, never a remembered belief" discipline `describeGear()` already applies to gear/inventory in
+every other prompt, just extended to this one reply path. `CHAT_INSTRUCTION` also gained an
+explicit rule against promising a specific future action unless it's covered by what's actually
+happening right now.
+
+### 16.2 Adaptive role-leaning — a light echo of Sid's specialization finding
+
+Sid's own key specialization result: role differentiation among their agents *required* tracking
+other agents' goals and intentions — without that Social Awareness signal, roles "did not persist
+across time and were also homogeneous." This fleet's roles are operator-assigned, not emergent
+(a deliberate, different choice, §15), but the same underlying signal was already sitting unused:
+`otherBotGoals` (§12/2.15.0) already tracks every other bot's real-time activity for collision-
+avoidance, and could just as easily inform a bot's own role-lean.
+
+`[BUILT]` New `otherBotActivityAt` (`index.js` 2.62.0), timestamped for free alongside
+`otherBotGoals` in the existing `minecraft-coordination` Buzz handler — no new message, no new
+poll. `lastRoleActivityAt(roleName)` reads it to find the most recent time any bot holding that
+role as their *primary* was seen genuinely active. `roleBiasNote()` (§15.5(a)) now calls this out
+for a bot's own *secondary* role specifically: if nobody's done real work in that role fleet-wide
+for `ROLE_NEGLECTED_MS` (20 minutes), that's surfaced as extra reason to lean into it now, layered
+on top of the existing fixed "primary usually wins" lean rather than replacing it — an adaptive
+nudge, not a re-architecture of §15's own operator-assigned model.
+
+### 16.3 Considered, not pursued
+
+- **Economy/peer-to-peer trading.** Sid's own paper describes no such mechanism either — their
+  "economy" experiment was a community chest plus taxation, not agent-to-agent commerce. This
+  fleet already has a strictly better fit for its own cooperative (not competing) bots: a shared
+  chest system feeding Builder's own infrastructure (§15.6) — there's nothing in Sid's actual
+  design to mine here that isn't already better-served.
+- **Government/voting/constitution.** Real and well-documented in Sid's paper (a 20% taxation
+  rate, a constituent/influencer/election-manager structure, feedback → amendment → vote →
+  enforcement over a fixed real-time window) — but built to study governance emerging among
+  competing agents at civilization scale. Six cooperative bots with an existing, working Leader
+  hierarchy (Mayor, plus Mark's Leader-secondary fallback, §15.5(d)) don't have the coordination
+  problem this would solve.
+- **Cultural/meme transmission.** Sid tracked catchphrases and religious language spreading
+  through ordinary agent conversation, with no dedicated propagation mechanism — it emerged from
+  existing Social Awareness + chat. Nothing broken to fix here; flagged as a low-priority, purely
+  flavor-level idea (bots already see each other's chat and could organically pick up recurring
+  phrases) rather than something worth spending a build pass on.
 
 ## Revision History
 
@@ -847,3 +910,4 @@ running 6th bot process (systemd unit, Matrix account, `MC_BOT_USERNAMES`/Buzz r
 | 1.11.0 | 2026-09-11 | Direct follow-up ("what's next" -> "2", closing gaps before deploying): §15.11 fully closed — new `shear`/`milk`/`build_pen` verbs (`actions.js` 1.49.0), wired into both vocabularies (`index.js` 2.59.0); pen containment resolved as its own dedicated verb rather than folded into `build`. §15.6/§15.8: Miner/Artist/Explorer/Soldier each gained an advisory (not deterministic — see §15.6's own reasoning) `priorities` array (`roles.js` 1.2.0), folded into `proposeOwnGoal()`'s prompt via new `priorityListNote()` (`index.js` 2.60.0). §15.8 also corrected: Bob's repo-side infra (service unit, `MC_BOT_USERNAMES`, Buzz `KNOWN_AGENTS`) was already landed in 1.8.0, a previous revision's open-questions list understated that. |
 | 1.12.0 | 2026-09-11 | Direct request "deploy bob" -> "restart the other bots": §15 is now deployed, not just built. Bob went live on `spark2` (not `spark` as §4 originally envisioned) after live inspection showed `spark` genuinely tight on memory (LLM model stack, not the bots) and `spark2` had real headroom — a live architecture decision made during deployment, not assumed in advance. `hermes-buzz.service` restarted on `spark` for `mc-bob`; Babs/Amy/Mark/Luke/Mayor restarted one at a time and each verified clean, so the whole 6-bot fleet now runs this section's code for the first time. New open item: `build_pen` places a structure but doesn't herd an animal into it. |
 | 1.13.0 | 2026-09-11 | Direct request "fix the shelter check, the pen herding, and the dynamic skill library": (1) real bug fixed in `hasShelterNearHome()` — it assumed an exact `bot.spawnPoint` anchor, but `gohome`'s own 3-block-radius goal meant a real shelter could go unrecognized; now searches a small radius and checks for a hollow interior too (`index.js` 2.61.0). (2) New `herd_to_pen` verb closes the animal-containment gap opened in 1.12.0, reusing vanilla's own tempt-follow AI (`actions.js` 1.50.0). (3) §14 turned out to be badly stale — the skill library was already fully built and live (86 real skills, verified via a live search query) before this session even started; corrected every status tag in that section from `[PROPOSED]`/"not started" to `[BUILT]`, and fixed the one real integration bug found (`SKILL_ACTION_VERBS` was missing every verb this session added). |
+| 1.14.0 | 2026-09-11 | New §16: two enhancements from a Project Sid research pass ("what other ideas... from Project Sid or similar research" -> "so both"). (1) Chat/action coherence: `generateReply()`'s CHAT-reply path had no grounding in real goal state, unlike `classifyIntent`'s own ACTION/GOAL branches — new `currentActivityNote()` closes it (`index.js` 2.62.0). (2) Adaptive role-leaning: new `otherBotActivityAt` (timestamped for free alongside `otherBotGoals`) and `lastRoleActivityAt()` feed `roleBiasNote()` an adaptive nudge toward a neglected secondary role, echoing Sid's own finding that specialization required tracking other agents' activity. Economy/trading and government/voting considered and explicitly not pursued — §16.3 has the reasoning. |

@@ -1,4 +1,23 @@
-// Version: 2.61.0
+// Version: 2.62.0
+//
+// 2.62.0 (2026-09-11) -- direct request "so both" (both ideas from a Project Sid research pass,
+// following up on the coherence-arbiter work that same paper's PIANO architecture already
+// inspired). (1) Chat/action coherence: generateReply() (the plain-CHAT reply path, distinct from
+// classifyIntent's own ACTION/GOAL branches which already ground chat in a real queued action)
+// had no equivalent grounding -- a borderline request classifyIntent scored as CHAT could still
+// get an in-character "sure, I'll get right on that!" with nothing actually queued. New
+// currentActivityNote() folds the bot's REAL, live goal state (or its real absence) into every
+// CHAT reply's own prompt, plus an explicit CHAT_INSTRUCTION rule against promising future action
+// that isn't already covered by what she's doing -- the same "ground every claim in real state,
+// never a remembered belief that could drift" discipline every other prompt in this file already
+// follows, just not yet applied to this one reply path. (2) Adaptive role-leaning: Sid's own key
+// specialization finding was that role differentiation required agents to track OTHER agents'
+// goals/intentions -- without it, roles stayed homogeneous. New otherBotActivityAt (timestamped
+// for free alongside otherBotGoals in the existing "minecraft-coordination" Buzz handler, no new
+// message/poll) and lastRoleActivityAt() feed roleBiasNote(): if nobody holding a bot's own
+// secondary role as their primary has done observable work in ROLE_NEGLECTED_MS (20 min), that's
+// now called out as extra reason to lean into the secondary -- an adaptive nudge layered on top
+// of §15.5(a)'s existing fixed lean, not a replacement for operator-assigned roles.
 //
 // 2.61.0 (2026-09-11) -- direct request "fix the shelter check, the pen herding, and the dynamic
 // skill library". (1) Real bug fixed in hasShelterNearHome(): it checked ONLY
@@ -1018,16 +1037,50 @@ function priorityListNote(role) {
   return `\n\nSuggested priority order for ${role.name} (not a strict requirement, just a lean):\n${lines}`;
 }
 
+// Direct request, 2026-09-11 ("adaptive role-leaning"). Most recent timestamp among every bot
+// whose PRIMARY role matches roleName being seen actively working on something (including this
+// bot herself, if it's her own primary and she has a live goal right now) -- reads
+// otherBotActivityAt (updated for free alongside otherBotGoals in the existing Buzz handler
+// below, no new message/poll). Returns 0 if nobody holding that role has been observed active
+// this process's lifetime -- deliberately in-memory only, same low-stakes tradeoff
+// lastRoleAssignedAt (Mayor's own tiebreak, §15.5(b)) already makes.
+function lastRoleActivityAt(roleName) {
+  let latest = (myRole?.primary?.name === roleName && currentGoal) ? Date.now() : 0;
+  for (const [agent, at] of otherBotActivityAt) {
+    const persona = agent.replace(/^mc-/, "");
+    if (BOT_ROLES[persona]?.primary?.name === roleName && at > latest) latest = at;
+  }
+  return latest;
+}
+
+const ROLE_NEGLECTED_MS = 20 * 60_000; // 20 min with zero observed activity -> worth leaning into
+
 function roleBiasNote() {
   if (!myRole) return "";
   const secondary = myRole.secondary
     ? ` Your secondary focus is ${myRole.secondary.name} (${myRole.secondary.domain}).`
     : "";
+  // Project Sid's own key specialization finding: role differentiation required agents to track
+  // OTHER agents' goals and adjust their own accordingly -- without it, roles stayed homogeneous.
+  // This fleet's roles are operator-assigned, not emergent, but the same signal (otherBotGoals,
+  // already tracked for collision-avoidance, §12) can still make the SECONDARY lean adaptive
+  // instead of a fixed, always-primary-first preference: if nobody holding this bot's secondary
+  // role as their OWN primary has done anything observable in a while, that's a real, concrete
+  // reason to lean into it now rather than defaulting to primary out of habit.
+  let neglectNote = "";
+  if (myRole.secondary) {
+    const lastSeen = lastRoleActivityAt(myRole.secondary.name);
+    if (lastSeen === 0 || Date.now() - lastSeen > ROLE_NEGLECTED_MS) {
+      neglectNote = ` Nobody in the fleet appears to have done real ${myRole.secondary.name} ` +
+        `work recently -- extra reason to lean into your secondary now if nothing in your ` +
+        `primary's lane stands out.`;
+    }
+  }
   return `\n\nYour primary role is ${myRole.primary.name} (${myRole.primary.domain}).` +
     `${secondary} Usually propose something in your primary's lane; your secondary is fair game ` +
     `too, especially if primary opportunities are thin nearby or something secondary-shaped is ` +
-    `right in front of you. Universal needs (hunger, gear, safety) still come first regardless ` +
-    `of role, exactly as before.` +
+    `right in front of you.${neglectNote} Universal needs (hunger, gear, safety) still come ` +
+    `first regardless of role, exactly as before.` +
     `${priorityListNote(myRole.primary)}${priorityListNote(myRole.secondary)}`;
 }
 
@@ -1260,6 +1313,15 @@ function recordGoalOutcome(description, outcome, reason) {
 // bot's goal except whichever one posted most recently. Keyed by from_agent instead, so it
 // scales to however many bots are actually running.
 const otherBotGoals = new Map(); // from_agent -> last-known active goal description
+
+// Direct request, 2026-09-11 ("adaptive role-leaning" -- a research pass into Project Sid found
+// its key specialization finding: role differentiation required agents to track OTHER agents'
+// goals/intentions and adjust their own accordingly -- without that, roles stayed homogeneous.
+// This fleet's roles are operator-assigned, not emergent, but the same signal was sitting right
+// here unused: otherBotGoals already tracks what everyone else is doing in real time, just never
+// fed into a bot's own role-lean. Timestamped alongside otherBotGoals itself, same Buzz handler,
+// so this is genuinely free -- no new message, no new poll.
+const otherBotActivityAt = new Map(); // from_agent -> Date.now() of their last "active" goal broadcast
 let pendingGiveRequest = null; // {forPlayer, item, count} she's agreed to fulfill, or null
 
 // Shared by planNextStep and proposeOwnGoal (previously two near-identical inline blocks, one
@@ -1540,9 +1602,33 @@ async function narrateAction(text) {
   return reply.trim().slice(0, MAX_CHAT_LEN) || text;
 }
 
+// Direct request, 2026-09-11 ("chat/action coherence fix" -- a research pass into Project Sid's
+// PIANO architecture surfaced this as the one real analog to a problem this codebase already
+// fixed elsewhere: Sid's Cognitive Controller broadcasts its own real decisions to "condition
+// talk-related modules," specifically to stop agents promising things they never act on.
+// classifyIntent's ACTION/GOAL branches already ground chat in a real queued action; this file's
+// OTHER reply path -- generateReply(), for anything classifyIntent scores as plain CHAT -- had no
+// such grounding. A borderline request classifyIntent doesn't recognize as actionable could still
+// get an in-character "sure, I'll get right on that!" with no goal ever actually queued -- the
+// exact talk-vs-action mismatch Sid's own architecture exists to prevent, just never audited for
+// here until asked to look. currentActivityNote() (below) grounds every CHAT reply in the bot's
+// REAL, live goal state (or its real absence) the same way every other prompt in this file already
+// grounds itself in real gear/inventory rather than a remembered belief that could drift.
 const CHAT_INSTRUCTION =
   "You are chatting in Minecraft's in-game chat, in character. Reply to the latest message " +
-  "in 1-2 short sentences suitable for game chat. Do not prefix your own name.";
+  "in 1-2 short sentences suitable for game chat. Do not prefix your own name. This is a plain " +
+  "conversational reply -- no goal or action is queued by sending it. Never promise a specific " +
+  "future action (\"I'll get you that,\" \"I'll do that now,\" \"on it\") unless it's covered by " +
+  "what you're ACTUALLY doing right now (see below) -- if someone asks for something you're not " +
+  "already working on, acknowledge the ask honestly without implying it's already happening " +
+  "(e.g. \"ask me directly and I'll get started\").";
+
+function currentActivityNote() {
+  return currentGoal
+    ? `\n\nWhat you're actually doing right now: "${currentGoal.description}." Only imply you're ` +
+      `on something if this genuinely covers it.`
+    : "\n\nYou have no active goal right now -- don't imply you're already working on anything.";
+}
 
 async function generateReply(speaker, message) {
   const conv = convId(speaker);
@@ -1584,7 +1670,8 @@ async function generateReply(speaker, message) {
     : "";
   const text = await callRole(
     "muse",
-    [{ role: "system", content: `${persona}\n\n---\n\n${CHAT_INSTRUCTION}${bossNote}${memoryNote}` },
+    [{ role: "system", content:
+        `${persona}\n\n---\n\n${CHAT_INSTRUCTION}${bossNote}${memoryNote}${currentActivityNote()}` },
      ...history],
     { maxTokens: 80, temperature: 0.9 },
   );
@@ -3718,8 +3805,12 @@ bot.once("spawn", () => {
         return; // not a real coordination payload -- ignore rather than crash on it
       }
       if (payload.type === "goal") {
-        if (payload.status === "active") otherBotGoals.set(msg.from_agent, payload.description);
-        else otherBotGoals.delete(msg.from_agent);
+        if (payload.status === "active") {
+          otherBotGoals.set(msg.from_agent, payload.description);
+          otherBotActivityAt.set(msg.from_agent, Date.now());
+        } else {
+          otherBotGoals.delete(msg.from_agent);
+        }
         console.log(`[${USERNAME}] heard ${msg.from_agent}'s goal: ${payload.status === "active" ? payload.description : "(idle)"}`);
         // Tech-tree curriculum (2026-09-08): Mayor has no view into another bot's own
         // inventory, so her OWN verified "done" broadcast (parseGoalStep's real, checked
