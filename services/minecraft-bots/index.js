@@ -1,4 +1,25 @@
-// Version: 2.62.0
+// Version: 2.63.0
+//
+// 2.63.0 (2026-09-12) -- direct report "still not functional" (crafting table not found, a
+// chest with sticks ignored, soldiers not responding to attacks). Traced through 6+ hours of
+// live logs, not guessed, and found ONE real root cause behind most of it, not three unrelated
+// bugs: nextBuilderPriority() had no memory of past attempts, so Amy re-proposed the IDENTICAL
+// "go home and place a furnace there" directive every single self-propose cycle for 6+ hours
+// straight with zero progress. Real, severe consequence: beds (priority item #4) never even got
+// ATTEMPTED, so nobody could sleep, and phantoms -- a real vanilla mechanic triggered by extended
+// sleep deprivation -- swarmed the base (1473 threat-detections in 2 hours, more than every other
+// hostile combined), compounding on dark-base zombie/spider/skeleton spawns from lighting also
+// never landing (see checkHomeLighting's own fix below for why). New per-item stall counter
+// (BUILDER_ITEM_STALL_LIMIT) skips a genuinely stuck priority item after 3 consecutive cycles in
+// favor of the next unmet one, revisiting the skipped one later rather than looping forever.
+// checkHomeLighting() separately required a CLAIMED bed to have a "home" to light around -- but
+// claiming a bed requires a bed to exist, a real bootstrapping catch-22 confirmed live (zero
+// "home lighting" log lines in 6+ hours, every call hit that one early return). Now falls back to
+// bot.spawnPoint, the same anchor nextBuilderPriority/checkTerrainDamage already use for exactly
+// this reason, instead of giving up outright. Squad response and self-defense were independently
+// verified WORKING (real successful assists in the logs) but overwhelmed by the same phantom
+// swarm -- not a separate bug, expected to ease once beds/lighting actually land. The chest-check
+// bug (actions.js, see its own changelog) is the one genuinely independent fix in this batch.
 //
 // 2.62.0 (2026-09-11) -- direct request "so both" (both ideas from a Project Sid research pass,
 // following up on the coherence-arbiter work that same paper's PIANO architecture already
@@ -2173,36 +2194,63 @@ function hasShelterNearHome() {
   return false;
 }
 
+// Real bug found live 2026-09-12 (direct report the fleet is "still not functional," traced
+// through logs, not guessed): Amy self-proposed the IDENTICAL "go home and place a furnace
+// there" directive every single cycle for 6+ hours straight, zero progress, because
+// nextBuilderPriority() had no memory of past attempts -- a genuinely hard blocker (furnace
+// needs cobblestone needs a pickaxe needs an uninterrupted stretch) just re-picked the same
+// still-unmet item forever. Real, severe consequence, not just wasted cycles: beds (item #4)
+// never even got ATTEMPTED, so nobody could sleep, and phantoms -- a real vanilla mechanic
+// triggered by extended sleep deprivation -- swarmed the base (1473 threat-detections in 2
+// hours, the single largest hostile category, more than every other mob combined), on top of
+// ordinary dark-base zombie/spider/skeleton spawns from lighting also never landing
+// (checkHomeLighting requires a claimed bed to run at all, and zero beds meant zero claims).
+// New per-item stall counter: after BUILDER_ITEM_STALL_LIMIT consecutive cycles proposing the
+// SAME still-unmet item, it's temporarily skipped in favor of the next unmet one -- so a hard
+// blocker doesn't block strictly-easier later items (beds, chest) forever. Resets whenever a
+// DIFFERENT item gets proposed, so a skipped item gets retried later, not abandoned outright.
+const BUILDER_ITEM_STALL_LIMIT = 3;
+let builderStallItem = null;
+let builderStallCount = 0;
+
 function nextBuilderPriority() {
+  const candidates = [];
   if (countNearHome(["crafting_table"]) < 1) {
-    return { name: "crafting_table", directive: "go home and place a crafting table there" };
+    candidates.push({ name: "crafting_table", directive: "go home and place a crafting table there" });
   }
   if (countNearHome(["furnace"]) < 1) {
-    return { name: "furnace", directive: "go home and place a furnace there" };
+    candidates.push({ name: "furnace", directive: "go home and place a furnace there" });
   }
   if (countNearHome(["chest"]) < 1) {
-    return { name: "chest", directive: "go home and place a chest there" };
+    candidates.push({ name: "chest", directive: "go home and place a chest there" });
   }
   const bedNames = Object.keys(bot.registry.blocksByName).filter((n) => n.endsWith("_bed"));
   const bedCount = countNearHome(bedNames, (block) => block?.getProperties?.().part === "head");
   if (bedCount < 6) {
-    return { name: "beds", directive: `go home and set up more beds there -- we have ${bedCount}, need at least 6` };
+    candidates.push({ name: "beds", directive: `go home and set up more beds there -- we have ${bedCount}, need at least 6` });
   }
   if (!hasShelterNearHome()) {
-    return { name: "shelter", directive: "go home and build a small shelter there" };
+    candidates.push({ name: "shelter", directive: "go home and build a small shelter there" });
   }
   // Added 2026-09-11 ("nest" again -> "wire honey/wax into Builder's ... priority list"). Sits
   // AFTER the operator's original five (crafting table/furnace/chest/beds/shelter) rather than
-  // among them -- a beehive is a nice-to-have sustainable resource, not core survival infra, so
-  // it shouldn't reorder anything the operator actually specified. Real dependency, not a bug:
-  // crafting a NEW beehive needs honeycomb, which only comes from shearing an existing hive
-  // (actions.js's "harvest_hive" with tool: "shears") -- this item may sit unsatisfied for a
-  // while if no wild bee_nest/honeycomb has been found yet, same as "shelter" can sit unsatisfied
-  // without enough building material. That's fine; the next tick just re-checks.
+  // among them -- a beehive is a nice-to-have sustainable resource, not core survival infra.
   if (countNearHome(["beehive"]) < 1) {
-    return { name: "beehive", directive: "craft a beehive (needs planks and honeycomb) and place it near home" };
+    candidates.push({ name: "beehive", directive: "craft a beehive (needs planks and honeycomb) and place it near home" });
   }
-  return null; // checklist complete -- proposeOwnGoal falls through to its normal freeform reasoning
+  if (!candidates.length) {
+    builderStallItem = null;
+    builderStallCount = 0;
+    return null; // checklist complete -- proposeOwnGoal falls through to its normal freeform reasoning
+  }
+
+  const skip = builderStallCount > BUILDER_ITEM_STALL_LIMIT ? builderStallItem : null;
+  const pick = candidates.find((c) => c.name !== skip) || candidates[0];
+
+  if (pick.name === builderStallItem) builderStallCount++;
+  else { builderStallItem = pick.name; builderStallCount = 1; }
+
+  return pick;
 }
 
 async function proposeOwnGoal() {
@@ -3430,11 +3478,21 @@ setInterval(() => {
 // fleet by construction (see light_area's own header): no explicit cross-bot coordination needed.
 const HOME_LIGHTING_CHECK_MS = parseInt(process.env.MC_HOME_LIGHTING_CHECK_MS || "90000", 10);
 
+// Real bug found live 2026-09-12: this required a CLAIMED BED to have a "home" to light around
+// -- but claiming a bed requires a bed to exist, which (per nextBuilderPriority's own ladder,
+// §15.6) only happens well after crafting_table/furnace/chest. Result, confirmed live: zero
+// "home lighting" log lines in 6+ hours straight -- every single call hit this exact early
+// return, the base never got lit, and dark-area mob spawns compounded on top of the sleep-
+// deprivation phantom swarm (see nextBuilderPriority's own comment for the fuller chain). Falls
+// back to bot.spawnPoint (the same real anchor nextBuilderPriority/checkTerrainDamage already
+// use for exactly this "before a bed exists yet" bootstrapping reason) instead of giving up
+// outright -- a claimed bed is still preferred once one exists, since it's a more precise
+// "where she actually sleeps" point than the wider world spawn.
 async function checkHomeLighting() {
   if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
   if (!bot.inventory.items().some((i) => i.name === "torch")) return;
-  const home = await loadClaimedBed(bot);
-  if (!home) return; // no claimed bed yet -- no real "home" to light up around
+  const home = (await loadClaimedBed(bot)) || bot.spawnPoint;
+  if (!home) return; // no claimed bed AND no spawn point known yet -- genuinely nothing to anchor on
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);

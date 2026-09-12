@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots — Design
 
-**Version:** 1.14.0
+**Version:** 1.15.0
 **Status:** Design only — nothing in this document is built. Status legend (same convention as
 `firmament-fleet-target-architecture.md`): `[DECIDED]` — operator made an explicit choice · `[PROPOSED]` —
 design recommendation, not yet ratified · `[UNKNOWN]` — needs discovery before build · `[RISK]` — flagged
@@ -892,6 +892,51 @@ nudge, not a re-architecture of §15's own operator-assigned model.
   flavor-level idea (bots already see each other's chat and could organically pick up recurring
   phrases) rather than something worth spending a build pass on.
 
+## 17. Live incident: Builder-priority stall → sleep-deprivation phantom spiral (2026-09-12)
+
+Direct report: "they are still not functional. if a crafting table is right next to them they
+can't find it. A chest with sticks already made is ignored when they need sticks. when one bot is
+under attack they do not call the soldiers, or the soldiers do not respond." Three symptoms that
+looked independent turned out to trace mostly to **one** root cause, found by reading 6+ hours of
+real live logs, not guessed:
+
+**Root cause.** `nextBuilderPriority()` (§15.6) had no memory of past attempts. Amy re-proposed
+the identical "go home and place a furnace there" directive every single self-propose cycle for
+6+ hours straight, zero progress (furnace needs cobblestone, which needs a pickaxe, which needs an
+uninterrupted stretch she never got). Real, severe consequence: **beds (priority item #4) never
+even got attempted** — nobody could sleep, and phantoms (a real vanilla mechanic triggered by
+extended sleep deprivation) swarmed the base: 1473 threat-detections in a 2-hour window, more than
+every other hostile mob *combined*. Compounding on top of that: `checkHomeLighting()` required a
+*claimed* bed to have a "home" to light around — but claiming a bed requires a bed to exist, a
+real bootstrapping catch-22 confirmed live (zero "home lighting" log lines in the entire 6+ hour
+window). Dark, bed-less, under a phantom swarm: self-defense and squad-response were independently
+verified *working* (real successful assists in the logs, e.g. "Luke squad response result: took
+care of it") but overwhelmed — everyone was individually fighting for their life simultaneously,
+leaving no one able to break away reliably. Not a separate bug in the coordination mechanism
+itself; a real consequence of the environment it was operating in.
+
+**Fixes, `index.js` 2.63.0:**
+- `nextBuilderPriority()` gained a per-item stall counter (`BUILDER_ITEM_STALL_LIMIT`, 3 cycles):
+  a genuinely stuck item is temporarily skipped in favor of the next unmet one, revisited later
+  rather than looping forever. Lets beds get attempted even while furnace remains hard.
+- `checkHomeLighting()` now falls back to `bot.spawnPoint` when no bed is claimed yet — the same
+  anchor `nextBuilderPriority`/`checkTerrainDamage` already use for exactly this reason — instead
+  of silently doing nothing until a bed exists.
+
+**Independent fix, `actions.js` 1.51.0 — the actual chest bug.** `tryTakeFromNearbyChest()` used
+to require ONE slot to independently hold the full wanted count. A real, common deposit pattern
+(multiple bots each banking a few items via "inventory insurance," §12/2.39.0) splits the same
+item across several slots — 3+3+2 sticks from three separate deposits, say — and a single-slot
+threshold check matched none of them even with plenty combined. Now sums every matching slot
+before deciding.
+
+**Not independently confirmed.** The literal "crafting table right next to them, not found"
+scenario produced zero matching log lines in the 6-hour window searched — plausible it happened at
+a different time, or was a description of the furnace-loop's own symptom (both are "go home and
+place X" Builder-priority directives, easy to conflate from the outside). Flagged honestly rather
+than invented a fix for a mechanism (`craft`'s own table-detection) that showed no evidence of
+being broken when actually read.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -911,3 +956,4 @@ nudge, not a re-architecture of §15's own operator-assigned model.
 | 1.12.0 | 2026-09-11 | Direct request "deploy bob" -> "restart the other bots": §15 is now deployed, not just built. Bob went live on `spark2` (not `spark` as §4 originally envisioned) after live inspection showed `spark` genuinely tight on memory (LLM model stack, not the bots) and `spark2` had real headroom — a live architecture decision made during deployment, not assumed in advance. `hermes-buzz.service` restarted on `spark` for `mc-bob`; Babs/Amy/Mark/Luke/Mayor restarted one at a time and each verified clean, so the whole 6-bot fleet now runs this section's code for the first time. New open item: `build_pen` places a structure but doesn't herd an animal into it. |
 | 1.13.0 | 2026-09-11 | Direct request "fix the shelter check, the pen herding, and the dynamic skill library": (1) real bug fixed in `hasShelterNearHome()` — it assumed an exact `bot.spawnPoint` anchor, but `gohome`'s own 3-block-radius goal meant a real shelter could go unrecognized; now searches a small radius and checks for a hollow interior too (`index.js` 2.61.0). (2) New `herd_to_pen` verb closes the animal-containment gap opened in 1.12.0, reusing vanilla's own tempt-follow AI (`actions.js` 1.50.0). (3) §14 turned out to be badly stale — the skill library was already fully built and live (86 real skills, verified via a live search query) before this session even started; corrected every status tag in that section from `[PROPOSED]`/"not started" to `[BUILT]`, and fixed the one real integration bug found (`SKILL_ACTION_VERBS` was missing every verb this session added). |
 | 1.14.0 | 2026-09-11 | New §16: two enhancements from a Project Sid research pass ("what other ideas... from Project Sid or similar research" -> "so both"). (1) Chat/action coherence: `generateReply()`'s CHAT-reply path had no grounding in real goal state, unlike `classifyIntent`'s own ACTION/GOAL branches — new `currentActivityNote()` closes it (`index.js` 2.62.0). (2) Adaptive role-leaning: new `otherBotActivityAt` (timestamped for free alongside `otherBotGoals`) and `lastRoleActivityAt()` feed `roleBiasNote()` an adaptive nudge toward a neglected secondary role, echoing Sid's own finding that specialization required tracking other agents' activity. Economy/trading and government/voting considered and explicitly not pursued — §16.3 has the reasoning. |
+| 1.15.0 | 2026-09-12 | New §17: a live incident, root-caused from 6+ hours of real logs rather than guessed. Direct report ("still not functional") named three symptoms; found one real root cause behind most of it — `nextBuilderPriority()`'s infinite loop on a stuck item (furnace) meant beds never got attempted, causing a real sleep-deprivation phantom swarm (1473 threat-detections in 2 hours) that then overwhelmed otherwise-working self-defense/squad-response. Fixed: a per-item stall counter (`index.js` 2.63.0) and `checkHomeLighting()`'s own bed/spawnPoint bootstrapping catch-22. Independently fixed the actual chest bug (`tryTakeFromNearbyChest()`'s single-slot threshold, `actions.js` 1.51.0). The literal "crafting table not found" claim had no matching log evidence in the window searched — flagged honestly, not papered over with an unverified fix. |

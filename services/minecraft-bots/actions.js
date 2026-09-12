@@ -1,4 +1,14 @@
-// Version: 1.50.0
+// Version: 1.51.0
+//
+// 1.51.0 (2026-09-12) -- direct report "a chest with sticks already made is ignored when they
+// need sticks," confirmed live: tryTakeFromNearbyChest() used to require ONE slot to
+// independently hold >= wantCount. A real, common deposit pattern (multiple bots each banking a
+// few via "inventory insurance," 2.39.0) easily splits the same item across several slots (e.g.
+// 3+3+2 sticks from three separate deposits) -- .find() against a single-slot threshold matched
+// none of them even with plenty combined. Now sums every matching slot before deciding and takes
+// whatever's actually available (never more than wantCount, honestly reports less otherwise) --
+// chest.withdraw() itself already draws from multiple slots of the same item/metadata
+// automatically, so summing first was the only change needed.
 //
 // 1.50.0 (2026-09-11) -- direct request "fix ... the pen herding [and] the dynamic skill
 // library". (1) New "herd_to_pen" case: build_pen (1.49.0) only ever placed the fence structure,
@@ -1474,14 +1484,28 @@ async function tryTakeFromNearbyChest(bot, token, itemNames, wantCount) {
     try {
       const chest = await bot.openChest(chestBlock);
       const contents = chest.containerItems();
-      const match = contents.find((i) => itemNames.includes(i.name) && i.count >= wantCount);
-      if (!match) {
+      // Real bug found live 2026-09-12 (direct report: "a chest with sticks already made is
+      // ignored when they need sticks"). This used to require ONE slot to independently hold
+      // >= wantCount -- but a real, common deposit pattern (multiple bots each banking a few via
+      // "inventory insurance," 2.39.0, or a partial withdrawal by an earlier visit) easily splits
+      // the same item across several slots (e.g. 3+3+2 sticks from three separate deposits), and
+      // .find() against a single-slot threshold matched none of them even though the chest
+      // genuinely had enough combined. Now sums every matching slot before deciding, and takes
+      // whatever's actually there (never more than wantCount, honestly reports less if that's all
+      // that's available -- matching this codebase's own "don't oversell a result" discipline).
+      // chest.withdraw() itself already draws from multiple slots of the same item/metadata
+      // automatically (confirmed against mineflayer's own Window/Chest source) -- summing first
+      // was the only change actually needed.
+      const matches = contents.filter((i) => itemNames.includes(i.name));
+      const totalAvailable = matches.reduce((sum, i) => sum + i.count, 0);
+      if (!totalAvailable) {
         await chest.close();
-        continue; // this chest doesn't have enough -- try the next candidate, not give up
+        continue; // this chest doesn't have any -- try the next candidate, not give up
       }
-      await chest.withdraw(match.type, null, wantCount);
+      const takeCount = Math.min(wantCount, totalAvailable);
+      await chest.withdraw(matches[0].type, null, takeCount);
       await chest.close();
-      return { name: match.name, count: wantCount };
+      return { name: matches[0].name, count: takeCount };
     } catch {
       continue; // couldn't open this one -- try the next candidate
     }
