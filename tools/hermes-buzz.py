@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 2.0.22
+# Version: 2.0.23
+#
+# 2.0.23 (2026-09-13) — added `mc-nell`, `mc-wade`, `mc-dale` to `KNOWN_AGENTS`, ahead of three
+# new Minecraft bots (direct request: "rebalance the bots so they each have exactly one role...
+# create [more] so every role has at least one bot", giving Artist/Explorer/Herder a real primary
+# owner for the first time — MINECRAFT_BOTS_DESIGN.md §22). Same convention as every other
+# `mc-*` entry below — no new topics needed, reuses `minecraft`/`minecraft-coordination`.
 #
 # 2.0.22 (2026-09-11) — added `mc-bob` to `KNOWN_AGENTS`, ahead of the new sixth Minecraft bot
 # (direct request: "add a new bot, Bob, for the farmer/herder roles" -> "go", building out
@@ -231,7 +237,7 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "mc-mark", "mc-luke", "mc-mayor", "mc-bob", "minecraft-triage", "gameadmin"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "mc-mark", "mc-luke", "mc-mayor", "mc-bob", "mc-nell", "mc-wade", "mc-dale", "minecraft-triage", "gameadmin"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1) plus
 # `minecraft` (shared broadcast topic for the bot coordination traffic KNOWN_AGENTS' mc-babs/

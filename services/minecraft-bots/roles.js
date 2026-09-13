@@ -1,4 +1,11 @@
-// Version: 1.3.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-09-13) -- direct request ("rebalance the bots so they each have exactly one role...
+// create [more] so every role has at least one bot"): every BOT_ROLES entry's `secondary` set to
+// null (nothing changed about the field's shape, every consumer already null-checks it), and
+// three new bots added -- Nell (Artist), Wade (Explorer), Dale (Herder) -- for the three roles
+// that previously only existed as somebody's secondary. Full rationale, persona/infra/Buzz
+// registration checklist, and host-placement decision in MINECRAFT_BOTS_DESIGN.md §22.
 //
 // 1.3.0 (2026-09-13) -- direct request ("soldier personas need to... prioritize a) weapon
 // b) killing monsters c) secondary roles"): SOLDIER's own `priorities` array below (items 1-2)
@@ -81,11 +88,25 @@ export const ROLES = Object.freeze({
 });
 
 // persona (USERNAME.toLowerCase(), matching PERSONA_NAME's own default in index.js) -> { primary, secondary }
+//
+// Direct request, 2026-09-13 ("rebalance the bots so they each have exactly one role... create
+// [more] so that every role has at least one bot"): every `secondary` is now null -- the field
+// itself stays (roleBiasNote/priorityListNote both already handle a null secondary gracefully;
+// removing it outright would be a bigger, unrequested refactor for no behavioral gain) but
+// nothing populates it anymore. Three new bots (Nell/Wade/Dale) give the three roles that
+// previously existed ONLY as somebody's secondary -- Artist, Explorer, Herder -- a real primary
+// owner for the first time, closing the gap the operator's own "every role has at least one bot"
+// framing named directly. See MINECRAFT_BOTS_DESIGN.md §22 for the full rationale (which existing
+// bot keeps which role, why 3 new bots rather than reassigning an existing one, host-placement
+// checks).
 export const BOT_ROLES = Object.freeze({
-  mayor: { primary: ROLES.LEADER,  secondary: null },
-  mark:  { primary: ROLES.SOLDIER, secondary: ROLES.LEADER },
-  luke:  { primary: ROLES.SOLDIER, secondary: null },
-  babs:  { primary: ROLES.MINER,   secondary: ROLES.EXPLORER },
-  amy:   { primary: ROLES.BUILDER, secondary: ROLES.ARTIST },
-  bob:   { primary: ROLES.FARMER,  secondary: ROLES.HERDER },
+  mayor: { primary: ROLES.LEADER,   secondary: null },
+  mark:  { primary: ROLES.SOLDIER,  secondary: null },
+  luke:  { primary: ROLES.SOLDIER,  secondary: null },
+  babs:  { primary: ROLES.MINER,    secondary: null },
+  amy:   { primary: ROLES.BUILDER,  secondary: null },
+  bob:   { primary: ROLES.FARMER,   secondary: null },
+  nell:  { primary: ROLES.ARTIST,   secondary: null },
+  wade:  { primary: ROLES.EXPLORER, secondary: null },
+  dale:  { primary: ROLES.HERDER,   secondary: null },
 });

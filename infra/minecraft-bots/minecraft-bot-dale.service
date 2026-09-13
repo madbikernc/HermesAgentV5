@@ -1,5 +1,5 @@
 [Unit]
-Description=Firmament Minecraft Bot (Mark)
+Description=Firmament Minecraft Bot (Dale)
 After=network-online.target hermes-router.service hermes-memory.service hermes-buzz.service continuwuity.service
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -8,11 +8,7 @@ StartLimitIntervalSec=0
 Type=simple
 User=pmoney
 WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
-Environment=MC_BOT_USERNAME=Mark
-Environment=MC_SELF_DEFENSE_FLEE_HEALTH=4
-Environment=MC_SELF_DEFENSE_RANGE=20
-Environment=MC_SQUAD_RESPONDER=true
-Environment=MC_FALLBACK_COORDINATOR=true
+Environment=MC_BOT_USERNAME=Dale
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

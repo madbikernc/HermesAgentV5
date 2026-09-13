@@ -1,4 +1,11 @@
-// Version: 1.52.0
+// Version: 1.53.0
+//
+// 1.53.0 (2026-09-13) -- direct request: "rebalance the bots so they each have exactly one
+// role... create [more] so every role has at least one bot." OTHER_BOT_USERNAMES (this file's own
+// independent duplicate of index.js's BOT_USERNAMES roster, kept in sync rather than a shared
+// import per this file's own "index.js does the mutating" header) extended with the three new
+// bots (Nell, Wade, Dale) so their positions get the same proximity-avoidance treatment every
+// other bot's already gets. See MINECRAFT_BOTS_DESIGN.md §22.
 //
 // 1.52.0 (2026-09-13) -- direct request: "extend resource sharing memory and scouting to *any*
 // resource or crafted object. remember what is in chests when someone opens it. if someone takes
@@ -1630,10 +1637,11 @@ async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount
 // something this bot can just see. Independent small env-derived roster, same pattern
 // index.js's own BOT_USERNAMES already uses -- actions.js stays a leaf module with no import from
 // index.js (this file's own header: "index.js does the mutating," never the reverse).
-// "Bob" added 2026-09-11 alongside index.js's own BOT_USERNAMES default -- kept in sync since
-// this really is an independent duplicate of that same roster, not a second source of truth.
+// "Bob" added 2026-09-11, "Nell,Wade,Dale" added 2026-09-13 (§22 rebalance) -- both times kept in
+// sync with index.js's own BOT_USERNAMES default since this really is an independent duplicate
+// of that same roster, not a second source of truth.
 const OTHER_BOT_USERNAMES = new Set(
-  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor,Bob").split(",").map((s) => s.trim()).filter(Boolean),
+  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor,Bob,Nell,Wade,Dale").split(",").map((s) => s.trim()).filter(Boolean),
 );
 const BOT_PROXIMITY_AVOID_DISTANCE = 6;
 // How many extra candidates to fetch beyond what's actually needed, so filtering out ones too

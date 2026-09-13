@@ -1,4 +1,18 @@
-// Version: 2.66.0
+// Version: 2.67.0
+//
+// 2.67.0 (2026-09-13) -- direct request: "rebalance the bots so they each have exactly one
+// role. If we need more bots so that every role has at least one bot, create them." roles.js
+// 1.4.0 has the real BOT_ROLES change (every secondary set to null, three new personas added for
+// the three roles -- Artist, Explorer, Herder -- that previously existed only as somebody's
+// secondary). This file's own share: (1) BOT_USERNAMES default list extended with the three new
+// names (Nell, Wade, Dale) so a fresh deploy's Buzz/chat-relay exclusion list stays in sync with
+// roles.js rather than silently drifting, same reasoning as Bob's own addition. (2) A real
+// regression caught and fixed before it could ship: proposeFallbackDirective() (§15.5(d), Mark's
+// Mayor-fallback coordination) was gated on `myRole?.secondary === ROLES.LEADER` -- flattening
+// every secondary to null would have silently disabled this live, working feature with no error
+// anywhere. New FALLBACK_COORDINATOR env-var flag (mirrors SQUAD_RESPONDER's own shape) decouples
+// it from the one-role rebalance entirely. See MINECRAFT_BOTS_DESIGN.md §22 for the full
+// rationale and deployment checklist.
 //
 // 2.66.0 (2026-09-13) -- direct request: "the soldier personas need to: 1) be responsive to
 // calls for help 2) be aware when fellow bots are killed by a mob 3) prioritize a) getting a
@@ -1066,8 +1080,12 @@ function isBoss(speaker) {
 // entries -- harmless for the 5 bots actually running today (an unset MC_BOT_USERNAMES env var
 // on a live unit still won't spawn a 6th process; this only changes what a FRESH deploy defaults
 // to), but keeps this list in sync with roles.js's own BOT_ROLES rather than silently drifting.
+// "Nell,Wade,Dale" added 2026-09-13 (§22, "rebalance the bots so they each have exactly one
+// role... create [more] so every role has at least one bot") -- same "harmless for bots not
+// actually running yet, keeps this list in sync with roles.js's own BOT_ROLES rather than
+// silently drifting" reasoning as Bob's own addition to this list.
 const BOT_USERNAMES = new Set(
-  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor,Bob").split(",").map((s) => s.trim()).filter(Boolean),
+  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor,Bob,Nell,Wade,Dale").split(",").map((s) => s.trim()).filter(Boolean),
 );
 
 function isAnotherBot(speaker) {
@@ -3164,8 +3182,10 @@ setInterval(() => {
   proposeDirectiveForOthers().catch((err) => console.error(`[${USERNAME}] proposeDirectiveForOthers error:`, err.message));
 }, MAYOR_DIRECTIVE_MS);
 
-// §15.5(d): Mark's Leader secondary -- fallback coordination only, never a standing second voice.
-// Deliberately a SEPARATE function from proposeDirectiveForOthers() above (Mayor's own, untouched
+// §15.5(d): fallback coordination only, never a standing second voice -- originally gated on
+// Mark's Leader secondary, now on its own FALLBACK_COORDINATOR flag (see that constant's own
+// 2026-09-13 comment below for why). Deliberately a SEPARATE function from
+// proposeDirectiveForOthers() above (Mayor's own, untouched
 // by this whole change) rather than a branch threaded through it -- Mayor's path is well-exercised
 // and this keeps zero risk of changing his behavior. Never touches curriculumStageIndex/
 // stageProgress/mayor-curriculum.json at all (Mayor-only state) -- a fallback directive is always
@@ -3173,8 +3193,20 @@ setInterval(() => {
 // original full proposal.
 const MAYOR_LIVENESS_TIMEOUT_MS = MAYOR_DIRECTIVE_MS * 3;
 
+// Direct request, 2026-09-13 ("rebalance the bots so they each have exactly one role"). Real
+// regression this would otherwise have silently caused: this gate used to be
+// `myRole?.secondary === ROLES.LEADER`, and Mark was the only bot ever given Leader as a
+// secondary -- flattening every BOT_ROLES entry to a single role (§22) would have set his
+// secondary to null along with everyone else's, permanently disabling this whole mechanism with
+// no error, no log line, nothing to notice. This is a real, live, working feature (unlike
+// §15.5(d)'s own doc comment above, which still calls it a smaller/safer scope of an
+// "originally proposed" plan -- it shipped) -- decoupling it into its own explicit flag, same
+// env-var-plus-role-derivation shape as SQUAD_RESPONDER, keeps it alive and independent of
+// whatever the one-role-per-bot rule does to roles.js from here on.
+const FALLBACK_COORDINATOR = process.env.MC_FALLBACK_COORDINATOR === "true";
+
 async function proposeFallbackDirective() {
-  if (USERNAME === MAYOR_USERNAME || myRole?.secondary !== ROLES.LEADER) return;
+  if (USERNAME === MAYOR_USERNAME || !FALLBACK_COORDINATOR) return;
   if (!AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
   // lastMayorSeenAt === 0 means "never heard from Mayor this process," deliberately distinct
   // from "he went quiet a while ago" -- a fresh process with no baseline yet doesn't activate the

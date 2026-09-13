@@ -499,6 +499,10 @@ Deliberately data, not a class hierarchy or a behavior-tree — matches this cod
 convention for `arbiter.js`'s `OWNERS` and `goals.js`'s plain-JSON shape: a small lookup table code
 branches on, not a new abstraction layer.
 
+> **Superseded 2026-09-13.** The mapping above is a historical snapshot of that day's decision,
+> not current truth — §22 rebalanced every bot to a single role and added three more. See §22 (or
+> just `roles.js` itself) for the real, current `BOT_ROLES`.
+
 ### 15.5 Wiring — three touch points, all additive to existing functions
 
 **(a) `proposeOwnGoal()` — self-propose bias.** The prompt already builds from persona + recent
@@ -1128,6 +1132,63 @@ role (Mark, Luke today), mirroring Builder's own primary-only precedent -- a bot
 a secondary lean gets the advisory prompt text, same as before, not a hard override competing
 with her own primary's work.
 
+## 22. Fleet rebalanced to one role per bot; three new bots for the previously-secondary-only roles (2026-09-13)
+
+Direct request: "rebalance the bots so they each have exactly one role. If we need more bots so
+that every role has at least one bot, create them."
+
+**Coverage before this change.** 6 bots, 8 roles, only 5 distinct roles actually had a PRIMARY
+owner: Leader (Mayor), Soldier (Mark, Luke -- redundant), Miner (Babs), Builder (Amy), Farmer
+(Bob). Artist, Explorer, and Herder existed only as somebody's SECONDARY (Amy, Babs, Bob
+respectively) -- real per §15.6-§15.11's own build history, but never a bot's own main focus.
+Since one bot can only ever have one primary role, covering all 8 roles with at least one primary
+owner each requires at minimum 8 bots; getting there from 6 requires exactly 2 new ones at
+minimum, or more if any existing bot's primary is reassigned instead of kept.
+
+**Decision: keep all 6 existing primaries unchanged, add 3 new bots.** Reassigning an existing
+bot (e.g. moving Mark off Soldier since Luke already covers it) was considered and rejected --
+Mark's combat tuning (`MC_SELF_DEFENSE_FLEE_HEALTH=4`/`RANGE=20`, §17-§21's Soldier-specific
+logic) and persona are real, working, built investment that a reassignment would throw away for
+no gain, and redundant Soldier coverage is a feature, not a waste, given §21's own "more soldiers
+means better defense" reasoning. Every existing bot's role stays exactly what its PRIMARY already
+was; only the (already-advisory, per roles.js's own 1.2.0 design note) `secondary` field is
+dropped, set to `null` fleet-wide. Three new bots -- **Nell** (Artist), **Wade** (Explorer), and
+**Dale** (Herder) -- give the three previously-secondary-only roles a real, dedicated primary
+owner for the first time, built at the same persona depth as the existing six (full
+`agents/minecraft-{nell,wade,dale}/PROMPT.md`, `roles.js` 1.4.0, `index.js`/`actions.js`
+`BOT_USERNAMES`/`OTHER_BOT_USERNAMES` defaults, `hermes-buzz.py` 2.0.23 `KNOWN_AGENTS`, and
+`infra/minecraft-bots/minecraft-bot-{nell,wade,dale}.service`). Fleet grows from 6 to 9.
+
+**A real regression caught before it shipped.** Auditing every `myRole?.secondary` read in
+`index.js` before flattening the field found one that wasn't just advisory text:
+`proposeFallbackDirective()` (§15.5(d), Mark stepping up to coordinate if Mayor goes quiet) was
+gated on `myRole?.secondary === ROLES.LEADER` -- a real, live, working mechanism (its own doc
+comment's claim of being unbuilt was itself stale, the same class of doc/code drift §14 already
+taught this project to check for rather than trust). Setting every secondary to `null` would have
+silently disabled it fleet-wide with no error anywhere. Decoupled into its own
+`MC_FALLBACK_COORDINATOR` env-var flag (same shape as `SQUAD_RESPONDER`), set on Mark's own
+service unit -- identical behavior preserved, independent of whatever the role system does to
+`secondary` from here on.
+
+**Persona cleanup, not just role removal.** Amy/Babs/Mark/Bob's `PROMPT.md` files each had real,
+specific prose built around their now-retired secondary (Amy's "before chasing purely decorative
+Artist-secondary work," Babs's "go find more (her Explorer secondary)," Bob's Herder-specific
+Core Directive/Behavioral Modifier rows, Mark's formal "Leader (secondary)" Identity tag) --
+trimmed rather than left stale, each pointing at the new bot who now owns that role for real
+(Nell/Wade/Dale respectively). Bob's file also had an already-stale guardrail (claiming pen/
+shear/milk don't exist -- they shipped in index.js 2.60-2.61, §15.11, months before this pass,
+his `PROMPT.md` was just never updated to say so) -- removed as moot now that Herder isn't his
+job at all, not fixed as if it still were.
+
+**Scope note / open tradeoff.** Mayor's tech-tree curriculum (§12) requires every bot in
+`BOT_USERNAMES` to clear a stage before the whole fleet advances -- three brand-new, freshly
+spawned bots starting from zero gear means curriculum advancement will genuinely slow down for
+everyone until Nell/Wade/Dale catch up, not a bug, just a direct, foreseeable consequence of
+growing the roster this way that the operator should expect to see rather than be surprised by.
+Host placement for the 3 new processes follows the same live-memory-headroom check §15.12's own
+deployment already established (not assumed safe) -- see the deployment log for where each
+actually landed.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1152,3 +1213,4 @@ with her own primary's work.
 | 1.17.0 | 2026-09-13 | New §19, direct follow-up to answering "do bots check world memory for chests/tables/resources?" honestly (partially, with real gaps) with "extend... to *any* resource or crafted object." `getResourceBlockNames()` (`actions.js` 1.52.0) replaces a hand-picked 4-item list with every real ore/log this server's registry has. Found and fixed a second, separate bug while extending it: the scout-broadcast receiver never actually checked the requested resource, only logged its name. New `known_chests.json` registry gives chest contents real structured tracking (not a RAG note) — every real interaction snapshots current truth, so "remembering" and "redacting" are the same operation. Doors/trapdoors/fence gates finally added to `isProtectedBlockName()`, closing the same "diggable by the library's own definition" gap already closed for furnaces/beds/chests. |
 | 1.18.0 | 2026-09-13 | New §20: direct follow-up report ("still detroying chests") turned out to have no bot-code cause at all — every block-removing verb and the protection list were re-checked and confirmed clean. Operator's own direct observation ("Chests that were full were no longer present when I returned") pointed outside the codebase; root cause was the live server's `mob_griefing` gamerule (creeper-explosion block destruction), left `true`. Fixed via RCON using the same Vaultwarden/paramiko pattern as `tools/hermes-game-server-monitor.py` — first attempt failed on a Brigadier parse error that looked like a connectivity problem but was actually this server's Minecraft 26.1.2 snake_case gamerule renaming (`mob_griefing`, not the legacy `mobGriefing`); confirmed `false` after correcting the name. No code changed — a server-config fact, not a repo regression. |
 | 1.19.0 | 2026-09-13 | New §21, direct request ("soldier personas need to..."). Audited the existing alarm/combat code first rather than guessing, and found four real gaps behind it: (1) `SQUAD_RESPONDER` was gated only by an env var, disconnected from `roles.js`'s own SOLDIER assignment — now derived from the role itself. (2) The two moments a bot most needs help (health-critical emergency, asleep-under-attack) never called `broadcastThreatAlert` at all — new shared `noteThreatSeen()` closes it for all three sites. (3) No death awareness existed in any form — new `broadcastDeathAlert` (position + best-guess killer) fires on every death, logged fleet-wide, with Soldiers securing the spot. (4) Soldier's own `priorities` list was pure advisory prompt text, never enforced — new `nextSoldierPriority()` (`index.js` 2.66.0) mirrors Builder's §15.6 deterministic-checklist shape: no weapon beats everything, then a nearby hostile, then falls through to the existing secondary-role lean for item (c). `equipment.js` 1.3.0 exports `hasWeapon()` for the check. |
+| 1.20.0 | 2026-09-13 | New §22, direct request ("rebalance the bots so they each have exactly one role... create [more] so every role has at least one bot"). Every `BOT_ROLES` secondary set to `null` (`roles.js` 1.4.0); three new bots (Nell/Artist, Wade/Explorer, Dale/Herder) built at full persona depth to own the three roles that previously existed only as somebody's secondary, growing the fleet from 6 to 9. Existing 6 bots' primaries left untouched rather than reassigned — redundant Soldier coverage (Mark+Luke) kept deliberately. Caught and fixed a real regression before shipping: `proposeFallbackDirective()`'s Mayor-fallback mechanism was gated on a secondary role field about to be nulled fleet-wide — decoupled into its own `MC_FALLBACK_COORDINATOR` env flag. Amy/Babs/Mark/Bob's `PROMPT.md` files cleaned of now-stale secondary-role prose rather than left to drift. |
