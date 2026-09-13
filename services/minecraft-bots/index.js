@@ -1,4 +1,38 @@
-// Version: 2.63.0
+// Version: 2.64.0
+//
+// 2.64.0 (2026-09-13) -- direct request: "look at the last 24 hours of logs... they seem to
+// mostly hallucinate their achievements, can't use doors, and are just generally ineffective
+// even during the daytime." Root-caused from real 24h log data (268 goal-level abandonments vs.
+// only 88 completions), not guessed. Found THREE real, independent bugs, one of them severe:
+// (1) THE dominant cause of daytime ineffectiveness, ~78% of all goal-blocked reasons in the
+// sample (207 of 266): planNextStep's and proposeOwnGoal's own prompts both still contained a
+// STALE "has NO ability to build or place actual structures... respond BLOCKED immediately"
+// paragraph, left over from before actions.js's real "build" verb existed (2026-09-07/08) and
+// never removed once it shipped. This directly CONTRADICTED the very same prompts' own "ACTION
+// BUILD" vocabulary entry a few lines later -- the model was told in one breath "you can't do
+// this" and in the next "here's how to do this," and consistently obeyed the more emphatic
+// refusal. Every shelter-related goal (a large fraction of all goals, since shelter is Builder's
+// own priority item #5 and a common freeform pick too) was being self-sabotaged before ever
+// trying. Corrected both prompts to accurately describe the real, working (if limited-to-one-
+// fixed-shape) capability instead of falsely denying it exists.
+// (2) Explains "can't use doors": mineflayer-pathfinder's own canOpenDoors was already correctly
+// enabled (2026-09-07) -- but mineflayer-collectblock (used by "mine" and "explore," almost
+// certainly the two most common daytime actions) builds its OWN separate, unconfigured
+// `Movements` instance and calls `pathfinder.setMovements()` with it on EVERY collect() call,
+// silently undoing canOpenDoors/swim-awareness/blocksCantBreak for the whole operation -- the
+// exact same bug class already fixed for mineflayer-pvp's attack() on 2026-09-11, never applied
+// here. Fixed the same way: `bot.collectBlock.movements = movements` right after the existing
+// `bot.pvp.movements` fix, so every future collect() call re-applies the correct instance.
+// (3) Explains "hallucinate their achievements" with hard evidence: "craft a beehive ... and
+// place it near home" was announced "goal complete" TWICE in the same 24h window while
+// nextBuilderPriority's own real world-state check still found zero beehives near home every
+// single cycle before and after both claims. Root cause: the existing DONE item-verification
+// (2.43.0) only ever checks whether the named item exists in INVENTORY -- true the instant she
+// CRAFTS a beehive, whether or not she ever actually walked home and placed it. New
+// builderPriorityItemSatisfied() re-verifies a Builder-priority goal's own real world condition
+// (the same check nextBuilderPriority() itself trusts) before accepting DONE for any of the six
+// "craft/build AND place near home" items, closing the gap between "possesses the item" and
+// "the compound directive actually happened."
 //
 // 2.63.0 (2026-09-12) -- direct report "still not functional" (crafting table not found, a
 // chest with sticks ignored, soldiers not responding to attacks). Traced through 6+ hours of
@@ -1165,11 +1199,29 @@ bot.once("spawn", async () => {
   // bot's own swim-aware `movements` (set just above) back out for stock Movements, which "can
   // walk across open water but can never change depth once already in it" (swim-movements.js's
   // own header). A drowned mob living underwater was therefore never actually reachable during
-  // "attack" specifically, even though every other action (goto, mine, flee, sleep) already used
-  // the correct swim-aware movements the whole time -- explains why this pattern never showed up
-  // against zombies/skeletons/creepers, only drowned. Pointing bot.pvp's own movements reference
-  // at the SAME SwimMovements instance makes every future attack() call re-apply the correct one.
+  // "attack" specifically -- explains why this pattern never showed up against zombies/
+  // skeletons/creepers, only drowned. Pointing bot.pvp's own movements reference at the SAME
+  // SwimMovements instance makes every future attack() call re-apply the correct one.
   bot.pvp.movements = movements;
+
+  // Real bug found live 2026-09-13 (direct report: 24h of logs show bots "can't use doors" and
+  // are "generally ineffective even during the daytime when there are no monsters nearby").
+  // canOpenDoors was already enabled above (2026-09-07) -- so the ORIGINAL claim just above this
+  // comment ("every other action already used the correct swim-aware movements the whole time")
+  // was simply wrong, never actually verified against every plugin. Confirmed by reading
+  // mineflayer-collectblock's own source (lib/CollectBlock.js): its constructor builds the EXACT
+  // same kind of separate, generic `this.movements = new Movements(bot)` mineflayer-pvp's own
+  // fix just above already had to work around, and collect() -- called by both "mine" and
+  // "explore," almost certainly the two most common daytime actions this fleet runs -- calls
+  // `this.bot.pathfinder.setMovements(this.movements)` on EVERY SINGLE invocation. That silently
+  // swapped the bot's own correctly-configured `movements` (canOpenDoors, swim-awareness,
+  // blocksCantBreak) back out for a stock, unconfigured instance for the full duration of every
+  // mining/exploring trip -- explaining doors specifically (undone every time a mining trip
+  // crossed one) and plausibly a real share of the broader "ineffective" pattern (bulldozing
+  // through functional blocks, refusing water crossings) during the single most common daytime
+  // activity. Same fix shape as bot.pvp.movements just above: point collectBlock's own reference
+  // at the SAME SwimMovements instance so every future collect() call re-applies the correct one.
+  bot.collectBlock.movements = movements;
 
   // Direct follow-up to "what other logic enhancements are available" -> cave-pathfinding cap:
   // real evidence from tonight's own OOM crashes (hermes-minecraft-triage.py's own log) traced
@@ -1978,10 +2030,13 @@ async function planNextStep(goal) {
           `material (e.g. no logs at all) rather than the item itself -- mine the raw material ` +
           `first instead of retrying the same craft.\n` +
           `She can place ONE utility block she's carrying (a furnace or crafting table, ACTION ` +
-          `PLACE) for her own use, but has NO ability to build or place actual structures. If the ` +
-          `goal is really about building/placing something bigger (a house, a base, a wall) ` +
-          `rather than gearing up/gathering/crafting a portable item, respond BLOCKED immediately ` +
-          `-- don't gather materials for a structure that can never actually get built.\n\n` +
+          `PLACE) for her own use, AND she can build a small fixed shelter (walls, a doorway, a ` +
+          `roof -- ACTION BUILD, see its own entry below) out of whatever solid block she has ` +
+          `the most of -- this is a REAL, working capability, do not claim otherwise or respond ` +
+          `BLOCKED for a goal ACTION BUILD can satisfy. Only respond BLOCKED for building if the ` +
+          `goal genuinely needs something bigger or differently-shaped than that one fixed ` +
+          `shelter (a real house, a base, a custom wall layout) -- that specific kind of building ` +
+          `is what's actually out of scope, not building in general.\n\n` +
           `Given the goal, her current gear/inventory, and what she's already tried below, you ` +
           `may reason briefly first -- AT MOST one short sentence, no matter how confusing or ` +
           `factually off the goal description sounds (reinterpret it charitably as the closest ` +
@@ -2253,6 +2308,33 @@ function nextBuilderPriority() {
   return pick;
 }
 
+// Real bug found live 2026-09-13 (direct report: bots "hallucinate their achievements"),
+// confirmed with hard evidence: "craft a beehive ... and place it near home" was announced
+// "goal complete" TWICE in the same 24h window, and EVERY builder-priority cycle before and
+// after each claim still found zero beehives near home. Root cause: parseGoalStep's own DONE
+// verification (2.43.0) checks whether the named item exists in inventory/equipped gear -- true
+// the moment she CRAFTS a beehive, regardless of whether she ever actually walked home and
+// placed it, since a crafted-but-unplaced item sits right there in her inventory satisfying that
+// check. Reuses the exact same real-world checks nextBuilderPriority() itself already trusts,
+// rather than a second, independently-drifting definition of "done" for these six items.
+function builderPriorityItemSatisfied(name) {
+  switch (name) {
+    case "crafting_table":
+    case "furnace":
+    case "chest":
+    case "beehive":
+      return countNearHome([name]) >= 1;
+    case "beds": {
+      const bedNames = Object.keys(bot.registry.blocksByName).filter((n) => n.endsWith("_bed"));
+      return countNearHome(bedNames, (block) => block?.getProperties?.().part === "head") >= 6;
+    }
+    case "shelter":
+      return hasShelterNearHome();
+    default:
+      return true; // not one of the six known items -- nothing real to re-check, don't block
+  }
+}
+
 async function proposeOwnGoal() {
   // §15.6: for a Builder-primary bot, the infrastructure checklist runs AHEAD of freeform
   // self-propose reasoning -- it's shared infrastructure other bots' own progress benefits from
@@ -2264,6 +2346,12 @@ async function proposeOwnGoal() {
     const priority = nextBuilderPriority();
     if (priority) {
       currentGoal = newGoal({ description: priority.directive, source: "self" });
+      // Real bug found live 2026-09-13 ("hallucinate their achievements"): tagged so the DONE
+      // handler below can re-verify against REAL world state (builderPriorityItemSatisfied())
+      // instead of trusting inventory possession alone -- see that check's own comment for the
+      // confirmed live evidence (a beehive announced "complete" twice while never actually
+      // placed near home).
+      currentGoal.builderPriorityItem = priority.name;
       await saveGoal(PERSONA_NAME, currentGoal);
       await broadcastGoalState("active", priority.directive);
       console.log(`[${USERNAME}] Builder priority goal (${priority.name}): ${priority.directive}`);
@@ -2317,13 +2405,16 @@ async function proposeOwnGoal() {
           `Minecraft mechanics -- e.g. planks/sticks/a table come from logs (never stone); ` +
           `ingots (iron/copper/gold) come from smelting raw ore at a furnace, which you CAN do, ` +
           `never from a crafting-table recipe. You can place a single utility block you're ` +
-          `carrying (a furnace or crafting table) for your own use, but have NO ability to build ` +
-          `or place actual structures -- never propose a goal about building/placing something ` +
-          `(a house, a base, a wall); stick to gearing up, gathering a resource, or crafting/` +
-          `smelting a portable item. Phrase the goal around the OUTCOME you want (e.g. "get some copper armor," ` +
+          `carrying (a furnace or crafting table) for your own use, and you CAN build a small ` +
+          `fixed shelter (walls, a doorway, a roof -- not a custom house/base design, just that ` +
+          `one shape) -- this is a real, working capability, don't claim otherwise. That said, ` +
+          `shelter/infrastructure goals are usually handled separately, so you don't need to ` +
+          `invent one yourself -- prefer gearing up, gathering a resource, or crafting/smelting ` +
+          `a portable item unless something building-shaped is genuinely the obvious next thing. ` +
+          `Phrase the goal around the OUTCOME you want (e.g. "get some copper armor," ` +
           `"stock up on iron") rather than one specific method, since more than one way to get ` +
-          `there might work -- but naming smelting/crafting as part of it is fine now, unlike ` +
-          `building, which is never possible. Respond with ONLY a short phrase naming the goal, ` +
+          `there might work -- naming smelting/crafting/the small fixed shelter as part of it is ` +
+          `all fine now. Respond with ONLY a short phrase naming the goal, ` +
           `in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}` +
           `${recentOutcomesNote}${otherGoalNote}${roleBiasNote()}`,
       },
@@ -2522,6 +2613,29 @@ async function goalTick() {
         bot.chat(await narrateAction(
           `giving up on "${currentGoal.description}" -- never actually made any real progress.`));
         recordGoalOutcome(currentGoal.description, "gave up", "claimed done with no real progress");
+        await broadcastGoalState("abandoned", currentGoal.description);
+        currentGoal = null;
+        await clearGoal(PERSONA_NAME);
+        return;
+      }
+
+      // Real bug found live 2026-09-13 ("hallucinate their achievements"), confirmed with hard
+      // evidence: a Builder-priority goal's item check just above only ever proves she HAS the
+      // named item -- true the instant she crafts a beehive/table/furnace/chest, whether or not
+      // she ever actually walked home and placed it. "craft a beehive ... and place it near
+      // home" was announced complete TWICE in the same 24h window; nextBuilderPriority's own
+      // real world-state check still found zero beehives near home every single cycle before
+      // and after both claims. builderPriorityItemSatisfied() re-checks the SAME real condition
+      // nextBuilderPriority() itself trusts (a world-placed block, or a real bed/shelter count),
+      // not inventory possession, before a compound "craft AND place" directive gets to announce
+      // success on the crafting half alone.
+      if (currentGoal.builderPriorityItem && !builderPriorityItemSatisfied(currentGoal.builderPriorityItem)) {
+        console.log(`[${USERNAME}] REJECTED DONE (claimed ${currentGoal.builderPriorityItem} ` +
+                    `done, but it's still not actually near home): ${currentGoal.description}`);
+        bot.chat(await narrateAction(
+          `not done yet on "${currentGoal.description}" -- it's still not actually there.`));
+        recordGoalOutcome(currentGoal.description, "gave up",
+          `claimed done but ${currentGoal.builderPriorityItem} still not near home`);
         await broadcastGoalState("abandoned", currentGoal.description);
         currentGoal = null;
         await clearGoal(PERSONA_NAME);

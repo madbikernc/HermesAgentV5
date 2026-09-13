@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots — Design
 
-**Version:** 1.15.0
+**Version:** 1.16.0
 **Status:** Design only — nothing in this document is built. Status legend (same convention as
 `firmament-fleet-target-architecture.md`): `[DECIDED]` — operator made an explicit choice · `[PROPOSED]` —
 design recommendation, not yet ratified · `[UNKNOWN]` — needs discovery before build · `[RISK]` — flagged
@@ -937,6 +937,51 @@ place X" Builder-priority directives, easy to conflate from the outside). Flagge
 than invented a fix for a mechanism (`craft`'s own table-detection) that showed no evidence of
 being broken when actually read.
 
+## 18. Live incident: stale "can't build" prompt text sabotaging daytime effectiveness (2026-09-13)
+
+Direct report: "look at the last 24 hours of logs from the minecraft botworld, they seem to
+mostly hallucinate their achievements, can't use doors, and are just generally ineffective even
+during the daytime when there are no monsters nearby. only worry about their capabilities in the
+daytime for now." Root-caused from real 24h log data (268 goal-level abandonments vs. 88
+completions — a prior back-of-envelope 2332:88 read was wrong, mostly nighttime self-defense
+noise mixed in by an over-broad grep), not guessed. Three independent bugs found, one severe.
+
+**The dominant bug — stale prompt text, ~78% of all goal-blocked reasons.** Both `planNextStep`
+and `proposeOwnGoal`'s prompts still contained a paragraph reading "has NO ability to build or
+place actual structures... respond BLOCKED immediately," left over from before `actions.js`'s
+real `build` verb existed (2026-09-07/08) and never removed once it shipped. This directly
+**contradicted** the same prompts' own `ACTION BUILD` vocabulary entry a few lines later — the
+model was told "you can't do this" and "here's how to do this" in the same message, and
+consistently obeyed the more emphatic refusal. Sample of the actual "goal blocked" reasons logged
+(266 total in 24h): 43+30+26+16+13+10+9+9+8+6+6+6+6+5+5+5+4 = 207 (78%) were paraphrases of
+"cannot build structures, only place utility blocks." Every shelter-related goal — Builder's own
+priority item #5, plus a common freeform pick — was being self-sabotaged before ever trying.
+**Fixed**: both prompts now accurately describe the real, working (if limited-to-one-fixed-shape)
+capability instead of denying it exists (`index.js` 2.64.0).
+
+**"Can't use doors" — a second, unrelated instance of an already-known bug class.**
+`mineflayer-pathfinder`'s `canOpenDoors` was already correctly enabled (2026-09-07). But
+`mineflayer-collectblock` (used by `mine`/`explore` — almost certainly the two most common
+daytime actions) builds its own separate, unconfigured `Movements` instance and calls
+`pathfinder.setMovements()` with it on *every* `collect()` call — silently undoing
+`canOpenDoors`/swim-awareness/`blocksCantBreak` for the whole operation. The exact same bug class
+already fixed for `mineflayer-pvp`'s `attack()` (2026-09-11), never applied here. Same fix:
+`bot.collectBlock.movements = movements` right after the existing `bot.pvp.movements` line.
+
+**"Hallucinate their achievements" — confirmed with hard, repeatable evidence.** "craft a beehive
+... and place it near home" was announced "goal complete" *twice* in the same 24h window, while
+`nextBuilderPriority()`'s own real world-state check still found zero beehives near home every
+cycle before and after both claims. The existing DONE item-verification (§ earlier, 2.43.0) only
+ever checks inventory — true the instant she crafts a beehive, regardless of whether she ever
+walked home and placed it. New `builderPriorityItemSatisfied()` re-verifies the real world
+condition (reusing `nextBuilderPriority()`'s own checks) before accepting DONE for any of the six
+"craft/build AND place near home" items.
+
+**Scoped deliberately to daytime, per the operator's own framing.** Self-defense/combat behavior
+was not touched in this pass — the prior incident (§17) already addressed the nighttime
+mob-siege spiral, and mixing that signal back in was exactly the mistake in this incident's own
+first (wrong) log-count attempt.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -957,3 +1002,4 @@ being broken when actually read.
 | 1.13.0 | 2026-09-11 | Direct request "fix the shelter check, the pen herding, and the dynamic skill library": (1) real bug fixed in `hasShelterNearHome()` — it assumed an exact `bot.spawnPoint` anchor, but `gohome`'s own 3-block-radius goal meant a real shelter could go unrecognized; now searches a small radius and checks for a hollow interior too (`index.js` 2.61.0). (2) New `herd_to_pen` verb closes the animal-containment gap opened in 1.12.0, reusing vanilla's own tempt-follow AI (`actions.js` 1.50.0). (3) §14 turned out to be badly stale — the skill library was already fully built and live (86 real skills, verified via a live search query) before this session even started; corrected every status tag in that section from `[PROPOSED]`/"not started" to `[BUILT]`, and fixed the one real integration bug found (`SKILL_ACTION_VERBS` was missing every verb this session added). |
 | 1.14.0 | 2026-09-11 | New §16: two enhancements from a Project Sid research pass ("what other ideas... from Project Sid or similar research" -> "so both"). (1) Chat/action coherence: `generateReply()`'s CHAT-reply path had no grounding in real goal state, unlike `classifyIntent`'s own ACTION/GOAL branches — new `currentActivityNote()` closes it (`index.js` 2.62.0). (2) Adaptive role-leaning: new `otherBotActivityAt` (timestamped for free alongside `otherBotGoals`) and `lastRoleActivityAt()` feed `roleBiasNote()` an adaptive nudge toward a neglected secondary role, echoing Sid's own finding that specialization required tracking other agents' activity. Economy/trading and government/voting considered and explicitly not pursued — §16.3 has the reasoning. |
 | 1.15.0 | 2026-09-12 | New §17: a live incident, root-caused from 6+ hours of real logs rather than guessed. Direct report ("still not functional") named three symptoms; found one real root cause behind most of it — `nextBuilderPriority()`'s infinite loop on a stuck item (furnace) meant beds never got attempted, causing a real sleep-deprivation phantom swarm (1473 threat-detections in 2 hours) that then overwhelmed otherwise-working self-defense/squad-response. Fixed: a per-item stall counter (`index.js` 2.63.0) and `checkHomeLighting()`'s own bed/spawnPoint bootstrapping catch-22. Independently fixed the actual chest bug (`tryTakeFromNearbyChest()`'s single-slot threshold, `actions.js` 1.51.0). The literal "crafting table not found" claim had no matching log evidence in the window searched — flagged honestly, not papered over with an unverified fix. |
+| 1.16.0 | 2026-09-13 | New §18: another live incident, scoped to daytime per the operator's own request. Found the dominant cause of "generally ineffective" — stale "NO ability to build... respond BLOCKED" prompt text in both `planNextStep` and `proposeOwnGoal`, directly contradicting their own `ACTION BUILD` vocabulary a few lines later, self-sabotaging ~78% of all goal-blocked outcomes (`index.js` 2.64.0). "Can't use doors" traced to `mineflayer-collectblock` silently resetting `pathfinder`'s movements on every `mine`/`explore` call — the same bug class already fixed for `mineflayer-pvp`, never applied here. "Hallucinate their achievements" confirmed with hard evidence (a beehive announced complete twice while never actually placed) and fixed with `builderPriorityItemSatisfied()`, re-verifying real world state instead of trusting inventory possession for compound "craft AND place" directives. |
