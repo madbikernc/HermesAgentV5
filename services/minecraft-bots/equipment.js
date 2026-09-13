@@ -1,4 +1,9 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-09-13) -- direct request ("soldier personas need to... prioritize a) getting a
+// weapon"): WEAPON_SUFFIXES and a new hasWeapon(bot) exported so index.js's new
+// nextSoldierPriority() can ask "does she actually have one" using the exact same definition
+// equipBestWeapon already trusts, rather than inventing a second list that could drift.
 //
 // 1.2.0 (2026-09-07) -- direct request ("next set of autonomy" -> gear durability awareness):
 // equipBestArmor/equipBestWeapon compared material tier alone, so a nearly-broken diamond
@@ -70,7 +75,14 @@ const ARMOR_SLOTS = [
   { suffix: "_boots", slot: "feet" },
 ];
 
-const WEAPON_SUFFIXES = ["_sword", "_axe"];
+export const WEAPON_SUFFIXES = ["_sword", "_axe"];
+
+// Exported 2026-09-13 for nextSoldierPriority() (index.js) -- a Soldier's own deterministic
+// "do you actually have a weapon" check needs the exact same definition equipBestWeapon already
+// uses, not a second, driftable one.
+export function hasWeapon(bot) {
+  return bot.inventory.items().some((i) => WEAPON_SUFFIXES.some((s) => i.name.endsWith(s)));
+}
 
 export function loadEquipmentPlugins(bot) {
   bot.loadPlugin(toolPkg.plugin);

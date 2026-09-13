@@ -1072,6 +1072,62 @@ chest disappearances recur after this change, `mob_griefing` was not the (or not
 and the investigation should resume from there, not from the bots' own code, which was already
 checked and cleared in this pass.
 
+## 21. Soldier role: real combat priority enforcement, squad response tied to role, death awareness (2026-09-13)
+
+Direct request: "the solider personas need to: 1) be responsive to calls for help 2) be aware
+when fellow bots are killed by a mob 3) prioritize a) getting a weapon (from chest or from
+another bot) b) killing monsters c) secondary roles. non-soldier bots need to: 1) call for help
+properly." Investigated the existing code first (an audit, not a guess) and found the call-for-
+help mechanism (`broadcastThreatAlert`/`respondToSquadCall`, §17) already existed and worked --
+but four real, distinct gaps behind the operator's report.
+
+**Gap 1 -- squad response wasn't actually tied to the role system.** `SQUAD_RESPONDER` was gated
+purely by an env var (`MC_SQUAD_RESPONDER=true`, set only on Mark/Luke's unit files),
+structurally independent of `roles.js`'s own `SOLDIER` assignment -- a bot could be assigned
+Soldier and never respond to a squad call unless someone separately remembered to also flip that
+env var. Now derived from `myRole.primary`/`secondary === ROLES.SOLDIER` (`index.js` 2.66.0), env
+var kept only as an explicit override for a non-Soldier bot the operator still wants on
+squad-response duty.
+
+**Gap 2 -- non-Soldiers didn't always call for help.** `checkSelfDefense`'s own idle-tick check
+was the ONLY place that ever called `broadcastThreatAlert` -- the true health-critical emergency
+interrupt (`bot.on("health")`, the moment a bot is closest to death) and `checkSleepingThreat` (a
+hostile creeping up on a sleeping bot) never called for help at all, they just handled it (or
+tried to) silently. New shared `noteThreatSeen()` funnels all three threat-detection sites through
+one call-for-help path instead of three drifting copies, directly closing "non-soldier bots need
+to call for help properly."
+
+**Gap 3 -- no death awareness existed in any form.** `bot.on("death")` only ever broadcast a
+"goal abandoned" message -- no signal she'd actually DIED (as opposed to giving up on a goal for
+any other reason), and no position. New `broadcastDeathAlert` (type `"death"`, position, and a
+best-guess killer name from `noteThreatSeen`'s own `lastKnownThreat` if seen within the last 10s,
+otherwise honestly `"unknown"` rather than fabricating a cause) fires on every death. Every bot
+logs it; a `SQUAD_RESPONDER` within `SQUAD_ASSIST_RANGE` goes to secure the spot, reusing
+`respondToSquadCall` completely unchanged (it only ever reads `payload.x/y/z`).
+
+**Gap 4 -- Soldier's own priority list was advisory text, never enforced.** `roles.js`'s
+`priorities` array for Soldier (weapon, then combat) went through `priorityListNote()` exactly
+like Miner/Artist/Explorer's own lists -- "an ordered SUGGESTION... never a hard override, never
+checked against real world state," by that function's own explicit 1.2.0 design note. New
+`nextSoldierPriority()` (`index.js` 2.66.0) mirrors `nextBuilderPriority()`'s own deterministic,
+world-checked-ahead-of-freeform shape (§15.6) instead of inventing a third pattern: for a
+Soldier-primary bot, (a) no weapon in inventory (`equipment.js`'s new exported `hasWeapon()`)
+beats everything -- the directive text nudges the existing `ACTION LOOT`/`ACTION REQUEST`/craft
+vocabulary (already real, already wired, see §19's chest registry and the existing bot-to-bot item
+request/give mechanism) to find one from a chest, a fleet-mate, or by crafting, in that order; (b)
+otherwise a nearby non-flee-only hostile (`SOLDIER_PATROL_RANGE=32`, wider than
+`SELF_DEFENSE_RANGE` -- proactive hunting, not just reactive self-defense) beats everything else;
+(c) "secondary roles" needed no new code at all -- returning `null` on both checks falls straight
+through to the existing freeform reasoning, where `roleBiasNote()` already leans toward
+`myRole.secondary`. No stall counter like Builder's own: a weapon either exists or it doesn't, and
+a hostile either is or isn't in range, on any given tick -- nothing here can get stuck the way a
+multi-step blocker (furnace needing cobblestone needing a pickaxe) required one for.
+
+**Scope note.** `nextSoldierPriority()`'s override only applies when Soldier is a bot's PRIMARY
+role (Mark, Luke today), mirroring Builder's own primary-only precedent -- a bot with Soldier as
+a secondary lean gets the advisory prompt text, same as before, not a hard override competing
+with her own primary's work.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1095,3 +1151,4 @@ checked and cleared in this pass.
 | 1.16.0 | 2026-09-13 | New §18: another live incident, scoped to daytime per the operator's own request. Found the dominant cause of "generally ineffective" — stale "NO ability to build... respond BLOCKED" prompt text in both `planNextStep` and `proposeOwnGoal`, directly contradicting their own `ACTION BUILD` vocabulary a few lines later, self-sabotaging ~78% of all goal-blocked outcomes (`index.js` 2.64.0). "Can't use doors" traced to `mineflayer-collectblock` silently resetting `pathfinder`'s movements on every `mine`/`explore` call — the same bug class already fixed for `mineflayer-pvp`, never applied here. "Hallucinate their achievements" confirmed with hard evidence (a beehive announced complete twice while never actually placed) and fixed with `builderPriorityItemSatisfied()`, re-verifying real world state instead of trusting inventory possession for compound "craft AND place" directives. |
 | 1.17.0 | 2026-09-13 | New §19, direct follow-up to answering "do bots check world memory for chests/tables/resources?" honestly (partially, with real gaps) with "extend... to *any* resource or crafted object." `getResourceBlockNames()` (`actions.js` 1.52.0) replaces a hand-picked 4-item list with every real ore/log this server's registry has. Found and fixed a second, separate bug while extending it: the scout-broadcast receiver never actually checked the requested resource, only logged its name. New `known_chests.json` registry gives chest contents real structured tracking (not a RAG note) — every real interaction snapshots current truth, so "remembering" and "redacting" are the same operation. Doors/trapdoors/fence gates finally added to `isProtectedBlockName()`, closing the same "diggable by the library's own definition" gap already closed for furnaces/beds/chests. |
 | 1.18.0 | 2026-09-13 | New §20: direct follow-up report ("still detroying chests") turned out to have no bot-code cause at all — every block-removing verb and the protection list were re-checked and confirmed clean. Operator's own direct observation ("Chests that were full were no longer present when I returned") pointed outside the codebase; root cause was the live server's `mob_griefing` gamerule (creeper-explosion block destruction), left `true`. Fixed via RCON using the same Vaultwarden/paramiko pattern as `tools/hermes-game-server-monitor.py` — first attempt failed on a Brigadier parse error that looked like a connectivity problem but was actually this server's Minecraft 26.1.2 snake_case gamerule renaming (`mob_griefing`, not the legacy `mobGriefing`); confirmed `false` after correcting the name. No code changed — a server-config fact, not a repo regression. |
+| 1.19.0 | 2026-09-13 | New §21, direct request ("soldier personas need to..."). Audited the existing alarm/combat code first rather than guessing, and found four real gaps behind it: (1) `SQUAD_RESPONDER` was gated only by an env var, disconnected from `roles.js`'s own SOLDIER assignment — now derived from the role itself. (2) The two moments a bot most needs help (health-critical emergency, asleep-under-attack) never called `broadcastThreatAlert` at all — new shared `noteThreatSeen()` closes it for all three sites. (3) No death awareness existed in any form — new `broadcastDeathAlert` (position + best-guess killer) fires on every death, logged fleet-wide, with Soldiers securing the spot. (4) Soldier's own `priorities` list was pure advisory prompt text, never enforced — new `nextSoldierPriority()` (`index.js` 2.66.0) mirrors Builder's §15.6 deterministic-checklist shape: no weapon beats everything, then a nearby hostile, then falls through to the existing secondary-role lean for item (c). `equipment.js` 1.3.0 exports `hasWeapon()` for the check. |

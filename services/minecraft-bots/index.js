@@ -1,4 +1,38 @@
-// Version: 2.65.0
+// Version: 2.66.0
+//
+// 2.66.0 (2026-09-13) -- direct request: "the soldier personas need to: 1) be responsive to
+// calls for help 2) be aware when fellow bots are killed by a mob 3) prioritize a) getting a
+// weapon... b) killing monsters c) secondary roles. non-soldier bots need to: 1) call for help
+// properly." Investigated the existing alarm/combat code first (audit, not guesswork) and found
+// the call-for-help mechanism itself already existed and worked (broadcastThreatAlert/
+// respondToSquadCall) -- but four real gaps behind it:
+// (1) SQUAD_RESPONDER (who actually answers a call for help) was gated ONLY by an env var,
+// structurally independent of roles.js's own SOLDIER assignment -- a bot could be given the
+// Soldier role and still never respond unless someone also remembered to set
+// MC_SQUAD_RESPONDER=true on her unit file. Now derived from myRole.primary/secondary === SOLDIER
+// (env var kept as an explicit override), so "responsive to calls for help" is finally a real
+// property of the role, not a second, disconnected switch.
+// (2) "call for help properly" (non-soldiers): the health-critical emergency interrupt
+// (bot.on("health"), the truest near-death case) and checkSleepingThreat (a hostile creeping up
+// on a sleeping bot) never called broadcastThreatAlert at all -- only checkSelfDefense's own
+// calmer idle-tick check did. The two moments a bot most needs the fleet's help were silent. New
+// shared noteThreatSeen() funnels all three sites through one call-for-help path instead of three
+// drifting copies.
+// (3) Death awareness didn't exist in any form -- bot.on("death") only ever broadcast a "goal
+// abandoned" message with no signal she'd DIED or where. New broadcastDeathAlert (type: "death",
+// position, best-guess killer from noteThreatSeen's own lastKnownThreat if seen within
+// DEATH_THREAT_ATTRIBUTION_MS, else honestly "unknown") fires on every death; every bot logs it,
+// and a SQUAD_RESPONDER within SQUAD_ASSIST_RANGE goes to secure the spot (reuses
+// respondToSquadCall unchanged -- it only ever reads x/y/z).
+// (4) Soldier's own roles.js `priorities` (weapon, then combat) were pure advisory prompt text
+// per priorityListNote()'s own documented design -- "never a hard override... free to ignore."
+// New nextSoldierPriority() (mirrors nextBuilderPriority's §15.6 deterministic-checklist shape)
+// makes (a)/(b) real, world-checked overrides ahead of freeform self-propose for a Soldier-
+// primary bot: no weapon in inventory (equipment.js's new hasWeapon()) beats everything, then a
+// nearby non-flee-only hostile (SOLDIER_PATROL_RANGE=32, proactive -- not just reactive
+// self-defense) beats everything else; (c) "secondary roles" needed no new code, since returning
+// null on both just falls through to the existing freeform reasoning where roleBiasNote() already
+// leans toward myRole.secondary.
 //
 // 2.65.0 (2026-09-13) -- direct request: "extend resource sharing memory and scouting to *any*
 // resource or crafted object... They need to OPEN doors not destroy them as well" (actions.js's
@@ -994,7 +1028,7 @@ import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
 import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
-import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
+import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements } from "./swim-movements.js";
 import { findSkill, runSkill, recordSkillOutcome, authorSkillFromGoal } from "./skills.js";
@@ -1453,6 +1487,35 @@ async function broadcastThreatAlert(threatName) {
   } catch (err) {
     console.error(`[${USERNAME}] threat alert broadcast failed:`, err.message);
   }
+}
+
+// Direct request, 2026-09-13 ("soldier personas need to... be aware when fellow bots are killed
+// by a mob") -- a real, confirmed gap: bot.on("death") below only ever broadcast a "goal
+// abandoned" message, which carries no signal that she DIED (as opposed to giving up on a goal
+// for any other reason) and no position, so nothing could react any differently. Fired from
+// bot.on("death") itself (every death, including a rapid-succession one that skips gear
+// recovery) using the death POSITION (bot.entity.position at the moment of death, before
+// respawn), same shape as broadcastThreatAlert's payload plus a best-guess killer name from
+// lastKnownThreat -- "unknown" when nothing hostile was actually seen recently (e.g. fall damage,
+// drowning), which is honest rather than fabricating a cause.
+async function broadcastDeathAlert(position, killerName) {
+  try {
+    await buzzPublish(AGENT_ID, "minecraft-coordination", JSON.stringify({
+      type: "death", killer: killerName,
+      x: position.x, y: position.y, z: position.z,
+    }));
+  } catch (err) {
+    console.error(`[${USERNAME}] death alert broadcast failed:`, err.message);
+  }
+}
+
+// Shared by the "threat" and "death" listener branches below -- both only care about "is this
+// close enough to actually help with," the exact same SQUAD_ASSIST_RANGE bound.
+function withinSquadAssistRange(payload) {
+  const dx = bot.entity.position.x - payload.x;
+  const dy = bot.entity.position.y - payload.y;
+  const dz = bot.entity.position.z - payload.z;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz) <= SQUAD_ASSIST_RANGE;
 }
 
 // Direct request, 2026-09-11: "if one bot is looking for a specific resource, it should (1) look
@@ -2368,6 +2431,39 @@ function builderPriorityItemSatisfied(name) {
   }
 }
 
+// Direct request, 2026-09-13 ("soldier personas need to... prioritize a) getting a weapon...
+// b) killing monsters c) secondary roles"). Mirrors nextBuilderPriority()'s own deterministic,
+// world-checked-ahead-of-freeform shape (§15.6) instead of a third pattern -- a Soldier's own two
+// hard priorities are exactly as concretely checkable against real state (inventory for a
+// weapon, nearestHostile for a monster) as Builder's checklist items are. No stall counter like
+// Builder's: a weapon either exists in inventory or it doesn't, and a hostile either is or isn't
+// within patrol range, on any given tick -- nothing here can get "stuck" waiting on the kind of
+// multi-step blocker (furnace needing cobblestone needing a pickaxe) that made one necessary
+// there. Item (c), "secondary roles," needs no code of its own here: returning null on both
+// checks falls straight through to proposeOwnGoal's normal freeform reasoning below, where
+// roleBiasNote() already leans toward myRole.secondary.
+const SOLDIER_PATROL_RANGE = 32; // wider than SELF_DEFENSE_RANGE -- a Soldier hunts, not just reacts
+
+function nextSoldierPriority() {
+  if (!hasWeapon(bot)) {
+    return {
+      name: "weapon",
+      directive: "you have no sword or axe -- get one before anything else. Check a nearby or " +
+        "remembered chest first, ask the fleet if anyone has a spare to give you, and if neither " +
+        "works, gather materials and craft one.",
+    };
+  }
+  // FLEE_ONLY_MOBS excluded deliberately -- checkSelfDefense/respondToSquadCall's own established
+  // fix already found that melee-attacking a flyer just hangs holding arbiter control for the
+  // full ACTION_TIMEOUT_MS with no real chance of landing a hit; proactively picking one as a
+  // self-propose target would walk straight into the same dead end.
+  const threat = nearestHostile(bot, SOLDIER_PATROL_RANGE);
+  if (threat && !FLEE_ONLY_MOBS.has(threat.name)) {
+    return { name: "monster", directive: `hunt down and kill the nearby ${threat.name}.` };
+  }
+  return null; // no hard priority right now -- fall through to freeform (secondary-role lean included)
+}
+
 async function proposeOwnGoal() {
   // §15.6: for a Builder-primary bot, the infrastructure checklist runs AHEAD of freeform
   // self-propose reasoning -- it's shared infrastructure other bots' own progress benefits from
@@ -2389,6 +2485,25 @@ async function proposeOwnGoal() {
       await broadcastGoalState("active", priority.directive);
       console.log(`[${USERNAME}] Builder priority goal (${priority.name}): ${priority.directive}`);
       bot.chat(await narrateAction(`getting the basics set up: ${priority.directive}.`));
+      return;
+    }
+  }
+
+  // Direct request, 2026-09-13: a Soldier-primary bot's own weapon/monster checklist runs AHEAD
+  // of freeform self-propose the same way Builder's does just above -- unlike Builder's, this
+  // isn't shared infrastructure, but "she has no way to fight" and "a hostile is loose nearby"
+  // are exactly the kind of universal-safety concern roleBiasNote() itself already says comes
+  // first regardless of role; making it a real override here (not just advisory prompt text)
+  // closes the gap the operator called out directly: roles.js's own `priorities` array for
+  // Soldier was never anything more than a suggestion the model was free to ignore.
+  if (myRole?.primary === ROLES.SOLDIER) {
+    const priority = nextSoldierPriority();
+    if (priority) {
+      currentGoal = newGoal({ description: priority.directive, source: "self" });
+      await saveGoal(PERSONA_NAME, currentGoal);
+      await broadcastGoalState("active", priority.directive);
+      console.log(`[${USERNAME}] Soldier priority goal (${priority.name}): ${priority.directive}`);
+      bot.chat(await narrateAction(`standing guard duty: ${priority.directive}`));
       return;
     }
   }
@@ -3234,7 +3349,17 @@ const SELF_DEFENSE_RANGE = parseInt(process.env.MC_SELF_DEFENSE_RANGE || "12", 1
 // abandoning a gathering run for a spider three biomes away would be a net loss, not backup.
 // Mirrors MC_SELF_DEFENSE_FLEE_HEALTH/RANGE's own "same code, per-bot tuning via each unit's own
 // Environment= lines" pattern, set true for Mark/Luke only.
-const SQUAD_RESPONDER = process.env.MC_SQUAD_RESPONDER === "true";
+//
+// Direct request, 2026-09-13 ("soldier personas need to... be responsive to calls for help"): a
+// real, confirmed gap -- this used to be gated ONLY by the env var, structurally independent of
+// roles.js's own SOLDIER assignment. A bot could be given the Soldier role and still never
+// respond to a squad call unless someone separately remembered to also set
+// MC_SQUAD_RESPONDER=true on her unit file; today that happens to line up for Mark/Luke, but
+// nothing enforced it. Now derived from the role assignment itself (primary OR secondary --
+// backing up the fleet is exactly what a secondary-Soldier lean means) with the env var kept as
+// an explicit override for a non-Soldier bot the operator still wants on squad-response duty.
+const SQUAD_RESPONDER = process.env.MC_SQUAD_RESPONDER === "true" ||
+  myRole?.primary === ROLES.SOLDIER || myRole?.secondary === ROLES.SOLDIER;
 // No point racing across half the map for a fight that's very likely already over by the time
 // she'd arrive -- bounded to a real, reachable-in-time assist radius.
 const SQUAD_ASSIST_RANGE = 48;
@@ -3243,6 +3368,26 @@ const SQUAD_ASSIST_RANGE = 48;
 const SQUAD_ALERT_COOLDOWN_MS = 15_000;
 let lastSquadAlertAt = 0;
 let squadResponseInFlight = false;
+
+// Direct request, 2026-09-13 ("non-soldier bots need to call for help properly"). Real, confirmed
+// gap found while adding death-awareness below: checkSelfDefense's own idle-tick threat detection
+// was the ONLY place that ever called broadcastThreatAlert -- the two situations where a bot most
+// needs the fleet's help, the true health-critical emergency interrupt (bot.on("health") below)
+// and a hostile creeping up on her while she's asleep (checkSleepingThreat), never called for
+// help at all, they just handled it (or tried to) alone. All three threat-detection sites now
+// funnel through this one function instead of three drifting copies of the same cooldown check.
+// Also doubles as the source of truth for "who probably just killed her" (lastKnownThreat,
+// consumed by bot.on("death") below) -- freshness for that purpose is tracked independently of
+// the alert's own spam-prevention cooldown, since a recent sighting is still a good guess even if
+// an alert for it was suppressed a few seconds ago.
+let lastKnownThreat = null;
+function noteThreatSeen(threatName) {
+  lastKnownThreat = { name: threatName, at: Date.now() };
+  if (Date.now() - lastSquadAlertAt > SQUAD_ALERT_COOLDOWN_MS) {
+    lastSquadAlertAt = Date.now();
+    broadcastThreatAlert(threatName);
+  }
+}
 
 // Direct report, 2026-09-08 ("they still don't seem to react to a threatening creature"). Real,
 // confirmed gap: this used to be gated on !acting, same as every other idle-tick check here --
@@ -3270,10 +3415,7 @@ async function checkSelfDefense() {
   selfDefenseInFlight = true;
   console.log(`[${USERNAME}] self-defense: threat detected (${threat.name}) -- force-cancelling ` +
               `current action to respond`);
-  if (Date.now() - lastSquadAlertAt > SQUAD_ALERT_COOLDOWN_MS) {
-    lastSquadAlertAt = Date.now();
-    broadcastThreatAlert(threat.name);
-  }
+  noteThreatSeen(threat.name);
 
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.SELF_DEFENSE);
   if (!handle) {
@@ -4053,15 +4195,25 @@ bot.once("spawn", () => {
           }
         }
       } else if (payload.type === "threat" && SQUAD_RESPONDER && !squadResponseInFlight) {
-        const dx = bot.entity.position.x - payload.x;
-        const dy = bot.entity.position.y - payload.y;
-        const dz = bot.entity.position.z - payload.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist <= SQUAD_ASSIST_RANGE) {
+        if (withinSquadAssistRange(payload)) {
           console.log(`[${USERNAME}] squad response: ${msg.from_agent} under attack (${payload.name}) ` +
-                      `${dist.toFixed(0)} blocks away -- moving to assist`);
+                      `-- moving to assist`);
           respondToSquadCall(payload).catch((err) =>
             console.error(`[${USERNAME}] squad response failed:`, err.message));
+        }
+      } else if (payload.type === "death") {
+        // Direct request, 2026-09-13 ("be aware when fellow bots are killed by a mob"). Every
+        // bot logs it (cheap, universal awareness -- same "costs nothing, might as well be
+        // universal" reasoning broadcastThreatAlert's own header already uses); only a
+        // SQUAD_RESPONDER actually goes to secure the spot, reusing respondToSquadCall as-is
+        // since it only ever reads payload.x/y/z -- whatever killed her may well still be right
+        // there.
+        console.log(`[${USERNAME}] heard ${msg.from_agent} was killed (likely by ${payload.killer})`);
+        if (SQUAD_RESPONDER && !squadResponseInFlight && withinSquadAssistRange(payload)) {
+          console.log(`[${USERNAME}] squad response: ${msg.from_agent} was killed by ` +
+                      `${payload.killer} -- moving to secure the area`);
+          respondToSquadCall(payload).catch((err) =>
+            console.error(`[${USERNAME}] squad response (death) failed:`, err.message));
         }
       } else if (payload.type === "request" && !pendingGiveRequest) {
         // Only agrees to fulfill one request at a time (first-come-first-served) -- simple and
@@ -4117,8 +4269,19 @@ let lastDeathAt = 0;
 const MAX_RECOVERY_ATTEMPTS = parseInt(process.env.MC_MAX_RECOVERY_ATTEMPTS || "3", 10);
 const RAPID_DEATH_WINDOW_MS = 60_000;
 
+// A sighting older than this is too stale to blame for THIS death -- e.g. a zombie noticed a
+// minute ago that wandered off before something else (fall, drowning, a different mob she never
+// saw) actually killed her. "unknown" is the honest answer once lastKnownThreat ages out.
+const DEATH_THREAT_ATTRIBUTION_MS = 10_000;
+
 bot.on("death", () => {
   const now = Date.now();
+  // bot.entity.position is still the death location at this point, before respawn repositions
+  // her -- same assumption deathPosition's own capture just below already relies on.
+  const killerGuess = (lastKnownThreat && now - lastKnownThreat.at <= DEATH_THREAT_ATTRIBUTION_MS)
+    ? lastKnownThreat.name : "unknown";
+  broadcastDeathAlert(bot.entity.position, killerGuess);
+
   recoveryAttempts = (now - lastDeathAt <= RAPID_DEATH_WINDOW_MS) ? recoveryAttempts + 1 : 1;
   lastDeathAt = now;
 
@@ -4133,7 +4296,8 @@ bot.on("death", () => {
     return;
   }
   deathPosition = bot.entity.position.clone();
-  console.log(`[${USERNAME}] died at ${deathPosition} (${recoveryAttempts} deaths in quick succession)`);
+  console.log(`[${USERNAME}] died at ${deathPosition} -- likely killed by ${killerGuess} ` +
+    `(${recoveryAttempts} deaths in quick succession)`);
 });
 
 bot.on("spawn", () => {
@@ -4248,6 +4412,7 @@ bot.on("health", () => {
   emergencyInFlight = true;
   console.log(`[${USERNAME}] EMERGENCY: health critical (${bot.health}) with ${threat.name} ` +
               `nearby -- force-cancelling current action to flee`);
+  noteThreatSeen(threat.name);
   // Real gap found live, 2026-09-07 ("they don't seem to be fighting back... when woken up from
   // sleeping"): the force-cancel primitives alone don't touch sleep. The in-flight "sleep"
   // performAction call holds control for its ENTIRE duration (until the real 'wake' event or
@@ -4427,6 +4592,7 @@ async function checkSleepingThreat() {
   if (!threat) return;
 
   console.log(`[${USERNAME}] threat while sleeping (${threat.name}) -- waking up to respond`);
+  noteThreatSeen(threat.name);
   try {
     await bot.wake();
   } catch (err) {

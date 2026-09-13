@@ -1,4 +1,15 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-09-13) -- direct request ("soldier personas need to... prioritize a) weapon
+// b) killing monsters c) secondary roles"): SOLDIER's own `priorities` array below (items 1-2)
+// is no longer purely advisory for a Soldier-PRIMARY bot -- index.js's new nextSoldierPriority()
+// now enforces them as a real, world-checked override ahead of freeform self-propose, the same
+// way Builder's own list already was (§15.6). Item 3, guard duty, stays advisory text here (no
+// crisp "done" signal the way "has a weapon"/"a hostile is nearby" are) but is effectively
+// superseded by the new deterministic monster-hunting check for a Soldier-primary bot in
+// practice. Domain text's "responds to alarm calls" is also no longer just descriptive --
+// index.js's SQUAD_RESPONDER is now derived from this role assignment (primary or secondary)
+// instead of a structurally separate env var nobody was required to keep in sync with it.
 //
 // 1.2.0 (2026-09-11) -- direct follow-up ("what's next" -> "2"): four roles (Miner, Artist,
 // Explorer, Soldier) gained a `priorities` array, closing §15.8's "whether the other roles get
