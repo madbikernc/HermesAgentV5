@@ -1,4 +1,33 @@
-// Version: 1.51.0
+// Version: 1.52.0
+//
+// 1.52.0 (2026-09-13) -- direct request: "extend resource sharing memory and scouting to *any*
+// resource or crafted object. remember what is in chests when someone opens it. if someone takes
+// the item out of a chest, redact it from global memory. They need to OPEN doors not destroy
+// them as well." Four real changes:
+// (1) Doors/trapdoors/fence gates added to isProtectedBlockName() -- the list that actually
+// feeds movements.blocksCantBreak (index.js). canOpenDoors was already enabled (2026-09-07) but
+// nothing stopped pathfinder from falling back to digging through a door if that logic didn't
+// apply to a given move -- the same "diggable by the library's own definition" gap this list
+// already closed for furnaces/beds/chests, just never extended to the one block class the
+// operator specifically named.
+// (2) getResourceBlockNames(bot) replaces the old hand-picked EXPLORE_TARGET_NAMES (oak_log/
+// coal_ore/iron_ore/copper_ore) -- derived programmatically from this server's own real block
+// registry (every "_ore"/"_log"/"_stem" name, plus ancient_debris) so gold/diamond/redstone/
+// lapis/every other log species get the same shared-memory benefit those four always had.
+// (3) New known_chests.json registry (loadKnownChests/saveKnownChests/recordChestSnapshot/
+// findKnownChestWithItem): a structured, mutable, position-keyed store -- deliberately NOT the
+// fuzzy RAG-based world-memory notes used for resource locations elsewhere in this file, since a
+// chest's contents change every time anyone opens it and need real point-in-time overwrites, not
+// a growing pile of similar notes. Every real chest interaction (tryTakeFromNearbyChest, "loot,"
+// "store") now snapshots the chest's CURRENT contents right before closing it -- "remembering"
+// and "redacting" are the same operation (always writing the current truth) rather than two
+// separate features to keep in sync. tryTakeFromNearbyChest's own local-search loop was
+// refactored into a shared tryTakeFromThisChest() helper so a new remembered-chest fallback
+// (consulted when local search comes up empty, same "local first, remembered second" pattern
+// "mine" already uses) doesn't duplicate the open/withdraw/snapshot logic.
+// (4) "craft"'s own crafting-table search gained the same local-then-remembered fallback via
+// findRememberedLocation("crafting_table") -- a table someone else placed, or one this bot saw
+// earlier and wandered away from, is exactly as worth remembering as an iron vein.
 //
 // 1.51.0 (2026-09-12) -- direct report "a chest with sticks already made is ignored when they
 // need sticks," confirmed live: tryTakeFromNearbyChest() used to require ONE slot to
@@ -1017,9 +1046,22 @@ const PROTECTED_BLOCK_NAMES = [
   "bookshelf", "chiseled_bookshelf",
 ];
 
+// Real bug found live 2026-09-13 (direct request "they need to OPEN doors not destroy them").
+// Doors/trapdoors/fence gates were only ever categorized as BUILDING_MATERIAL_SUFFIXES (a
+// looksLikeBuilding() detection heuristic below) -- never added here, which is the list that
+// actually feeds movements.blocksCantBreak (index.js's own pathfinder setup). canOpenDoors was
+// already enabled (2026-09-07) so pathfinder SHOULD open a door in its way instead of digging it,
+// but nothing ever stopped it from falling back to digging through one if that logic didn't apply
+// to a given move type -- the same "diggable by the library's own definition" gap this list
+// already closes for furnaces/beds/chests, just never extended to the one block class the
+// operator specifically named. Matches mineflayer-pathfinder's own `blockC.openable` concept
+// (the exact set canOpenDoors' own check cares about) -- fence gates included since build_pen/
+// herd_to_pen already open/close them deliberately via activateBlock, a different operation from
+// digging, so protecting them from auto-dig doesn't conflict with that.
 export function isProtectedBlockName(name) {
   return PROTECTED_BLOCK_NAMES.includes(name) || (name?.endsWith("_bed") ?? false) ||
-    (name?.endsWith("_shulker_box") ?? false);
+    (name?.endsWith("_shulker_box") ?? false) || (name?.endsWith("_door") ?? false) ||
+    (name?.endsWith("_trapdoor") ?? false) || (name?.endsWith("_fence_gate") ?? false);
 }
 
 // Direct request, 2026-09-07 ("what other logic enhancements are available" -> "explore/
@@ -1064,7 +1106,24 @@ const MAX_DIRECTED_HOPS = 4;
 // scans this SAME curated "common raw materials" list so a scout request and an ordinary explore
 // success note stay in exactly one vocabulary; one bot's "mine" query can match another bot's
 // incidental discovery either way, not two independently-drifting lists.
-export const EXPLORE_TARGET_NAMES = ["oak_log", "coal_ore", "iron_ore", "copper_ore"];
+//
+// Real gap found live 2026-09-13 (direct request: "extend resource sharing memory and scouting
+// to *any* resource or crafted object"). A hand-maintained 4-item list meant gold/diamond/
+// redstone/lapis/every other log species/every other ore got ZERO benefit from any of this --
+// rediscovered from scratch by every bot, every time. Derived programmatically from this
+// server's own real block registry instead of hand-maintained: every block whose name ends in
+// "_ore" or "_log"/"_stem" (every wood species this server actually has, not a guessed list),
+// plus ancient_debris (the one real valuable resource that matches neither suffix). Memoized --
+// the registry is fixed once a bot has spawned, no reason to recompute this every call.
+let resourceBlockNamesCache = null;
+export function getResourceBlockNames(bot) {
+  if (resourceBlockNamesCache) return resourceBlockNamesCache;
+  resourceBlockNamesCache = bot.registry.blocksArray
+    .map((b) => b.name)
+    .filter((name) => name.endsWith("_ore") || name.endsWith("_log") || name.endsWith("_stem") ||
+      name === "ancient_debris");
+  return resourceBlockNamesCache;
+}
 
 // Direct request, 2026-09-11 ("if one bot is looking for a specific resource... each bot uses the
 // global world memory to gather a resource it needs, if it's not in their immediate vicinity").
@@ -1469,48 +1528,93 @@ async function tryTakeFromNearbyChest(bot, token, itemNames, wantCount) {
     if (token.cancelled) return null;
     const chestBlock = bot.blockAt(pos);
     if (!chestBlock || chestObstructed(bot, chestBlock)) continue;
+    const result = await tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount);
+    if (result === "cancelled") return null;
+    if (result) return result;
+    // else: reachable and openable, just didn't have enough -- try the next local candidate
+  }
 
+  // Direct request, 2026-09-13 ("extend resource sharing memory... to chests"): local search
+  // (above) came up with nothing usable within 32 blocks -- consult the shared known-chests
+  // registry (recordChestSnapshot's own write side, populated by every real open/withdraw/
+  // deposit fleet-wide) for a specific chest anywhere that's recently been seen holding this
+  // item, same "local search first, remembered location second" pattern "mine" already uses via
+  // findRememberedLocation(). A stale entry (emptied since, or never really had it) just falls
+  // through to the normal fail() a caller already handles -- no worse off than not trying.
+  for (const itemName of itemNames) {
+    const known = await findKnownChestWithItem(bot, itemName, wantCount);
+    if (!known) continue;
+    if (token.cancelled) return null;
     try {
-      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
-        chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
-        () => bot.pathfinder.setGoal(null));
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(known.position.x, known.position.y, known.position.z, 3)),
+        ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
     } catch {
-      continue; // couldn't reach this one -- try the next candidate
+      continue; // couldn't reach the remembered spot -- try the next remembered item name, if any
     } finally {
       bot.pathfinder.setGoal(null);
     }
     if (token.cancelled) return null;
-
-    try {
-      const chest = await bot.openChest(chestBlock);
-      const contents = chest.containerItems();
-      // Real bug found live 2026-09-12 (direct report: "a chest with sticks already made is
-      // ignored when they need sticks"). This used to require ONE slot to independently hold
-      // >= wantCount -- but a real, common deposit pattern (multiple bots each banking a few via
-      // "inventory insurance," 2.39.0, or a partial withdrawal by an earlier visit) easily splits
-      // the same item across several slots (e.g. 3+3+2 sticks from three separate deposits), and
-      // .find() against a single-slot threshold matched none of them even though the chest
-      // genuinely had enough combined. Now sums every matching slot before deciding, and takes
-      // whatever's actually there (never more than wantCount, honestly reports less if that's all
-      // that's available -- matching this codebase's own "don't oversell a result" discipline).
-      // chest.withdraw() itself already draws from multiple slots of the same item/metadata
-      // automatically (confirmed against mineflayer's own Window/Chest source) -- summing first
-      // was the only change actually needed.
-      const matches = contents.filter((i) => itemNames.includes(i.name));
-      const totalAvailable = matches.reduce((sum, i) => sum + i.count, 0);
-      if (!totalAvailable) {
-        await chest.close();
-        continue; // this chest doesn't have any -- try the next candidate, not give up
-      }
-      const takeCount = Math.min(wantCount, totalAvailable);
-      await chest.withdraw(matches[0].type, null, takeCount);
-      await chest.close();
-      return { name: matches[0].name, count: takeCount };
-    } catch {
-      continue; // couldn't open this one -- try the next candidate
-    }
+    const chestBlock = bot.blockAt(known.position);
+    if (!chestBlock || chestObstructed(bot, chestBlock)) continue;
+    const result = await tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount);
+    if (result === "cancelled") return null;
+    if (result) return result;
   }
   return null;
+}
+
+// Extracted from tryTakeFromNearbyChest's own loop body so both the local-search pass and the
+// remembered-chest fallback share exactly one open/withdraw/snapshot implementation rather than
+// two independently-drifting copies. Returns the withdrawal result object, "cancelled" (caller
+// should stop entirely), or null (this specific chest didn't have enough -- try another).
+async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount) {
+  try {
+    await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
+      chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
+      () => bot.pathfinder.setGoal(null));
+  } catch {
+    return null; // couldn't reach this one -- try the next candidate
+  } finally {
+    bot.pathfinder.setGoal(null);
+  }
+  if (token.cancelled) return "cancelled";
+
+  try {
+    const chest = await bot.openChest(chestBlock);
+    const contents = chest.containerItems();
+    // Real bug found live 2026-09-12 (direct report: "a chest with sticks already made is
+    // ignored when they need sticks"). This used to require ONE slot to independently hold
+    // >= wantCount -- but a real, common deposit pattern (multiple bots each banking a few via
+    // "inventory insurance," 2.39.0, or a partial withdrawal by an earlier visit) easily splits
+    // the same item across several slots (e.g. 3+3+2 sticks from three separate deposits), and
+    // .find() against a single-slot threshold matched none of them even though the chest
+    // genuinely had enough combined. Now sums every matching slot before deciding, and takes
+    // whatever's actually there (never more than wantCount, honestly reports less if that's all
+    // that's available -- matching this codebase's own "don't oversell a result" discipline).
+    // chest.withdraw() itself already draws from multiple slots of the same item/metadata
+    // automatically (confirmed against mineflayer's own Window/Chest source) -- summing first
+    // was the only change actually needed.
+    const matches = contents.filter((i) => itemNames.includes(i.name));
+    const totalAvailable = matches.reduce((sum, i) => sum + i.count, 0);
+    if (!totalAvailable) {
+      // Real, current truth either way -- an empty/wrong-contents chest is worth recording too,
+      // so a stale known-chests entry gets corrected rather than kept forever.
+      await recordChestSnapshot(chestBlock.position, contents);
+      await chest.close();
+      return null;
+    }
+    const takeCount = Math.min(wantCount, totalAvailable);
+    await chest.withdraw(matches[0].type, null, takeCount);
+    // Direct request, 2026-09-13 ("remember what is in chests when someone opens it, if someone
+    // takes the item out redact it from global memory"): a fresh post-withdraw snapshot IS the
+    // redaction -- whatever was just taken is naturally absent from this real, current-truth
+    // read, no separate delete-this-item step to get subtly out of sync with reality.
+    await recordChestSnapshot(chestBlock.position, chest.containerItems());
+    await chest.close();
+    return { name: matches[0].name, count: takeCount };
+  } catch {
+    return null; // couldn't open this one -- try the next candidate
+  }
 }
 
 // Direct follow-up to "what other autonomous behaviors are solvable" -> "fix all the above":
@@ -1713,6 +1817,84 @@ async function savePenLocation(center, gate) {
   }
 }
 
+// Direct request, 2026-09-13 ("remember what is in chests when someone opens it. if someone
+// takes the item out of a chest, redact it from global memory"). A structured, mutable, SHARED
+// registry -- deliberately NOT the fuzzy RAG-based world-memory notes (hermes-rag/longterm.js)
+// used for resource/crafted-object LOCATIONS elsewhere in this file: that system is append-only/
+// dedup-based, built for "is this roughly the same fact as one already noted," not "replace this
+// chest's exact contents with what's true right now." A chest's contents change every time
+// anyone opens it, so this needs real point-in-time overwrites, not a growing pile of similar
+// notes -- same "small shared JSON file under the durable mount" pattern PEN_FILE/BEDS_DIR
+// already use, keyed by chest position (rounded -- a chest occupies one exact block, no need for
+// SwimMovements-style fuzziness). Recording a FULL snapshot on every real interaction means
+// "redaction" is a side effect of always writing the current truth, never a separate
+// delete-this-one-item operation that could drift from reality.
+const KNOWN_CHESTS_FILE = "/mnt/hermes-data/minecraft-memory/known_chests.json";
+
+function chestKey(position) {
+  return `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}`;
+}
+
+async function loadKnownChests() {
+  try {
+    return JSON.parse(await readFile(KNOWN_CHESTS_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+async function saveKnownChests(data) {
+  try {
+    await mkdir(path.dirname(KNOWN_CHESTS_FILE), { recursive: true });
+    await writeFile(KNOWN_CHESTS_FILE, JSON.stringify(data, null, 2), "utf8");
+  } catch (err) {
+    console.error("known_chests: failed to persist:", err.message);
+  }
+}
+
+// Called after every real chest interaction (a plain open, or open+withdraw, or open+deposit)
+// with whatever chest.containerItems() shows AT THAT EXACT MOMENT -- always the current truth,
+// so an item someone just withdrew is simply absent from this write, and one just deposited is
+// present. Read-modify-write against one shared file, same low-contention tolerance every other
+// piece of shared fleet state here already accepts (pen location, claimed beds) -- a rare
+// simultaneous write from two bots opening the same chest at once could lose one update, judged
+// an acceptable, self-correcting-on-next-open tradeoff rather than building real locking for it.
+async function recordChestSnapshot(position, items) {
+  const known = await loadKnownChests();
+  const contents = {};
+  for (const item of items) contents[item.name] = (contents[item.name] || 0) + item.count;
+  known[chestKey(position)] = {
+    position: { x: position.x, y: position.y, z: position.z },
+    contents,
+    lastSeenAt: new Date().toISOString(),
+  };
+  await saveKnownChests(known);
+}
+
+// The read-side counterpart: a real, structured, position-precise lookup ("which known chest
+// actually has enough of this item") rather than the fuzzy RAG search findRememberedLocation()
+// already does for raw resource veins. Returns the NEAREST matching chest (not just the first
+// found), since "closest known chest with the item" is a more useful answer than an arbitrary
+// one once more than a handful of chests are tracked. Best-effort: a chest emptied by someone
+// else since its last recorded snapshot simply won't be found again until its own next open
+// re-snapshots it -- the same eventual-consistency tradeoff recordChestSnapshot's own comment
+// already accepts.
+async function findKnownChestWithItem(bot, itemName, wantCount) {
+  const known = await loadKnownChests();
+  let best = null, bestDist = Infinity;
+  for (const entry of Object.values(known)) {
+    const have = entry.contents?.[itemName] || 0;
+    if (have < 1) continue;
+    const pos = new Vec3(entry.position.x, entry.position.y, entry.position.z);
+    const dist = pos.distanceTo(bot.entity.position);
+    if (dist < bestDist) {
+      best = { position: pos, count: Math.min(have, wantCount) };
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
 // Exported 2026-09-09 so index.js's storeSurplusNearHome() ("after any crafting activity,
 // surplus materials should be stored in a chest as close to their sleeping home as possible")
 // can read the same real claimed-bed position "sleep" itself already tries first every night,
@@ -1894,7 +2076,9 @@ export async function performAction(bot, action, speaker) {
       // whatever's found first, not just enough for right now -- the travel is the real cost
       // here, not the extra inventory slots, so "find resources for later" means actually
       // stockpiling while she's already out looking, not just solving today's shortage.
-      const blockIds = [...new Set(EXPLORE_TARGET_NAMES.flatMap((name) => resolveBlockFamily(bot, name)))];
+      const blockIds = getResourceBlockNames(bot)
+        .map((name) => bot.registry.blocksByName[name]?.id)
+        .filter((id) => id !== undefined);
 
       // Direct request, 2026-09-08 ("if a resource is in a nearby chest, they should not mine
       // it") -- same reasoning as "mine"'s own check, applied to explore's own broader target
@@ -1976,7 +2160,18 @@ export async function performAction(bot, action, speaker) {
       let tableBlock = null;
       if (tableWouldHelp) {
         const tableType = bot.registry.blocksByName.crafting_table;
-        const positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
+        let positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
+        // Direct request, 2026-09-13 ("extend resource sharing memory and scouting to *any*
+        // resource or crafted object"): same local-search-first-remembered-location-second
+        // pattern "mine" already uses -- a crafting table someone else placed (or one this bot
+        // saw earlier and wandered away from) is exactly as worth remembering as an iron vein.
+        if (!positions.length) {
+          const remembered = await findRememberedLocation("crafting_table").catch(() => null);
+          if (remembered) {
+            await gotoRememberedSpot(bot, token, remembered);
+            positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
+          }
+        }
         if (!positions.length) return fail(`need a crafting table nearby for ${action.item}.`);
         tableBlock = bot.blockAt(positions[0]);
         try {
@@ -2080,6 +2275,10 @@ export async function performAction(bot, action, speaker) {
               console.error(`loot: failed to withdraw ${item.name}:`, err.message);
             }
           }
+          // Direct request, 2026-09-13 ("remember what is in chests when someone opens it, if
+          // someone takes the item out redact it from global memory") -- see recordChestSnapshot's
+          // own header for why a fresh post-withdraw snapshot IS the redaction.
+          await recordChestSnapshot(chestBlock.position, chest.containerItems());
           await chest.close();
         } catch (err) {
           continue; // couldn't open this one (e.g. windowOpen timeout) -- try the next candidate
@@ -3005,6 +3204,9 @@ export async function performAction(bot, action, speaker) {
         try {
           const chest = await bot.openChest(chestBlock);
           await chest.deposit(itemDef.id, null, storeCount);
+          // Direct request, 2026-09-13 ("remember what is in chests when someone opens it") --
+          // a deposit is exactly as real a change to this chest's contents as a withdrawal.
+          await recordChestSnapshot(chestBlock.position, chest.containerItems());
           await chest.close();
         } catch (err) {
           // Real live gap found 2026-09-09 (storeSurplusNearHome's own post-craft cleanup

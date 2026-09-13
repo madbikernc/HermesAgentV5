@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots — Design
 
-**Version:** 1.16.0
+**Version:** 1.17.0
 **Status:** Design only — nothing in this document is built. Status legend (same convention as
 `firmament-fleet-target-architecture.md`): `[DECIDED]` — operator made an explicit choice · `[PROPOSED]` —
 design recommendation, not yet ratified · `[UNKNOWN]` — needs discovery before build · `[RISK]` — flagged
@@ -982,6 +982,58 @@ was not touched in this pass — the prior incident (§17) already addressed the
 mob-siege spiral, and mixing that signal back in was exactly the mistake in this incident's own
 first (wrong) log-count attempt.
 
+## 19. World-memory sharing generalized to any resource/crafted object; chest contents; doors (2026-09-13)
+
+Direct follow-up to the previous turn's investigative question ("do the bots successfully check
+world memory... including chests, crafting tables, and resources?") — the honest answer was
+"partially, with real gaps" (only 4 hardcoded resource types, no chest-content tracking at all,
+no crafting-table memory, and a confirmed scout-receiver bug that ignored the actual requested
+resource). Direct request: "extend resource sharing memory and scouting to *any* resource or
+crafted object. remember what is in chests when someone opens it. if someone takes the item out
+of a chest, redact it from global memory. They need to OPEN doors not destroy them as well."
+
+**Doors.** `canOpenDoors` was already enabled (2026-09-07), but doors/trapdoors/fence gates were
+never added to `isProtectedBlockName()` — the list that actually feeds
+`movements.blocksCantBreak`. Nothing stopped pathfinder from falling back to digging through a
+door if `canOpenDoors`'s own logic didn't apply to a given move type. Fixed the same way
+furnaces/beds/chests already were.
+
+**Any resource, not 4.** `getResourceBlockNames(bot)` (`actions.js` 1.52.0) replaces the old
+hand-picked `oak_log`/`coal_ore`/`iron_ore`/`copper_ore` list — derived programmatically from this
+server's own real block registry (every `_ore`/`_log`/`_stem` name, plus `ancient_debris`) so
+gold/diamond/redstone/lapis/every other log species get the same benefit those four always had.
+
+**A second, separate bug found while extending this — the scout-receiver never checked what was
+actually asked.** `noteNearbyResources()`'s own reason string named `payload.resource` for
+logging only; the real scan always ran the same fixed list regardless of the question. New
+`extraTargets` parameter threaded through both real call sites (a bot's own exhausted "mine"
+search, and hearing another bot's scout request) so a scout request finally gets checked for the
+thing it asked about (`index.js` 2.65.0).
+
+**Crafted objects now share locations too.** A new `CRAFTED_OBJECT_NAMES` set (crafting table,
+furnace, chest, beehive, bee nest) is folded into `noteNearbyResources()`'s own scan, and a
+successfully PLACED one writes its own memory note immediately in `goalTick`'s result handling —
+no need to wait for some other bot's later opportunistic sweep. `craft`'s own crafting-table
+search gained the same local-then-remembered fallback `mine` already had via
+`findRememberedLocation("crafting_table")`.
+
+**Chest contents — a real, structured registry, not a RAG note.** New `known_chests.json`
+(`actions.js` 1.52.0): a small, shared, position-keyed JSON file — deliberately NOT the fuzzy,
+append-only/dedup RAG-based world-memory notes used for resource locations elsewhere in this
+file, since a chest's contents change every time anyone opens it and need real point-in-time
+overwrites. Every real chest interaction (the shared chest-check helper, `loot`, `store`) now
+snapshots the chest's CURRENT contents right before closing it — "remembering" and "redacting"
+are the same operation (always writing the current truth), not two separate features that could
+drift out of sync with each other. `tryTakeFromNearbyChest`'s own local-search loop was
+refactored into a shared `tryTakeFromThisChest()` helper so a new remembered-chest fallback (any
+known chest fleet-wide, not just the local 32-block radius) doesn't duplicate the open/withdraw/
+snapshot logic.
+
+**Scope note.** Eventual consistency, not strict — a chest emptied by someone else since its last
+recorded snapshot simply won't be found again until its own next open re-snapshots it. Same
+low-contention tradeoff every other piece of shared fleet state here already accepts (pen
+location, claimed beds) rather than building real locking for a rare race.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1003,3 +1055,4 @@ first (wrong) log-count attempt.
 | 1.14.0 | 2026-09-11 | New §16: two enhancements from a Project Sid research pass ("what other ideas... from Project Sid or similar research" -> "so both"). (1) Chat/action coherence: `generateReply()`'s CHAT-reply path had no grounding in real goal state, unlike `classifyIntent`'s own ACTION/GOAL branches — new `currentActivityNote()` closes it (`index.js` 2.62.0). (2) Adaptive role-leaning: new `otherBotActivityAt` (timestamped for free alongside `otherBotGoals`) and `lastRoleActivityAt()` feed `roleBiasNote()` an adaptive nudge toward a neglected secondary role, echoing Sid's own finding that specialization required tracking other agents' activity. Economy/trading and government/voting considered and explicitly not pursued — §16.3 has the reasoning. |
 | 1.15.0 | 2026-09-12 | New §17: a live incident, root-caused from 6+ hours of real logs rather than guessed. Direct report ("still not functional") named three symptoms; found one real root cause behind most of it — `nextBuilderPriority()`'s infinite loop on a stuck item (furnace) meant beds never got attempted, causing a real sleep-deprivation phantom swarm (1473 threat-detections in 2 hours) that then overwhelmed otherwise-working self-defense/squad-response. Fixed: a per-item stall counter (`index.js` 2.63.0) and `checkHomeLighting()`'s own bed/spawnPoint bootstrapping catch-22. Independently fixed the actual chest bug (`tryTakeFromNearbyChest()`'s single-slot threshold, `actions.js` 1.51.0). The literal "crafting table not found" claim had no matching log evidence in the window searched — flagged honestly, not papered over with an unverified fix. |
 | 1.16.0 | 2026-09-13 | New §18: another live incident, scoped to daytime per the operator's own request. Found the dominant cause of "generally ineffective" — stale "NO ability to build... respond BLOCKED" prompt text in both `planNextStep` and `proposeOwnGoal`, directly contradicting their own `ACTION BUILD` vocabulary a few lines later, self-sabotaging ~78% of all goal-blocked outcomes (`index.js` 2.64.0). "Can't use doors" traced to `mineflayer-collectblock` silently resetting `pathfinder`'s movements on every `mine`/`explore` call — the same bug class already fixed for `mineflayer-pvp`, never applied here. "Hallucinate their achievements" confirmed with hard evidence (a beehive announced complete twice while never actually placed) and fixed with `builderPriorityItemSatisfied()`, re-verifying real world state instead of trusting inventory possession for compound "craft AND place" directives. |
+| 1.17.0 | 2026-09-13 | New §19, direct follow-up to answering "do bots check world memory for chests/tables/resources?" honestly (partially, with real gaps) with "extend... to *any* resource or crafted object." `getResourceBlockNames()` (`actions.js` 1.52.0) replaces a hand-picked 4-item list with every real ore/log this server's registry has. Found and fixed a second, separate bug while extending it: the scout-broadcast receiver never actually checked the requested resource, only logged its name. New `known_chests.json` registry gives chest contents real structured tracking (not a RAG note) — every real interaction snapshots current truth, so "remembering" and "redacting" are the same operation. Doors/trapdoors/fence gates finally added to `isProtectedBlockName()`, closing the same "diggable by the library's own definition" gap already closed for furnaces/beds/chests. |

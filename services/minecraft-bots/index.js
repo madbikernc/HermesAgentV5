@@ -1,4 +1,21 @@
-// Version: 2.64.0
+// Version: 2.65.0
+//
+// 2.65.0 (2026-09-13) -- direct request: "extend resource sharing memory and scouting to *any*
+// resource or crafted object... They need to OPEN doors not destroy them as well" (actions.js's
+// own 1.52.0 has the door/chest-registry half). This file's own share: (1) noteNearbyResources()
+// now scans actions.js's new getResourceBlockNames() (every real ore/log this server has) plus a
+// new CRAFTED_OBJECT_NAMES set (crafting_table/furnace/chest/beehive/bee_nest), not the old
+// hand-picked 4-item list, via one findBlocks() matcher call rather than one call per name. (2) A
+// real, separate bug fixed in the SAME function: the "scout" broadcast RECEIVER used to name the
+// requester's actual resource only in its own log line -- `${msg.from_agent}'s scout request for
+// ${payload.resource}` -- and then scan the same fixed list regardless of what was actually
+// asked. New extraTargets parameter, threaded through from both the "mine"-exhaustion call site
+// (now also passing the block she was actually looking for) and the scout-receiver call site (now
+// actually passing payload.resource) -- a scout request finally gets checked for the thing it
+// asked about. (3) A successfully PLACED crafted object (ACTION PLACE succeeding for anything in
+// CRAFTED_OBJECT_NAMES) now writes its own world-memory note immediately, in goalTick's own
+// per-step result handling -- she already knows the real position, no reason to wait for some
+// other bot's later opportunistic sweep to notice it.
 //
 // 2.64.0 (2026-09-13) -- direct request: "look at the last 24 hours of logs... they seem to
 // mostly hallucinate their achievements, can't use doors, and are just generally ineffective
@@ -975,7 +992,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, EXPLORE_TARGET_NAMES } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -1454,16 +1471,32 @@ async function broadcastThreatAlert(threatName) {
 // findRememberedLocation() for the parser that reads it back out. writeMemoryNote's own
 // near-duplicate check (longterm.js) keeps repeated scans of an already-noted spot cheap and
 // harmless rather than piling up redundant notes.
-async function noteNearbyResources(reason) {
-  for (const name of EXPLORE_TARGET_NAMES) {
-    const positions = bot.findBlocks({ matching: (block) => block.name === name, maxDistance: 24, count: 1 });
-    if (!positions.length) continue;
+// Real gap found live 2026-09-13 (direct request: "extend resource sharing memory and scouting
+// to *any* resource or crafted object"). Two real bugs closed here, not one: (1) the resource
+// list was a hand-picked 4 items -- now actions.js's own getResourceBlockNames() (every real
+// ore/log/ancient_debris this server's registry has) plus a fixed CRAFTED_OBJECT_NAMES set, so a
+// crafting table or chest sighted incidentally is exactly as noteworthy as an iron vein. (2) the
+// scout-receiver call site below used to pass NOTHING of what was actually being asked about --
+// `${msg.from_agent}'s scout request for ${payload.resource}` only ever named it in the LOG
+// line, the real scan always ran the same fixed list regardless of the question. extraTargets
+// lets a specific request get checked even if it falls outside both standing sets. One single
+// findBlocks() call (a matcher set, not one call per name) keeps this cheap regardless of how
+// large the combined target list gets.
+const CRAFTED_OBJECT_NAMES = ["crafting_table", "furnace", "chest", "trapped_chest", "beehive", "bee_nest"];
+
+async function noteNearbyResources(reason, extraTargets = []) {
+  const targets = new Set([...getResourceBlockNames(bot), ...CRAFTED_OBJECT_NAMES, ...extraTargets]);
+  const positions = bot.findBlocks({ matching: (block) => targets.has(block.name), maxDistance: 24, count: 64 });
+  const noted = new Set(); // one note per distinct name per sweep is enough -- matches prior behavior
+  for (const pos of positions) {
+    const block = bot.blockAt(pos);
+    if (!block || noted.has(block.name)) continue;
+    noted.add(block.name);
     try {
-      const pos = positions[0];
       await writeMemoryNote({ scope: "world", persona: PERSONA_NAME,
-        text: `Found ${name} near (${pos.x}, ${pos.y}, ${pos.z}), as of ${new Date().toISOString()}.` });
+        text: `Found ${block.name} near (${pos.x}, ${pos.y}, ${pos.z}), as of ${new Date().toISOString()}.` });
     } catch (err) {
-      console.error(`[${USERNAME}] nearby-resource memory write failed (${name}, ${reason}):`, err.message);
+      console.error(`[${USERNAME}] nearby-resource memory write failed (${block.name}, ${reason}):`, err.message);
     }
   }
 }
@@ -2717,6 +2750,23 @@ async function goalTick() {
     console.log(`[${USERNAME}] goal step: ${parsed.action.type} -> ${result.text} ` +
                 `(ok=${result.ok}, consecutiveFailures=${currentGoal.consecutiveFailures})`);
 
+    // Direct request, 2026-09-13 ("extend resource sharing memory... to *any* resource or
+    // crafted object"): a successfully PLACED utility block is exactly as worth sharing as a
+    // mined resource -- she knows the real position right now, no reason to wait for some other
+    // bot to stumble onto it later via noteNearbyResources' own broader sweep. Scoped to
+    // CRAFTED_OBJECT_NAMES specifically (crafting_table/furnace/chest/beehive/bee_nest) -- an
+    // ordinary torch or building-material placement isn't a "known location" fact worth cluttering
+    // world memory with the way a shared utility block is.
+    if (result.ok && parsed.action.type === "place" && CRAFTED_OBJECT_NAMES.includes(parsed.action.item)) {
+      const pos = bot.entity.position;
+      try {
+        await writeMemoryNote({ scope: "world", persona: PERSONA_NAME,
+          text: `Found ${parsed.action.item} near (${pos.x}, ${pos.y}, ${pos.z}), as of ${new Date().toISOString()}.` });
+      } catch (err) {
+        console.error(`[${USERNAME}] placed-object memory write failed:`, err.message);
+      }
+    }
+
     // Environmental memory (direct follow-up, 2026-09-07: "look for more ways to improve their
     // autonomy"). "even after looking around" is wanderAndRetryFind()'s own signature (actions.js
     // 1.11.0) for "tried the normal search AND wandered, still nothing" -- a real, worth-
@@ -2738,7 +2788,7 @@ async function goalTick() {
       // findRememberedLocation() (actions.js) is what actually benefits from whatever the fleet
       // reports back in the meantime -- no new blocking/waiting primitive needed.
       if (parsed.action.type === "mine") {
-        noteNearbyResources("before asking the fleet to scout").catch((err) =>
+        noteNearbyResources("before asking the fleet to scout", [parsed.action.block]).catch((err) =>
           console.error(`[${USERNAME}] nearby-resource scan failed:`, err.message));
         try {
           await buzzPublish(AGENT_ID, "minecraft-coordination",
@@ -4032,7 +4082,7 @@ bot.once("spawn", () => {
         // msg.from_agent either: every bot (asker included) writes to the one shared world-
         // memory corpus, so the asker's own later findRememberedLocation() (actions.js) picks
         // up whatever anyone wrote, same as if she'd stumbled onto it herself.
-        noteNearbyResources(`${msg.from_agent}'s scout request for ${payload.resource}`).catch((err) =>
+        noteNearbyResources(`${msg.from_agent}'s scout request for ${payload.resource}`, [payload.resource]).catch((err) =>
           console.error(`[${USERNAME}] scout response failed:`, err.message));
       }
     },
