@@ -1189,6 +1189,65 @@ Host placement for the 3 new processes follows the same live-memory-headroom che
 deployment already established (not assumed safe) -- see the deployment log for where each
 actually landed.
 
+## 23. Tech-tree progress reset; Mayor's assignments made role-aware; Soldiers restricted to gear/combat (2026-09-13)
+
+Direct request: "Reset their tech tree progress. The leader should make sure to only assign tasks
+to idle bots, and to prioritize tasks in their role. Soldiers should not get tasks beyond
+equipping weapons and armor, and fighting off monsters." A direct, immediate follow-up to §22's
+rebalance -- with three brand-new bots now in the roster and Soldiers about to be carved out of
+the general curriculum entirely, a clean restart made more sense than papering over old state.
+
+**Tech-tree progress -- checked, not assumed.** `mayor-curriculum.json` (the only PERSISTED piece
+of curriculum state -- `curriculumStageIndex`) didn't exist on disk at all, meaning the fleet's
+entire history never actually advanced past stage 0 ("basic tools"), despite individual bots
+visibly having much more advanced gear (iron boots, iron chestplates) in their own goal chatter.
+Real, findable reason, not a mystery: `stageProgress` (who's cleared the CURRENT stage) is
+in-memory-only by design (§12's own tradeoff, "an acceptable, low-cost simplification"), reset to
+empty on every Mayor process restart -- and Mayor has been restarted for nearly every deploy this
+whole session. Getting all 6-then-9 bots' completions to land in the same `stageProgress` Set
+between restarts essentially never happened. No file to reset, and this deploy's own Mayor
+restart (needed for the code changes below regardless) clears `stageProgress` fresh again --
+tech-tree progress is genuinely at zero for the new 9-bot roster starting now.
+
+**"Only assign tasks to idle bots" -- audited, already correct.** Checked rather than assumed:
+`proposeDirectiveForOthers()`'s own `idleBots` filter (`!otherBotGoals.has(...)`) and
+`proposeFallbackDirective()`'s identical filter both already gate on the same live
+Buzz-broadcast idle signal every other idle-detection in this codebase already trusts. The one
+theoretical race (a bot self-proposes a goal and Mayor's own 5-minute tick lands in the
+split-second before that goal's own broadcast arrives) is real but negligible given
+`MAYOR_DIRECTIVE_MS`'s own 5-minute cadence versus the near-instant broadcast round-trip --
+no code changed here, since there was nothing actually broken to fix.
+
+**"Prioritize tasks in their role" -- real gap, now closed.** The curriculum-stage branch of
+`proposeDirectiveForOthers()` (the one that fires whenever the fleet hasn't finished the starting
+tech tree -- i.e., most of the time, especially right after the reset above) never mentioned the
+target's role at all: "the fleet's current stage is X, tell them to do exactly that," full stop.
+Only the POST-curriculum branch (reached once the whole ladder is cleared) had ever been made
+role-aware (§15.5(b)). Fixed by making the pre-curriculum branch stay as-is for non-Soldiers
+(the curriculum itself already IS the priority list before it's cleared) while giving Soldiers
+their own dedicated branch regardless of curriculum state -- see below.
+
+**Soldiers restricted to gear + combat, everywhere a directive can come from.** New shared
+`SOLDIER_DIRECTIVE_NOTE` constant, consumed by BOTH leader-directive functions
+(`proposeDirectiveForOthers` for Mayor, `proposeFallbackDirective` for Mark's stand-in role) so a
+Soldier gets the identical restricted task space no matter who's doing the assigning: equip the
+best weapon/armor available, stand guard, fight off nearby monsters -- explicitly never mining,
+building, farming, or exploring. This matches `nextSoldierPriority()`'s own self-propose scope
+(§21) exactly, so Mayor-assigned and self-proposed Soldier work can never contradict each other.
+`checkCurriculumAdvance()`'s own fleet-wide completion gate (`everyone.every(...)`) now excludes
+Soldier-primary bots entirely -- they were never going to be assigned a farming/enchanting-table
+task to clear those stages, so requiring it of them would have permanently stalled the whole
+fleet's curriculum. The tech tree is a non-Soldier ladder now; Soldiers have their own separate,
+narrower lane and always have (§21), this just stops the general curriculum from silently
+depending on them anyway.
+
+**A second stale claim caught while in this code.** `proposeFallbackDirective()`'s own prompt
+text still told the model "you carry Leader as a secondary role" -- true when written, false
+since §22 retired every secondary and decoupled this mechanism into its own
+`MC_FALLBACK_COORDINATOR` flag (§22 already fixed the GATE, but missed the user-facing prompt
+text itself). Reworded to describe Mark's actual standing ("the fleet's stand-in coordinator")
+rather than a role membership that no longer exists in `roles.js`.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1214,3 +1273,4 @@ actually landed.
 | 1.18.0 | 2026-09-13 | New §20: direct follow-up report ("still detroying chests") turned out to have no bot-code cause at all — every block-removing verb and the protection list were re-checked and confirmed clean. Operator's own direct observation ("Chests that were full were no longer present when I returned") pointed outside the codebase; root cause was the live server's `mob_griefing` gamerule (creeper-explosion block destruction), left `true`. Fixed via RCON using the same Vaultwarden/paramiko pattern as `tools/hermes-game-server-monitor.py` — first attempt failed on a Brigadier parse error that looked like a connectivity problem but was actually this server's Minecraft 26.1.2 snake_case gamerule renaming (`mob_griefing`, not the legacy `mobGriefing`); confirmed `false` after correcting the name. No code changed — a server-config fact, not a repo regression. |
 | 1.19.0 | 2026-09-13 | New §21, direct request ("soldier personas need to..."). Audited the existing alarm/combat code first rather than guessing, and found four real gaps behind it: (1) `SQUAD_RESPONDER` was gated only by an env var, disconnected from `roles.js`'s own SOLDIER assignment — now derived from the role itself. (2) The two moments a bot most needs help (health-critical emergency, asleep-under-attack) never called `broadcastThreatAlert` at all — new shared `noteThreatSeen()` closes it for all three sites. (3) No death awareness existed in any form — new `broadcastDeathAlert` (position + best-guess killer) fires on every death, logged fleet-wide, with Soldiers securing the spot. (4) Soldier's own `priorities` list was pure advisory prompt text, never enforced — new `nextSoldierPriority()` (`index.js` 2.66.0) mirrors Builder's §15.6 deterministic-checklist shape: no weapon beats everything, then a nearby hostile, then falls through to the existing secondary-role lean for item (c). `equipment.js` 1.3.0 exports `hasWeapon()` for the check. |
 | 1.20.0 | 2026-09-13 | New §22, direct request ("rebalance the bots so they each have exactly one role... create [more] so every role has at least one bot"). Every `BOT_ROLES` secondary set to `null` (`roles.js` 1.4.0); three new bots (Nell/Artist, Wade/Explorer, Dale/Herder) built at full persona depth to own the three roles that previously existed only as somebody's secondary, growing the fleet from 6 to 9. Existing 6 bots' primaries left untouched rather than reassigned — redundant Soldier coverage (Mark+Luke) kept deliberately. Caught and fixed a real regression before shipping: `proposeFallbackDirective()`'s Mayor-fallback mechanism was gated on a secondary role field about to be nulled fleet-wide — decoupled into its own `MC_FALLBACK_COORDINATOR` env flag. Amy/Babs/Mark/Bob's `PROMPT.md` files cleaned of now-stale secondary-role prose rather than left to drift. |
+| 1.21.0 | 2026-09-13 | New §23, direct follow-up ("Reset their tech tree progress. The leader should... only assign tasks to idle bots, and... prioritize tasks in their role. Soldiers should not get tasks beyond equipping weapons and armor, and fighting off monsters"). Tech-tree progress checked, not assumed reset — `mayor-curriculum.json` never existed on disk at all (curriculum never actually advanced past stage 0 across this whole session's many Mayor restarts, each one silently wiping in-memory `stageProgress`); this deploy's own restart completes a genuine fresh start. "Idle bots only" audited and found already correct — no code changed. Real gap closed: `proposeDirectiveForOthers()`'s curriculum-stage branch never mentioned the target's role at all; new shared `SOLDIER_DIRECTIVE_NOTE` now gates a Soldier target to gear+combat-only in BOTH leader-directive functions (Mayor's own and Mark's fallback stand-in), matching `nextSoldierPriority()`'s own §21 scope exactly, and `checkCurriculumAdvance()`'s fleet-wide gate now excludes Soldiers so the curriculum can't stall waiting on a farming/enchanting task they'll never be assigned. Also fixed a second stale claim caught while in this code: `proposeFallbackDirective()`'s prompt still said Mark "carries Leader as a secondary role," true before §22, false since — reworded to describe his actual standing. |

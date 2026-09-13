@@ -1,4 +1,23 @@
-// Version: 2.67.0
+// Version: 2.68.0
+//
+// 2.68.0 (2026-09-13) -- direct follow-up: "Reset their tech tree progress. The leader should
+// make sure to only assign tasks to idle bots, and to prioritize tasks in their role. Soldiers
+// should not get tasks beyond equipping weapons and armor, and fighting off monsters." Tech-tree
+// reset needed no file surgery -- mayor-curriculum.json never existed on disk (curriculum never
+// actually advanced past stage 0 this whole session, since every Mayor restart silently wiped
+// the in-memory stageProgress Set before all bots could ever land in it at once); this deploy's
+// own restart finishes the reset for real. "Idle bots only" audited (proposeDirectiveForOthers/
+// proposeFallbackDirective's own idleBots filters) and found already correct, nothing changed.
+// Real gap closed: the curriculum-stage branch never mentioned the target's role -- new shared
+// SOLDIER_DIRECTIVE_NOTE constant now restricts a Soldier target to gear+combat-only in BOTH
+// proposeDirectiveForOthers (Mayor) and proposeFallbackDirective (Mark's stand-in), matching
+// nextSoldierPriority()'s own §21 scope so assigned and self-proposed Soldier work never
+// contradict. checkCurriculumAdvance()'s fleet-wide completion gate now excludes Soldier-primary
+// bots -- they'll never be assigned a farming/enchanting task to clear those stages with, so
+// requiring it of them would have stalled the whole fleet's curriculum forever. Also fixed a
+// second stale claim caught while in this code: proposeFallbackDirective's prompt still told the
+// model Mark "carries Leader as a secondary role" -- true before §22's rebalance, false since.
+// See MINECRAFT_BOTS_DESIGN.md §23.
 //
 // 2.67.0 (2026-09-13) -- direct request: "rebalance the bots so they each have exactly one
 // role. If we need more bots so that every role has at least one bot, create them." roles.js
@@ -3085,7 +3104,13 @@ async function checkCurriculumAdvance() {
   if (curriculumStageIndex >= TECH_TREE_STAGES.length) return; // graduated the whole ladder
   const stage = TECH_TREE_STAGES[curriculumStageIndex];
   if (mayorHasStageItem(stage)) stageProgress.add(MAYOR_USERNAME);
-  const everyone = [...BOT_USERNAMES];
+  // Direct request, 2026-09-13: Soldiers are never assigned a curriculum-stage directive
+  // (proposeDirectiveForOthers' own targetIsSoldier branch) or expected to self-propose one
+  // (nextSoldierPriority's own §21 scope never touches TECH_TREE_STAGES either) -- requiring
+  // them to independently produce a farming/enchanting-table/etc. item just to unblock the
+  // WHOLE FLEET's advancement would either stall the curriculum forever or reward wandering
+  // outside their restricted lane. The curriculum is a non-Soldier fleet ladder now.
+  const everyone = [...BOT_USERNAMES].filter((name) => BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER);
   if (!everyone.every((name) => stageProgress.has(name))) return;
 
   curriculumStageIndex += 1;
@@ -3122,6 +3147,19 @@ function markRoleAssigned(target) {
   if (roleName) lastRoleAssignedAt.set(roleName, Date.now());
 }
 
+// Direct request, 2026-09-13 ("Soldiers should not get tasks beyond equipping weapons and
+// armor, and fighting off monsters"): shared by both leader-directive functions below
+// (Mayor's own, and Mark's fallback stand-in) so a Soldier gets the exact same restricted task
+// space no matter which of them is doing the assigning right now. Matches
+// nextSoldierPriority()'s own self-propose scope (§21) so Mayor-assigned and self-proposed
+// Soldier work never contradict each other -- a Soldier is never told to mine, build, farm, or
+// explore by anyone.
+const SOLDIER_DIRECTIVE_NOTE =
+  "their whole job is staying armed and keeping the fleet safe, nothing else. Tell them to " +
+  "make sure they're fully equipped (weapon and armor, upgrading if they can) and to stand " +
+  "guard / deal with any monsters nearby. Don't give them a mining, building, farming, or " +
+  "exploring task.";
+
 async function proposeDirectiveForOthers() {
   if (USERNAME !== MAYOR_USERNAME || !AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
   await checkCurriculumAdvance();
@@ -3134,14 +3172,23 @@ async function proposeDirectiveForOthers() {
   // (nobody's behind, or the whole curriculum's cleared) is now role-aware, not purely random.
   const target = idleBots.find((name) => !stageProgress.has(name)) || pickIdleTarget(idleBots);
   const targetRole = BOT_ROLES[target.toLowerCase()];
-  const stage = curriculumStageIndex < TECH_TREE_STAGES.length ? TECH_TREE_STAGES[curriculumStageIndex] : null;
+  // A Soldier target never gets a curriculum-stage directive, regardless of where the rest of
+  // the fleet's own progression stands -- see SOLDIER_DIRECTIVE_NOTE's own comment.
+  const targetIsSoldier = targetRole?.primary === ROLES.SOLDIER;
+  const stage = !targetIsSoldier && curriculumStageIndex < TECH_TREE_STAGES.length
+    ? TECH_TREE_STAGES[curriculumStageIndex] : null;
 
   busy = true;
   try {
     const reply = await callRole("muse", [
       {
         role: "system",
-        content: stage
+        content: targetIsSoldier
+          ? `${persona}\n\n---\n\n${target} currently has no active goal. ${target} is a ` +
+            `Soldier -- ${SOLDIER_DIRECTIVE_NOTE} Address ${target} by name, exactly like a ` +
+            `real chat message you'd actually send. One or two sentences, nothing else -- no ` +
+            `quotes, no stage directions.`
+          : stage
           ? `${persona}\n\n---\n\n${target} currently has no active goal. The fleet's current ` +
             `curriculum stage is "${stage.name}": ${stage.directive}. Tell ${target} to do ` +
             `exactly that, in your own voice -- don't invent a different objective. Address ` +
@@ -3153,11 +3200,8 @@ async function proposeDirectiveForOthers() {
             `already cleared the whole starting curriculum (basic tools, armor, farming, iron, ` +
             `diamonds, enchanting). ` +
             (targetRole
-              ? `${target}'s role is ${targetRole.primary.name} (${targetRole.primary.domain})` +
-                (targetRole.secondary ? `, secondarily ${targetRole.secondary.name} ` +
-                  `(${targetRole.secondary.domain})` : "") +
-                ` -- assign something in their wheelhouse, or their secondary if that fits ` +
-                `better right now. `
+              ? `${target}'s role is ${targetRole.primary.name} (${targetRole.primary.domain}) ` +
+                `-- assign something in their wheelhouse. `
               : "") +
             `Give ${target} ONE short, specific, in-character task that pushes further -- a ` +
             `real, more advanced Minecraft objective, not vague encouragement. Address ` +
@@ -3169,7 +3213,8 @@ async function proposeDirectiveForOthers() {
     if (reply) {
       bot.chat(reply);
       markRoleAssigned(target);
-      console.log(`[${USERNAME}] issued directive to ${target} (stage: ${stage?.name ?? "post-curriculum"}): ${reply}`);
+      console.log(`[${USERNAME}] issued directive to ${target} ` +
+        `(${targetIsSoldier ? "soldier gear/guard" : stage?.name ?? "post-curriculum"}): ${reply}`);
     }
   } catch (err) {
     console.error(`[${USERNAME}] failed to issue a directive:`, err.message);
@@ -3219,21 +3264,35 @@ async function proposeFallbackDirective() {
   if (!idleBots.length) return;
   const target = pickIdleTarget(idleBots);
   const targetRole = BOT_ROLES[target.toLowerCase()];
+  // Same restriction as Mayor's own proposeDirectiveForOthers -- see SOLDIER_DIRECTIVE_NOTE's
+  // comment. A Soldier gets the identical restricted task space regardless of which of the two
+  // functions is doing the assigning.
+  const targetIsSoldier = targetRole?.primary === ROLES.SOLDIER;
 
   busy = true;
   try {
     const reply = await callRole("muse", [
       {
         role: "system",
-        content: `${persona}\n\n---\n\nMayor's been unreachable for a while, and you carry ` +
-          `Leader as a secondary role -- step up and coordinate, plainly, without claiming to ` +
-          `BE Mayor or making a big deal of it. ${target} currently has no active goal` +
-          (targetRole ? `, and their role is ${targetRole.primary.name} ` +
-            `(${targetRole.primary.domain})` : "") +
-          `. Give ${target} ONE short, specific, in-character task fitting their role -- a real ` +
-          `Minecraft objective, not vague encouragement. Address ${target} by name, exactly ` +
-          `like a real chat message you'd actually send. One or two sentences, nothing else -- ` +
-          `no quotes, no stage directions.`,
+        // "you carry Leader as a secondary role" removed 2026-09-13 -- stale since §22's
+        // rebalance retired every bot's secondary; FALLBACK_COORDINATOR is its own explicit
+        // flag now, not a role membership, so this no longer claims one that doesn't exist.
+        content: targetIsSoldier
+          ? `${persona}\n\n---\n\nMayor's been unreachable for a while -- as the fleet's ` +
+            `stand-in coordinator, step up and coordinate, plainly, without claiming to BE ` +
+            `Mayor or making a big deal of it. ${target} currently has no active goal. ` +
+            `${target} is a Soldier -- ${SOLDIER_DIRECTIVE_NOTE} Address ${target} by name, ` +
+            `exactly like a real chat message you'd actually send. One or two sentences, ` +
+            `nothing else -- no quotes, no stage directions.`
+          : `${persona}\n\n---\n\nMayor's been unreachable for a while -- as the fleet's ` +
+            `stand-in coordinator, step up and coordinate, plainly, without claiming to BE ` +
+            `Mayor or making a big deal of it. ${target} currently has no active goal` +
+            (targetRole ? `, and their role is ${targetRole.primary.name} ` +
+              `(${targetRole.primary.domain})` : "") +
+            `. Give ${target} ONE short, specific, in-character task fitting their role -- a ` +
+            `real Minecraft objective, not vague encouragement. Address ${target} by name, ` +
+            `exactly like a real chat message you'd actually send. One or two sentences, ` +
+            `nothing else -- no quotes, no stage directions.`,
       },
       { role: "user", content: `What do you tell ${target}?` },
     ], { maxTokens: 60, temperature: 0.9 });
