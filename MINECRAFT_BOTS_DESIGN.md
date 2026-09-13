@@ -1034,6 +1034,44 @@ recorded snapshot simply won't be found again until its own next open re-snapsho
 low-contention tradeoff every other piece of shared fleet state here already accepts (pen
 location, claimed beds) rather than building real locking for a rare race.
 
+## 20. Chest disappearance investigated -- server gamerule, not bot code (2026-09-13)
+
+Direct follow-up report after §19 shipped: "they are still detroying chests rather than *
+opening htem * learning the contents (storing in world memory) * taking only exactly what they
+need." Investigated the bots' own code first, not the server -- `isProtectedBlockName()`
+confirmed correct and live (chest/trapped_chest/ender_chest/barrel all present, verified via a
+direct read on `spark`), and every block-removing verb (`collectBlock`'s own dig target,
+`build`, `build_pen`, `repair_terrain`) confirmed to never target an existing chest. No log
+evidence of a bot issuing a dig against a chest anywhere in the window searched. Asked the
+operator directly rather than guessing further; the answer narrowed it to a real, first-hand
+observation with no bot-code path left to blame: "Chests that were full were no longer present
+when I returned to check" -- the block itself vanished, not just its contents.
+
+**Root cause: `mob_griefing` was `true` on the live server**, letting creeper explosions (and
+other mob griefing) destroy chest blocks outright -- a server config fact, external to every
+line of code this fleet's bots run, and consistent with every piece of evidence gathered (no
+bot-issued dig, contents-stable registry, direct visual confirmation of a missing block rather
+than an emptied one).
+
+**Fixed via RCON, not a code change.** Read the same Vaultwarden credential
+(`Zomboid Admin - muncraft`) and paramiko/RCON pattern already used by
+`tools/hermes-game-server-monitor.py`, run from `spark` against the game server
+(`192.168.1.221`) over SSH executing a local RCON client against `127.0.0.1:25575` on that box.
+First attempt (`gamerule mobGriefing false`) failed with a Brigadier parse error
+(`Incorrect argument for command...<--[HERE]`) even though the RCON transport itself round-
+tripped correctly (`list` succeeded, auth succeeded) -- misleading at first glance since it looks
+like a connectivity problem. `help gamerule` revealed the real cause: this server runs Minecraft
+26.1.2, whose gamerule names were renamed to snake_case (`mob_griefing`, `mob_drops`,
+`spawn_monsters`, ...) instead of the legacy camelCase (`mobGriefing`) every online reference and
+this fleet's own code assumed. `gamerule mob_griefing false` succeeded and was read back
+confirmed `false`.
+
+**Scope note.** This is a live server setting, not something `HermesAgentV5` code or config
+tracks or can regress -- there is nothing to commit for this section beyond the doc itself. If
+chest disappearances recur after this change, `mob_griefing` was not the (or not the only) cause
+and the investigation should resume from there, not from the bots' own code, which was already
+checked and cleared in this pass.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1056,3 +1094,4 @@ location, claimed beds) rather than building real locking for a rare race.
 | 1.15.0 | 2026-09-12 | New §17: a live incident, root-caused from 6+ hours of real logs rather than guessed. Direct report ("still not functional") named three symptoms; found one real root cause behind most of it — `nextBuilderPriority()`'s infinite loop on a stuck item (furnace) meant beds never got attempted, causing a real sleep-deprivation phantom swarm (1473 threat-detections in 2 hours) that then overwhelmed otherwise-working self-defense/squad-response. Fixed: a per-item stall counter (`index.js` 2.63.0) and `checkHomeLighting()`'s own bed/spawnPoint bootstrapping catch-22. Independently fixed the actual chest bug (`tryTakeFromNearbyChest()`'s single-slot threshold, `actions.js` 1.51.0). The literal "crafting table not found" claim had no matching log evidence in the window searched — flagged honestly, not papered over with an unverified fix. |
 | 1.16.0 | 2026-09-13 | New §18: another live incident, scoped to daytime per the operator's own request. Found the dominant cause of "generally ineffective" — stale "NO ability to build... respond BLOCKED" prompt text in both `planNextStep` and `proposeOwnGoal`, directly contradicting their own `ACTION BUILD` vocabulary a few lines later, self-sabotaging ~78% of all goal-blocked outcomes (`index.js` 2.64.0). "Can't use doors" traced to `mineflayer-collectblock` silently resetting `pathfinder`'s movements on every `mine`/`explore` call — the same bug class already fixed for `mineflayer-pvp`, never applied here. "Hallucinate their achievements" confirmed with hard evidence (a beehive announced complete twice while never actually placed) and fixed with `builderPriorityItemSatisfied()`, re-verifying real world state instead of trusting inventory possession for compound "craft AND place" directives. |
 | 1.17.0 | 2026-09-13 | New §19, direct follow-up to answering "do bots check world memory for chests/tables/resources?" honestly (partially, with real gaps) with "extend... to *any* resource or crafted object." `getResourceBlockNames()` (`actions.js` 1.52.0) replaces a hand-picked 4-item list with every real ore/log this server's registry has. Found and fixed a second, separate bug while extending it: the scout-broadcast receiver never actually checked the requested resource, only logged its name. New `known_chests.json` registry gives chest contents real structured tracking (not a RAG note) — every real interaction snapshots current truth, so "remembering" and "redacting" are the same operation. Doors/trapdoors/fence gates finally added to `isProtectedBlockName()`, closing the same "diggable by the library's own definition" gap already closed for furnaces/beds/chests. |
+| 1.18.0 | 2026-09-13 | New §20: direct follow-up report ("still detroying chests") turned out to have no bot-code cause at all — every block-removing verb and the protection list were re-checked and confirmed clean. Operator's own direct observation ("Chests that were full were no longer present when I returned") pointed outside the codebase; root cause was the live server's `mob_griefing` gamerule (creeper-explosion block destruction), left `true`. Fixed via RCON using the same Vaultwarden/paramiko pattern as `tools/hermes-game-server-monitor.py` — first attempt failed on a Brigadier parse error that looked like a connectivity problem but was actually this server's Minecraft 26.1.2 snake_case gamerule renaming (`mob_griefing`, not the legacy `mobGriefing`); confirmed `false` after correcting the name. No code changed — a server-config fact, not a repo regression. |
