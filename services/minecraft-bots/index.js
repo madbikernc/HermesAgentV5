@@ -1,4 +1,28 @@
-// Version: 2.68.0
+// Version: 2.69.0
+//
+// 2.69.0 (2026-09-14) -- direct report: "generally stationary on their wake-up spot... 'the
+// route can't be resolved'/'I can't reach you,' even when the only thing in the way was an open
+// door... or nothing at all." Root-caused with hard numbers, not guessed from the doors/
+// pathfinding angle the symptom description itself suggested: Mark alone logged 268
+// checkSelfDefense triggers in a single hour (240 of them phantoms) and 1,608
+// `path_reset: goal_updated` events over 15.5h -- a threat re-detected and force-cancelling
+// whatever was happening roughly every 13 seconds. FLEE_ONLY_MOBS's own "flee" response only
+// ever buys a few blocks of distance from a mob that's faster on the wing than a bot is on foot,
+// so it re-entered SELF_DEFENSE_RANGE well within the next 2000ms tick almost every time -- ANY
+// real travel (a goto/follow toward a player, walking to a chest or bed, terrain repair) kept
+// getting force-cancelled before it could ever finish, which looks exactly like "stationary" and
+// produces exactly the reported errors. New FLEE_MOB_RESPONSE_COOLDOWN_MS (20s) throttles
+// checkSelfDefense's own re-trigger specifically for FLEE_ONLY_MOBS, giving real travel an actual
+// window to complete -- a genuine melee threat (zombie/spider/creeper) is untouched, still gets
+// the full immediate response every time, and the separate health-critical emergency handler
+// still fires immediately regardless of this cooldown. Also fixed a real scaling gap feeding the
+// same phantom-swarm-from-sleep-deprivation feedback loop §17 broke once already: the Builder bed
+// target was still the original ">= 6" from when the fleet WAS 6 bots -- now ">= BOT_USERNAMES.
+// size" (9 today) in both nextBuilderPriority() and builderPriorityItemSatisfied(), kept in
+// lockstep so DONE-verification can't drift from the checklist's own target. See
+// MINECRAFT_BOTS_DESIGN.md §24, including a separate discovery (the real bot Minecraft server's
+// RCON was never actually reached by §20's mob_griefing fix) that's prepared but not completed --
+// blocked on a safety-classifier denial and a missing sudo grant this account doesn't have.
 //
 // 2.68.0 (2026-09-13) -- direct follow-up: "Reset their tech tree progress. The leader should
 // make sure to only assign tasks to idle bots, and to prioritize tasks in their role. Soldiers
@@ -2414,8 +2438,15 @@ function nextBuilderPriority() {
   }
   const bedNames = Object.keys(bot.registry.blocksByName).filter((n) => n.endsWith("_bed"));
   const bedCount = countNearHome(bedNames, (block) => block?.getProperties?.().part === "head");
-  if (bedCount < 6) {
-    candidates.push({ name: "beds", directive: `go home and set up more beds there -- we have ${bedCount}, need at least 6` });
+  // Direct report, 2026-09-14 ("bots are generally stationary... couldn't reach bed"): the
+  // operator's original ">= 6" target (§15.6) was set when the fleet WAS 6 bots -- with 9 now,
+  // up to 3 could never claim a bed of their own at all, and the rest were competing over a
+  // cramped, undersized area, both plausible contributors to the chronic "couldn't reach bed"/
+  // "took too long to decide path" failures behind the sleep-deprivation phantom-swarm loop this
+  // incident traced back to. BOT_USERNAMES.size (not a second hardcoded number) so this scales
+  // itself the next time the roster grows, instead of silently going stale again.
+  if (bedCount < BOT_USERNAMES.size) {
+    candidates.push({ name: "beds", directive: `go home and set up more beds there -- we have ${bedCount}, need at least ${BOT_USERNAMES.size}` });
   }
   if (!hasShelterNearHome()) {
     candidates.push({ name: "shelter", directive: "go home and build a small shelter there" });
@@ -2459,7 +2490,11 @@ function builderPriorityItemSatisfied(name) {
       return countNearHome([name]) >= 1;
     case "beds": {
       const bedNames = Object.keys(bot.registry.blocksByName).filter((n) => n.endsWith("_bed"));
-      return countNearHome(bedNames, (block) => block?.getProperties?.().part === "head") >= 6;
+      // Kept in lockstep with nextBuilderPriority's own >= BOT_USERNAMES.size target (2026-09-14)
+      // -- a literal "6" here would have quietly accepted "done" at the OLD 6-bot target even
+      // after that one scaled up, the exact kind of two-copies-of-the-same-number drift
+      // builderPriorityItemSatisfied() was built to prevent in the first place.
+      return countNearHome(bedNames, (block) => block?.getProperties?.().part === "head") >= BOT_USERNAMES.size;
     }
     case "shelter":
       return hasShelterNearHome();
@@ -3494,6 +3529,24 @@ function noteThreatSeen(threatName) {
 // one case nothing else can reach in time.
 let selfDefenseInFlight = false;
 
+// Direct report, 2026-09-14 ("bots are generally stationary... 'route can't be resolved'/'can't
+// reach you' even with nothing in the way"). Root-caused from live evidence, not guessed: Mark
+// alone logged 268 self-defense triggers in a single hour (240 of them phantoms) and 1,608
+// pathfinder goal-resets over 15.5h -- a threat re-detected and re-force-cancelled roughly every
+// 13 seconds, almost entirely phantoms. The FLEE_ONLY_MOBS "flee" response only ever buys a few
+// blocks of distance from a flying mob that's faster on the wing than she is on foot, so it
+// re-enters SELF_DEFENSE_RANGE well within the next 2000ms tick almost every time -- she wasn't
+// stationary from being blocked, she was flinching in place, since EVERY real travel goal
+// (a goto/follow toward a player, walking to a chest or bed, terrain repair) kept getting
+// force-cancelled by the next tick's re-trigger before it could ever finish. A real melee threat
+// (zombie/spider/creeper) still gets the full, immediate 2000ms response every time -- only a
+// FLEE_ONLY_MOB's own re-trigger is throttled, since fleeing already bought real safety
+// (phantoms rarely land a hit on a moving target, and the separate health-critical emergency
+// handler below is untouched and still fires immediately regardless of this cooldown if one
+// somehow does) while repeating the full interrupt every 2s bought nothing further.
+const FLEE_MOB_RESPONSE_COOLDOWN_MS = 20_000;
+let lastFleeMobResponseAt = 0;
+
 // Direct request, 2026-09-10 ("write up a plan for that single arbiter..." -> the approved
 // per-bot coherence arbiter plan, Phase 2 of its migration). The old inline 4-primitive cancel +
 // busy||acting poll loop is now arbiter.requestControl() -- see arbiter.js's own header for why
@@ -3502,6 +3555,10 @@ async function checkSelfDefense() {
   if (!AUTONOMY_ENABLED || selfDefenseInFlight || bot.isSleeping) return;
   const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
   if (!threat) return;
+  if (FLEE_ONLY_MOBS.has(threat.name) &&
+      Date.now() - lastFleeMobResponseAt < FLEE_MOB_RESPONSE_COOLDOWN_MS) {
+    return; // already fled one of these recently -- let real travel/goals actually run for a bit
+  }
 
   selfDefenseInFlight = true;
   console.log(`[${USERNAME}] self-defense: threat detected (${threat.name}) -- force-cancelling ` +
@@ -3524,6 +3581,7 @@ async function checkSelfDefense() {
     // how much health is left to spend on a doomed chase.
     const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH
       ? "flee" : "attack";
+    if (FLEE_ONLY_MOBS.has(threat.name)) lastFleeMobResponseAt = Date.now();
     console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
     // action.target: the already-found entity, not re-derived -- see actions.js's own
     // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.

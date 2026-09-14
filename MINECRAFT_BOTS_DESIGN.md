@@ -1248,6 +1248,77 @@ since §22 retired every secondary and decoupled this mechanism into its own
 text itself). Reworded to describe Mark's actual standing ("the fleet's stand-in coordinator")
 rather than a role membership that no longer exists in `roles.js`.
 
+## 24. "Generally stationary" root-caused to a self-defense interrupt storm, not pathfinding (2026-09-14)
+
+Direct report: bots "generally stationary on their wake-up spot," and a direct "come here" command
+from the operator (as The President) frequently failing with "the route can't be resolved"/"I
+can't reach you" -- "even when the only thing in the way was an open door... or when there was
+nothing at all in the way." Investigated live, with hard numbers, rather than guessing at the
+door/pathfinding angle the symptom description itself suggested.
+
+**Root cause: not doors, not pathfinding -- a self-defense interrupt storm.** Mark's own logs
+showed 268 `checkSelfDefense` triggers in a single hour (240 of them phantoms) and 1,608
+`path_reset: goal_updated` events over 15.5 hours -- a threat re-detected and force-cancelling
+whatever was happening roughly every 13 seconds, almost entirely phantoms. `FLEE_ONLY_MOBS`'s own
+"flee" response (§18) only ever buys a few blocks of distance from a flying mob that's faster on
+the wing than a bot is on foot, so it re-enters `SELF_DEFENSE_RANGE` well within the next 2000ms
+tick almost every time. The bot wasn't blocked by a door or a missing path -- ANY travel goal (a
+`goto`/`follow` toward a player, walking to a chest or bed, terrain repair) kept getting
+force-cancelled by the next tick's re-trigger before it could ever finish, which looks exactly
+like "stationary" from the outside and produces exactly the errors reported (the interrupted
+`goto`'s own promise rejects with whatever pathfinder's state happened to be at that instant).
+
+**Why so many phantoms -- the same feedback loop as §17, recurring.** Phantoms are vanilla's own
+sleep-deprivation mechanic. `[sleep] couldn't reach bed` failures were chronic fleet-wide
+("The goal was changed before it could be completed!" -- itself very likely the SAME interrupt
+storm cancelling the walk-to-bed goto; "Took to long to decide path to goal!" -- a genuine astar
+search-time exhaustion). A real, concrete scaling gap behind that: `nextBuilderPriority()`'s own
+bed target was still the operator's original "`>= 6`" from §15.6, set when the fleet WAS 6 bots
+-- with 9 now, up to 3 bots could never claim a bed of their own at all. Bots that can't reliably
+sleep keep spawning more phantoms, which keep interrupting the very travel that would let them
+reach a bed -- the same self-reinforcing loop §17 broke once already, recurring after the roster
+grew past what that fix's own numbers assumed.
+
+**Two real fixes shipped.**
+1. New `FLEE_MOB_RESPONSE_COOLDOWN_MS` (20s) in `checkSelfDefense()` (`index.js` 2.69.0): once a
+   flee-only mob triggers a flee response, a FLEE-ONLY threat specifically is throttled from
+   re-triggering for 20 seconds, giving real travel/goals an actual window to complete. A genuine
+   melee threat (zombie/spider/creeper) is completely untouched -- still the full, immediate
+   2000ms response every time, and the separate health-critical emergency handler still fires
+   immediately regardless of this cooldown if health actually drops.
+2. `nextBuilderPriority()`/`builderPriorityItemSatisfied()`'s bed target changed from a hardcoded
+   `6` to `BOT_USERNAMES.size` (currently 9) in both places, kept in lockstep so DONE-verification
+   can't drift from the checklist's own target the way a second hardcoded number risked. Self-
+   scaling: the next time the roster grows, this doesn't need a third manual edit. Building out
+   enough beds for 9 bots is also the concrete mechanism by which the shared base actually gets
+   physically bigger -- a more open-ended "widen the base" task has no crisp completion signal the
+   way a bed count does, so that's the lever pulled rather than a separately-invented one.
+
+**A separate, important discovery made while investigating a `mob_griefing` angle.** The
+`mob_griefing` RCON fix from §20 was applied to the WRONG Minecraft server. The bots actually
+connect to `192.168.1.221:25580` (`/home/zomboid-admin/minecraft-bots/`, real systemd unit
+`minecraft-bots.service`), but §20's RCON session connected to a DIFFERENT, unrelated server on
+port 25565 (`/opt/minecraft/`) -- confirmed live: that server had 0 players and unloaded chunks at
+the exact moment the real bot fleet was actively playing. The real bot server has
+`enable-rcon=false` (a deliberate choice, per `backup.sh`'s own comment: "left off to keep this
+instance's surface minimal") -- so `mob_griefing` on the actual bot world was never touched by §20
+and is very likely still `true`.
+
+**RCON-enable prepared, not completed -- needs the operator.** Two hard blockers, not a choice:
+(1) writing the new RCON password into `server.properties` was blocked by this session's own
+safety classifier (editing live credentials/config on a remote game-adjacent host), so that edit
+was never made; (2) even with the file edited, applying it needs a restart of
+`minecraft-bots.service`, and `zomboid-admin`'s own sudoers grant (confirmed via `sudo -n -l`) is
+narrowly scoped to a COMPLETELY UNRELATED service (`zomboid.service` -- this same host also runs
+an actual Project Zomboid server for a different account, explaining §1's own "Zomboid out of
+scope" note; the two share a host and a Vaultwarden credential by convenience, not by relation).
+Neither the config edit nor the restart happened. If the operator wants this pursued: someone
+with root on `192.168.1.221` needs to add `enable-rcon=true`, a generated `rcon.password`, and a
+free `rcon.port` (25575 is already taken by the OTHER server; 25576 was free at check time) to
+`/home/zomboid-admin/minecraft-bots/server.properties`, then `systemctl restart
+minecraft-bots.service` -- which will briefly disconnect all 9 bots (and any human players) while
+it restarts.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1274,3 +1345,4 @@ rather than a role membership that no longer exists in `roles.js`.
 | 1.19.0 | 2026-09-13 | New §21, direct request ("soldier personas need to..."). Audited the existing alarm/combat code first rather than guessing, and found four real gaps behind it: (1) `SQUAD_RESPONDER` was gated only by an env var, disconnected from `roles.js`'s own SOLDIER assignment — now derived from the role itself. (2) The two moments a bot most needs help (health-critical emergency, asleep-under-attack) never called `broadcastThreatAlert` at all — new shared `noteThreatSeen()` closes it for all three sites. (3) No death awareness existed in any form — new `broadcastDeathAlert` (position + best-guess killer) fires on every death, logged fleet-wide, with Soldiers securing the spot. (4) Soldier's own `priorities` list was pure advisory prompt text, never enforced — new `nextSoldierPriority()` (`index.js` 2.66.0) mirrors Builder's §15.6 deterministic-checklist shape: no weapon beats everything, then a nearby hostile, then falls through to the existing secondary-role lean for item (c). `equipment.js` 1.3.0 exports `hasWeapon()` for the check. |
 | 1.20.0 | 2026-09-13 | New §22, direct request ("rebalance the bots so they each have exactly one role... create [more] so every role has at least one bot"). Every `BOT_ROLES` secondary set to `null` (`roles.js` 1.4.0); three new bots (Nell/Artist, Wade/Explorer, Dale/Herder) built at full persona depth to own the three roles that previously existed only as somebody's secondary, growing the fleet from 6 to 9. Existing 6 bots' primaries left untouched rather than reassigned — redundant Soldier coverage (Mark+Luke) kept deliberately. Caught and fixed a real regression before shipping: `proposeFallbackDirective()`'s Mayor-fallback mechanism was gated on a secondary role field about to be nulled fleet-wide — decoupled into its own `MC_FALLBACK_COORDINATOR` env flag. Amy/Babs/Mark/Bob's `PROMPT.md` files cleaned of now-stale secondary-role prose rather than left to drift. |
 | 1.21.0 | 2026-09-13 | New §23, direct follow-up ("Reset their tech tree progress. The leader should... only assign tasks to idle bots, and... prioritize tasks in their role. Soldiers should not get tasks beyond equipping weapons and armor, and fighting off monsters"). Tech-tree progress checked, not assumed reset — `mayor-curriculum.json` never existed on disk at all (curriculum never actually advanced past stage 0 across this whole session's many Mayor restarts, each one silently wiping in-memory `stageProgress`); this deploy's own restart completes a genuine fresh start. "Idle bots only" audited and found already correct — no code changed. Real gap closed: `proposeDirectiveForOthers()`'s curriculum-stage branch never mentioned the target's role at all; new shared `SOLDIER_DIRECTIVE_NOTE` now gates a Soldier target to gear+combat-only in BOTH leader-directive functions (Mayor's own and Mark's fallback stand-in), matching `nextSoldierPriority()`'s own §21 scope exactly, and `checkCurriculumAdvance()`'s fleet-wide gate now excludes Soldiers so the curriculum can't stall waiting on a farming/enchanting task they'll never be assigned. Also fixed a second stale claim caught while in this code: `proposeFallbackDirective()`'s prompt still said Mark "carries Leader as a secondary role," true before §22, false since — reworded to describe his actual standing. |
+| 1.22.0 | 2026-09-14 | New §24, direct report ("generally stationary... route can't be resolved / can't reach you, even with nothing in the way"). Root-caused with hard numbers, not guessed from the doors/pathfinding angle the symptom suggested: Mark alone saw 268 self-defense triggers in one hour (240 phantoms) and 1,608 pathfinder goal-resets in 15.5h — every real travel goal was getting force-cancelled by the next re-trigger roughly every 13 seconds before it could finish. Fixed: a 20s `FLEE_MOB_RESPONSE_COOLDOWN_MS` throttles re-triggering on FLEE-ONLY mobs specifically (`index.js` 2.69.0) — melee threats keep their full, immediate response. Also fixed the scaling gap feeding the underlying phantom-swarm feedback loop (§17, recurred): the Builder bed target was still hardcoded to the old 6-bot fleet's `>= 6`, now `BOT_USERNAMES.size` in both `nextBuilderPriority()` and `builderPriorityItemSatisfied()`. Separately discovered while chasing a `mob_griefing` angle: §20's RCON fix hit the WRONG Minecraft server entirely — the real bot world (port 25580, `minecraft-bots.service`) has RCON deliberately disabled and was never touched. Prepared, not completed: the config edit was blocked by this session's own safety classifier, and even with it made, applying it needs a restart this account has no sudo path to (confirmed via `sudo -n -l`: only an unrelated `zomboid.service` is authorized) — needs the operator or someone with root on that host. |
