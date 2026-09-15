@@ -1376,6 +1376,82 @@ reseed like this one, or a `newworld`-style wipe) will silently reset `mob_grief
 other non-default gamerule) back to vanilla defaults -- re-applying it isn't a one-time fix, it's
 a step that belongs in the re-init checklist itself, not something to assume carried over.
 
+## 26. `coder`/`coder2` benchmarked against `dispatch` for real planning prompts (2026-09-15)
+
+Direct follow-up to the prior turn's model-effectiveness review ("no genuine benchmark exists in
+this codebase"): "do some benchmarking of using coder, as was originally intended, or coder2, for
+planning and bot behavior tactics. Search the internet for the experience and findings of others."
+
+**Method.** Hit `hermes-router.py`'s real `/v1/chat/completions` endpoint directly (from `spark`,
+`127.0.0.1:8080`) with `planNextStep()`'s exact, unmodified production system prompt, varying only
+the goal/gear/recent-progress `user` content across three scenarios chosen to probe the specific
+failure modes already documented for `dispatch` in this file: (T1) ordinary multi-step planning
+under format-compliance pressure; (T2) the documented "correct diagnosis, no follow-through"
+pattern -- a smelt blocked on missing fuel/furnace, where the prompt's own explicit fallback rule
+prescribes `ACTION LOOT`; (T3) DONE-hallucination resistance -- gear that's close to but not
+actually satisfying the goal. `temperature=0` for reproducibility (production actually runs at
+`0.9`, router.js's own default -- a caveat, not a control: this setting is a *best case* for
+instruction-following relative to what ships, so any failure observed here is a floor, not a
+ceiling, on how often it happens live).
+
+**Results.**
+
+| Test | `dispatch` | `coder` | `coder2` |
+|---|---|---|---|
+| T1 (format/planning) | 1.6s, correct (`ACTION CRAFT oak_planks 3`) | 8.8s, correct (`ACTION CRAFT oak_planks 4`) | 54.9s, **empty response** |
+| T2 (LOOT-fallback rule) | 5.9s, **deviates** (`ACTION MINE oak_log 1` -- plausible but ignores the prompt's explicit LOOT-first rule) | 7.7s, **deviates** (`ACTION MINE cobblestone 8` to self-craft a furnace -- same class of plausible-but-noncompliant answer) | 33.9s, **correct** (`ACTION LOOT`, terse, exactly matches the rule) |
+| T3 (output-parameter correctness) | 3.5s, **wrong parameter** (`ACTION SMELT raw_iron 2` -- used the INPUT material as `<item_id>`, directly violating "item_id is the OUTPUT... never invent one," a bug that would likely fail to parse/execute for real) | 8.1s, correct (`ACTION SMELT iron_ingot 2`) | 48.9s, correct (`ACTION SMELT iron_ingot 2`) |
+
+**Reading the results honestly.** `dispatch` is 3-10x faster than `coder` and 10-30x faster than
+`coder2`, but it's the only one of the three that produced a genuinely wrong, likely-to-break
+answer (T3's swapped input/output parameter) and the only one that deviated from an explicit
+in-prompt rule without acknowledging it (T2). `coder` matched `dispatch`'s speed order of
+magnitude (single-digit seconds, not sub-2s) while getting T3 right and offering a defensible
+(if rule-noncompliant) alternative on T2. `coder2` was the most rule-compliant model tested (the
+only one to get T2 exactly right) but is not viable as a like-for-like swap in its current
+form -- 34-55 seconds per call is far outside what a per-tick planner can tolerate, and one of
+three calls returned nothing at all, which would surface as exactly the same "unparseable
+planNextStep reply" fallback bug already on record for `dispatch`, not a fix for it.
+
+**No clean winner; a real tradeoff, not a slam dunk either way.** `dispatch`'s speed is real and
+matters for a bot that's supposed to react within a couple of seconds; so is the T3 defect, which
+is a genuine correctness bug this exact benchmark reproduced live rather than inferred from old
+log comments. `coder` is the more interesting candidate of the two alternatives -- same
+architecture family and abliteration status as `muse` (which has no output-quality complaints on
+record), meaningfully more accurate on this small sample, and slow but not impractically so.
+`coder2` earned real credit for rule-following but isn't usable as shipped (latency, one dead
+response). No change made to which role backs `planNextStep` -- this section is the evidence, the
+actual routing decision is left to the operator.
+
+**What the wider community's experience says.** Searched for how other Minecraft-LLM-agent
+projects choose their models:
+- [kolbytn/mindcraft](https://github.com/kolbytn/mindcraft) — the most directly comparable
+  open-source project (LLM + Mineflayer bots) — documents no model comparison or code-vs-general
+  finding in its own README; it does structurally separate "chatting" from "coding" model configs,
+  the same split this fleet already makes (`muse` vs `coder`), without commenting on which wins
+  for in-game decision-making specifically.
+- [Sweaterdog/MindCraft-LLM-tuning](https://huggingface.co/Sweaterdog/MindCraft-LLM-tuning)
+  (predecessor to the current Andy series) states directly: "Gemma 2 and Qwen2.5... were by far
+  the best at playing Minecraft before fine-tuning" — general-purpose base models, not
+  code-specialized ones. Qwen2.5 was the one carried forward.
+- [Mindcraft-CE/Andy-4.2](https://huggingface.co/Mindcraft-CE/Andy-4.2) — the current
+  community-standard "best local model for Minecraft" — is built on a general Qwen3.5-series base
+  (same family as this fleet's own `dispatch`/`muse`), not a code-tuned checkpoint. Its
+  improvement over stock comes from task-specific fine-tuning on spatial reasoning and
+  step-by-step planning examples, not from starting with a coding-specialized base model.
+- Broader agent-benchmark literature (searched separately, not Minecraft-specific): "code
+  specialists did not win the coding benchmark" on one cited agentic-coding leaderboard, and
+  "training LLMs on code and high-quality, multi-turn alignment data enhances agent performance"
+  per AgentBench findings — code EXPOSURE during training correlates with better agent behavior,
+  but a model BRANDED/marketed as a coding specialist isn't reliably the strongest general
+  planner. This is consistent with, not contradicted by, `coder` outperforming `dispatch` on
+  accuracy above: `coder`'s edge plausibly comes from being a larger, more careful model overall
+  (27B vs the A3B-MoE stock quant backing `dispatch`), not specifically from code abliteration.
+- **No source found anywhere -- this project's own history or the wider community's -- reporting
+  a controlled comparison of a code-specialized model against a general one for real-time
+  Minecraft bot planning specifically.** This benchmark is more evidence on that exact question
+  than what was previously available anywhere searched.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1404,3 +1480,4 @@ a step that belongs in the re-init checklist itself, not something to assume car
 | 1.21.0 | 2026-09-13 | New §23, direct follow-up ("Reset their tech tree progress. The leader should... only assign tasks to idle bots, and... prioritize tasks in their role. Soldiers should not get tasks beyond equipping weapons and armor, and fighting off monsters"). Tech-tree progress checked, not assumed reset — `mayor-curriculum.json` never existed on disk at all (curriculum never actually advanced past stage 0 across this whole session's many Mayor restarts, each one silently wiping in-memory `stageProgress`); this deploy's own restart completes a genuine fresh start. "Idle bots only" audited and found already correct — no code changed. Real gap closed: `proposeDirectiveForOthers()`'s curriculum-stage branch never mentioned the target's role at all; new shared `SOLDIER_DIRECTIVE_NOTE` now gates a Soldier target to gear+combat-only in BOTH leader-directive functions (Mayor's own and Mark's fallback stand-in), matching `nextSoldierPriority()`'s own §21 scope exactly, and `checkCurriculumAdvance()`'s fleet-wide gate now excludes Soldiers so the curriculum can't stall waiting on a farming/enchanting task they'll never be assigned. Also fixed a second stale claim caught while in this code: `proposeFallbackDirective()`'s prompt still said Mark "carries Leader as a secondary role," true before §22, false since — reworded to describe his actual standing. |
 | 1.22.0 | 2026-09-14 | New §24, direct report ("generally stationary... route can't be resolved / can't reach you, even with nothing in the way"). Root-caused with hard numbers, not guessed from the doors/pathfinding angle the symptom suggested: Mark alone saw 268 self-defense triggers in one hour (240 phantoms) and 1,608 pathfinder goal-resets in 15.5h — every real travel goal was getting force-cancelled by the next re-trigger roughly every 13 seconds before it could finish. Fixed: a 20s `FLEE_MOB_RESPONSE_COOLDOWN_MS` throttles re-triggering on FLEE-ONLY mobs specifically (`index.js` 2.69.0) — melee threats keep their full, immediate response. Also fixed the scaling gap feeding the underlying phantom-swarm feedback loop (§17, recurred): the Builder bed target was still hardcoded to the old 6-bot fleet's `>= 6`, now `BOT_USERNAMES.size` in both `nextBuilderPriority()` and `builderPriorityItemSatisfied()`. Separately discovered while chasing a `mob_griefing` angle: §20's RCON fix hit the WRONG Minecraft server entirely — the real bot world (port 25580, `minecraft-bots.service`) has RCON deliberately disabled and was never touched. Blocked on a safety-classifier denial for the config edit and a missing sudo grant for the restart, both of which needed the operator — who did both directly (new Vaultwarden item, config edit, service restart), catching and fixing one snag along the way (`enable-rcon` itself hadn't actually flipped on the first attempt). `mob_griefing` confirmed `true` → `false` on the real server this time; all 9 bots reconnected after the server-side restart (confirmed mineflayer does not auto-reconnect on a server-initiated disconnect — every bot needed its own systemd restart to rejoin). |
 | 1.23.0 | 2026-09-14 | New §25, direct request ("I changed the seed value manually. re-init the world using the new seed"). Confirmed live first that editing `level-seed` alone does nothing to an existing world — RCON's own `seed` command still reported the ORIGINAL seed after the operator's edit. Re-init used §24's now-working RCON end-to-end, no sudo/operator step needed: `save-all flush` + `stop` over RCON, relying on `minecraft-bots.service`'s own `Restart=always` to bring it back up; old world directory moved (not deleted) to a timestamped backup, matching four earlier `firmament-bots.bak-*` snapshots already on disk from prior resets. A real race in the first attempt's own "wait for exit" check (a `pgrep` match on an unrelated server owned by a different Unix account, plus a `kill -0` permission-denied misread as "already exited") was caught by verifying the actual end state directly — the boot log's "No existing world data, creating new world" line and RCON's own `seed` readback confirmed `694200161758793929` — rather than trusting the script's own report. All 9 bots reconnected and confirmed spawned into the new world (a visibly different spawn region from the old one). Direct follow-up ("re-check the anti-griefing setting"): `mob_griefing` had reverted to `true` on the new world — expected, since gamerules live in the world save, not `server.properties`, so any future re-init needs this re-applied as a checklist step, not assumed carried over. Re-confirmed and re-set to `false` via RCON. |
+| 1.24.0 | 2026-09-15 | New §26, direct request ("do some benchmarking of using coder... or coder2, for planning and bot behavior tactics. Search the internet for the experience and findings of others"). Ran `planNextStep()`'s real, unmodified production prompt against `dispatch`/`coder`/`coder2` directly through `hermes-router.py`'s live endpoint across 3 scenarios targeting documented `dispatch` failure modes. Real, mixed result: `dispatch` stayed fastest (1.6-5.9s) but produced a genuine parameter-format bug (used an input material as a SMELT output id) and deviated from an explicit in-prompt rule; `coder` matched `dispatch`'s correctness on the two tests where they diverged at moderate latency (7.7-8.8s); `coder2` was the most rule-compliant but impractically slow (34-55s) with one empty response outright. No routing change made — evidence recorded, decision left to the operator. Web research found no source (this project's own history or the wider Minecraft-LLM-agent community, including kolbytn/mindcraft and the Andy/Mindcraft-CE project) reporting a real code-vs-general-model comparison for this exact task; the community's own leading local model (Andy-4.2) is built on a general Qwen base with task-specific fine-tuning, not a code-specialized checkpoint. |
