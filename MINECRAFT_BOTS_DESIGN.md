@@ -1556,6 +1556,58 @@ real, clean reconnect.
 `journalctl` glance but need different fixes; this section closes the "looks fine, isn't even
 connected" one specifically.
 
+## 29. World restore point (2026-09-16)
+
+Direct request: "backup the current world into a restoration point. If I ask, I want to be able to
+restore to the current state." A dedicated, clean snapshot -- not the same thing as the automatic
+nightly `backup.sh`/`minecraft-bots-backup.timer` tarballs already running, and not the same as
+the `firmament-bots.bak-*` directories §25/§28 left behind as incidental byproducts of a world
+re-init. This one was taken deliberately, for later restore on request.
+
+**How it was taken -- stopped, not live-copied, for a genuinely consistent snapshot.** The
+existing `backup.sh` script's own comment explains it tars the world *while the server keeps
+running*, accepting "losing whatever changed since the last autosave" as a low-consequence
+tradeoff -- reasonable for an unattended nightly job, not good enough for a restore point someone
+is deliberately relying on. Now that RCON actually works on this server (§24/§28), a proper clean
+snapshot was possible instead: `save-all flush` + `stop` over RCON (same pattern as §25/§28,
+verified by polling the exact PID that owns port 25580, not a name-based `pgrep`), then `cp -a`
+the fully-idle `firmament-bots` world directory (not moved -- the live world stays exactly where
+it was) to:
+
+```
+/home/zomboid-admin/minecraft-bots/firmament-bots.RESTORE-POINT-20260916-152257
+```
+
+21M, same seed (`694200161758793929`) confirmed via RCON both before and after. `Restart=always`
+brought the live server back up automatically (`Preparing level "firmament-bots"`, not "creating
+new world" -- confirmed the live world was untouched) -- and, for the first time, every bot's own
+`process.exit(1)` fix from §28 fired for real and worked exactly as designed: all 9 reconnected
+and rejoined on their own, no manual restart needed, closing the loop on that fix live.
+
+**To actually restore to this point later, when asked:**
+1. Stop the live server cleanly: RCON `save-all flush` then `stop` (or, if RCON is down, whatever
+   the operator uses directly on `192.168.1.221`); confirm the process that owned port 25580 has
+   actually exited before touching anything.
+2. Move (don't delete) the THEN-current `firmament-bots` aside to a fresh
+   `firmament-bots.bak-<timestamp>-pre-restore`, preserving whatever was built since, in case the
+   restore itself needs undoing.
+3. Copy the restore point back into place:
+   `cp -a firmament-bots.RESTORE-POINT-20260916-152257 firmament-bots`.
+4. Let `Restart=always` bring the server back up (or start it manually if it doesn't) --
+   confirm via RCON `seed` (should read back `694200161758793929`, same as it always has been) and
+   the boot log's own `Preparing level` line.
+5. Restart all 9 bot systemd services so they reconnect to the restored world (§28's own fix
+   means they may well reconnect on their own after the server-side outage, same as this section's
+   own deploy did -- verify via RCON `list` before assuming a manual restart is needed).
+
+**Scope note.** This restore point captures ONLY the world save (terrain, structures, chests,
+bot-claimed beds, whatever's been built) -- it does not include bot memory/goal state
+(`/mnt/hermes-data/minecraft-memory/`), which lives on `spark`/`spark2`, not on the game-server
+host, and isn't touched by anything in this section. A restore rolls the world back; each bot's
+own persisted goal/curriculum/claimed-bed state would still reflect whatever it was at restore
+time, not automatically rewound to match -- worth being aware of if a future restore is requested
+long after this point was taken.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1587,3 +1639,4 @@ connected" one specifically.
 | 1.24.0 | 2026-09-15 | New §26, direct request ("do some benchmarking of using coder... or coder2, for planning and bot behavior tactics. Search the internet for the experience and findings of others"). Ran `planNextStep()`'s real, unmodified production prompt against `dispatch`/`coder`/`coder2` directly through `hermes-router.py`'s live endpoint across 3 scenarios targeting documented `dispatch` failure modes. Real, mixed result: `dispatch` stayed fastest (1.6-5.9s) but produced a genuine parameter-format bug (used an input material as a SMELT output id) and deviated from an explicit in-prompt rule; `coder` matched `dispatch`'s correctness on the two tests where they diverged at moderate latency (7.7-8.8s); `coder2` was the most rule-compliant but impractically slow (34-55s) with one empty response outright. No routing change made — evidence recorded, decision left to the operator. Web research found no source (this project's own history or the wider Minecraft-LLM-agent community, including kolbytn/mindcraft and the Andy/Mindcraft-CE project) reporting a real code-vs-general-model comparison for this exact task; the community's own leading local model (Andy-4.2) is built on a general Qwen base with task-specific fine-tuning, not a code-specialized checkpoint. |
 | 1.25.0 | 2026-09-15 | New §27, direct request ("check the logs since the last review... look for behavioral gaps"). Confirmed the §24 phantom throttle is working (85-87% fewer triggers, real travel now completing) and no repeat of the original mass-death incident at anywhere near its original scale. Confirmed, root-caused, and fixed a real §23 regression: Mark logged 909 doomed "gave up on the fight" self-defense results in 34h because `checkSelfDefense()` never checked weapon possession before choosing "attack" -- a bare-handed fight against nearly anything can't land enough hits inside `ACTION_TIMEOUT_MS`, so SELF_DEFENSE-tier control was held almost continuously, starving the "go get a weapon" directive of any real execution window and explaining the chronic `iron_sword` DONE-hallucination without the verification logic itself being at fault. Fixed in `checkSelfDefense()`/`checkSleepingThreat()`/`respondToSquadCall()` (`index.js` 2.70.0): flee (or decline to engage) whenever `hasWeapon(bot)` is false, same reasoning already established for `FLEE_ONLY_MOBS`. Separately closed `nextSoldierPriority()`'s own fall-through-to-unrestricted-freeform gap (returned `null` once armed with nothing nearby, exactly how "craft a pickaxe" got self-proposed) -- now always returns a directive for a Soldier-primary bot, ending in a "stand guard" fallback rather than ever reaching freeform. Flagged, not fixed: a recurring `sqlite3` `UNIQUE constraint failed on vec_chunks` traceback affecting only the 5 bots co-located on `spark`, never causing a crash -- shared Firmament memory/RAG infrastructure, a distinct investigation of its own. |
 | 1.26.0 | 2026-09-16 | New §28, direct report ("the bots do not appear to be active in world") -- caught a false-positive in the immediately preceding "check bot status" turn. RCON's `list` showed 0 of 9 bots actually connected while every systemd unit still reported active with normal-looking logs. Root cause: a real `keepAliveError` disconnect (coinciding with an independent game-server process restart) was only ever logged by `bot.on("end")`, never acted on -- every `setInterval` check kept firing against a dead connection for 2+ hours, some resolving with fabricated success ("slept through the night," "nothing left to fight"). Fixed (`index.js` 2.71.0): `bot.on("end")` now exits the process, handing recovery to the same `Restart=always` systemd machinery already proven for OOM crashes. |
+| 1.27.0 | 2026-09-16 | New §29, direct request ("backup the current world into a restoration point... I want to be able to restore to the current state"). Stopped the server cleanly via RCON (`save-all flush` + `stop`, PID-verified exit) rather than tarring a live world, for a genuinely consistent snapshot — `cp -a` to `firmament-bots.RESTORE-POINT-20260916-152257` (21M). `Restart=always` brought the live world back up untouched (confirmed via the boot log and a same-seed RCON readback), and §28's `process.exit(1)` fix fired for real for the first time: all 9 bots reconnected on their own, no manual restart needed. Documented the exact restore procedure for later use, and flagged that a restore rolls back the world only, not each bot's own separately-persisted goal/curriculum state. |
