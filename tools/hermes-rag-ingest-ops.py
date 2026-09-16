@@ -60,7 +60,6 @@ MAX_CHUNK_CHARS = 1800
 
 NODES = [
     ("Spark-Sintra", "local", "sintra", "/home/sintra/.hermes/state/node-health/last-report.json"),
-    ("Spark-Amy", "local", "amy", "/home/amy/.hermes/state/node-health/last-report.json"),
     ("HomeD13", "ssh", "homed13", "/home/pmoney/.node-health/state/node-health/last-report.json"),
 ]
 
@@ -140,12 +139,12 @@ def ingest_node(conn, node_name, kind, target, path, dry_run) -> int:
         return len(chunks)
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    conn.execute("DELETE FROM chunks WHERE corpus=? AND source_path=?", (CORPUS, source_path))
     conn.execute(
         "DELETE FROM vec_chunks WHERE chunk_id IN "
         "(SELECT id FROM chunks WHERE corpus=? AND source_path=?)",
         (CORPUS, source_path),
     )
+    conn.execute("DELETE FROM chunks WHERE corpus=? AND source_path=?", (CORPUS, source_path))
     for idx, (section, timestamp, text) in enumerate(chunks):
         citation = f"Node health — {node_name} — {section} (as of {timestamp})"
         vec = rag.embed(text)
