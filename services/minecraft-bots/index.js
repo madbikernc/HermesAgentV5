@@ -1,4 +1,30 @@
-// Version: 2.69.0
+// Version: 2.70.0
+//
+// 2.70.0 (2026-09-15) -- direct request: "check the logs since the last review... look for
+// behavioral gaps." Found and fixed the real cause behind an apparent §23 regression: Mark
+// logged 909 doomed "gave up on the fight -- took too long" self-defense results in 34 hours
+// (~27/hour) because he had no weapon the ENTIRE window, and checkSelfDefense()'s own
+// attack-vs-flee decision never checked weapon possession before committing to "attack" -- a
+// bare-handed fight against nearly anything can't land enough hits inside ACTION_TIMEOUT_MS to
+// win, the exact same doomed-timeout shape FLEE_ONLY_MOBS already exists to prevent for flyers.
+// This held SELF_DEFENSE-tier arbiter control almost continuously, starving GOAL_STEP tier (the
+// tier nextSoldierPriority()'s own "go get a weapon" directive runs under) of any real
+// uninterrupted window to ever actually loot/craft/request one -- permanently weaponless, which
+// kept every future encounter exactly as doomed, forever. This also fully explains the chronic
+// "REJECTED DONE (claimed iron_sword...)" hallucination loop without the verification logic
+// itself being at fault: it was already correctly rejecting the false claim every time, dispatch
+// just never got a real chance to make actual progress between guesses. checkSelfDefense(),
+// checkSleepingThreat(), and respondToSquadCall() now all flee (or decline to engage) whenever
+// hasWeapon(bot) is false, alongside their existing flyer/low-health conditions. Separately
+// closed a real, confirmed-live violation of §23's Soldier restriction ("Secure Luke's flank --
+// craft a pickaxe" self-proposed by Mark): nextSoldierPriority() returned null once armed with
+// no hostile nearby, falling through to the SAME unrestricted freeform path every other role
+// uses -- Builder's own checklist legitimately graduates to freeform once her one-time
+// infrastructure list is built, but a Soldier's job was never supposed to have an equivalent
+// "done, move on" state. Now always returns a directive for a Soldier-primary bot, ending in a
+// "stand guard near home" fallback instead of ever reaching freeform. See
+// MINECRAFT_BOTS_DESIGN.md §27, including a separate, flagged-not-fixed sqlite concurrency bug
+// in shared Firmament memory infrastructure outside this fleet's own code.
 //
 // 2.69.0 (2026-09-14) -- direct report: "generally stationary on their wake-up spot... 'the
 // route can't be resolved'/'I can't reach you,' even when the only thing in the way was an open
@@ -2533,7 +2559,16 @@ function nextSoldierPriority() {
   if (threat && !FLEE_ONLY_MOBS.has(threat.name)) {
     return { name: "monster", directive: `hunt down and kill the nearby ${threat.name}.` };
   }
-  return null; // no hard priority right now -- fall through to freeform (secondary-role lean included)
+  // Direct report, 2026-09-15 ("look for behavioral gaps"): a real, confirmed live violation of
+  // "Soldiers should not get tasks beyond equipping weapons and armor, and fighting off
+  // monsters" -- Mark self-proposed "Secure Luke's flank -- craft a pickaxe" during a window
+  // where both conditions above happened to be false (armed, nothing hostile in patrol range).
+  // Returning null here, like Builder's own checklist does once its infrastructure is built,
+  // was the bug: Builder graduates to unrestricted freeform once her one-time checklist is
+  // done, but a Soldier's job was never meant to have a "checklist complete" state to graduate
+  // out of (§21) -- standing guard is supposed to be ongoing, never "done." A Soldier-primary
+  // bot now never reaches the unrestricted freeform path at all.
+  return { name: "guard", directive: "stand guard near home and keep watch for anything hostile." };
 }
 
 async function proposeOwnGoal() {
@@ -3579,8 +3614,22 @@ async function checkSelfDefense() {
     // ACTION_TIMEOUT_MS every single time and blocking everything else for that whole span).
     // Checked ahead of the health threshold -- a flyer is never worth attacking regardless of
     // how much health is left to spend on a doomed chase.
-    const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH
-      ? "flee" : "attack";
+    //
+    // Direct report, 2026-09-15 ("look for behavioral gaps"): the exact same doomed-timeout
+    // shape, found live -- Mark logged 909 "gave up on the fight -- took too long" results in
+    // 34 hours (~27/hour, against every hostile type, not just flyers) because he had no sword
+    // or axe the ENTIRE window. A bare-handed bot attacking anything is nearly as doomed as
+    // meleeing a flyer -- it just fails by timeout instead of by unreachability. Worse, this was
+    // self-reinforcing: constant SELF_DEFENSE-tier combat (always chosen over flee, since none
+    // of these mobs were FLEE_ONLY and health never dropped low enough to trigger the OTHER
+    // flee condition) never gave GOAL_STEP tier -- the tier her own "go get a weapon" directive
+    // runs under -- a long enough uninterrupted window to ever actually loot/craft/request one,
+    // which kept her bare-handed, which kept every future encounter doomed the same way. Now
+    // checked alongside the other two flee conditions: no weapon means flee, regardless of mob
+    // type or health, breaking the cycle by actually surviving long enough between encounters to
+    // get equipped.
+    const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH ||
+      !hasWeapon(bot) ? "flee" : "attack";
     if (FLEE_ONLY_MOBS.has(threat.name)) lastFleeMobResponseAt = Date.now();
     console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
     // action.target: the already-found entity, not re-derived -- see actions.js's own
@@ -3645,6 +3694,12 @@ async function respondToSquadCall(payload) {
       // for the full 90s ACTION_TIMEOUT_MS holding SQUAD_RESPONSE control the whole time,
       // for no real chance of ever landing a hit.
       console.log(`[${USERNAME}] squad response: arrived, but a ${threat.name} isn't worth chasing on foot.`);
+    } else if (!hasWeapon(bot)) {
+      // Direct report, 2026-09-15 ("look for behavioral gaps") -- same doomed-timeout shape as
+      // checkSelfDefense's own fix just above: a responder who arrives with no weapon of her own
+      // is exactly as unable to actually help as one facing a flyer, and committing to "attack"
+      // anyway would just hold SQUAD_RESPONSE control for the full 90s for nothing.
+      console.log(`[${USERNAME}] squad response: arrived, but no weapon to fight ${threat.name} with.`);
     } else {
       const result = await performAction(bot, { type: "attack", target: threat }, USERNAME);
       console.log(`[${USERNAME}] squad response result: ${result.text} (ok=${result.ok})`);
@@ -4761,10 +4816,11 @@ async function checkSleepingThreat() {
     return;
   }
   try {
-    // See checkSelfDefense's own 2026-09-10 note (actions.js's FLEE_ONLY_MOBS header) -- a
-    // flyer is never worth attacking, regardless of health.
-    const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH
-      ? "flee" : "attack";
+    // See checkSelfDefense's own 2026-09-10/2026-09-15 notes (actions.js's FLEE_ONLY_MOBS
+    // header) -- a flyer is never worth attacking regardless of health, and neither is anything
+    // else when she has no weapon to fight it with.
+    const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH ||
+      !hasWeapon(bot) ? "flee" : "attack";
     const result = await performAction(bot, { type, target: threat }, USERNAME);
     console.log(`[${USERNAME}] post-wake defense: ${type} -> ${result.text} (ok=${result.ok})`);
   } catch (err) {

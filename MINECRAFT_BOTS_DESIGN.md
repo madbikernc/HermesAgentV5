@@ -1452,6 +1452,73 @@ projects choose their models:
   Minecraft bot planning specifically.** This benchmark is more evidence on that exact question
   than what was previously available anywhere searched.
 
+## 27. 34-hour post-fix review finds Soldiers permanently weaponless -- root cause was self-defense, not the role system (2026-09-15)
+
+Direct request: "check the logs since the last review for the bots, look for behavioral gaps."
+Reviewed ~34 hours since the world re-seed (§25) and the phantom-throttle/bed-scaling deploy
+(§24), through both an automated sweep and direct spot-verification of its two most consequential
+claims before acting on them.
+
+**Confirmed fixed.** The phantom self-defense throttle (§24) is working as designed: sample-hour
+trigger counts dropped from the old ~268/hour baseline to 35-40/hour (an 85-87% reduction), with
+measured gaps between consecutive phantom triggers consistently at or above the 20s cooldown, and
+real travel now completing (dozens of `goal_reached` events per bot per hour where before there
+were essentially none). No crash-restarts anywhere in the fleet across the whole window. No repeat
+of the original 2.5-hour, 200+-death mass spawn-camp incident, though two much smaller, shorter
+single-location death clusters occurred (Amy: 58 deaths in ~7 minutes to a drowned at one
+coordinate; Wade: 11 deaths in ~7 minutes to mixed mobs) -- the same failure *shape*, an order of
+magnitude smaller in scale, not eliminated as a possibility.
+
+**Confirmed NOT fixed, and root-caused for real this time.** §23's Soldier task restriction looked
+violated live: Mark self-proposed "Secure Luke's flank -- craft a pickaxe" and both Mark and Luke
+showed a chronic `REJECTED DONE (claimed iron_sword, not actually in inventory or equipped)`
+hallucination loop spanning the entire 34-hour window (Mark 44 occurrences, Luke 57). Verified
+directly rather than trusted from the sweep alone. The real root cause was not a role-system gap
+at all: Mark logged **909** `self-defense: gave up on the fight -- took too long` results in 34
+hours (~27/hour) across every hostile type (spider, enderman, zombie, skeleton, creeper, drowned,
+stray) -- because he had no sword or axe for the entire window, and `checkSelfDefense()`'s own
+attack-vs-flee decision never checked whether the bot actually had a weapon before committing to
+"attack." A bare-handed fight against nearly anything can't land enough hits inside
+`ACTION_TIMEOUT_MS` (90s) to win -- the *exact* failure shape the `FLEE_ONLY_MOBS`/phantom fix
+already existed to prevent, just triggered by "no weapon" instead of "can't reach a flyer."
+
+**The self-reinforcing loop this created.** Attack was chosen every time (none of these mobs are
+`FLEE_ONLY_MOBS`, and health never dropped low enough to trigger the other flee condition), which
+meant SELF_DEFENSE-tier arbiter control was held almost continuously -- never leaving a real,
+sustained window for GOAL_STEP tier (the tier `nextSoldierPriority()`'s own "go get a weapon"
+directive runs under) to actually execute a LOOT/CRAFT/REQUEST through to completion. Permanently
+weaponless kept every future encounter exactly as doomed, forever. This also explains the
+`iron_sword` hallucination without any change needed to the DONE-verification itself: that check
+was already correctly rejecting the false claim every single time (see "REJECTED DONE" itself) --
+the bug was dispatch never getting a real opportunity to make actual progress between guesses, not
+the safety net failing to catch a bad one.
+
+**Two fixes, both small and surgical.**
+1. `checkSelfDefense()`, `checkSleepingThreat()`, and `respondToSquadCall()` (`index.js` 2.70.0)
+   all now flee (or decline to engage, for the squad-response case) whenever `hasWeapon(bot)` is
+   false, alongside their existing flyer/low-health conditions -- exactly the same reasoning
+   `FLEE_ONLY_MOBS` already established, extended to cover "no weapon" as its own doomed-fight
+   case rather than only "wrong kind of target."
+2. A second, independent gap in the same investigation: `nextSoldierPriority()` returned `null`
+   once a Soldier had both a weapon AND no nearby hostile, falling through to the SAME
+   unrestricted freeform self-propose path every other role uses -- which is exactly how "craft a
+   pickaxe" got self-proposed despite §23's restriction. Builder's own checklist (§15.6)
+   legitimately graduates to freeform once her one-time infrastructure list is built; a Soldier's
+   job was never supposed to have an equivalent "done, move on" state (§21's own framing: gear and
+   combat, ongoing, never done). `nextSoldierPriority()` now always returns a directive for a
+   Soldier-primary bot -- weapon check, then nearby-hostile check, then a final "stand guard near
+   home" fallback -- so a Soldier never reaches the unrestricted freeform path at all.
+
+**A separate, un-fixed anomaly found and flagged, not chased down.** A recurring
+`sqlite3.OperationalError: UNIQUE constraint failed on vec_chunks primary key` traceback appears
+232-329 times per bot over the window, but only on `spark`-hosted bots (Babs/Amy/Mark/Luke/Mayor
+all affected; Bob/Nell/Wade/Dale on `spark2`, zero occurrences) -- consistent with a concurrent-
+write race in a shared local vector-store table that only five co-located processes on one host
+can actually contend for. Never causes a crash (`Main process exited` count stayed zero
+throughout). This lives in shared Firmament memory/RAG infrastructure, not this fleet's own code,
+and touching it is a distinct, cross-service investigation of its own -- flagged here for
+engineering attention, not chased down as part of this pass.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1481,3 +1548,4 @@ projects choose their models:
 | 1.22.0 | 2026-09-14 | New §24, direct report ("generally stationary... route can't be resolved / can't reach you, even with nothing in the way"). Root-caused with hard numbers, not guessed from the doors/pathfinding angle the symptom suggested: Mark alone saw 268 self-defense triggers in one hour (240 phantoms) and 1,608 pathfinder goal-resets in 15.5h — every real travel goal was getting force-cancelled by the next re-trigger roughly every 13 seconds before it could finish. Fixed: a 20s `FLEE_MOB_RESPONSE_COOLDOWN_MS` throttles re-triggering on FLEE-ONLY mobs specifically (`index.js` 2.69.0) — melee threats keep their full, immediate response. Also fixed the scaling gap feeding the underlying phantom-swarm feedback loop (§17, recurred): the Builder bed target was still hardcoded to the old 6-bot fleet's `>= 6`, now `BOT_USERNAMES.size` in both `nextBuilderPriority()` and `builderPriorityItemSatisfied()`. Separately discovered while chasing a `mob_griefing` angle: §20's RCON fix hit the WRONG Minecraft server entirely — the real bot world (port 25580, `minecraft-bots.service`) has RCON deliberately disabled and was never touched. Blocked on a safety-classifier denial for the config edit and a missing sudo grant for the restart, both of which needed the operator — who did both directly (new Vaultwarden item, config edit, service restart), catching and fixing one snag along the way (`enable-rcon` itself hadn't actually flipped on the first attempt). `mob_griefing` confirmed `true` → `false` on the real server this time; all 9 bots reconnected after the server-side restart (confirmed mineflayer does not auto-reconnect on a server-initiated disconnect — every bot needed its own systemd restart to rejoin). |
 | 1.23.0 | 2026-09-14 | New §25, direct request ("I changed the seed value manually. re-init the world using the new seed"). Confirmed live first that editing `level-seed` alone does nothing to an existing world — RCON's own `seed` command still reported the ORIGINAL seed after the operator's edit. Re-init used §24's now-working RCON end-to-end, no sudo/operator step needed: `save-all flush` + `stop` over RCON, relying on `minecraft-bots.service`'s own `Restart=always` to bring it back up; old world directory moved (not deleted) to a timestamped backup, matching four earlier `firmament-bots.bak-*` snapshots already on disk from prior resets. A real race in the first attempt's own "wait for exit" check (a `pgrep` match on an unrelated server owned by a different Unix account, plus a `kill -0` permission-denied misread as "already exited") was caught by verifying the actual end state directly — the boot log's "No existing world data, creating new world" line and RCON's own `seed` readback confirmed `694200161758793929` — rather than trusting the script's own report. All 9 bots reconnected and confirmed spawned into the new world (a visibly different spawn region from the old one). Direct follow-up ("re-check the anti-griefing setting"): `mob_griefing` had reverted to `true` on the new world — expected, since gamerules live in the world save, not `server.properties`, so any future re-init needs this re-applied as a checklist step, not assumed carried over. Re-confirmed and re-set to `false` via RCON. |
 | 1.24.0 | 2026-09-15 | New §26, direct request ("do some benchmarking of using coder... or coder2, for planning and bot behavior tactics. Search the internet for the experience and findings of others"). Ran `planNextStep()`'s real, unmodified production prompt against `dispatch`/`coder`/`coder2` directly through `hermes-router.py`'s live endpoint across 3 scenarios targeting documented `dispatch` failure modes. Real, mixed result: `dispatch` stayed fastest (1.6-5.9s) but produced a genuine parameter-format bug (used an input material as a SMELT output id) and deviated from an explicit in-prompt rule; `coder` matched `dispatch`'s correctness on the two tests where they diverged at moderate latency (7.7-8.8s); `coder2` was the most rule-compliant but impractically slow (34-55s) with one empty response outright. No routing change made — evidence recorded, decision left to the operator. Web research found no source (this project's own history or the wider Minecraft-LLM-agent community, including kolbytn/mindcraft and the Andy/Mindcraft-CE project) reporting a real code-vs-general-model comparison for this exact task; the community's own leading local model (Andy-4.2) is built on a general Qwen base with task-specific fine-tuning, not a code-specialized checkpoint. |
+| 1.25.0 | 2026-09-15 | New §27, direct request ("check the logs since the last review... look for behavioral gaps"). Confirmed the §24 phantom throttle is working (85-87% fewer triggers, real travel now completing) and no repeat of the original mass-death incident at anywhere near its original scale. Confirmed, root-caused, and fixed a real §23 regression: Mark logged 909 doomed "gave up on the fight" self-defense results in 34h because `checkSelfDefense()` never checked weapon possession before choosing "attack" -- a bare-handed fight against nearly anything can't land enough hits inside `ACTION_TIMEOUT_MS`, so SELF_DEFENSE-tier control was held almost continuously, starving the "go get a weapon" directive of any real execution window and explaining the chronic `iron_sword` DONE-hallucination without the verification logic itself being at fault. Fixed in `checkSelfDefense()`/`checkSleepingThreat()`/`respondToSquadCall()` (`index.js` 2.70.0): flee (or decline to engage) whenever `hasWeapon(bot)` is false, same reasoning already established for `FLEE_ONLY_MOBS`. Separately closed `nextSoldierPriority()`'s own fall-through-to-unrestricted-freeform gap (returned `null` once armed with nothing nearby, exactly how "craft a pickaxe" got self-proposed) -- now always returns a directive for a Soldier-primary bot, ending in a "stand guard" fallback rather than ever reaching freeform. Flagged, not fixed: a recurring `sqlite3` `UNIQUE constraint failed on vec_chunks` traceback affecting only the 5 bots co-located on `spark`, never causing a crash -- shared Firmament memory/RAG infrastructure, a distinct investigation of its own. |
