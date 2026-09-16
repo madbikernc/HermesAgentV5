@@ -1519,6 +1519,43 @@ throughout). This lives in shared Firmament memory/RAG infrastructure, not this 
 and touching it is a distinct, cross-service investigation of its own -- flagged here for
 engineering attention, not chased down as part of this pass.
 
+## 28. A disconnected bot ran for 2+ hours pretending to still be playing (2026-09-16)
+
+Direct report: "the bots do not appear to be active in world." A routine status check just before
+this ("check bot status") had reported all 9 systemd services `active` with normal-looking goal
+chatter and self-defense activity in their logs -- **that check was wrong**, fooled by exactly the
+bug this section root-causes.
+
+**Confirmed via RCON, the only authoritative source.** `list` showed **0 of the 9 bots actually
+connected** -- only the human player. Every bot's own logs, meanwhile, looked completely ordinary:
+goals proposed and heard, `squad response: arrived, nothing left to fight` repeating on a tight
+~20s rhythm, even `sleep: slept through the night. (ok=true)`. None of it was real. Traced to a
+genuine `[Mark] disconnected: keepAliveError` at `12:50:18`, coinciding with the game server
+process itself restarting (`ps` showed a fresh PID from `12:53:42` -- a restart this session didn't
+initiate). Every bot hit the same disconnect.
+
+**Root cause: `bot.on("end", ...)` only ever logged the disconnect.** No reconnect attempt, no
+process exit, nothing else. Every `setInterval`-driven check (`checkSelfDefense`,
+`checkSleepingThreat`, `proposeOwnGoal`, `goalTick`, squad response...) kept firing on schedule
+against a `bot` object with no live connection -- and several of them don't hard-error on a dead
+connection, they resolve with misleading success instead, which is how a genuinely disconnected
+bot ended up logging that she'd both fought off a creeper and slept through the night. **A silently
+zombied process is worse than a crashed one** -- it actively defeats the exact kind of
+`journalctl`-based status check this whole design doc's incident log relies on throughout, which
+is exactly what happened to the immediately-preceding "check bot status" turn.
+
+**Fixed the same way OOM crashes already recover.** Every bot service already runs under
+`Restart=always` (confirmed working for real, repeatedly, in §27's own OOM findings). `bot.on(
+"end")` now calls `process.exit(1)` after logging -- handing recovery to that same, already-proven
+systemd machinery instead of leaving a stale process to keep pretending. A fresh process gets a
+real, clean reconnect.
+
+**Scope note.** This fix only covers the mineflayer-level "the connection actually ended" signal
+-- it does not, and can't by itself, detect a bot that's connected but stuck/wedged (that's
+`checkStuck`'s own, separate job, §17/elsewhere). The two failure modes look similar from a
+`journalctl` glance but need different fixes; this section closes the "looks fine, isn't even
+connected" one specifically.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1549,3 +1586,4 @@ engineering attention, not chased down as part of this pass.
 | 1.23.0 | 2026-09-14 | New §25, direct request ("I changed the seed value manually. re-init the world using the new seed"). Confirmed live first that editing `level-seed` alone does nothing to an existing world — RCON's own `seed` command still reported the ORIGINAL seed after the operator's edit. Re-init used §24's now-working RCON end-to-end, no sudo/operator step needed: `save-all flush` + `stop` over RCON, relying on `minecraft-bots.service`'s own `Restart=always` to bring it back up; old world directory moved (not deleted) to a timestamped backup, matching four earlier `firmament-bots.bak-*` snapshots already on disk from prior resets. A real race in the first attempt's own "wait for exit" check (a `pgrep` match on an unrelated server owned by a different Unix account, plus a `kill -0` permission-denied misread as "already exited") was caught by verifying the actual end state directly — the boot log's "No existing world data, creating new world" line and RCON's own `seed` readback confirmed `694200161758793929` — rather than trusting the script's own report. All 9 bots reconnected and confirmed spawned into the new world (a visibly different spawn region from the old one). Direct follow-up ("re-check the anti-griefing setting"): `mob_griefing` had reverted to `true` on the new world — expected, since gamerules live in the world save, not `server.properties`, so any future re-init needs this re-applied as a checklist step, not assumed carried over. Re-confirmed and re-set to `false` via RCON. |
 | 1.24.0 | 2026-09-15 | New §26, direct request ("do some benchmarking of using coder... or coder2, for planning and bot behavior tactics. Search the internet for the experience and findings of others"). Ran `planNextStep()`'s real, unmodified production prompt against `dispatch`/`coder`/`coder2` directly through `hermes-router.py`'s live endpoint across 3 scenarios targeting documented `dispatch` failure modes. Real, mixed result: `dispatch` stayed fastest (1.6-5.9s) but produced a genuine parameter-format bug (used an input material as a SMELT output id) and deviated from an explicit in-prompt rule; `coder` matched `dispatch`'s correctness on the two tests where they diverged at moderate latency (7.7-8.8s); `coder2` was the most rule-compliant but impractically slow (34-55s) with one empty response outright. No routing change made — evidence recorded, decision left to the operator. Web research found no source (this project's own history or the wider Minecraft-LLM-agent community, including kolbytn/mindcraft and the Andy/Mindcraft-CE project) reporting a real code-vs-general-model comparison for this exact task; the community's own leading local model (Andy-4.2) is built on a general Qwen base with task-specific fine-tuning, not a code-specialized checkpoint. |
 | 1.25.0 | 2026-09-15 | New §27, direct request ("check the logs since the last review... look for behavioral gaps"). Confirmed the §24 phantom throttle is working (85-87% fewer triggers, real travel now completing) and no repeat of the original mass-death incident at anywhere near its original scale. Confirmed, root-caused, and fixed a real §23 regression: Mark logged 909 doomed "gave up on the fight" self-defense results in 34h because `checkSelfDefense()` never checked weapon possession before choosing "attack" -- a bare-handed fight against nearly anything can't land enough hits inside `ACTION_TIMEOUT_MS`, so SELF_DEFENSE-tier control was held almost continuously, starving the "go get a weapon" directive of any real execution window and explaining the chronic `iron_sword` DONE-hallucination without the verification logic itself being at fault. Fixed in `checkSelfDefense()`/`checkSleepingThreat()`/`respondToSquadCall()` (`index.js` 2.70.0): flee (or decline to engage) whenever `hasWeapon(bot)` is false, same reasoning already established for `FLEE_ONLY_MOBS`. Separately closed `nextSoldierPriority()`'s own fall-through-to-unrestricted-freeform gap (returned `null` once armed with nothing nearby, exactly how "craft a pickaxe" got self-proposed) -- now always returns a directive for a Soldier-primary bot, ending in a "stand guard" fallback rather than ever reaching freeform. Flagged, not fixed: a recurring `sqlite3` `UNIQUE constraint failed on vec_chunks` traceback affecting only the 5 bots co-located on `spark`, never causing a crash -- shared Firmament memory/RAG infrastructure, a distinct investigation of its own. |
+| 1.26.0 | 2026-09-16 | New §28, direct report ("the bots do not appear to be active in world") -- caught a false-positive in the immediately preceding "check bot status" turn. RCON's `list` showed 0 of 9 bots actually connected while every systemd unit still reported active with normal-looking logs. Root cause: a real `keepAliveError` disconnect (coinciding with an independent game-server process restart) was only ever logged by `bot.on("end")`, never acted on -- every `setInterval` check kept firing against a dead connection for 2+ hours, some resolving with fabricated success ("slept through the night," "nothing left to fight"). Fixed (`index.js` 2.71.0): `bot.on("end")` now exits the process, handing recovery to the same `Restart=always` systemd machinery already proven for OOM crashes. |

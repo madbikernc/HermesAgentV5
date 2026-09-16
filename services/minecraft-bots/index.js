@@ -1,4 +1,15 @@
-// Version: 2.70.0
+// Version: 2.71.0
+//
+// 2.71.0 (2026-09-16) -- direct report: "the bots do not appear to be active in world." Real,
+// severe, confirmed gap: RCON's own `list` showed 0 of the 9 bots actually connected (only the
+// human player) while every bot's systemd unit still reported "active" and kept logging goal
+// chatter, self-defense, even a false "slept through the night. (ok=true)" -- a real
+// keepAliveError disconnect (fired when the game server itself restarted) was only ever logged
+// by bot.on("end"), never acted on, so the process kept running every setInterval check against
+// a dead connection indefinitely, fabricating misleading success. Fixed: bot.on("end") now exits
+// the process, handing recovery to the same systemd Restart=always machinery already proven for
+// OOM crashes -- a fresh process gets a real, clean reconnect instead of a stale one pretending
+// to keep working. See MINECRAFT_BOTS_DESIGN.md §28.
 //
 // 2.70.0 (2026-09-15) -- direct request: "check the logs since the last review... look for
 // behavioral gaps." Found and fixed the real cause behind an apparent §23 regression: Mark
@@ -4836,4 +4847,23 @@ setInterval(() => {
 
 bot.on("kicked", (reason) => console.log(`[${USERNAME}] kicked:`, reason));
 bot.on("error", (err) => console.log(`[${USERNAME}] error:`, err));
-bot.on("end", (reason) => console.log(`[${USERNAME}] disconnected:`, reason));
+// Direct report, 2026-09-16 ("the bots do not appear to be active in world"): a real, severe,
+// confirmed gap -- this handler only ever logged the disconnect, then did nothing else. Every
+// setInterval-driven check (checkSelfDefense, checkSleepingThreat, proposeOwnGoal, goalTick...)
+// kept firing on schedule against a `bot` object with no live connection, and several of them
+// don't hard-error on a dead connection -- they resolve with misleading "success" instead
+// ("squad response: arrived, nothing left to fight," "sleep: slept through the night. (ok=true)"
+// were both logged live, in a tight, suspiciously regular rhythm, for over two hours after a
+// real `keepAliveError` disconnect -- confirmed live: RCON's own `list` showed 0 of the 9 bots
+// actually connected while every one of their systemd units still reported "active" and kept
+// logging as if nothing had happened). A silently zombied process is worse than a crashed one --
+// it actively misleads anyone (including a status check like this one) into believing the fleet
+// is still operating. The fix is the same one already proven for OOM crashes: every bot service
+// already runs under `Restart=always` -- exiting non-zero on ANY disconnect (network blip,
+// keepalive timeout, a kick, the game server itself restarting) hands recovery to the exact same
+// systemd machinery already relied on, giving a fresh process a real, clean reconnect instead of
+// a stale one pretending to keep working.
+bot.on("end", (reason) => {
+  console.log(`[${USERNAME}] disconnected:`, reason);
+  process.exit(1);
+});
