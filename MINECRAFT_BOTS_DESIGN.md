@@ -1688,6 +1688,61 @@ a bot could walk straight into a fight holding a pickaxe. `equipBestWeapon()` no
 "attack" (`actions.js` 1.55.0) too, so combat always starts weapon-in-hand regardless of what was
 held a moment before -- a fresh tool, a fishing rod, held food, anything.
 
+## 32. Task-hallucination review, dug in: root-caused Amy's chronic loop to a silently-failing home-lighting reflex (2026-09-17)
+
+Direct follow-up to a "look in new logs for task hallucinations" review that found (1) both
+existing hallucination-detection mechanisms (`REJECTED DONE`/`SUSPICIOUS DONE`) firing correctly
+~2,160 times fleet-wide in 26 hours with zero missed catches, and (2) two standout patterns worth
+digging into: Amy's chained furnace→beds→shelter loop (near-continuous for the whole window) and a
+fleet-wide "get a sword" loop across 6 bots. Direct request: "dig in."
+
+**Verified, not assumed: Amy has been pinned at critically low health, repeatedly.** Pulled her raw,
+unfiltered logs rather than trusting the summary. Sep 15 23:39-23:46: stuck at **5.17/20 health**
+for the entire stretch shown, triggering near-continuous `EMERGENCY`/self-defense flee interrupts
+against a spider. Checked her CURRENT live state while investigating (not historical) and found the
+exact same pattern actively in progress: **health=1** (literally one hit from death) against a
+persistent creeper, for at least 4 straight minutes, in the SAME "go home and build a shelter"
+goal. This is a recurring condition, not a one-off.
+
+**Root cause, traced to a genuinely invisible failure.** `checkHomeLighting()`'s own "no torches ->
+return" early exit was **completely silent** -- no log line of any kind -- confirmed by grepping
+Amy's entire 13+ hour post-reseed log for "torch": all 46 hits were other bots' goals relayed over
+Buzz; she herself never once crafted, held, or attempted anything with a torch. A resource-starved
+bot (stuck early in the tech tree, per her own repeatedly-reasoned-but-never-completed crafting
+chain) could go the ENTIRE time with this reflex doing nothing, leaving her home area permanently
+dark, with zero trace in the logs of why -- exactly the kind of silent failure this incident log has
+caught before (§17's own "checkHomeLighting requires a claimed bed... zero beds meant zero claims"
+catch-22, a different cause, the same class of bug).
+
+**The vicious cycle this created.** Dark home -> nighttime mob spawns right where she works -> she
+gets pinned at critical health -> constant flee/emergency interrupts prevent her from ever finishing
+the multi-step crafting chain needed for a shelter (or the torches that would have lit the area in
+the first place) -> home stays dark -> repeat. This also plausibly explains the dense multi-mob
+swarm window found in the original review (creeper/zombie/enderman/phantom all converging in a tight
+span) -- an unlit, unsheltered base at night is exactly the condition that produces one.
+
+**Fixed at the root, not by treating a symptom.** Torches need no crafting table -- confirmed
+against `bot.recipesFor()`'s own table-less lookup, the identical mechanism already relied on for
+sticks/planks (§ various). `checkHomeLighting()` (`index.js` 2.73.0) now crafts torches herself
+first when she's carrying fuel (coal/charcoal) and a stick, instead of only ever depending on
+already having some, and logs plainly when she genuinely can't (no fuel, no stick) -- turning a
+silent, indefinite failure into a real, visible, diagnosable one either way.
+
+**Other threads dug into, not separately fixed.** The "get a sword" loop's root cause (verified for
+Mark specifically): he genuinely crafted a wooden sword, then gave it away to Luke fulfilling a
+legitimate teammate request three minutes later, and every retry after that ran into the same
+combat-interruption problem as Amy's -- a real log excerpt showed a near-continuous flood of
+squad-response threat alerts (a different bot, different mob, every few seconds) during one retry
+window. Amy's own reasoning also showed the "correct diagnosis, no follow-through" pattern already
+documented and benchmarked in §26 (sometimes jumps straight to a later step of her own correctly-
+reasoned chain, e.g. "ACTION MINE stone 8," skipping the crafting-table/pickaxe prerequisites she'd
+just laid out) -- a known, already-investigated `dispatch` characteristic, not a new bug requiring a
+fresh fix here. A smaller, real interaction also observed but not chased further: `checkInventory
+Insurance()`'s health-triggered surplus-banking has no awareness of what the CURRENT goal actually
+needs, so a raw material she was actively working toward using can get banked away the moment her
+health drops -- confirmed happening once (a single stored oak_log), self-corrected moments later via
+a chest re-loot, low-impact in the trace examined and not fixed in this pass.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1722,3 +1777,4 @@ held a moment before -- a fresh tool, a fishing rod, held food, anything.
 | 1.27.0 | 2026-09-16 | New §29, direct request ("backup the current world into a restoration point... I want to be able to restore to the current state"). Stopped the server cleanly via RCON (`save-all flush` + `stop`, PID-verified exit) rather than tarring a live world, for a genuinely consistent snapshot — `cp -a` to `firmament-bots.RESTORE-POINT-20260916-152257` (21M). `Restart=always` brought the live world back up untouched (confirmed via the boot log and a same-seed RCON readback), and §28's `process.exit(1)` fix fired for real for the first time: all 9 bots reconnected on their own, no manual restart needed. Documented the exact restore procedure for later use, and flagged that a restore rolls back the world only, not each bot's own separately-persisted goal/curriculum state. |
 | 1.28.0 | 2026-09-17 | New §30, direct request ("they loot EVERYTHING instead of what they need"). Confirmed the complaint first — "loot" really did sweep every stack, a deliberate 2026-09-07 choice being explicitly reversed now. `ACTION LOOT` gains optional `<item_id> <count>` (both classifyIntent and planNextStep vocabularies, `index.js` 2.72.0), reusing `tryTakeFromThisChest()` — the same need-based helper MINE/CRAFT's own chest-first fallback already used — so there's one "take up to N from a chest" implementation, not two (`actions.js` 1.54.0). Omitting the item is now the only way to "just look": inspects and snapshots contents without taking anything. "Put leftovers in a chest" needed no new mechanism — verified `storeSurplusNearHome()`/`checkInventoryFull()`/`checkInventoryInsurance()` already cover it generically; added a targeted-loot trigger to the existing post-craft immediate-cleanup pass. "All chest contents go to world memory" was already true via §19's `known_chests.json` — verified rather than rebuilt, deliberately not duplicated into the RAG corpus too (mutable-state fit problem §19 already reasoned through). |
 | 1.29.0 | 2026-09-17 | New §31, direct request ("if they craft armor or weapons or tools, they should equip them"). `refreshGear()`'s own comment claimed this was already handled but `equipBestWeapon`'s `WEAPON_SUFFIXES` never covered pickaxe/shovel/hoe — same comment/code drift pattern §22 already caught once. "craft" now equips the specific item just crafted when it's one of those three (`actions.js` 1.55.0), not a tier comparison. Auditing "attack" while making this change found a real, independent gap: it never re-equipped a weapon before engaging, only after a fight ends — low-risk before, a real exposure now that a freshly-crafted tool stays held. `equipBestWeapon()` now runs at the top of "attack" too. |
+| 1.30.0 | 2026-09-17 | New §32, direct follow-up ("dig in") to a hallucination review that found both detection mechanisms firing correctly (~2,160 catches, 26h, no missed hallucinations) but two standout chronic loops. Root-caused Amy's chained furnace→beds→shelter loop live: verified she's been repeatedly pinned at critically low health near "home" (5.17/20 historically, confirmed *currently* at 1/20 against a persistent creeper while investigating) — traced to `checkHomeLighting()`'s "no torches" early exit being completely silent, so a resource-starved bot could leave home permanently dark with zero log trace of why, feeding a dark-home → mob spawns → pinned health → can't finish shelter/torches → still dark cycle (also plausibly explaining the dense multi-mob swarm window from the original review). Torches need no crafting table (confirmed against `bot.recipesFor()`'s own table-less lookup) — `checkHomeLighting()` (`index.js` 2.73.0) now crafts some herself when she has fuel+stick, and always logs when she can't. The "get a sword" loop's cause (verified for Mark): a genuinely crafted sword given away to a teammate, then retries drowned out by a real flood of squad-response combat interrupts — not a new bug, not separately fixed. |

@@ -1,4 +1,17 @@
-// Version: 2.72.0
+// Version: 2.73.0
+//
+// 2.73.0 (2026-09-17) -- direct request "look in new logs for task hallucinations" -> "dig in."
+// Root-caused Amy's chronic multi-goal loop (§30/§31-adjacent, 17+ hours stuck on furnace, then
+// beds, then shelter) live: she was pinned at critically low health (as low as 1/20, confirmed
+// live) near "home" for extended stretches, constantly re-triggering flee/emergency interrupts
+// before she could ever finish a multi-step crafting chain. Traced to checkHomeLighting()'s own
+// "no torches -> return" early exit being COMPLETELY SILENT -- no log line at all -- so a
+// resource-starved bot could go the entire time with this check doing nothing and zero trace of
+// why in the logs, leaving her home area permanently dark and mob-spawn-prone. Torches need no
+// crafting table (confirmed against bot.recipesFor()'s own table-less lookup, same as
+// sticks/planks) -- checkHomeLighting now crafts some herself first if she's carrying fuel and a
+// stick, instead of only ever depending on already having some, and logs clearly when it
+// genuinely can't. See MINECRAFT_BOTS_DESIGN.md §32.
 //
 // 2.72.0 (2026-09-17) -- direct request: "when a bot opens a chest, they loot EVERYTHING instead
 // of what they need." ACTION LOOT's vocabulary (both classifyIntent's direct-command version and
@@ -4057,7 +4070,6 @@ const HOME_LIGHTING_CHECK_MS = parseInt(process.env.MC_HOME_LIGHTING_CHECK_MS ||
 // "where she actually sleeps" point than the wider world spawn.
 async function checkHomeLighting() {
   if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
-  if (!bot.inventory.items().some((i) => i.name === "torch")) return;
   const home = (await loadClaimedBed(bot)) || bot.spawnPoint;
   if (!home) return; // no claimed bed AND no spawn point known yet -- genuinely nothing to anchor on
 
@@ -4065,6 +4077,26 @@ async function checkHomeLighting() {
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
+    // Direct report, 2026-09-17 ("dig in" -> Amy's chronic near-home danger, root-caused live):
+    // the old "no torches -> return" used to be COMPLETELY SILENT -- no log line at all -- so a
+    // resource-starved bot (confirmed live: Amy, stuck early in the tech tree for 17+ hours)
+    // could go the ENTIRE time with this check doing nothing, and there was no trace of why in
+    // the logs. Torches need no crafting table (a real, confirmed recipe fact, same as
+    // sticks/planks -- bot.recipesFor(..., null) already finds the table-less recipe on its
+    // own), so if she's carrying fuel and a stick, she can just make some herself instead of
+    // only ever depending on already having some. If she genuinely can't (no fuel, no stick),
+    // that's now a real, visible log line instead of silence.
+    if (!bot.inventory.items().some((i) => i.name === "torch")) {
+      const fuel = bot.inventory.items().find((i) => i.name === "coal" || i.name === "charcoal");
+      const hasStick = bot.inventory.items().some((i) => i.name === "stick");
+      if (!fuel || !hasStick) {
+        console.log(`[${USERNAME}] home lighting: no torches, and no fuel+stick on hand to craft one -- skipping for now.`);
+        return;
+      }
+      const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME);
+      console.log(`[${USERNAME}] home lighting: crafted torches first -- ${craftResult.text} (ok=${craftResult.ok})`);
+      if (!craftResult.ok) return;
+    }
     const result = await performAction(bot, { type: "light_area", near: home }, USERNAME);
     console.log(`[${USERNAME}] home lighting: ${result.text} (ok=${result.ok})`);
   } catch (err) {
