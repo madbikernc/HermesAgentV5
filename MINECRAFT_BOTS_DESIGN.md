@@ -1608,6 +1608,55 @@ own persisted goal/curriculum/claimed-bed state would still reflect whatever it 
 time, not automatically rewound to match -- worth being aware of if a future restore is requested
 long after this point was taken.
 
+## 30. Chest looting made need-based (2026-09-17)
+
+Direct request: "when a bot opens a chest, they loot EVERYTHING instead of what they need. They
+need to: take only the mats they need for their current objective; put any leftovers and gathered
+materials in a chest; all chest contents goes into world memory for other bots to leverage."
+
+**Confirmed the complaint before touching anything.** `actions.js`'s "loot" case really did sweep
+every stack in a chest -- a DELIBERATE 2026-09-07 design choice at the time ("this is a curated
+sandbox server, not a real-survival dungeon with true junk loot"), capped only at one instance per
+distinct tool/weapon/armor piece, otherwise a full stack of everything else. The operator is
+explicitly reversing that choice now.
+
+**Fix reuses infrastructure that already existed for a DIFFERENT chest-access path.**
+`tryTakeFromThisChest()`/`tryTakeFromNearbyChest()` -- the exact, already-correct, need-based
+"take up to N of item X" helper "mine"/"craft"'s own chest-first fallback has used since before
+this session -- was never wired into the standalone `ACTION LOOT` verb, which had its own,
+separate "take everything" implementation. `ACTION LOOT` now takes optional `<item_id> <count>`,
+matching MINE/CRAFT/SMELT's own shape (both `classifyIntent`'s direct-command vocabulary and
+`planNextStep`'s own goal-planner vocabulary, `index.js` 2.72.0) -- naming an item withdraws up to
+that many and no more, via the SAME helper, so there's one implementation of "take up to N from a
+chest" fleet-wide, not two that could quietly drift apart (`actions.js` 1.54.0). The MINE
+vocabulary's own "try LOOT first" line was updated to name the same item_id it's about to mine,
+closing a small consistency gap that predates this request.
+
+**Omitting the item is still valid -- and is now the ONLY way to "just look."** A bare
+`ACTION LOOT` (goal planner) or a direct "check that chest" with nothing specific named (player
+command) opens the nearest reachable chest, snapshots its real contents into `known_chests.json`,
+and takes nothing. This is a genuine behavior split, not a fallback default: naming an item always
+means "take it," omitting one always means "inspect only."
+
+**"Put leftovers in a chest" needed no new mechanism.** `storeSurplusNearHome()`/
+`checkInventoryFull()`/`checkInventoryInsurance()` (`index.js`, built 2026-09-07/09) already cover
+banking non-essential surplus generically, regardless of source (mining, crafting, or looting) --
+verified these are real and already running, not re-invented. The one real, additive change: the
+existing post-craft immediate-cleanup trigger (`runAction`/`goalTick`) now also fires right after a
+targeted loot that actually withdrew something, closing the gap where a loot-caused surplus would
+otherwise sit until the next periodic space/health-based check instead of getting banked promptly,
+the same way a craft/smelt already does.
+
+**"All chest contents go into world memory" was already true, verified rather than re-built.**
+`known_chests.json` (§19) already snapshots full chest contents on every real open (loot, store,
+and now the bare-inspection case too), and is already genuinely fleet-wide -- any bot's own
+MINE/CRAFT/LOOT chest-fallback already queries it via `findKnownChestWithItem()`. Deliberately kept
+as the single source of truth rather than ALSO duplicating chest contents into the fuzzy RAG world-
+memory corpus used for resource-location notes elsewhere -- §19's own reasoning still applies: a
+chest's contents change on every open and need real point-in-time overwrites, a poor fit for RAG's
+own append-only-with-dedup design. Two stores of the same mutable fact would only risk them quietly
+disagreeing with each other.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1640,3 +1689,4 @@ long after this point was taken.
 | 1.25.0 | 2026-09-15 | New §27, direct request ("check the logs since the last review... look for behavioral gaps"). Confirmed the §24 phantom throttle is working (85-87% fewer triggers, real travel now completing) and no repeat of the original mass-death incident at anywhere near its original scale. Confirmed, root-caused, and fixed a real §23 regression: Mark logged 909 doomed "gave up on the fight" self-defense results in 34h because `checkSelfDefense()` never checked weapon possession before choosing "attack" -- a bare-handed fight against nearly anything can't land enough hits inside `ACTION_TIMEOUT_MS`, so SELF_DEFENSE-tier control was held almost continuously, starving the "go get a weapon" directive of any real execution window and explaining the chronic `iron_sword` DONE-hallucination without the verification logic itself being at fault. Fixed in `checkSelfDefense()`/`checkSleepingThreat()`/`respondToSquadCall()` (`index.js` 2.70.0): flee (or decline to engage) whenever `hasWeapon(bot)` is false, same reasoning already established for `FLEE_ONLY_MOBS`. Separately closed `nextSoldierPriority()`'s own fall-through-to-unrestricted-freeform gap (returned `null` once armed with nothing nearby, exactly how "craft a pickaxe" got self-proposed) -- now always returns a directive for a Soldier-primary bot, ending in a "stand guard" fallback rather than ever reaching freeform. Flagged, not fixed: a recurring `sqlite3` `UNIQUE constraint failed on vec_chunks` traceback affecting only the 5 bots co-located on `spark`, never causing a crash -- shared Firmament memory/RAG infrastructure, a distinct investigation of its own. |
 | 1.26.0 | 2026-09-16 | New §28, direct report ("the bots do not appear to be active in world") -- caught a false-positive in the immediately preceding "check bot status" turn. RCON's `list` showed 0 of 9 bots actually connected while every systemd unit still reported active with normal-looking logs. Root cause: a real `keepAliveError` disconnect (coinciding with an independent game-server process restart) was only ever logged by `bot.on("end")`, never acted on -- every `setInterval` check kept firing against a dead connection for 2+ hours, some resolving with fabricated success ("slept through the night," "nothing left to fight"). Fixed (`index.js` 2.71.0): `bot.on("end")` now exits the process, handing recovery to the same `Restart=always` systemd machinery already proven for OOM crashes. |
 | 1.27.0 | 2026-09-16 | New §29, direct request ("backup the current world into a restoration point... I want to be able to restore to the current state"). Stopped the server cleanly via RCON (`save-all flush` + `stop`, PID-verified exit) rather than tarring a live world, for a genuinely consistent snapshot — `cp -a` to `firmament-bots.RESTORE-POINT-20260916-152257` (21M). `Restart=always` brought the live world back up untouched (confirmed via the boot log and a same-seed RCON readback), and §28's `process.exit(1)` fix fired for real for the first time: all 9 bots reconnected on their own, no manual restart needed. Documented the exact restore procedure for later use, and flagged that a restore rolls back the world only, not each bot's own separately-persisted goal/curriculum state. |
+| 1.28.0 | 2026-09-17 | New §30, direct request ("they loot EVERYTHING instead of what they need"). Confirmed the complaint first — "loot" really did sweep every stack, a deliberate 2026-09-07 choice being explicitly reversed now. `ACTION LOOT` gains optional `<item_id> <count>` (both classifyIntent and planNextStep vocabularies, `index.js` 2.72.0), reusing `tryTakeFromThisChest()` — the same need-based helper MINE/CRAFT's own chest-first fallback already used — so there's one "take up to N from a chest" implementation, not two (`actions.js` 1.54.0). Omitting the item is now the only way to "just look": inspects and snapshots contents without taking anything. "Put leftovers in a chest" needed no new mechanism — verified `storeSurplusNearHome()`/`checkInventoryFull()`/`checkInventoryInsurance()` already cover it generically; added a targeted-loot trigger to the existing post-craft immediate-cleanup pass. "All chest contents go to world memory" was already true via §19's `known_chests.json` — verified rather than rebuilt, deliberately not duplicated into the RAG corpus too (mutable-state fit problem §19 already reasoned through). |

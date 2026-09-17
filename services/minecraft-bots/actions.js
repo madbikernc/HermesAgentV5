@@ -1,4 +1,24 @@
-// Version: 1.53.0
+// Version: 1.54.0
+//
+// 1.54.0 (2026-09-17) -- direct request: "when a bot opens a chest, they loot EVERYTHING instead
+// of what they need. They need to: take only the mats they need for their current objective; put
+// any leftovers... in a chest; all chest contents goes into world memory." The "loot" case used
+// to sweep every stack in a chest (capped at one per distinct tool, otherwise a full stack)
+// regardless of whether any of it was wanted -- a deliberate 2026-09-07 design choice ("this is a
+// curated sandbox server, not a real-survival dungeon") the operator is now explicitly reversing.
+// action.item (optional, matching MINE/CRAFT/SMELT's own <item_id> <count> shape -- see index.js's
+// own vocabulary/parser changes) makes it genuinely need-based: naming an item withdraws up to
+// <count> of exactly that one via tryTakeFromThisChest, the SAME helper "mine"/"craft"'s own
+// chest-first fallback already uses, so there's one implementation of "take up to N of X from a
+// chest," not two independently-drifting ones. Omitting the item (still valid, e.g. a bare
+// "ACTION LOOT" or a direct "check that chest" with nothing specific named) is now a pure
+// inspection -- opens the chest, snapshots its real contents into known_chests.json for the whole
+// fleet (§19/§27's chest registry was already correct and fleet-wide; this just stops the ONE
+// caller that used to also sweep it clean), takes nothing. "Put leftovers in a chest" needed no
+// new mechanism -- storeSurplusNearHome()/checkInventoryFull()/checkInventoryInsurance()
+// (index.js) already cover it generically; index.js's own post-craft cleanup trigger now also
+// fires after a targeted loot that actually withdrew something, for the same reason it already
+// fires after craft/smelt.
 //
 // 1.53.0 (2026-09-13) -- direct request: "rebalance the bots so they each have exactly one
 // role... create [more] so every role has at least one bot." OTHER_BOT_USERNAMES (this file's own
@@ -2222,20 +2242,68 @@ export async function performAction(bot, action, speaker) {
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, lootFindOptions);
       if (!positions.length) return fail("couldn't find any chests nearby, even after looking around.");
 
+      // Direct request, 2026-09-17 ("they loot EVERYTHING instead of what they need... take only
+      // the mats they need"): this used to sweep every stack in the chest (capped at one per
+      // distinct tool, otherwise a full stack) regardless of whether any of it was actually
+      // wanted. Now genuinely need-based: action.item names exactly what she's after, reusing
+      // tryTakeFromThisChest -- the SAME open/withdraw/snapshot helper "mine"/"craft"'s own
+      // chest-first fallback already relies on, so there is only ever one implementation of
+      // "take up to <count> of <item> from a chest," not two that could quietly drift apart.
+      if (action.item) {
+        const itemDef = bot.registry.itemsByName[action.item];
+        if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
+        let sawObstruction = false;
+        for (const pos of positions) {
+          if (token.cancelled) return ok("stopped on the way to a chest.");
+          const chestBlock = bot.blockAt(pos);
+          if (!chestBlock) continue;
+          if (chestObstructed(bot, chestBlock)) { sawObstruction = true; continue; }
+          const result = await tryTakeFromThisChest(bot, token, chestBlock, [action.item], action.count);
+          if (result === "cancelled") return ok("stopped on the way to a chest.");
+          if (result) {
+            await refreshGear(bot);
+            return ok(`found ${result.count} ${result.name} in a chest.`);
+          }
+          // else: reachable and openable, just didn't have any -- try the next local candidate
+        }
+        // Local search came up empty for this specific item -- consult the shared known-chests
+        // registry (same "local first, remembered second" pattern tryTakeFromNearbyChest's own
+        // callers already use for MINE/CRAFT's chest-first fallback) before giving up outright.
+        const known = await findKnownChestWithItem(bot, action.item, action.count);
+        if (known && !token.cancelled) {
+          try {
+            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(known.position.x,
+              known.position.y, known.position.z, 3)), ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+            const chestBlock = bot.blockAt(known.position);
+            if (chestBlock && !chestObstructed(bot, chestBlock)) {
+              const result = await tryTakeFromThisChest(bot, token, chestBlock, [action.item], action.count);
+              if (result === "cancelled") return ok("stopped on the way to a chest.");
+              if (result) {
+                await refreshGear(bot);
+                return ok(`found ${result.count} ${result.name} in a remembered chest.`);
+              }
+            }
+          } catch {
+            // couldn't reach the remembered chest -- fall through to the normal failure below
+          } finally {
+            bot.pathfinder.setGoal(null);
+          }
+        }
+        return fail(sawObstruction
+          ? `found chests nearby, but they're all obstructed, and no remembered chest has ${action.item} either.`
+          : `checked nearby chests, no ${action.item} in any of them.`);
+      }
+
+      // No item named -- this is a plain inspection, not a withdrawal: open the nearest reachable
+      // chest, snapshot its real contents into known_chests.json for the whole fleet to see
+      // (§19/§27's own "remembering and redacting are the same operation" design), and take
+      // nothing. This is now the ONLY case that opens a chest without a specific target in mind.
       let sawObstruction = false;
       for (const pos of positions) {
         if (token.cancelled) return ok("stopped on the way to a chest.");
         const chestBlock = bot.blockAt(pos);
         if (!chestBlock) continue;
-
-        // Real error found live (2026-09-06): openChest() waited its own internal 20s timeout
-        // ("Event windowOpen did not fire") against a chest that vanilla Minecraft will never
-        // actually open -- any solid block directly above EITHER half of a double chest blocks
-        // the whole thing, a real, common world-state issue, not a bug in this code.
-        if (chestObstructed(bot, chestBlock)) {
-          sawObstruction = true;
-          continue; // try the next candidate instead of giving up entirely
-        }
+        if (chestObstructed(bot, chestBlock)) { sawObstruction = true; continue; }
 
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
@@ -2249,52 +2317,22 @@ export async function performAction(bot, action, speaker) {
         }
         if (token.cancelled) return ok("stopped on the way to a chest.");
 
-        let taken = [];
         try {
           const chest = await bot.openChest(chestBlock);
-          // Real bug found live (2026-09-06), the actual root cause after two wrong guesses
-          // (a timing delay, then a "wrong chest" theory -- both ruled out by direct testing):
-          // Window.items() returns itemsRange(inventoryStart, inventoryEnd) -- the PLAYER'S OWN
-          // inventory slots within the combined window, not the container's. A chest confirmed
-          // (by a human, in-game) to hold two netherite pickaxes correctly logged as "(empty)"
-          // every time because Babs' own inventory was empty, not the chest. containerItems()
-          // (itemsRange(0, inventoryStart)) is the actual container-only view.
+          // Real bug found live (2026-09-06): Window.items() returns itemsRange(inventoryStart,
+          // inventoryEnd) -- the PLAYER'S OWN inventory slots within the combined window, not the
+          // container's. containerItems() (itemsRange(0, inventoryStart)) is the actual
+          // container-only view.
           const contents = chest.containerItems();
           console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
-          // Direct request, 2026-09-07: "should only take one instance of any tool, but can take
-          // resources up to one full stack at a time." Previously capped to the narrow
-          // isEssentialItem set (gear/fuel/food) and took every matching STACK uncapped -- a
-          // chest with three duplicate diamond pickaxes (three separate inventory slots, since
-          // tools don't stack) got all three. Now takes everything in the chest (this is a
-          // curated sandbox server, not a real-survival dungeon with true junk loot), capped at
-          // ONE instance per distinct tool/weapon/armor piece (GEAR_SUFFIXES -- she only needs
-          // one of each to be equipped) but up to a full stack (item.count, one inventory slot's
-          // worth -- vanilla's own per-slot cap) of anything else.
-          const takenToolNames = new Set();
-          for (const item of contents) {
-            const isTool = GEAR_SUFFIXES.some((s) => item.name.endsWith(s));
-            if (isTool && takenToolNames.has(item.name)) continue; // already have one of this exact piece
-            const count = isTool ? 1 : item.count;
-            try {
-              await chest.withdraw(item.type, null, count);
-              taken.push(isTool ? item.name : `${count} ${item.name}`);
-              if (isTool) takenToolNames.add(item.name);
-            } catch (err) {
-              console.error(`loot: failed to withdraw ${item.name}:`, err.message);
-            }
-          }
-          // Direct request, 2026-09-13 ("remember what is in chests when someone opens it, if
-          // someone takes the item out redact it from global memory") -- see recordChestSnapshot's
-          // own header for why a fresh post-withdraw snapshot IS the redaction.
-          await recordChestSnapshot(chestBlock.position, chest.containerItems());
+          await recordChestSnapshot(chestBlock.position, contents);
           await chest.close();
+          return ok(contents.length
+            ? `checked a chest -- has ${contents.map((i) => `${i.count} ${i.name}`).join(", ")}.`
+            : "checked a chest, it's empty.");
         } catch (err) {
           continue; // couldn't open this one (e.g. windowOpen timeout) -- try the next candidate
         }
-        await refreshGear(bot);
-        // Finding nothing worth taking is a completed check, not a failed one -- an empty/
-        // already-looted chest is a legitimate outcome, not the bot getting stuck.
-        return ok(taken.length ? `found ${taken.join(", ")} in a chest.` : "checked a chest, nothing worth taking.");
       }
       return fail(sawObstruction
         ? "found chests nearby, but they're all obstructed."

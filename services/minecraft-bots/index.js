@@ -1,4 +1,13 @@
-// Version: 2.71.0
+// Version: 2.72.0
+//
+// 2.72.0 (2026-09-17) -- direct request: "when a bot opens a chest, they loot EVERYTHING instead
+// of what they need." ACTION LOOT's vocabulary (both classifyIntent's direct-command version and
+// planNextStep's own goal-planner version) and its parser now take optional <item_id> <count>,
+// matching MINE/CRAFT/SMELT's own shape -- naming an item withdraws up to that many and no more;
+// omitting it inspects the chest and remembers its contents without taking anything. See
+// actions.js's own 1.54.0 for the execution-side rewrite. Also extended the existing post-craft
+// cleanup trigger (runAction/goalTick) to fire after a targeted loot that actually withdrew
+// something too, same reasoning as craft/smelt already have. See MINECRAFT_BOTS_DESIGN.md §30.
 //
 // 2.71.0 (2026-09-16) -- direct report: "the bots do not appear to be active in world." Real,
 // severe, confirmed gap: RCON's own `list` showed 0 of the 9 bots actually connected (only the
@@ -1713,8 +1722,13 @@ async function classifyIntent(speaker, message) {
           `specific block is named, respond CHAT instead -- never invent a block.\n` +
           `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob\n` +
           `ACTION FLEE - asks ${USERNAME} to run away from a nearby hostile mob instead of fighting it\n` +
-          `ACTION LOOT - asks ${USERNAME} to check a nearby chest for anything useful (gear, ` +
-          `resources, whatever's in there)\n` +
+          `ACTION LOOT <item_id> <count> - asks ${USERNAME} to check a nearby chest for a ` +
+          `SPECIFIC item, ONLY if one was actually named or clearly implied (e.g. "check the ` +
+          `chest for arrows" or "see if there's a sword in there"). <count> is a small positive ` +
+          `integer, default 1 if unstated. She takes up to that many and no more -- never ` +
+          `everything in the chest. If no item was named (e.g. "check that chest" with no ` +
+          `specifics), omit both parameters -- she'll inspect it and remember what's inside for ` +
+          `the whole fleet without taking anything.\n` +
           `ACTION SLEEP - asks ${USERNAME} to go find a bed and sleep (only makes sense at ` +
           `night or during a thunderstorm)\n` +
           `ACTION EAT - asks ${USERNAME} to eat some food from her inventory\n` +
@@ -1780,7 +1794,11 @@ async function classifyIntent(speaker, message) {
     if (verb === "FLEE") return { type: "action", action: { type: "flee" } };
     if (verb === "EAT") return { type: "action", action: { type: "eat" } };
     if (verb === "FISH") return { type: "action", action: { type: "fish" } };
-    if (verb === "LOOT") return { type: "action", action: { type: "loot" } };
+    if (verb === "LOOT") {
+      const item = (parts[2] || "").toLowerCase();
+      const count = parseInt(parts[3], 10);
+      return { type: "action", action: { type: "loot", item: item || null, count: count > 0 ? count : 1 } };
+    }
     if (verb === "SLEEP") return { type: "action", action: { type: "sleep" } };
     if (verb === "CRAFT") {
       const item = (parts[2] || "").toLowerCase();
@@ -2036,7 +2054,8 @@ async function runAction(action, speaker, message, send) {
     const startLine = {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
       mine: `off to gather some ${action.block}.`, attack: "engaging.", flee: "getting out of here!",
-      loot: "checking a nearby chest.", craft: `let's see about crafting ${action.item}.`,
+      loot: action.item ? `checking a nearby chest for ${action.item}.` : "checking a nearby chest.",
+      craft: `let's see about crafting ${action.item}.`,
       sleep: "heading to bed.", smelt: `time to smelt some ${action.item}.`,
       place: `let's set up a ${action.item} here.`, eat: "grabbing a bite.", fish: "let's try fishing.",
       give: `bringing you some ${action.item}.`, store: `putting away some ${action.item}.`,
@@ -2046,7 +2065,13 @@ async function runAction(action, speaker, message, send) {
     if (startLine) send(await narrateAction(startLine));
 
     const result = await performAction(bot, action, speaker);
-    craftedOk = result.ok && (action.type === "craft" || action.type === "smelt");
+    // Direct request, 2026-09-17 ("put any leftovers... in a chest"): a targeted loot that
+    // actually withdrew something (action.item set) is just as worth an immediate cleanup pass
+    // as a craft/smelt -- new inventory contents that might not all still be needed. A bare,
+    // item-less inspect-only loot never changes her inventory at all, so it's deliberately
+    // excluded here.
+    craftedOk = result.ok && (action.type === "craft" || action.type === "smelt" ||
+      (action.type === "loot" && action.item));
     send(await narrateAction(result.text));
 
     // Actions are conversational events too -- worth the same continuity as a chat exchange.
@@ -2095,7 +2120,18 @@ function parseGoalStep(text) {
     if (trimmed.startsWith("ACTION")) {
       const parts = trimmed.split(/\s+/);
       const verb = parts[1];
-      if (verb === "LOOT") return { type: "step", action: { type: "loot" } };
+      // Direct request, 2026-09-17 ("they loot EVERYTHING instead of what they need"): item/
+      // count are now optional parameters, matching CRAFT/MINE/SMELT's own shape, instead of a
+      // bare no-argument verb -- see actions.js's own "loot" case (1.54.0) for what changed on
+      // the execution side. A bare "ACTION LOOT" (no item named) is still valid and means
+      // "just look" -- inspect the chest, snapshot its real contents into known_chests.json for
+      // the whole fleet, take nothing. Naming an item withdraws up to <count> of exactly that
+      // one, never more.
+      if (verb === "LOOT") {
+        const item = (parts[2] || "").toLowerCase();
+        const count = parseInt(parts[3], 10);
+        return { type: "step", action: { type: "loot", item: item || null, count: count > 0 ? count : 1 } };
+      }
       if (verb === "ATTACK") return { type: "step", action: { type: "attack" } };
       if (verb === "CRAFT") {
         const item = (parts[2] || "").toLowerCase();
@@ -2246,10 +2282,10 @@ async function planNextStep(goal) {
           `modern Minecraft block id -- never invent one. For a material class rather than one ` +
           `exact species/color (any wood, any wool, any ore), any real example works -- she'll ` +
           `automatically gather whatever matching variant is actually nearby. If she hasn't ` +
-          `already checked a chest THIS goal, try ACTION LOOT first -- a nearby chest may ` +
-          `already have the resource (LOOT now takes any useful item it finds, not just gear), ` +
-          `saving a trip. Go straight to MINE only once LOOT has already come up empty for this ` +
-          `same need, or the recent progress below already shows a LOOT attempt.\n` +
+          `already checked a chest THIS goal, try ACTION LOOT <that same item_id> <count> first ` +
+          `-- a nearby chest may already have exactly what she needs, saving a trip. Go straight ` +
+          `to MINE only once LOOT has already come up empty for this same need, or the recent ` +
+          `progress below already shows a LOOT attempt.\n` +
           `ACTION CRAFT <item_id> <count> - craft an item via a crafting-table/grid recipe only. ` +
           `<item_id> must be the exact modern Minecraft item id -- never invent one.\n` +
           `ACTION EXPLORE - go looking for any useful raw material (wood, ore) when CRAFT/MINE ` +
@@ -2261,7 +2297,14 @@ async function planNextStep(goal) {
           `id -- never invent one.\n` +
           `ACTION PLACE <item_id> - place a furnace or crafting_table she's already carrying, ` +
           `right next to herself, when SMELT/CRAFT needs one and none is reachable.\n` +
-          `ACTION LOOT - check the nearest chest for anything useful (gear, resources, whatever's in there)\n` +
+          `ACTION LOOT <item_id> <count> - check the nearest chest for a SPECIFIC item you ` +
+          `actually need right now for this goal. <item_id> must be the exact modern Minecraft ` +
+          `item id -- never invent one, and never a generic guess just to "see what's there." ` +
+          `<count> is exactly how many you need, not a full stack by default -- she takes up to ` +
+          `that many and no more, never sweeps the rest of the chest's contents. Whatever chest ` +
+          `she opens gets fully remembered for the whole fleet either way, so a miss still helps ` +
+          `later. Only omit both parameters if the goal genuinely isn't about one specific item ` +
+          `(rare) -- that inspects the chest and remembers its contents without taking anything.\n` +
           `ACTION ATTACK - fight a nearby hostile mob\n` +
           `ACTION HARVEST - pick a ripe crop nearby and replant it, or till open ground and plant ` +
           `seeds to start a new farm if nothing is ripe yet, if the goal is about food or farming\n` +
@@ -2977,7 +3020,10 @@ async function goalTick() {
     }
 
     const result = await performAction(bot, parsed.action, currentGoal.setBy || USERNAME);
-    craftedOk = result.ok && (parsed.action.type === "craft" || parsed.action.type === "smelt");
+    // See runAction's own 2026-09-17 note -- a targeted loot that actually withdrew something
+    // is worth the same immediate cleanup pass as a craft/smelt.
+    craftedOk = result.ok && (parsed.action.type === "craft" || parsed.action.type === "smelt" ||
+      (parsed.action.type === "loot" && parsed.action.item));
     logStep(currentGoal, `${parsed.action.type}: ${result.text}`, result.ok, parsed.action);
     currentGoal.consecutiveFailures = result.ok ? 0 : currentGoal.consecutiveFailures + 1;
     console.log(`[${USERNAME}] goal step: ${parsed.action.type} -> ${result.text} ` +
