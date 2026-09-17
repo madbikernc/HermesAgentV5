@@ -1,4 +1,16 @@
-// Version: 1.54.0
+// Version: 1.55.0
+//
+// 1.55.0 (2026-09-17) -- direct request: "if they craft armor or weapons or tools, they should
+// equip them." refreshGear()'s own comment ("a freshly-crafted tool/weapon/armor piece should get
+// equipped") turned out to only be half true -- equipBestArmor/equipBestWeapon cover armor and
+// sword/axe-class weapons, but pickaxe/shovel/hoe were never weapon-classed, so a freshly-crafted
+// mining/digging/farming tool just sat unequipped in inventory. The "craft" case now equips the
+// SPECIFIC item just crafted when it's one of those three, not a tier comparison against whatever
+// was already held -- she made it on purpose. This surfaced a real, independent gap in "attack":
+// nothing there ever re-equipped a weapon before engaging, only refreshGear() in the finally block
+// AFTER a fight ends -- meaning a bot could walk into combat holding whatever a prior action left
+// in hand (now more likely to be a tool). equipBestWeapon() now runs at the top of "attack" too,
+// so combat always starts weapon-in-hand regardless of what was held a moment before.
 //
 // 1.54.0 (2026-09-17) -- direct request: "when a bot opens a chest, they loot EVERYTHING instead
 // of what they need. They need to: take only the mats they need for their current objective; put
@@ -2221,6 +2233,27 @@ export async function performAction(bot, action, speaker) {
         return fail(`couldn't craft ${action.item}: ${err.message}`);
       } finally {
         await refreshGear(bot); // a freshly-crafted tool/weapon/armor piece should get equipped
+        // Direct request, 2026-09-17 ("if they craft armor or weapons or tools, they should
+        // equip them"): refreshGear's own equipBestArmor/equipBestWeapon already cover armor and
+        // sword/axe-class weapons (this comment's own claim above was only ever half true) -- but
+        // pickaxe/shovel/hoe aren't weapon-classed, so a freshly-crafted mining/digging/farming
+        // tool just sat unequipped in inventory until some later action happened to reach for
+        // one. Equips the SPECIFIC item just crafted, not a tier comparison against whatever's
+        // already held -- she made it on purpose, presumably to use it soon. See "attack"'s own
+        // 2026-09-17 note for why holding a tool instead of a weapon right after this is safe:
+        // combat now re-equips the best weapon for itself before engaging, regardless of what
+        // was held a moment before.
+        const TOOL_SUFFIXES = ["_pickaxe", "_shovel", "_hoe"];
+        if (TOOL_SUFFIXES.some((s) => action.item.endsWith(s))) {
+          const freshTool = bot.inventory.items().find((i) => i.name === action.item);
+          if (freshTool) {
+            try {
+              await bot.equip(freshTool, "hand");
+            } catch (err) {
+              console.error(`craft: failed to equip freshly-crafted ${action.item}:`, err.message);
+            }
+          }
+        }
       }
       return ok(`crafted ${action.count} ${action.item}.`);
     }
@@ -2352,6 +2385,16 @@ export async function performAction(bot, action, speaker) {
       // search exactly as before.
       const target = action.target || nearestHostile(bot);
       if (!target) return fail("no hostile mobs nearby.");
+      // Direct request, 2026-09-17 ("if they craft armor or weapons or tools, they should equip
+      // them"): a real gap this surfaced -- nothing here ever re-equipped a weapon before
+      // engaging, only refreshGear() in the finally block AFTER the fight ends ("mob drops may
+      // include something worth wearing/wielding"). Combat has always just used whatever
+      // happened to already be held, and now that a freshly-crafted tool deliberately stays held
+      // after "craft" (this same file's own new note there), a bot could otherwise walk into a
+      // fight holding a pickaxe. equipBestWeapon() here guarantees combat always starts
+      // weapon-in-hand regardless of what was held a moment before, whether that's a fresh tool,
+      // a fishing rod, or held food.
+      await equipBestWeapon(bot);
       // Real gap found by reading mineflayer-pvp's own source (PVP.js), 2026-09-07: it already
       // fully automates shield use during combat -- blocking a creeper's explosion, and an
       // active-block-then-attack cadence on every swing (hasShield()/checkExplosion()/

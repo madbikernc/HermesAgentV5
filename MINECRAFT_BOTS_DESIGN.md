@@ -1657,6 +1657,37 @@ chest's contents change on every open and need real point-in-time overwrites, a 
 own append-only-with-dedup design. Two stores of the same mutable fact would only risk them quietly
 disagreeing with each other.
 
+## 31. Freshly-crafted gear now gets equipped -- including tools, and closed a real combat gap it surfaced (2026-09-17)
+
+Direct request: "if they craft armor or weapons or tools, they should equip them."
+
+**The existing comment already claimed this was handled -- it wasn't, fully.** `refreshGear()`'s
+own header comment reads "called after any action that might have changed the inventory," and the
+"craft" case's own call site comment says "a freshly-crafted tool/weapon/armor piece should get
+equipped" -- but `refreshGear()` itself only ever calls `equipBestArmor()`/`equipBestWeapon()`.
+`equipBestWeapon`'s own `WEAPON_SUFFIXES` is `["_sword", "_axe"]` -- so armor and sword/axe-class
+weapons genuinely were already covered, but pickaxe/shovel/hoe were never weapon-classed, so a
+freshly-crafted mining/digging/farming tool just sat in inventory unequipped until some unrelated
+later action happened to reach for one. The exact same comment/code drift pattern this project has
+caught before (§22) -- a claim in a comment that was never actually true for the whole category it
+described.
+
+**Fix: equip the specific item just crafted, not a tier comparison.** The "craft" case (`actions.js`
+1.55.0) now checks if `action.item` ends in `_pickaxe`/`_shovel`/`_hoe` and, if so, equips that
+exact item directly -- deliberately not routed through a "pick the best tool in inventory" function
+the way armor/weapon are, since she crafted this one on purpose and is presumably about to use it,
+not comparing it against whatever she happened to already have.
+
+**A real, independent gap this surfaced: combat never re-equipped a weapon before engaging.**
+Auditing "attack" while making this change found it never called `equipBestWeapon()` (or
+`refreshGear()`) before starting a fight -- only in the `finally` block AFTER the fight ends ("mob
+drops may include something worth wearing/wielding"). Combat has always just fought with whatever
+happened to already be held, which was low-risk before (little reason to be holding a non-weapon)
+but became a real exposure now that a freshly-crafted tool deliberately stays equipped afterward --
+a bot could walk straight into a fight holding a pickaxe. `equipBestWeapon()` now runs at the top of
+"attack" (`actions.js` 1.55.0) too, so combat always starts weapon-in-hand regardless of what was
+held a moment before -- a fresh tool, a fishing rod, held food, anything.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1690,3 +1721,4 @@ disagreeing with each other.
 | 1.26.0 | 2026-09-16 | New §28, direct report ("the bots do not appear to be active in world") -- caught a false-positive in the immediately preceding "check bot status" turn. RCON's `list` showed 0 of 9 bots actually connected while every systemd unit still reported active with normal-looking logs. Root cause: a real `keepAliveError` disconnect (coinciding with an independent game-server process restart) was only ever logged by `bot.on("end")`, never acted on -- every `setInterval` check kept firing against a dead connection for 2+ hours, some resolving with fabricated success ("slept through the night," "nothing left to fight"). Fixed (`index.js` 2.71.0): `bot.on("end")` now exits the process, handing recovery to the same `Restart=always` systemd machinery already proven for OOM crashes. |
 | 1.27.0 | 2026-09-16 | New §29, direct request ("backup the current world into a restoration point... I want to be able to restore to the current state"). Stopped the server cleanly via RCON (`save-all flush` + `stop`, PID-verified exit) rather than tarring a live world, for a genuinely consistent snapshot — `cp -a` to `firmament-bots.RESTORE-POINT-20260916-152257` (21M). `Restart=always` brought the live world back up untouched (confirmed via the boot log and a same-seed RCON readback), and §28's `process.exit(1)` fix fired for real for the first time: all 9 bots reconnected on their own, no manual restart needed. Documented the exact restore procedure for later use, and flagged that a restore rolls back the world only, not each bot's own separately-persisted goal/curriculum state. |
 | 1.28.0 | 2026-09-17 | New §30, direct request ("they loot EVERYTHING instead of what they need"). Confirmed the complaint first — "loot" really did sweep every stack, a deliberate 2026-09-07 choice being explicitly reversed now. `ACTION LOOT` gains optional `<item_id> <count>` (both classifyIntent and planNextStep vocabularies, `index.js` 2.72.0), reusing `tryTakeFromThisChest()` — the same need-based helper MINE/CRAFT's own chest-first fallback already used — so there's one "take up to N from a chest" implementation, not two (`actions.js` 1.54.0). Omitting the item is now the only way to "just look": inspects and snapshots contents without taking anything. "Put leftovers in a chest" needed no new mechanism — verified `storeSurplusNearHome()`/`checkInventoryFull()`/`checkInventoryInsurance()` already cover it generically; added a targeted-loot trigger to the existing post-craft immediate-cleanup pass. "All chest contents go to world memory" was already true via §19's `known_chests.json` — verified rather than rebuilt, deliberately not duplicated into the RAG corpus too (mutable-state fit problem §19 already reasoned through). |
+| 1.29.0 | 2026-09-17 | New §31, direct request ("if they craft armor or weapons or tools, they should equip them"). `refreshGear()`'s own comment claimed this was already handled but `equipBestWeapon`'s `WEAPON_SUFFIXES` never covered pickaxe/shovel/hoe — same comment/code drift pattern §22 already caught once. "craft" now equips the specific item just crafted when it's one of those three (`actions.js` 1.55.0), not a tier comparison. Auditing "attack" while making this change found a real, independent gap: it never re-equipped a weapon before engaging, only after a fight ends — low-risk before, a real exposure now that a freshly-crafted tool stays held. `equipBestWeapon()` now runs at the top of "attack" too. |
