@@ -1781,6 +1781,80 @@ near-universally requested one at a time, so "any real instance satisfies the ne
 tier-ranking multiple candidates in the same chest was judged not worth the added complexity for
 how rarely it would actually matter.
 
+## 34. Second hallucination review dug in to the real root cause: fleet was dying every ~42 minutes and losing everything (2026-09-18)
+
+Direct follow-up ("look in new logs for task hallucinations") on top of §32/§33. A background review
+found both `REJECTED DONE`/`SUSPICIOUS DONE` mechanisms still firing correctly (~3,315 catches,
+33h, nothing missed) but reported the §32 torch fix as a total no-op (0 "crafted torches" fleet-
+wide) and a still-fully-active fleet-wide "get a sword" loop, headlined by Mark receiving a stone
+sword from two different teammates (Babs, Mayor) 22 minutes apart and remaining swordless 33+
+hours later. Both claims were verified directly rather than reported as-is, per this session's own
+standing rule about trusting a subagent's findings.
+
+**Torch fix: confirmed genuinely inert, and why.** Amy's own logs show she legitimately possessed
+fuel and sticks separately at different moments, but the check only ever caught her missing one or
+the other -- because between `checkHomeLighting()` ticks she was almost never in a stable state at
+all. At 07:36-07:37 alone: self-defense force-cancelled her current action 5 times in 60 seconds
+(zombie, phantom x3, an EMERGENCY health-critical flee at 4.33 HP) while she was mid-craft on the
+exact sticks the torch check needed. She also still has zero pickaxe fleet-session-wide (9x "need a
+better tool for stone"), and is stuck on a goal the code itself keeps re-assigning her: `Builder
+priority goal (beehive)`, a deterministic checklist item in `nextBuilderPriority()` requiring
+honeycomb, which requires shears, which requires iron, which requires mining she has no tool for --
+logged 38+ times across the window with no real path to completion. Not a bug in the §32 fix
+itself; a symptom of the same thing below.
+
+**The real root cause, found by asking "why does everyone keep losing gear they just got":**
+counted deaths fleet-wide for this same 33-hour window --
+
+| Bot | Deaths (33h) |
+|---|---|
+| Mark | 287 |
+| Wade | 214 |
+| Luke | 181 |
+| Amy | 181 |
+| Bob | 163 |
+| Mayor | 160 |
+| Dale | 134 |
+| Babs | 120 |
+| Nell | 115 |
+| **Total** | **1,555** |
+
+Averages one death every ~42 minutes per bot. RCON confirmed the live world's `keep_inventory`
+gamerule (this server's snake_case renaming, same naming scheme §20/§24 already ran into for
+`mob_griefing`) was `false` -- meaning every one of those 1,555 deaths dropped the bot's entire
+inventory on the ground with no code anywhere that walks back to a death location to recover it.
+Cross-checked directly against the headline claim: Mark received a sword from Babs at 05:05:20 and
+from Mayor at 05:27:25 on 9/17 -- and died at 05:15:39 in between, squarely between the two gifts.
+That single death explains the first loss outright; constant re-death after the second (his own
+Soldier-priority directive re-fired 10+ times in the next 20 minutes) accounts for the rest. This
+isn't a bug in the sword-acquisition logic, the gifting logic, or the DONE-verification logic --
+all three were already working exactly as designed. It's a world-state fact sitting upstream of
+all of it, the same shape of finding as §20's `mob_griefing` discovery: nothing to fix in the repo,
+something to fix on the server.
+
+**Fix: `gamerule keep_inventory true`**, set live via RCON and confirmed (`false` -> `true`). Only
+example of the two headline claims chosen with an operator decision rather than assumed -- offered
+the alternative of a code-side death-recovery behavior (walk back to the corpse) instead, and the
+operator picked the gamerule flip: simpler, immediate, and doesn't ask a bot that just died at
+4 HP to path back into the same threat to retrieve its own drops. Same category of gotcha as
+§23's world-restore lesson: this lives in the world save, not `server.properties`, so any future
+`re-init the map` needs it re-applied same as `mob_griefing` already is.
+
+**Nell's reported third chronic loop: checked, and it wasn't what it was reported as.** The review
+described "start a small flower garden near home" as a dead-end spanning the full 33h window with
+zero successful steps ever logged. Direct count: 38 self-proposals, 22 of them logged `goal
+complete`, spread across the whole window (most recently 11:26:59 on 9/18) -- a real pattern (an
+Artist repeatedly self-proposing the same low-effort goal instead of a more varied one), but not a
+hallucination or a stuck loop; it mostly just... works, repeatedly. Reported here as a correction
+rather than silently dropped, since propagating an unverified subagent finding without checking it
+first is exactly the failure mode this session's own verification discipline exists to catch.
+
+No code changed this section -- the fix was entirely a live RCON gamerule flip. Left deliberately
+unfixed and flagged for a future pass: the hardcoded `beehive` entry in `nextBuilderPriority()`'s
+checklist has no fallback or timeout when its prerequisites are structurally unreachable for the
+bot currently assigned it, unlike Soldier's own priority list (§21) which always resolves to
+something achievable.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1817,3 +1891,4 @@ how rarely it would actually matter.
 | 1.29.0 | 2026-09-17 | New §31, direct request ("if they craft armor or weapons or tools, they should equip them"). `refreshGear()`'s own comment claimed this was already handled but `equipBestWeapon`'s `WEAPON_SUFFIXES` never covered pickaxe/shovel/hoe — same comment/code drift pattern §22 already caught once. "craft" now equips the specific item just crafted when it's one of those three (`actions.js` 1.55.0), not a tier comparison. Auditing "attack" while making this change found a real, independent gap: it never re-equipped a weapon before engaging, only after a fight ends — low-risk before, a real exposure now that a freshly-crafted tool stays held. `equipBestWeapon()` now runs at the top of "attack" too. |
 | 1.30.0 | 2026-09-17 | New §32, direct follow-up ("dig in") to a hallucination review that found both detection mechanisms firing correctly (~2,160 catches, 26h, no missed hallucinations) but two standout chronic loops. Root-caused Amy's chained furnace→beds→shelter loop live: verified she's been repeatedly pinned at critically low health near "home" (5.17/20 historically, confirmed *currently* at 1/20 against a persistent creeper while investigating) — traced to `checkHomeLighting()`'s "no torches" early exit being completely silent, so a resource-starved bot could leave home permanently dark with zero log trace of why, feeding a dark-home → mob spawns → pinned health → can't finish shelter/torches → still dark cycle (also plausibly explaining the dense multi-mob swarm window from the original review). Torches need no crafting table (confirmed against `bot.recipesFor()`'s own table-less lookup) — `checkHomeLighting()` (`index.js` 2.73.0) now crafts some herself when she has fuel+stick, and always logs when she can't. The "get a sword" loop's cause (verified for Mark): a genuinely crafted sword given away to a teammate, then retries drowned out by a real flood of squad-response combat interrupts — not a new bug, not separately fixed. |
 | 1.31.0 | 2026-09-18 | New §33, direct request ("if the bot is in need of a piece of equipment... and finds one already crafted in a chest, it should pick up ONE of those pieces... and abandon the quest to craft it"). Craft/loot chest-substitution already existed and worked, but only ever matched the EXACT item id named — a chest's `iron_pickaxe` was invisible to a `craft wooden_pickaxe` check. New `gearCategoryNames()` (`actions.js` 1.56.0) broadens matching to every real tier sharing the same `GEAR_SUFFIXES` suffix, wired into "craft" and both of "loot"'s matching passes; deliberately left raw materials untouched (no "any tier" concept applies to an ingot). "Abandon the quest" needed no new mechanism — the real substituted item already lands in the next `planNextStep` tick's own gear snapshot, and the existing real-world-state DONE-verification closes the goal on its own. |
+| 1.32.0 | 2026-09-18 | New §34, second hallucination review this window. Verified two of the prior review's headline claims directly instead of reporting them as-is: the §32 torch fix was genuinely inert (confirmed why — Amy's self-defense force-cancels action mid-craft every few seconds, so fuel and sticks were essentially never in inventory simultaneously), and Mark really was gifted two swords by teammates and remained swordless — because he died between the two gifts. Chased that one further and found the actual root cause behind both, and most of the fleet's chronic gear churn: 1,555 deaths fleet-wide in 33 hours (~1 every 42 minutes/bot) against a live `keep_inventory=false` gamerule, dropping each bot's entire inventory on every death with no recovery mechanism anywhere in the codebase. Not a repo bug — same shape of finding as §20's `mob_griefing` discovery. Operator chose a live RCON fix (`gamerule keep_inventory true`, confirmed set) over a code-side death-recovery behavior. Also corrected a third claim from the same review: Nell's reported "flower garden" dead-end loop is actually completing regularly (22 of 38 self-proposals logged `goal complete`) — a repetitive low-variety self-propose pattern, not a hallucination. Flagged, not fixed: `nextBuilderPriority()`'s hardcoded `beehive` checklist item has no fallback when its prerequisite chain is structurally unreachable, unlike Soldier's own priority list. |
