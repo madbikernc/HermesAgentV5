@@ -244,7 +244,7 @@ def process_one():
     return True
 
 
-def main():
+def main(:
     if not BUZZ_TOKEN or not MEMORY_TOKEN:
         sys.exit("BUZZ_TOKEN and MEMORY_TOKEN are required")
     if not GUARD_TOKEN:
