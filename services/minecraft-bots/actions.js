@@ -1,4 +1,12 @@
-// Version: 1.56.0
+// Version: 1.57.0
+//
+// 1.57.0 (2026-09-18) -- direct live report: "Luke is getting shot, not reacting. there is no mass
+// mob." Root-caused: Luke's self-defense held SELF_DEFENSE-tier control on an unproductive
+// "attack" against an enderman for over a minute (teleport-evasion defeats bot.pvp's chase-and-
+// melee the same way flight defeats it for phantom/ghast), silently blocking any response to a
+// SEPARATE skeleton sniping him the whole time. Confirmed not a one-off: Mark/Luke logged
+// 2,800/1,770 enderman self-defense triggers in 24h, far above every other bot. FLEE_ONLY_MOBS
+// now includes "enderman" -- see its own updated header below for the full reasoning.
 //
 // 1.56.0 (2026-09-18) -- direct request: "if the bot is in need of a piece of equipment (sword,
 // armor, pickaxe, etc), and finds one already crafted in a chest, it should pick up ONE of those
@@ -905,7 +913,20 @@ export function nearestHostile(bot, maxDistance = 16) {
 // reach the target -- already confirmed live to genuinely create real distance every cycle. Mobs
 // in this set are always fled from, never melee-attacked, regardless of health -- ghast included
 // on the same reasoning (also a flyer, also effectively unreachable on foot).
-export const FLEE_ONLY_MOBS = new Set(["phantom", "ghast"]);
+//
+// Direct report, 2026-09-18 ("Luke is getting shot, not reacting. there is no mass mob"): enderman
+// added on the same underlying reasoning, confirmed live -- Luke's own self-defense held
+// SELF_DEFENSE-tier control on an "attack (threat=enderman)" for over a minute straight (silently
+// re-returning on every 2s checkSelfDefense tick the whole time, since selfDefenseInFlight was
+// still true) while a skeleton he had no ability to respond to sniped him from range, only broken
+// by the separate EMERGENCY health-critical flee once he'd already dropped to ~6 HP -- then
+// immediately re-engaged the SAME enderman and repeated. Endermen aren't flightless-unreachable
+// like phantom/ghast, but teleporting away whenever hit makes bot.pvp's chase-and-melee approach
+// close to it in practice: confirmed fleet-wide, Mark and Luke (the two bots actually willing to
+// melee-attack rather than flee at their own tuned health thresholds) logged 2,800 and 1,770
+// enderman self-defense triggers respectively in 24h -- far above every other bot -- consistent
+// with the same doomed-retry shape, not an occasional unlucky fight.
+export const FLEE_ONLY_MOBS = new Set(["phantom", "ghast", "enderman"]);
 
 // Direct request, 2026-09-07 ("look for more ways to improve their autonomy" -> hunger). Checked
 // live: minecraft-data's own item registry carries no food/nutrition field at all (bread/apple

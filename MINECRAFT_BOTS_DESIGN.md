@@ -1888,6 +1888,46 @@ both live, the chronic self-defense-storm and death-rate findings from earlier s
 substantially reduced on their own, without needing further code changes to the throttle/priority
 logic those sections added.
 
+## 36. Enderman joins FLEE_ONLY_MOBS: the same doomed-melee shape as phantom/ghast, caught live (2026-09-18)
+
+Direct live report: "Luke is getting shot, not reacting. there is no mass mob" -- a real-time
+incident, not a log review. Checked live rather than guessed: Luke's health (RCON) matched his own
+logs exactly, a skeleton was genuinely ~8 blocks away and landing hits, and `nearestHostile()`
+(§ various) was confirmed working correctly by inspection -- so the detection path itself wasn't
+the problem.
+
+**Root cause: `selfDefenseInFlight` was legitimately stuck on a different fight.** `checkSelfDefense()`
+returns early and silently whenever a self-defense action is already in progress -- correct
+re-entrancy guarding, but it means a SECOND, unrelated threat gets no response at all until the
+first one resolves. Live logs showed exactly that: Luke's self-defense had been holding
+SELF_DEFENSE-tier control on `attack (threat=enderman)` since 19:08:53, with no `self-defense
+result:` line at all until 19:10:36 -- over 90 seconds later -- when the separate EMERGENCY
+health-critical check (a different, still-live code path) finally force-broke it at ~6 HP. He
+immediately re-engaged the SAME enderman and repeated the exact pattern a second time before
+finally landing on the skeleton as his next target. The whole time, the skeleton was free to keep
+shooting him with zero self-defense response -- not a detection bug, a target-monopolization one.
+
+**Why enderman specifically:** endermen teleport away when hit, defeating `bot.pvp`'s straightforward
+chase-and-melee approach almost as thoroughly as literal flight does for phantom/ghast (§ the
+original FLEE_ONLY_MOBS section) -- the mob isn't unreachable by pathfinding, but the fight rarely
+resolves cleanly either. Checked this wasn't one unlucky encounter before fixing it: counted
+`threat=enderman` self-defense triggers fleet-wide over 24h -- Mayor 42, Babs 30, Amy 27, but
+**Mark 2,800 and Luke 1,770** -- the two bots actually willing to melee-attack (vs. flee) at their
+own tuned health thresholds, exactly the bots that would get stuck holding SELF_DEFENSE-tier
+control this way. A consistent, high-volume pattern, not a fluke.
+
+**Fix:** `FLEE_ONLY_MOBS` (`actions.js` 1.57.0) now includes `"enderman"` alongside `phantom`/`ghast`
+-- self-defense/squad-response flee on sight rather than attempt a melee resolution, same as the
+existing two entries, freeing SELF_DEFENSE-tier control to respond to a genuinely separate threat
+instead of monopolizing it on a fight that rarely closes cleanly anyway. Trade-off, accepted
+deliberately rather than overlooked: bots will no longer fight endermen at all (no more ender
+pearls from self-defense encounters) -- judged a reasonable cost against a confirmed, high-volume
+"gets shot with zero response" failure mode.
+
+Immediate live incident needed no separate intervention: by the time this was investigated, Luke's
+own EMERGENCY flee had already gotten him clear and his health (5.68) had stopped dropping --
+confirmed stable via RCON and fresh logs before moving on to root-cause and fix.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1926,3 +1966,4 @@ logic those sections added.
 | 1.31.0 | 2026-09-18 | New §33, direct request ("if the bot is in need of a piece of equipment... and finds one already crafted in a chest, it should pick up ONE of those pieces... and abandon the quest to craft it"). Craft/loot chest-substitution already existed and worked, but only ever matched the EXACT item id named — a chest's `iron_pickaxe` was invisible to a `craft wooden_pickaxe` check. New `gearCategoryNames()` (`actions.js` 1.56.0) broadens matching to every real tier sharing the same `GEAR_SUFFIXES` suffix, wired into "craft" and both of "loot"'s matching passes; deliberately left raw materials untouched (no "any tier" concept applies to an ingot). "Abandon the quest" needed no new mechanism — the real substituted item already lands in the next `planNextStep` tick's own gear snapshot, and the existing real-world-state DONE-verification closes the goal on its own. |
 | 1.32.0 | 2026-09-18 | New §34, second hallucination review this window. Verified two of the prior review's headline claims directly instead of reporting them as-is: the §32 torch fix was genuinely inert (confirmed why — Amy's self-defense force-cancels action mid-craft every few seconds, so fuel and sticks were essentially never in inventory simultaneously), and Mark really was gifted two swords by teammates and remained swordless — because he died between the two gifts. Chased that one further and found the actual root cause behind both, and most of the fleet's chronic gear churn: 1,555 deaths fleet-wide in 33 hours (~1 every 42 minutes/bot) against a live `keep_inventory=false` gamerule, dropping each bot's entire inventory on every death with no recovery mechanism anywhere in the codebase. Not a repo bug — same shape of finding as §20's `mob_griefing` discovery. Operator chose a live RCON fix (`gamerule keep_inventory true`, confirmed set) over a code-side death-recovery behavior. Also corrected a third claim from the same review: Nell's reported "flower garden" dead-end loop is actually completing regularly (22 of 38 self-proposals logged `goal complete`) — a repetitive low-variety self-propose pattern, not a hallucination. Flagged, not fixed: `nextBuilderPriority()`'s hardcoded `beehive` checklist item has no fallback when its prerequisite chain is structurally unreachable, unlike Soldier's own priority list. |
 | 1.33.0 | 2026-09-18 | New §35, direct request ("turn down the spawn rate, especially of phantoms"). While checking what levers actually exist, found and fixed a real tooling gap: the RCON client reused since §20 only ever read a single response packet, silently truncating any multi-packet reply — `help gamerule`'s real output was being cut off mid-list. Fixed with the standard sentinel-packet read-until-echo pattern, which then revealed this server build exposes a `spawn_phantoms` gamerule beyond standard vanilla (boolean only, no partial rate). Given phantoms' consistent role as the dominant disruptive threat across §17/§24/§27/§34, operator chose to disable them outright (`gamerule spawn_phantoms false`, confirmed) rather than a partial measure that doesn't exist here. Also dropped difficulty Normal → Easy (`difficulty easy`, confirmed) for general (non-phantom) spawn/damage reduction, offered and chosen as a separate decision since it's a broader change. No code changed — both live RCON commands, same category as §20/§34. |
+| 1.34.0 | 2026-09-18 | New §36, direct live report ("Luke is getting shot, not reacting. there is no mass mob"). Verified live via RCON and fresh logs rather than guessed — real skeleton, real damage, `nearestHostile()` working correctly. Root cause: Luke's self-defense had been holding SELF_DEFENSE-tier control on an unresolved `attack (threat=enderman)` for 90+ seconds, silently blocking any response to the separate skeleton sniping him the whole time — not a detection bug, a target-monopolization one, only broken by the unrelated EMERGENCY health-critical flee once he'd dropped to ~6 HP. Confirmed not a one-off: Mark/Luke (the two bots willing to melee-attack rather than flee) logged 2,800/1,770 enderman self-defense triggers in 24h, far above every other bot — endermen's teleport-evasion defeats `bot.pvp`'s chase-and-melee almost as thoroughly as literal flight does for phantom/ghast. `FLEE_ONLY_MOBS` (`actions.js` 1.57.0) now includes `enderman`, same treatment as the existing two entries. Trade-off accepted deliberately: bots no longer fight endermen at all (no more self-defense ender pearls) in exchange for closing a confirmed "gets shot with zero response" failure mode. |
