@@ -1855,6 +1855,39 @@ checklist has no fallback or timeout when its prerequisites are structurally unr
 bot currently assigned it, unlike Soldier's own priority list (§21) which always resolves to
 something achievable.
 
+## 35. Spawn rate turned down: phantoms off, difficulty dropped to Easy (2026-09-18)
+
+Direct request: "can we turn down the spawn rate, especially of phantoms?" -- a natural follow-on
+to §24 and §34, both of which kept tracing chronic disruption (force-cancelled travel, self-defense
+storms, the chronic-death rate behind §34's `keep_inventory` fix) back to phantoms specifically.
+
+**Checked what levers actually exist before picking one.** Confirmed via the full (previously
+truncated -- see below) `help gamerule` output that this is a plain vanilla `server.jar` (no Paper/
+Spigot/Purpur config files present, just `server.properties`), so there's no per-mob spawn-weight
+or spawn-frequency config to tune. Vanilla's own real lever for phantoms specifically is time-since-
+last-slept, not a rate dial -- consistent with everything already found about the fleet's chronic
+sleep-deprivation problem. However, this server build turned out to expose one gamerule beyond
+standard vanilla: `spawn_phantoms` (boolean, alongside `spawn_wardens`, `spawn_patrols`, etc.) --
+found only because the RCON client used through §20/§24/§34 was truncating multi-packet responses
+to a single packet, silently cutting off `help gamerule`'s real output. Fixed the client to read
+until a sentinel packet echoes back (the standard multi-packet RCON workaround) before trusting a
+`help` listing as complete again.
+
+**No partial dial exists for phantoms** -- `spawn_phantoms` is on/off only, nothing in between.
+Given how consistently phantoms specifically (not the general mob population) kept surfacing as the
+dominant disruptive threat across §17, §24, §27, and §34's own death count, offered the operator the
+straight choice rather than assuming; operator chose full disable. Set `gamerule spawn_phantoms
+false`, confirmed. For general (non-phantom) spawn rate, difficulty is the only real vanilla lever
+-- offered as a separate choice since it's a broader change than the phantom-specific ask; operator
+chose Easy. Set `difficulty easy`, confirmed (was Normal). Both live immediately, no bot restart
+needed, both trivially reversible via the same two RCON commands.
+
+No code changed -- both fixes were live RCON commands, same category as §20's `mob_griefing` and
+§34's `keep_inventory`. Worth checking back on: with phantoms off and §34's `keep_inventory` fix
+both live, the chronic self-defense-storm and death-rate findings from earlier sections may now be
+substantially reduced on their own, without needing further code changes to the throttle/priority
+logic those sections added.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1892,3 +1925,4 @@ something achievable.
 | 1.30.0 | 2026-09-17 | New §32, direct follow-up ("dig in") to a hallucination review that found both detection mechanisms firing correctly (~2,160 catches, 26h, no missed hallucinations) but two standout chronic loops. Root-caused Amy's chained furnace→beds→shelter loop live: verified she's been repeatedly pinned at critically low health near "home" (5.17/20 historically, confirmed *currently* at 1/20 against a persistent creeper while investigating) — traced to `checkHomeLighting()`'s "no torches" early exit being completely silent, so a resource-starved bot could leave home permanently dark with zero log trace of why, feeding a dark-home → mob spawns → pinned health → can't finish shelter/torches → still dark cycle (also plausibly explaining the dense multi-mob swarm window from the original review). Torches need no crafting table (confirmed against `bot.recipesFor()`'s own table-less lookup) — `checkHomeLighting()` (`index.js` 2.73.0) now crafts some herself when she has fuel+stick, and always logs when she can't. The "get a sword" loop's cause (verified for Mark): a genuinely crafted sword given away to a teammate, then retries drowned out by a real flood of squad-response combat interrupts — not a new bug, not separately fixed. |
 | 1.31.0 | 2026-09-18 | New §33, direct request ("if the bot is in need of a piece of equipment... and finds one already crafted in a chest, it should pick up ONE of those pieces... and abandon the quest to craft it"). Craft/loot chest-substitution already existed and worked, but only ever matched the EXACT item id named — a chest's `iron_pickaxe` was invisible to a `craft wooden_pickaxe` check. New `gearCategoryNames()` (`actions.js` 1.56.0) broadens matching to every real tier sharing the same `GEAR_SUFFIXES` suffix, wired into "craft" and both of "loot"'s matching passes; deliberately left raw materials untouched (no "any tier" concept applies to an ingot). "Abandon the quest" needed no new mechanism — the real substituted item already lands in the next `planNextStep` tick's own gear snapshot, and the existing real-world-state DONE-verification closes the goal on its own. |
 | 1.32.0 | 2026-09-18 | New §34, second hallucination review this window. Verified two of the prior review's headline claims directly instead of reporting them as-is: the §32 torch fix was genuinely inert (confirmed why — Amy's self-defense force-cancels action mid-craft every few seconds, so fuel and sticks were essentially never in inventory simultaneously), and Mark really was gifted two swords by teammates and remained swordless — because he died between the two gifts. Chased that one further and found the actual root cause behind both, and most of the fleet's chronic gear churn: 1,555 deaths fleet-wide in 33 hours (~1 every 42 minutes/bot) against a live `keep_inventory=false` gamerule, dropping each bot's entire inventory on every death with no recovery mechanism anywhere in the codebase. Not a repo bug — same shape of finding as §20's `mob_griefing` discovery. Operator chose a live RCON fix (`gamerule keep_inventory true`, confirmed set) over a code-side death-recovery behavior. Also corrected a third claim from the same review: Nell's reported "flower garden" dead-end loop is actually completing regularly (22 of 38 self-proposals logged `goal complete`) — a repetitive low-variety self-propose pattern, not a hallucination. Flagged, not fixed: `nextBuilderPriority()`'s hardcoded `beehive` checklist item has no fallback when its prerequisite chain is structurally unreachable, unlike Soldier's own priority list. |
+| 1.33.0 | 2026-09-18 | New §35, direct request ("turn down the spawn rate, especially of phantoms"). While checking what levers actually exist, found and fixed a real tooling gap: the RCON client reused since §20 only ever read a single response packet, silently truncating any multi-packet reply — `help gamerule`'s real output was being cut off mid-list. Fixed with the standard sentinel-packet read-until-echo pattern, which then revealed this server build exposes a `spawn_phantoms` gamerule beyond standard vanilla (boolean only, no partial rate). Given phantoms' consistent role as the dominant disruptive threat across §17/§24/§27/§34, operator chose to disable them outright (`gamerule spawn_phantoms false`, confirmed) rather than a partial measure that doesn't exist here. Also dropped difficulty Normal → Easy (`difficulty easy`, confirmed) for general (non-phantom) spawn/damage reduction, offered and chosen as a separate decision since it's a broader change. No code changed — both live RCON commands, same category as §20/§34. |
