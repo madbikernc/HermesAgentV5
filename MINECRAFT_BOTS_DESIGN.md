@@ -1743,6 +1743,44 @@ needs, so a raw material she was actively working toward using can get banked aw
 health drops -- confirmed happening once (a single stored oak_log), self-corrected moments later via
 a chest re-loot, low-impact in the trace examined and not fixed in this pass.
 
+## 33. Chest-substitution broadened to any equipment tier (2026-09-18)
+
+Direct request: "if the bot is in need of a piece of equipment (sword, armor, pickaxe, etc), and
+finds one already crafted in a chest, it should pick up ONE of those pieces of that equipment and
+abandon the quest to craft it."
+
+**A real gap in an already-existing mechanism, not a missing feature.** The craft-time and
+loot-time chest-substitution checks (§ various, 2026-09-08 and §30) already existed and already
+worked -- a bot really would take a `stone_pickaxe` from a chest instead of crafting one, if a
+`stone_pickaxe` was what she'd specifically asked for. The gap was narrower than "does this
+happen at all": both checks only ever matched the EXACT item id the model named. A chest holding
+an `iron_pickaxe` was invisible to a `craft wooden_pickaxe` check, so she'd go ahead and craft (or
+keep looking for) the specific tier she'd happened to guess, walking right past a better tool
+sitting a few blocks away.
+
+**Fix, scoped deliberately to gear only.** New `gearCategoryNames(bot, itemName)` (`actions.js`
+1.56.0): if the requested item ends in one of `GEAR_SUFFIXES` (helmet/chestplate/leggings/boots/
+sword/axe/pickaxe/shovel/hoe), returns every real registry item name sharing that suffix --
+otherwise returns just the one name, unchanged. Wired into "craft"'s own chest-check and both of
+"loot"'s matching passes (local search, remembered-chest fallback via `known_chests.json`).
+Deliberately NOT applied to raw materials -- an `iron_ingot` really is the one specific thing a
+smelting recipe needs, there's no "any tier" concept to broaden to, so every non-gear chest-check
+in this file (mine's, explore's) is untouched.
+
+**"Abandon the quest" needed no new mechanism.** The substituted item was already honestly
+reported in the step's own result text (`found iron_pickaxe already in a chest, no need to craft
+it` -- the REAL item taken, not a repeat of what was asked for), which lands in `recentLog` and
+her own gear/inventory snapshot on the very next `planNextStep` tick. The existing DONE-
+verification (real inventory/equipment check, not a self-report) already closes a goal the moment
+it sees the actual equipment present -- the same real-world-state discipline this whole
+hallucination-detection system already runs on, not a separate feature to build.
+
+**Scope note.** Doesn't prefer the best tier when a chest happens to hold more than one --
+`tryTakeFromThisChest()` takes whichever matches first, same as it always has. Gear is
+near-universally requested one at a time, so "any real instance satisfies the need" is enough;
+tier-ranking multiple candidates in the same chest was judged not worth the added complexity for
+how rarely it would actually matter.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1778,3 +1816,4 @@ a chest re-loot, low-impact in the trace examined and not fixed in this pass.
 | 1.28.0 | 2026-09-17 | New §30, direct request ("they loot EVERYTHING instead of what they need"). Confirmed the complaint first — "loot" really did sweep every stack, a deliberate 2026-09-07 choice being explicitly reversed now. `ACTION LOOT` gains optional `<item_id> <count>` (both classifyIntent and planNextStep vocabularies, `index.js` 2.72.0), reusing `tryTakeFromThisChest()` — the same need-based helper MINE/CRAFT's own chest-first fallback already used — so there's one "take up to N from a chest" implementation, not two (`actions.js` 1.54.0). Omitting the item is now the only way to "just look": inspects and snapshots contents without taking anything. "Put leftovers in a chest" needed no new mechanism — verified `storeSurplusNearHome()`/`checkInventoryFull()`/`checkInventoryInsurance()` already cover it generically; added a targeted-loot trigger to the existing post-craft immediate-cleanup pass. "All chest contents go to world memory" was already true via §19's `known_chests.json` — verified rather than rebuilt, deliberately not duplicated into the RAG corpus too (mutable-state fit problem §19 already reasoned through). |
 | 1.29.0 | 2026-09-17 | New §31, direct request ("if they craft armor or weapons or tools, they should equip them"). `refreshGear()`'s own comment claimed this was already handled but `equipBestWeapon`'s `WEAPON_SUFFIXES` never covered pickaxe/shovel/hoe — same comment/code drift pattern §22 already caught once. "craft" now equips the specific item just crafted when it's one of those three (`actions.js` 1.55.0), not a tier comparison. Auditing "attack" while making this change found a real, independent gap: it never re-equipped a weapon before engaging, only after a fight ends — low-risk before, a real exposure now that a freshly-crafted tool stays held. `equipBestWeapon()` now runs at the top of "attack" too. |
 | 1.30.0 | 2026-09-17 | New §32, direct follow-up ("dig in") to a hallucination review that found both detection mechanisms firing correctly (~2,160 catches, 26h, no missed hallucinations) but two standout chronic loops. Root-caused Amy's chained furnace→beds→shelter loop live: verified she's been repeatedly pinned at critically low health near "home" (5.17/20 historically, confirmed *currently* at 1/20 against a persistent creeper while investigating) — traced to `checkHomeLighting()`'s "no torches" early exit being completely silent, so a resource-starved bot could leave home permanently dark with zero log trace of why, feeding a dark-home → mob spawns → pinned health → can't finish shelter/torches → still dark cycle (also plausibly explaining the dense multi-mob swarm window from the original review). Torches need no crafting table (confirmed against `bot.recipesFor()`'s own table-less lookup) — `checkHomeLighting()` (`index.js` 2.73.0) now crafts some herself when she has fuel+stick, and always logs when she can't. The "get a sword" loop's cause (verified for Mark): a genuinely crafted sword given away to a teammate, then retries drowned out by a real flood of squad-response combat interrupts — not a new bug, not separately fixed. |
+| 1.31.0 | 2026-09-18 | New §33, direct request ("if the bot is in need of a piece of equipment... and finds one already crafted in a chest, it should pick up ONE of those pieces... and abandon the quest to craft it"). Craft/loot chest-substitution already existed and worked, but only ever matched the EXACT item id named — a chest's `iron_pickaxe` was invisible to a `craft wooden_pickaxe` check. New `gearCategoryNames()` (`actions.js` 1.56.0) broadens matching to every real tier sharing the same `GEAR_SUFFIXES` suffix, wired into "craft" and both of "loot"'s matching passes; deliberately left raw materials untouched (no "any tier" concept applies to an ingot). "Abandon the quest" needed no new mechanism — the real substituted item already lands in the next `planNextStep` tick's own gear snapshot, and the existing real-world-state DONE-verification closes the goal on its own. |

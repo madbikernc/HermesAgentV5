@@ -1,4 +1,20 @@
-// Version: 1.55.0
+// Version: 1.56.0
+//
+// 1.56.0 (2026-09-18) -- direct request: "if the bot is in need of a piece of equipment (sword,
+// armor, pickaxe, etc), and finds one already crafted in a chest, it should pick up ONE of those
+// pieces of that equipment and abandon the quest to craft it." The existing craft/loot
+// chest-substitution checks (2026-09-08/2026-09-17) already stopped a bot from crafting
+// something already sitting in a chest -- but only ever matched the EXACT item id the model
+// happened to name. A chest holding an iron_pickaxe was invisible to a "craft wooden_pickaxe"
+// check, so she'd craft (or keep looking for) the specific tier she'd guessed instead of
+// recognizing any real pickaxe as already satisfying the need. New gearCategoryNames() broadens
+// the search to every real tier sharing the same GEAR_SUFFIXES suffix, wired into both "craft"'s
+// own chest-check and "loot"'s local + remembered-chest matching -- raw materials are untouched
+// (an iron_ingot really is the one specific thing a recipe needs, no "any tier" concept applies).
+// "Abandon the quest" itself needed no new mechanism: the substituted item is now honestly
+// reported in the step result and her own gear/inventory snapshot on the next planNextStep tick,
+// so the existing DONE-recognition already closes the goal on its own -- the same real-world-
+// state-driven completion check this whole hallucination-detection system already relies on.
 //
 // 1.55.0 (2026-09-17) -- direct request: "if they craft armor or weapons or tools, they should
 // equip them." refreshGear()'s own comment ("a freshly-crafted tool/weapon/armor piece should get
@@ -910,6 +926,24 @@ export const FOOD_NAMES = [
 const GEAR_SUFFIXES = [
   "_helmet", "_chestplate", "_leggings", "_boots", "_sword", "_axe", "_pickaxe", "_shovel", "_hoe",
 ];
+
+// Direct request, 2026-09-18 ("if the bot is in need of a piece of equipment... and finds one
+// already crafted in a chest, it should pick up ONE of those pieces... and abandon the quest to
+// craft it"): the existing chest-substitution checks (craft/loot, below) only ever matched the
+// EXACT item id the model happened to name (e.g. "stone_pickaxe") -- a chest holding a BETTER or
+// just DIFFERENT-tier instance of the same equipment (an iron_pickaxe, say) was invisible to an
+// exact match, so she'd craft or keep looking for the specific tier she'd guessed instead of
+// recognizing ANY real pickaxe as already satisfying the need. Deliberately only broadens for
+// gear (GEAR_SUFFIXES) -- raw materials have no equivalent "any tier will do" concept, an
+// iron_ingot really is the one specific thing a recipe needs, so this is a no-op for anything
+// that isn't armor/a weapon/a tool. Doesn't prefer the best tier if a chest happens to hold more
+// than one -- tryTakeFromThisChest() takes whichever matches first, same as it always has; gear
+// is near-universally requested one at a time, so "any real instance" is enough to satisfy this.
+function gearCategoryNames(bot, itemName) {
+  const suffix = GEAR_SUFFIXES.find((s) => itemName.endsWith(s));
+  if (!suffix) return [itemName];
+  return Object.keys(bot.registry.itemsByName).filter((name) => name.endsWith(suffix));
+}
 
 // Real gap found live (2026-09-07): once furnace smelting existed, "no fuel" became the single
 // most common reason a goal gave up, and loot -- the natural fallback -- had no idea coal/
@@ -2185,8 +2219,12 @@ export async function performAction(bot, action, speaker) {
       // well as utilities like crafting tables"). Generalizes the check above beyond just
       // crafting_table/furnace (placed WORLD blocks) to any item at all, checked against nearby
       // CHESTS instead -- no reason to spend raw materials crafting something that's already
-      // sitting in a container within reach.
-      const chestMatch = await tryTakeFromNearbyChest(bot, token, [action.item], action.count);
+      // sitting in a container within reach. gearCategoryNames() (2026-09-18) broadens this to
+      // ANY tier of the same equipment when action.item is gear -- a chest with an iron_pickaxe
+      // satisfies a "craft wooden_pickaxe" goal just as well, no reason to craft (or overlook)
+      // one just because it's not the exact material she happened to name.
+      const chestMatch = await tryTakeFromNearbyChest(bot, token,
+        gearCategoryNames(bot, action.item), action.count);
       if (chestMatch) {
         await refreshGear(bot);
         return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to craft it.`);
@@ -2285,13 +2323,18 @@ export async function performAction(bot, action, speaker) {
       if (action.item) {
         const itemDef = bot.registry.itemsByName[action.item];
         if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
+        // gearCategoryNames() (2026-09-18, "pick up ONE of those pieces... and abandon the quest
+        // to craft it"): broadens an equipment request to ANY tier of the same category, not
+        // just the exact material she named -- a chest's diamond_pickaxe satisfies "LOOT
+        // wooden_pickaxe" just as well.
+        const wantedNames = gearCategoryNames(bot, action.item);
         let sawObstruction = false;
         for (const pos of positions) {
           if (token.cancelled) return ok("stopped on the way to a chest.");
           const chestBlock = bot.blockAt(pos);
           if (!chestBlock) continue;
           if (chestObstructed(bot, chestBlock)) { sawObstruction = true; continue; }
-          const result = await tryTakeFromThisChest(bot, token, chestBlock, [action.item], action.count);
+          const result = await tryTakeFromThisChest(bot, token, chestBlock, wantedNames, action.count);
           if (result === "cancelled") return ok("stopped on the way to a chest.");
           if (result) {
             await refreshGear(bot);
@@ -2302,14 +2345,22 @@ export async function performAction(bot, action, speaker) {
         // Local search came up empty for this specific item -- consult the shared known-chests
         // registry (same "local first, remembered second" pattern tryTakeFromNearbyChest's own
         // callers already use for MINE/CRAFT's chest-first fallback) before giving up outright.
-        const known = await findKnownChestWithItem(bot, action.item, action.count);
+        // findKnownChestWithItem() only ever checks one exact name per call (unlike
+        // tryTakeFromThisChest's own array-of-names shape), so a gear-broadened search means
+        // trying each real tier name in turn -- same loop shape tryTakeFromNearbyChest's own
+        // remembered-chest fallback already uses for exactly this reason.
+        let known = null;
+        for (const name of wantedNames) {
+          known = await findKnownChestWithItem(bot, name, action.count);
+          if (known) break;
+        }
         if (known && !token.cancelled) {
           try {
             await withTimeout(bot.pathfinder.goto(new goals.GoalNear(known.position.x,
               known.position.y, known.position.z, 3)), ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
             const chestBlock = bot.blockAt(known.position);
             if (chestBlock && !chestObstructed(bot, chestBlock)) {
-              const result = await tryTakeFromThisChest(bot, token, chestBlock, [action.item], action.count);
+              const result = await tryTakeFromThisChest(bot, token, chestBlock, wantedNames, action.count);
               if (result === "cancelled") return ok("stopped on the way to a chest.");
               if (result) {
                 await refreshGear(bot);
