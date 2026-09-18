@@ -1,4 +1,10 @@
-// Version: 1.57.0
+// Version: 1.58.0
+//
+// 1.58.0 (2026-09-18) -- direct request: "have the threatened bot run towards safety, run towards
+// golems, or soldiers." New nearestFriendlyGolem() (alongside nearestHostile()) and "flee" now
+// heads directly to an action.rallyPoint when index.js supplies one (via its own new
+// nearestRallyPoint() -- golem > nearby Soldier teammate > home) instead of only ever maximizing
+// distance from the threat with no destination in mind. See MINECRAFT_BOTS_DESIGN.md §37.
 //
 // 1.57.0 (2026-09-18) -- direct live report: "Luke is getting shot, not reacting. there is no mass
 // mob." Root-caused: Luke's self-defense held SELF_DEFENSE-tier control on an unproductive
@@ -896,6 +902,16 @@ const HOSTILE_MOBS = new Set([
 // function exists to check against.
 export function nearestHostile(bot, maxDistance = 16) {
   return bot.nearestEntity((e) => HOSTILE_MOBS.has(e.name) &&
+    e.position.distanceTo(bot.entity.position) <= maxDistance);
+}
+
+// Direct request, 2026-09-18 ("have the threatened bot run towards safety, run towards golems, or
+// soldiers"), direct follow-up to the SQUAD_ASSIST_RANGE finding (a fleeing bot beyond 48 blocks
+// of both Soldiers gets no help at all). Same shape as nearestHostile -- an iron golem fights
+// nearby hostiles on its own vanilla AI once a bot leads a threat near one, real backup a bot can
+// reach on foot even when no teammate is close enough to come to her.
+export function nearestFriendlyGolem(bot, maxDistance = 32) {
+  return bot.nearestEntity((e) => e.name === "iron_golem" &&
     e.position.distanceTo(bot.entity.position) <= maxDistance);
 }
 
@@ -2533,16 +2549,28 @@ export async function performAction(bot, action, speaker) {
       // instead of racing a second nearestHostile(bot) lookup against it moving/despawning.
       const target = action.target || nearestHostile(bot);
       if (!target) return ok("nothing to flee from.");
+      // Direct request, 2026-09-18 ("run towards safety, run towards golems, or soldiers"):
+      // index.js's checkSelfDefense/checkSleepingThreat/respondToSquadCall compute this (golem >
+      // nearby Soldier teammate > home, in that priority -- see their own nearestRallyPoint())
+      // since they're the ones with role/teammate-position knowledge; this action just heads
+      // there instead of blindly maximizing distance with no destination in mind. Deliberately no
+      // path-safety check between here and the rally point (same best-effort level as the rest of
+      // self-defense) -- a rally point is only ever picked when it's a real place to go, not a
+      // guarantee the route there is threat-free.
+      const rally = action.rallyPoint;
       try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalInvert(new goals.GoalFollow(target, 16))),
-          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        const goal = rally
+          ? new goals.GoalNear(rally.x, rally.y, rally.z, 3)
+          : new goals.GoalInvert(new goals.GoalFollow(target, 16));
+        await withTimeout(bot.pathfinder.goto(goal), ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
       } catch (err) {
         if (token.cancelled) return ok("stopped fleeing.");
         return fail(`couldn't get away: ${err.message}`);
       } finally {
         bot.pathfinder.setGoal(null);
       }
-      return token.cancelled ? ok("stopped fleeing.") : ok("got some distance from it.");
+      if (token.cancelled) return ok("stopped fleeing.");
+      return ok(rally ? "made it to safety." : "got some distance from it.");
     }
 
     case "eat": {

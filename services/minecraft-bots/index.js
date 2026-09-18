@@ -1,4 +1,16 @@
-// Version: 2.73.0
+// Version: 2.74.0
+//
+// 2.74.0 (2026-09-18) -- direct request: "have the threatened bot run towards safety, run towards
+// golems, or soldiers." Direct follow-up to confirming SQUAD_ASSIST_RANGE (48 blocks) leaves a
+// fleeing bot beyond it with no real help at all (the live incident that prompted this: Nell,
+// critical, ~70 blocks from both Soldiers, got no response). "Flee" itself never had a
+// destination -- just maximized distance from the threat, which could run a bot deeper into
+// danger as easily as out of it. New nearestRallyPoint() (golem > nearby Soldier teammate via
+// bot.players > home, in that priority) wired into all three flee-triggering sites
+// (checkSelfDefense, the EMERGENCY health-critical handler, checkSleepingThreat) and passed as
+// action.rallyPoint; actions.js's own "flee" case (1.58.0) heads there directly when given one,
+// falling back to its original away-from-threat behavior otherwise. See MINECRAFT_BOTS_DESIGN.md
+// §37.
 //
 // 2.73.0 (2026-09-17) -- direct request "look in new logs for task hallucinations" -> "dig in."
 // Root-caused Amy's chronic multi-goal loop (§30/§31-adjacent, 17+ hours stuck on furnace, then
@@ -1142,7 +1154,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -3620,6 +3632,41 @@ function noteThreatSeen(threatName) {
   }
 }
 
+// Direct request, 2026-09-18 ("have the threatened bot run towards safety, run towards golems, or
+// soldiers") -- direct follow-up to confirming SQUAD_ASSIST_RANGE (48 blocks) leaves a fleeing bot
+// beyond it with no real help coming (the exact live incident that prompted this: Nell, alone and
+// critical, ~70 blocks from both Soldiers). "Flee" previously had no destination at all -- it just
+// maximized distance from the threat, which could just as easily run a bot deeper into danger as
+// out of it. Priority, cheapest/most-effective first: a nearby iron golem (fights hostiles near it
+// on its own vanilla AI -- real backup even with zero teammates in range) > a nearby Soldier
+// teammate whose entity this bot's own client currently has loaded (bot.players -- no new
+// broadcast infrastructure needed, this is just each bot's own already-tracked world state) > home
+// (always a safer place to end up than wherever the flee happened to start, even with nobody
+// there). Returns null only when none of the three are known at all, in which case "flee" falls
+// back to its original plain away-from-threat behavior.
+const RALLY_SEARCH_RANGE = 32;
+async function nearestRallyPoint(bot) {
+  const golem = nearestFriendlyGolem(bot, RALLY_SEARCH_RANGE);
+  if (golem) return golem.position;
+
+  let nearestSoldierPos = null;
+  let nearestSoldierDist = RALLY_SEARCH_RANGE;
+  for (const name of BOT_USERNAMES) {
+    if (name === USERNAME) continue;
+    if (BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER) continue;
+    const entity = bot.players[name]?.entity;
+    if (!entity) continue;
+    const dist = entity.position.distanceTo(bot.entity.position);
+    if (dist <= nearestSoldierDist) {
+      nearestSoldierPos = entity.position;
+      nearestSoldierDist = dist;
+    }
+  }
+  if (nearestSoldierPos) return nearestSoldierPos;
+
+  return (await loadClaimedBed(bot)) || bot.spawnPoint || null;
+}
+
 // Direct report, 2026-09-08 ("they still don't seem to react to a threatening creature"). Real,
 // confirmed gap: this used to be gated on !acting, same as every other idle-tick check here --
 // but `acting` now spans an entire physical action end-to-end (up to ACTION_TIMEOUT_MS, 90s
@@ -3702,9 +3749,10 @@ async function checkSelfDefense() {
       !hasWeapon(bot) ? "flee" : "attack";
     if (FLEE_ONLY_MOBS.has(threat.name)) lastFleeMobResponseAt = Date.now();
     console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
+    const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
     // action.target: the already-found entity, not re-derived -- see actions.js's own
     // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.
-    const result = await performAction(bot, { type, target: threat }, USERNAME);
+    const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
     console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] self-defense check failed:`, err.message);
@@ -4731,7 +4779,8 @@ bot.on("health", () => {
       return;
     }
     try {
-      const result = await performAction(bot, { type: "flee", target: threat }, USERNAME);
+      const rallyPoint = await nearestRallyPoint(bot);
+      const result = await performAction(bot, { type: "flee", target: threat, rallyPoint }, USERNAME);
       console.log(`[${USERNAME}] emergency flee: ${result.text} (ok=${result.ok})`);
     } catch (err) {
       console.error(`[${USERNAME}] emergency flee failed:`, err.message);
@@ -4910,7 +4959,8 @@ async function checkSleepingThreat() {
     // else when she has no weapon to fight it with.
     const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH ||
       !hasWeapon(bot) ? "flee" : "attack";
-    const result = await performAction(bot, { type, target: threat }, USERNAME);
+    const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
+    const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
     console.log(`[${USERNAME}] post-wake defense: ${type} -> ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] post-wake defense failed:`, err.message);

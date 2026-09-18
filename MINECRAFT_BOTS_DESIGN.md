@@ -1928,6 +1928,47 @@ Immediate live incident needed no separate intervention: by the time this was in
 own EMERGENCY flee had already gotten him clear and his health (5.68) had stopped dropping --
 confirmed stable via RCON and fresh logs before moving on to root-cause and fix.
 
+## 37. Fleeing now runs toward a rally point (golem, Soldier, or home) instead of nowhere in particular (2026-09-18)
+
+Direct follow-up to §36's own incident: "why aren't the soldier bots coming to defend Nell?"
+Checked live rather than assumed -- confirmed via RCON positions that Nell (~4.4 HP, repeatedly
+attacked) was ~70 blocks from both Mark and Luke, outside `SQUAD_ASSIST_RANGE` (48 blocks,
+`index.js`). Traced her threat alerts all the way through: `broadcastThreatAlert()` really was
+firing every ~15s as designed, but `withinSquadAssistRange()` silently drops anything past 48
+blocks with no log line either way -- not a bug, a deliberate bound ("no point racing across half
+the map for a fight that's very likely already over by the time she'd arrive"), but it leaves any
+bot who wanders that far with zero backup, confirmed by the complete absence of her name anywhere
+in Mark/Luke's logs. Immediate danger handled the same way as §29's Babs incident: killed the
+nearby zombie via RCON once confirmed she was isolated with no help coming.
+
+Direct request in response: "have the threatened bot run towards safety, run towards golems, or
+soldiers." Checked what "flee" actually did first -- confirmed it had never had a destination at
+all, just `GoalInvert(GoalFollow(threat, 16))`, maximizing distance from the threat with zero
+regard for where that put the bot. Could run her further from home, into water, off a ledge, or
+simply back toward the same danger from a different angle -- "getting away" and "getting safe" were
+never the same thing here.
+
+**Fix:** new `nearestRallyPoint(bot)` (`index.js` 2.74.0), checked in priority order --
+
+1. **A nearby iron golem** (`nearestFriendlyGolem()`, `actions.js` 1.58.0, mirrors `nearestHostile()`)
+   -- golems fight hostiles near them on their own vanilla AI, real backup even with zero teammates
+   anywhere close.
+2. **A nearby Soldier teammate** -- checked via each bot's own `bot.players[name].entity`, already
+   locally tracked world state, no new broadcast infrastructure needed. Deliberately NOT gated by
+   `SQUAD_ASSIST_RANGE` -- that constant bounds whether a Soldier travels to a distant call, not
+   whether a fleeing bot may run toward one who happens to already be close.
+3. **Home** (`loadClaimedBed()` or `spawnPoint`, same fallback chain `checkHomeLighting()` already
+   uses) -- always a safer place to end up than wherever the flee started, even with nobody there.
+
+Returns `null` only when none of the three are known at all, in which case "flee" falls back to its
+original plain away-from-threat behavior -- unchanged, not replaced. Wired into all three
+flee-triggering sites (`checkSelfDefense`, the EMERGENCY health-critical handler,
+`checkSleepingThreat`) via a new `action.rallyPoint` field; `actions.js`'s "flee" case heads
+straight there (`GoalNear`, 3-block radius) when given one instead of the old distance-maximizing
+goal. No path-safety check between the bot and the rally point -- same best-effort level as the
+rest of self-defense; a rally point is a real place to go, not a guarantee the route there is
+threat-free.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1967,3 +2008,4 @@ confirmed stable via RCON and fresh logs before moving on to root-cause and fix.
 | 1.32.0 | 2026-09-18 | New §34, second hallucination review this window. Verified two of the prior review's headline claims directly instead of reporting them as-is: the §32 torch fix was genuinely inert (confirmed why — Amy's self-defense force-cancels action mid-craft every few seconds, so fuel and sticks were essentially never in inventory simultaneously), and Mark really was gifted two swords by teammates and remained swordless — because he died between the two gifts. Chased that one further and found the actual root cause behind both, and most of the fleet's chronic gear churn: 1,555 deaths fleet-wide in 33 hours (~1 every 42 minutes/bot) against a live `keep_inventory=false` gamerule, dropping each bot's entire inventory on every death with no recovery mechanism anywhere in the codebase. Not a repo bug — same shape of finding as §20's `mob_griefing` discovery. Operator chose a live RCON fix (`gamerule keep_inventory true`, confirmed set) over a code-side death-recovery behavior. Also corrected a third claim from the same review: Nell's reported "flower garden" dead-end loop is actually completing regularly (22 of 38 self-proposals logged `goal complete`) — a repetitive low-variety self-propose pattern, not a hallucination. Flagged, not fixed: `nextBuilderPriority()`'s hardcoded `beehive` checklist item has no fallback when its prerequisite chain is structurally unreachable, unlike Soldier's own priority list. |
 | 1.33.0 | 2026-09-18 | New §35, direct request ("turn down the spawn rate, especially of phantoms"). While checking what levers actually exist, found and fixed a real tooling gap: the RCON client reused since §20 only ever read a single response packet, silently truncating any multi-packet reply — `help gamerule`'s real output was being cut off mid-list. Fixed with the standard sentinel-packet read-until-echo pattern, which then revealed this server build exposes a `spawn_phantoms` gamerule beyond standard vanilla (boolean only, no partial rate). Given phantoms' consistent role as the dominant disruptive threat across §17/§24/§27/§34, operator chose to disable them outright (`gamerule spawn_phantoms false`, confirmed) rather than a partial measure that doesn't exist here. Also dropped difficulty Normal → Easy (`difficulty easy`, confirmed) for general (non-phantom) spawn/damage reduction, offered and chosen as a separate decision since it's a broader change. No code changed — both live RCON commands, same category as §20/§34. |
 | 1.34.0 | 2026-09-18 | New §36, direct live report ("Luke is getting shot, not reacting. there is no mass mob"). Verified live via RCON and fresh logs rather than guessed — real skeleton, real damage, `nearestHostile()` working correctly. Root cause: Luke's self-defense had been holding SELF_DEFENSE-tier control on an unresolved `attack (threat=enderman)` for 90+ seconds, silently blocking any response to the separate skeleton sniping him the whole time — not a detection bug, a target-monopolization one, only broken by the unrelated EMERGENCY health-critical flee once he'd dropped to ~6 HP. Confirmed not a one-off: Mark/Luke (the two bots willing to melee-attack rather than flee) logged 2,800/1,770 enderman self-defense triggers in 24h, far above every other bot — endermen's teleport-evasion defeats `bot.pvp`'s chase-and-melee almost as thoroughly as literal flight does for phantom/ghast. `FLEE_ONLY_MOBS` (`actions.js` 1.57.0) now includes `enderman`, same treatment as the existing two entries. Trade-off accepted deliberately: bots no longer fight endermen at all (no more self-defense ender pearls) in exchange for closing a confirmed "gets shot with zero response" failure mode. |
+| 1.35.0 | 2026-09-18 | New §37, direct follow-up ("why aren't the soldier bots coming to defend Nell?" -> "have the threatened bot run towards safety, run towards golems, or soldiers"). Traced live: Nell was genuinely ~70 blocks from both Soldiers, outside `SQUAD_ASSIST_RANGE` (48 blocks) -- `withinSquadAssistRange()` silently drops out-of-range alerts with no log line, a deliberate bound, not a bug, but it leaves far-ranging bots with zero backup. Immediate danger cleared via RCON (same pattern as §29). Root cause of the underlying request: "flee" never had a destination, just maximized distance from the threat with no regard for where that led. New `nearestRallyPoint()` (`index.js` 2.74.0) checks, in order, a nearby iron golem (`nearestFriendlyGolem()`, `actions.js` 1.58.0), a nearby Soldier teammate via each bot's own already-tracked `bot.players`, then home -- wired into all three flee-triggering sites via a new `action.rallyPoint` field; "flee" now heads straight there when one exists, falling back to the original away-from-threat behavior otherwise. |
