@@ -1,4 +1,17 @@
-// Version: 1.59.0
+// Version: 1.60.0
+//
+// 1.60.0 (2026-09-19) -- direct request: "Mayor/Leader missions, if they would effectively
+// DOWNGRADE a bot's equipment or status, should be rejected by the bot." "give" (the concrete
+// gear-loss vector -- both a direct chat command and the autonomous checkPendingGiveRequests
+// fulfillment path route through this same case) never checked whether complying would leave the
+// giver without a weapon/armor/tool she still needs, whoever asked -- the exact mechanism behind
+// Mark being gifted a sword twice by teammates yet ending up swordless anyway (§34: he died
+// between the gifts, a separate cause, but this closes the OTHER real way that keeps happening --
+// a bot handing away her own last one on request). Now refuses (a clear fail(), not a silent
+// no-op) when giving would take the item's whole category from "has one" to "has none": sword/axe
+// treated as one interchangeable weapon category (matching equipment.js's own hasWeapon()),
+// armor/tool suffixes each their own. A genuine spare is always still fine to give. See
+// MINECRAFT_BOTS_DESIGN.md §40.
 //
 // 1.59.0 (2026-09-19) -- direct request: "expand their search capabilities further, especially the
 // miner and explorer roles." New env-tunable MINE_SEARCH_RADIUS/EXPLORE_SEARCH_RADIUS/
@@ -2674,6 +2687,30 @@ export async function performAction(bot, action, speaker) {
       const have = bot.inventory.count(itemDef.id, null);
       if (!have) return fail(`don't have any ${action.item} to give.`);
       const giveCount = Math.min(action.count, have);
+
+      // Direct request, 2026-09-19 ("Mayor/Leader missions, if they would effectively DOWNGRADE a
+      // bot's equipment or status, should be rejected by the bot"). Real, already-confirmed
+      // failure shape (§34/MINECRAFT_BOTS_DESIGN.md): Mark was gifted a sword twice by teammates
+      // responding to a request, yet a give this blind can just as easily strip the GIVER bare --
+      // "give" never checked whether complying would leave her without a weapon/armor/tool she
+      // still needs, whoever asked. Sword and axe are treated as one interchangeable "weapon"
+      // category (matching equipment.js's own hasWeapon() definition); armor/tool suffixes are
+      // each their own category (a spare pickaxe doesn't cover for giving away her only shovel).
+      // Only blocks going from "has one" to "has none" -- a genuine spare is always fine to give.
+      const giveSuffix = GEAR_SUFFIXES.find((s) => action.item.endsWith(s));
+      if (giveSuffix) {
+        const isWeapon = giveSuffix === "_sword" || giveSuffix === "_axe";
+        const category = isWeapon ? ["_sword", "_axe"] : [giveSuffix];
+        const totalOfCategory = bot.inventory.items()
+          .filter((i) => category.some((s) => i.name.endsWith(s)))
+          .reduce((sum, i) => sum + i.count, 0);
+        const remainingAfterGive = totalOfCategory - giveCount;
+        if (remainingAfterGive <= 0) {
+          return fail(`won't give away my ${action.item} -- that's my only ` +
+            `${isWeapon ? "weapon" : giveSuffix.slice(1)}, and giving it up would leave me ` +
+            `worse off than before.`);
+        }
+      }
 
       try {
         await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(target, 2)), ACTION_TIMEOUT_MS,

@@ -2055,6 +2055,41 @@ about the one specific target), catching any other ore/log/village-indicator vis
 the action left her -- a free look around at zero extra travel, the same mechanism already used for
 scout requests now also firing on ordinary routine success.
 
+## 40. Bots now refuse a "give" that would leave them without a weapon/armor/tool they need (2026-09-19)
+
+Direct request: "Mayor/Leader missions, if they would effectively DOWNGRADE a bot's equipment or
+status, should be rejected by the bot."
+
+**Found the concrete mechanism first, rather than trying to define "downgrade" abstractly.**
+Mayor's own directives are delivered as plain in-game chat (`bot.chat(reply)`,
+`proposeDirectiveForOthers()`), so a receiving bot processes them through the exact same
+`classifyIntent` pipeline as any other message -- there's no separate "this came from the Leader"
+code path to special-case. The one real, already-diagnosed gear-loss vector both a direct command
+("ACTION GIVE") and the autonomous `checkPendingGiveRequests()` fulfillment path funnel through is
+the "give" action itself (`actions.js`) -- and it never checked whether complying would leave the
+GIVER worse off, whoever asked. §34 already found Mark gifted a sword twice by teammates yet ending
+up swordless anyway (that specific case traced to a death between the gifts, a different cause) --
+but the giving side of that same exchange had no safeguard at all: a bot asked to hand over her only
+sword, her only pickaxe, or a piece of armor she's not doubled up on would simply comply.
+
+**Fix (`actions.js` 1.60.0):** "give" now checks, before ever pathing to the recipient, whether the
+requested item's whole category would go from "has one" to "has none." Sword and axe are treated as
+one interchangeable weapon category, matching `equipment.js`'s own `hasWeapon()` definition exactly
+(a bot with a spare axe isn't left defenseless by giving away her sword); armor and tool suffixes
+are each their own category (a spare pickaxe doesn't cover for giving away her only shovel). A
+genuine spare is always still fine to give -- this only blocks the specific case of going to zero.
+Refusal is a real `fail()` with a clear reason (`"won't give away my iron_sword -- that's my only
+weapon..."`), not a silent no-op: visible in her own logs, and reported back exactly like any other
+declined action, so whoever issued the request (Mayor included) sees why.
+
+**Scoped deliberately to "give," not a general directive-intent classifier.** Trying to detect
+"would this arbitrary instruction downgrade her status" in the abstract (before it's even executed)
+would mean guessing at consequences from a free-text directive with no reliable signal to check
+against. "Give" is different: it names an exact item and count, so what leaving her with can be
+checked directly against real inventory state, the same real-world-state discipline every other
+fix this session relies on rather than a broader heuristic that would risk blocking legitimate
+requests it can't actually evaluate.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2097,3 +2132,4 @@ scout requests now also firing on ordinary routine success.
 | 1.35.0 | 2026-09-18 | New §37, direct follow-up ("why aren't the soldier bots coming to defend Nell?" -> "have the threatened bot run towards safety, run towards golems, or soldiers"). Traced live: Nell was genuinely ~70 blocks from both Soldiers, outside `SQUAD_ASSIST_RANGE` (48 blocks) -- `withinSquadAssistRange()` silently drops out-of-range alerts with no log line, a deliberate bound, not a bug, but it leaves far-ranging bots with zero backup. Immediate danger cleared via RCON (same pattern as §29). Root cause of the underlying request: "flee" never had a destination, just maximized distance from the threat with no regard for where that led. New `nearestRallyPoint()` (`index.js` 2.74.0) checks, in order, a nearby iron golem (`nearestFriendlyGolem()`, `actions.js` 1.58.0), a nearby Soldier teammate via each bot's own already-tracked `bot.players`, then home -- wired into all three flee-triggering sites via a new `action.rallyPoint` field; "flee" now heads straight there when one exists, falling back to the original away-from-threat behavior otherwise. |
 | 1.36.0 | 2026-09-18 | New §38, direct live report ("I am watching a spider attack Mark as he doesn't react") that turned out to be one visible thread of a much larger nighttime mob crisis: RCON found Dale at 1.7 HP and 7+ deaths fleet-wide inside under a minute. Stabilized live via RCON mob-clear plus 11 real torches placed directly at `bot.spawnPoint` (verified held, not popped). Operator chose "do both" -- also dug into why `checkHomeLighting()` has now failed THREE times running (2026-09-10, §32, and tonight): confirmed its gate only ever checked the running bot's own personal inventory at the exact moment its 90s check fires, and across a fleet with constant self-defense interrupts, no bot is ever reliably both free and stocked at once -- the general mechanism behind all three failures. Fix (`index.js` 2.75.0): tries a chest first via the existing "loot" action's local-then-remembered-chest search before ever falling back to personal-inventory crafting. |
 | 1.37.0 | 2026-09-19 | New §39, direct request ("expand their search capabilities further, especially the miner and explorer roles. make *sure* that discovered resources are being stored in world memory"). Audited existing memory-write paths and found a real, confirmed gap: a successful MINE never wrote a world-memory note at all, only a failed one did -- fixed (`index.js` 2.76.0) by extending explore's own existing success-note mechanism to mine too. Also confirmed neither Miner nor Explorer has ever had deterministic search logic (unlike Soldier/Builder) -- added env-tunable per-bot search radius (`MINE_SEARCH_RADIUS`/`EXPLORE_SEARCH_RADIUS`/`EXTENDED_SEARCH_DISTANCE`, `actions.js` 1.59.0, same pattern as `MC_SELF_DEFENSE_RANGE`) now set larger on Babs/Wade's own systemd units, kept under the documented 48-block pathfinder OOM ceiling; and new `VILLAGE_INDICATOR_NAMES` (bell, composter) gives Explorer's own stated "locate a village" priority a real, note-only search target for the first time. Both mine and explore now also trigger a full `noteNearbyResources()` sweep on success, not just a note about the one target. |
+| 1.38.0 | 2026-09-19 | New §40, direct request ("Mayor/Leader missions, if they would effectively DOWNGRADE a bot's equipment or status, should be rejected by the bot"). Found the concrete mechanism rather than a general directive classifier: Mayor's own directives are plain chat, routed through the same classifyIntent pipeline as anything else, and the one real gear-loss vector -- "give" (`actions.js`) -- never checked whether complying would leave the giver without a weapon/armor/tool she needs. Fixed (1.60.0): refuses when giving would take an item's whole category (sword/axe as one interchangeable weapon category matching `hasWeapon()`, armor/tools each their own) from "has one" to "has none" -- a genuine spare is still always fine to give. Refusal is a real, visible `fail()`, not a silent no-op. |
