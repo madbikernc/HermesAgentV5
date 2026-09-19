@@ -1,4 +1,15 @@
-// Version: 2.74.0
+// Version: 2.75.0
+//
+// 2.75.0 (2026-09-18) -- direct live incident: watched a spider hit Mark with no reaction, which
+// turned out to be one tiny symptom of a much bigger nighttime mob crisis (7+ deaths fleet-wide in
+// under a minute, Dale down to 1.7 HP). Stabilized live via RCON (mob clear + a real torch ring
+// placed at bot.spawnPoint), then root-caused checkHomeLighting's THIRD straight failure (after
+// 2026-09-10 and 2026-09-17 fixes, both confirmed dead ends): its "no torches -> try crafting"
+// gate only ever checked THIS bot's own personal inventory at the exact instant this 90s check
+// fires, and across a fleet whose self-defense fires every few seconds during any real incident,
+// no bot is ever reliably both free and stocked at the same moment. Now tries a chest first (reuses
+// "loot"'s own existing local-then-remembered-chest search, §19/§30) before ever falling back to
+// crafting from personal inventory. See MINECRAFT_BOTS_DESIGN.md §38.
 //
 // 2.74.0 (2026-09-18) -- direct request: "have the threatened bot run towards safety, run towards
 // golems, or soldiers." Direct follow-up to confirming SQUAD_ASSIST_RANGE (48 blocks) leaves a
@@ -4135,15 +4146,32 @@ async function checkHomeLighting() {
     // only ever depending on already having some. If she genuinely can't (no fuel, no stick),
     // that's now a real, visible log line instead of silence.
     if (!bot.inventory.items().some((i) => i.name === "torch")) {
-      const fuel = bot.inventory.items().find((i) => i.name === "coal" || i.name === "charcoal");
-      const hasStick = bot.inventory.items().some((i) => i.name === "stick");
-      if (!fuel || !hasStick) {
-        console.log(`[${USERNAME}] home lighting: no torches, and no fuel+stick on hand to craft one -- skipping for now.`);
-        return;
+      // Direct live incident, 2026-09-18 (nighttime mob crisis, 7+ deaths in under a minute):
+      // confirmed this whole gate has been the real, recurring blocker -- it only EVER checked
+      // this one bot's own personal inventory at the exact 90s-interval instant this check
+      // happens to fire, while not busy/asleep/arbiter-locked. Across a fleet whose self-defense
+      // triggers every few seconds during any real incident, no bot reliably has fuel+stick AND a
+      // free moment at the same time, so this branch has been silently doing nothing for days
+      // despite two prior fix attempts (see this function's own 2026-09-17 note above). Now tries
+      // a chest first -- reuses "loot"'s own existing local-then-remembered-chest search (§30/§19)
+      // instead of only ever depending on what she happens to be personally carrying; cheaper and
+      // far more likely to succeed than crafting from scratch, especially now that the shared base
+      // chests can be pre-stocked (tools/minecraft-chests/).
+      const lootResult = await performAction(bot, { type: "loot", item: "torch", count: 4 }, USERNAME);
+      if (lootResult.ok) {
+        console.log(`[${USERNAME}] home lighting: grabbed torches from a chest -- ${lootResult.text}`);
+      } else {
+        const fuel = bot.inventory.items().find((i) => i.name === "coal" || i.name === "charcoal");
+        const hasStick = bot.inventory.items().some((i) => i.name === "stick");
+        if (!fuel || !hasStick) {
+          console.log(`[${USERNAME}] home lighting: no torches (chest check came up empty too: ` +
+            `${lootResult.text}), and no fuel+stick on hand to craft one -- skipping for now.`);
+          return;
+        }
+        const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME);
+        console.log(`[${USERNAME}] home lighting: crafted torches first -- ${craftResult.text} (ok=${craftResult.ok})`);
+        if (!craftResult.ok) return;
       }
-      const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME);
-      console.log(`[${USERNAME}] home lighting: crafted torches first -- ${craftResult.text} (ok=${craftResult.ok})`);
-      if (!craftResult.ok) return;
     }
     const result = await performAction(bot, { type: "light_area", near: home }, USERNAME);
     console.log(`[${USERNAME}] home lighting: ${result.text} (ok=${result.ok})`);

@@ -1969,6 +1969,47 @@ goal. No path-safety check between the bot and the rally point -- same best-effo
 rest of self-defense; a rally point is a real place to go, not a guarantee the route there is
 threat-free.
 
+## 38. Nighttime mob crisis: real torches placed live, and checkHomeLighting's third straight fix (2026-09-18)
+
+Direct live report: "I am watching a spider attack Mark as he doesn't react" -- checked live rather
+than assumed, and the spider turned out to be a tiny visible piece of something much larger already
+in progress: RCON health checks across the fleet found Dale at 1.7 HP, Wade and Amy at ~5.8, Luke at
+~9, and fresh logs showed at least 7 deaths fleet-wide (Nell, Luke, Bob x2, Mayor x2, Amy) inside
+under a minute -- Mark's own respawn-then-immediate-second-encounter with the spider was just one
+thread of a full nighttime swarm hitting nearly everyone at once. `spawn_phantoms` was re-confirmed
+still `false` (§35 held), so the "killed by phantom" attributions were either stale
+best-guess-killer labels or leftover pre-existing phantoms, not a re-emerging spawn -- the dominant
+cause was the same unlit-base problem flagged live in §17, §32, and §34, none of which had actually
+stuck.
+
+**Immediate stabilization (RCON, live):** cleared hostile mobs around every bot in obvious danger
+(same pattern as §29/§34/§37's own incidents), then placed 11 real torches directly via
+`/setblock ... minecraft:torch keep` in a spread around `bot.spawnPoint` (328, 77, -144) -- verified
+they actually held (a follow-up `keep`-mode placement attempt at the same coordinates correctly
+failed with "Could not set the block," confirming occupied, not popped from missing support).
+Fleet health confirmed recovering within a couple of minutes; night was also naturally ending
+(tick ~22700/24000) by the time this was checked.
+
+**Given the operator's explicit "do both," dug into why `checkHomeLighting()` has now failed THREE
+times running** (2026-09-10's original build, §32's 2026-09-17 "craft your own torches" fix, and
+now). Re-read the live function: its gate was still `if (!bot.inventory... torch) { check fuel+stick
+in inventory, craft or give up }` -- it has ONLY ever consulted this one bot's own personal
+inventory at the exact instant its 90-second interval fires, while not busy/asleep/arbiter-locked.
+Across a fleet whose self-defense re-triggers every few seconds during any real incident (extensively
+documented all session -- §24, §27, §34, §36, §37, and tonight's own crisis), no bot is ever
+reliably BOTH free of higher-priority control AND personally carrying the right materials at the
+same moment -- the same root shape §34 already confirmed via Amy's specific case, now understood as
+the general mechanism behind all three failures, not something specific to her.
+
+**Fix (`index.js` 2.75.0):** before ever falling back to personal-inventory crafting,
+`checkHomeLighting()` now tries a chest first via `performAction(bot, {type:"loot", item:"torch",
+count:4})` -- reusing "loot"'s own existing local-then-remembered-chest search (§19/§30) rather than
+building new plumbing. Cheaper than crafting when it works, and now has a real chance of finding
+something: the shared base has actual chests nearby (confirmed via repeated "Found chest near..."
+log lines all session), and `tools/minecraft-chests/` (§ the tool-review conversation, same day) can
+pre-stock them. Falls through to the original fuel+stick-crafting attempt, then the original
+silent-no-more skip log, exactly as before, if the chest search also comes up empty.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2009,3 +2050,4 @@ threat-free.
 | 1.33.0 | 2026-09-18 | New §35, direct request ("turn down the spawn rate, especially of phantoms"). While checking what levers actually exist, found and fixed a real tooling gap: the RCON client reused since §20 only ever read a single response packet, silently truncating any multi-packet reply — `help gamerule`'s real output was being cut off mid-list. Fixed with the standard sentinel-packet read-until-echo pattern, which then revealed this server build exposes a `spawn_phantoms` gamerule beyond standard vanilla (boolean only, no partial rate). Given phantoms' consistent role as the dominant disruptive threat across §17/§24/§27/§34, operator chose to disable them outright (`gamerule spawn_phantoms false`, confirmed) rather than a partial measure that doesn't exist here. Also dropped difficulty Normal → Easy (`difficulty easy`, confirmed) for general (non-phantom) spawn/damage reduction, offered and chosen as a separate decision since it's a broader change. No code changed — both live RCON commands, same category as §20/§34. |
 | 1.34.0 | 2026-09-18 | New §36, direct live report ("Luke is getting shot, not reacting. there is no mass mob"). Verified live via RCON and fresh logs rather than guessed — real skeleton, real damage, `nearestHostile()` working correctly. Root cause: Luke's self-defense had been holding SELF_DEFENSE-tier control on an unresolved `attack (threat=enderman)` for 90+ seconds, silently blocking any response to the separate skeleton sniping him the whole time — not a detection bug, a target-monopolization one, only broken by the unrelated EMERGENCY health-critical flee once he'd dropped to ~6 HP. Confirmed not a one-off: Mark/Luke (the two bots willing to melee-attack rather than flee) logged 2,800/1,770 enderman self-defense triggers in 24h, far above every other bot — endermen's teleport-evasion defeats `bot.pvp`'s chase-and-melee almost as thoroughly as literal flight does for phantom/ghast. `FLEE_ONLY_MOBS` (`actions.js` 1.57.0) now includes `enderman`, same treatment as the existing two entries. Trade-off accepted deliberately: bots no longer fight endermen at all (no more self-defense ender pearls) in exchange for closing a confirmed "gets shot with zero response" failure mode. |
 | 1.35.0 | 2026-09-18 | New §37, direct follow-up ("why aren't the soldier bots coming to defend Nell?" -> "have the threatened bot run towards safety, run towards golems, or soldiers"). Traced live: Nell was genuinely ~70 blocks from both Soldiers, outside `SQUAD_ASSIST_RANGE` (48 blocks) -- `withinSquadAssistRange()` silently drops out-of-range alerts with no log line, a deliberate bound, not a bug, but it leaves far-ranging bots with zero backup. Immediate danger cleared via RCON (same pattern as §29). Root cause of the underlying request: "flee" never had a destination, just maximized distance from the threat with no regard for where that led. New `nearestRallyPoint()` (`index.js` 2.74.0) checks, in order, a nearby iron golem (`nearestFriendlyGolem()`, `actions.js` 1.58.0), a nearby Soldier teammate via each bot's own already-tracked `bot.players`, then home -- wired into all three flee-triggering sites via a new `action.rallyPoint` field; "flee" now heads straight there when one exists, falling back to the original away-from-threat behavior otherwise. |
+| 1.36.0 | 2026-09-18 | New §38, direct live report ("I am watching a spider attack Mark as he doesn't react") that turned out to be one visible thread of a much larger nighttime mob crisis: RCON found Dale at 1.7 HP and 7+ deaths fleet-wide inside under a minute. Stabilized live via RCON mob-clear plus 11 real torches placed directly at `bot.spawnPoint` (verified held, not popped). Operator chose "do both" -- also dug into why `checkHomeLighting()` has now failed THREE times running (2026-09-10, §32, and tonight): confirmed its gate only ever checked the running bot's own personal inventory at the exact moment its 90s check fires, and across a fleet with constant self-defense interrupts, no bot is ever reliably both free and stocked at once -- the general mechanism behind all three failures. Fix (`index.js` 2.75.0): tries a chest first via the existing "loot" action's local-then-remembered-chest search before ever falling back to personal-inventory crafting. |
