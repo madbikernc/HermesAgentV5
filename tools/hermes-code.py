@@ -262,3 +262,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# already-applied test marker -- reverted immediately after
