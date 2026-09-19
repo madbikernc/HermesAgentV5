@@ -1,4 +1,21 @@
-// Version: 2.76.0
+// Version: 2.77.0
+//
+// 2.77.0 (2026-09-19) -- direct report: "I don't think they really know how to use the crafting
+// table or furnace." Root-caused live, not guessed: Amy crafted a crafting_table at 01:45, then a
+// Builder-priority "go home and place a crafting table there" REJECTED DONE fired three separate
+// times over the next 25 minutes -- every time, the whole goal was thrown away (currentGoal =
+// null) rather than acting on the one fact already certain: she was STILL CARRYING the table the
+// entire time, she just never walked home and placed it. Abandoning wasted that real progress and
+// left the next re-issued directive to rediscover it from scratch, which kept immediately
+// re-hallucinating DONE instead of ever proposing "place" as a step -- a real trap, not a one-off.
+// Fixed: on this exact rejection, if she's still holding the item, walk home and place it herself
+// right now (reusing "gohome"/"place", both already robust) -- one deterministic shot before
+// giving up on the goal, no extra unreliable LLM round-trip needed for something this mechanical.
+// Also clarified planNextStep's own ACTION CRAFT/PLACE descriptions, which never mentioned CRAFT's
+// existing auto-chaining of simple intermediates (logs->planks->sticks/table) or that PLACE is the
+// action that actually satisfies a "set one up at home" directive -- confirmed live via repeated,
+// lengthy, sometimes-wrong multi-paragraph self-debate (Amy, Babs) about basic crafting mechanics
+// the model shouldn't have needed to re-derive every time. See MINECRAFT_BOTS_DESIGN.md §41.
 //
 // 2.76.0 (2026-09-19) -- direct request: "expand their search capabilities further, especially the
 // miner and explorer roles. make *sure* that discovered resources are being stored in world
@@ -2346,7 +2363,10 @@ async function planNextStep(goal) {
           `to MINE only once LOOT has already come up empty for this same need, or the recent ` +
           `progress below already shows a LOOT attempt.\n` +
           `ACTION CRAFT <item_id> <count> - craft an item via a crafting-table/grid recipe only. ` +
-          `<item_id> must be the exact modern Minecraft item id -- never invent one.\n` +
+          `<item_id> must be the exact modern Minecraft item id -- never invent one. She handles ` +
+          `simple intermediate steps herself automatically (logs into planks, planks into sticks ` +
+          `or a crafting_table) -- name the FINAL item you actually want, not the raw material; ` +
+          `no need to plan out "craft planks, then craft sticks" yourself first.\n` +
           `ACTION EXPLORE - go looking for any useful raw material (wood, ore) when CRAFT/MINE ` +
           `failed because a needed resource isn't nearby and you don't have a more specific ` +
           `block to try -- gathers whatever's found, worth doing before giving up or asking the ` +
@@ -2355,7 +2375,10 @@ async function planNextStep(goal) {
           `furnace. <item_id> is the OUTPUT (e.g. iron_ingot), the exact modern Minecraft item ` +
           `id -- never invent one.\n` +
           `ACTION PLACE <item_id> - place a furnace or crafting_table she's already carrying, ` +
-          `right next to herself, when SMELT/CRAFT needs one and none is reachable.\n` +
+          `right next to herself. Use this both when SMELT/CRAFT needs one and none is reachable, ` +
+          `AND whenever a goal asks her to set one up in a specific spot (e.g. "at home") -- ` +
+          `crafting or already carrying the item is NOT the same as the goal being done if it ` +
+          `says to place it somewhere; that only happens once PLACE actually succeeds there.\n` +
           `ACTION LOOT <item_id> <count> - check the nearest chest for a SPECIFIC item you ` +
           `actually need right now for this goal. <item_id> must be the exact modern Minecraft ` +
           `item id -- never invent one, and never a generic guess just to "see what's there." ` +
@@ -3000,6 +3023,41 @@ async function goalTick() {
       if (currentGoal.builderPriorityItem && !builderPriorityItemSatisfied(currentGoal.builderPriorityItem)) {
         console.log(`[${USERNAME}] REJECTED DONE (claimed ${currentGoal.builderPriorityItem} ` +
                     `done, but it's still not actually near home): ${currentGoal.description}`);
+
+        // Direct report, 2026-09-19 ("I don't think they really know how to use the crafting
+        // table or furnace"). Root-caused live: Amy crafted a crafting_table at 01:45, then this
+        // exact rejection fired three separate times over the next 25 minutes (01:59, 02:13,
+        // 02:19) -- every time, the goal was thrown away outright (currentGoal = null) rather
+        // than acting on the one thing already known for certain: she was STILL CARRYING the
+        // table the entire time, she just never walked home and placed it. Abandoning wasted
+        // that real progress and left it up to the next re-issued directive, minutes later, to
+        // rediscover from scratch -- which kept immediately re-hallucinating DONE instead of
+        // ever proposing "place" as a step. Rather than another unreliable LLM round-trip for
+        // something this mechanical, do it directly: if she's still holding the item, walk home
+        // and place it herself right now (reusing "gohome"/"place", both already robust), one
+        // deterministic shot, before giving up on the whole goal.
+        const stillHasItem = bot.inventory.items()
+          .some((i) => i.name === currentGoal.builderPriorityItem);
+        let recovered = false;
+        if (stillHasItem) {
+          await performAction(bot, { type: "gohome" }, USERNAME);
+          const placeResult = await performAction(bot,
+            { type: "place", item: currentGoal.builderPriorityItem }, USERNAME);
+          console.log(`[${USERNAME}] builder-priority recovery: ${placeResult.text} ` +
+                      `(ok=${placeResult.ok})`);
+          recovered = placeResult.ok && builderPriorityItemSatisfied(currentGoal.builderPriorityItem);
+        }
+
+        if (recovered) {
+          console.log(`[${USERNAME}] goal complete (recovered): ${currentGoal.description}`);
+          bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
+          recordGoalOutcome(currentGoal.description, "done", null);
+          await broadcastGoalState("done", currentGoal.description, currentGoal.builderPriorityItem);
+          currentGoal = null;
+          await clearGoal(PERSONA_NAME);
+          return;
+        }
+
         bot.chat(await narrateAction(
           `not done yet on "${currentGoal.description}" -- it's still not actually there.`));
         recordGoalOutcome(currentGoal.description, "gave up",

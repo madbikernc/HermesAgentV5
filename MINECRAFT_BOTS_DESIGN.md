@@ -2101,6 +2101,45 @@ checked directly against real inventory state, the same real-world-state discipl
 fix this session relies on rather than a broader heuristic that would risk blocking legitimate
 requests it can't actually evaluate.
 
+## 41. Crafting-table/furnace "craft then never place" trap, root-caused and closed (2026-09-19)
+
+Direct report: "I don't think they really know how to use the crafting table or furnace." Checked
+live rather than assumed, and found a genuine, previously-undiagnosed trap rather than confirming
+the report's own framing at face value.
+
+**The real bug wasn't confusion about crafting -- it was goal abandonment throwing away real
+progress.** Traced Amy's full session: she successfully crafted a `crafting_table` at 01:45:15.
+`nextBuilderPriority()` then re-issued "go home and place a crafting table there" three separate
+times (01:59, 02:13, 02:19) over the next 25 minutes -- and every single time, the very next model
+call claimed `DONE crafting_table` with **zero** real steps attempted in between (no `ACTION PLACE`
+ever logged for it, confirmed by grepping her entire session). `builderPriorityItemSatisfied()`
+(§18) correctly caught every one of these three false claims -- the safety net worked exactly as
+designed -- but the handling code then threw the WHOLE goal away (`currentGoal = null`,
+`clearGoal()`) rather than acting on the one fact already certain: she was still physically
+carrying the table the entire time. The next re-issued directive had no memory of that and
+immediately re-hallucinated DONE again, over and over, apparently indefinitely -- a real trap, not
+a one-off. This same mechanism covers every `builderPriorityItem` (furnace, beehive, crafting_table,
+not just the one instance directly observed).
+
+**Fix (`index.js` 2.77.0):** on this exact rejection, before giving up, check whether she's still
+holding the named item. If so, resolve it directly and deterministically -- `gohome` then `place`,
+both already-robust existing actions -- rather than gambling on another LLM round-trip for
+something this mechanical. Only falls through to the original abandon-the-goal path if that direct
+attempt itself fails (e.g. genuinely no clear spot to place it), so this doesn't risk a new
+infinite-retry shape of its own.
+
+**A second, contributing factor, also fixed:** live logs showed real, sometimes multi-paragraph,
+occasionally self-contradicting reasoning (Amy, Babs) re-deriving from first principles whether
+logs can hand-craft into planks, whether a crafting table is needed to make a crafting table, etc.
+-- `craftItem()`'s own existing auto-chaining of simple intermediates (logs -> planks -> sticks/
+table, already built and working) was never mentioned in `planNextStep`'s own `ACTION CRAFT`
+description at all, so the model had no way to know it didn't need to plan those substeps itself.
+Separately, `ACTION PLACE`'s description only ever framed placement as unlocking a SMELT/CRAFT
+prerequisite, never as the action that actually satisfies a "set one up at home" directive --
+exactly the gap that let "I'm carrying it" get conflated with "done." Both descriptions clarified;
+no behavior change on their own, but removes a real source of wasted reasoning and a plausible
+contributor to the DONE-hallucination pattern this fixes.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2145,3 +2184,4 @@ requests it can't actually evaluate.
 | 1.37.0 | 2026-09-19 | New §39, direct request ("expand their search capabilities further, especially the miner and explorer roles. make *sure* that discovered resources are being stored in world memory"). Audited existing memory-write paths and found a real, confirmed gap: a successful MINE never wrote a world-memory note at all, only a failed one did -- fixed (`index.js` 2.76.0) by extending explore's own existing success-note mechanism to mine too. Also confirmed neither Miner nor Explorer has ever had deterministic search logic (unlike Soldier/Builder) -- added env-tunable per-bot search radius (`MINE_SEARCH_RADIUS`/`EXPLORE_SEARCH_RADIUS`/`EXTENDED_SEARCH_DISTANCE`, `actions.js` 1.59.0, same pattern as `MC_SELF_DEFENSE_RANGE`) now set larger on Babs/Wade's own systemd units, kept under the documented 48-block pathfinder OOM ceiling; and new `VILLAGE_INDICATOR_NAMES` (bell, composter) gives Explorer's own stated "locate a village" priority a real, note-only search target for the first time. Both mine and explore now also trigger a full `noteNearbyResources()` sweep on success, not just a note about the one target. |
 | 1.38.0 | 2026-09-19 | New §40, direct request ("Mayor/Leader missions, if they would effectively DOWNGRADE a bot's equipment or status, should be rejected by the bot"). Found the concrete mechanism rather than a general directive classifier: Mayor's own directives are plain chat, routed through the same classifyIntent pipeline as anything else, and the one real gear-loss vector -- "give" (`actions.js`) -- never checked whether complying would leave the giver without a weapon/armor/tool she needs. Fixed (1.60.0): refuses when giving would take an item's whole category (sword/axe as one interchangeable weapon category matching `hasWeapon()`, armor/tools each their own) from "has one" to "has none" -- a genuine spare is still always fine to give. Refusal is a real, visible `fail()`, not a silent no-op. |
 | 1.39.0 | 2026-09-19 | Extended §40, direct follow-up ("the downgrade rejection must also reject if the mayor's instructions would cause the quality of their equipment to be reduced"). Going to zero was only half of it -- giving away her best piece in a category while a worse one stays behind is a downgrade too. New `GEAR_TIER_RANK` (`actions.js` 1.61.0, a single common-sense material ranking, not a precise armor-point/mining-level simulation) lets "give"'s existing check also compare the tier of what's being given against the best tier she'd still hold afterward; an unrecognized material falls back to the has-one/has-none check alone. |
+| 1.40.0 | 2026-09-19 | New §41, direct report ("I don't think they really know how to use the crafting table or furnace"). Root-caused live: Amy crafted a crafting_table at 01:45, then a Builder-priority "place it at home" REJECTED DONE fired three times over 25 minutes -- every time the whole goal was abandoned (`currentGoal = null`) instead of acting on the fact she was still carrying the item the entire time, so the next re-issued directive immediately re-hallucinated DONE again with zero real steps. Fixed (`index.js` 2.77.0): on this rejection, if she's still holding the item, walk home and place it herself right now (reusing `gohome`/`place`) before giving up -- one deterministic shot instead of another unreliable LLM round-trip. Also clarified `planNextStep`'s own `ACTION CRAFT`/`ACTION PLACE` descriptions, which never mentioned CRAFT's existing auto-chaining of simple intermediates or that PLACE is what actually satisfies a "set one up at home" directive -- a real, confirmed contributor to repeated multi-paragraph confused reasoning in live logs. |
