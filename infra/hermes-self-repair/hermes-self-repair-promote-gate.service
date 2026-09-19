@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes self-repair promote gate - Step 5 human confirmation watcher (FleetOps promote/skip commands)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-self-repair/README.md
+After=network-online.target hermes-memory.service continuwuity.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-self-repair-promote-gate-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
