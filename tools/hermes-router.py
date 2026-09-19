@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 2.11.0
+# Version: 2.12.0
+#
+# 2.12.0 (2026-09-19) — Direct request: guard alerting only ever named which category fired,
+# not what text actually tripped it. Layer 1's email already embedded matched snippets (via
+# `hits`), but its Matrix real-time notice and its hermes-memory row didn't -- and Layer 2 had
+# no matched-string concept at all to fall back on (it's a whole-message classifier, not a
+# pattern matcher), so its Matrix notice carried only a score and its hermes-memory row carried
+# only label/score, no text. That last gap mattered beyond alerting: memory_log_guard_verdict's
+# own docstring says this table is meant as "the training set if Layer 2 is ever tuned" --
+# a training set with no text in it can't serve that purpose. Fixed by threading the matched
+# snippets (L1) or a truncated copy of the triggering message (L2) through to both the Matrix
+# notice and the memory_log_guard_verdict call, for block AND flag on L1 (flag was silent on
+# this before too). New `_truncate()` helper caps what lands in a chat notice or memory row --
+# email keeps carrying the untruncated text/hits it always did.
 #
 # 2.11.0 (2026-09-11) — real incident, traced live: a "Camera check" request got a 400 from
 # Layer 1 for a conversation with nothing actually wrong in it. Layer 1 was scanning
@@ -308,6 +321,14 @@ def send_email(subject, body):
         log(f"guard alert email failed: {exc}")
 
 
+def _truncate(text, limit=200):
+    """Shared truncation for alert payloads — a Matrix notice or memory row carrying
+    megabytes of a blocked prompt is its own minor incident. Adds a marker when it actually
+    cut something, so an alert reader can tell "this is everything" from "this is a prefix"."""
+    text = str(text)
+    return text if len(text) <= limit else text[:limit] + f"...[+{len(text) - limit} chars]"
+
+
 def matrix_notice(text):
     """Best-effort real-time notice to FleetOps. Never raises — a notice failure must not
     affect the actual proxied request."""
@@ -531,9 +552,17 @@ class Handler(BaseHTTPRequestHandler):
         if guard_severity == "block":
             categories = sorted({cat for r in guard_hits for cat in r["hits"]})
             roles_hit = sorted({r["role"] for r in guard_hits})
-            log(f"BLOCKED by injection guard: categories={categories} roles={roles_hit}")
+            # The matched snippets themselves, not just which categories fired -- an alert
+            # that only says "cmd_injection" tells a reader nothing they can act on; the
+            # actual triggering substring is what lets them tell a real attack from a
+            # catalog false positive (see hermes_injection_guard.py's own 1.4.0 history of
+            # exactly that failure mode) without re-running the request by hand.
+            matched = sorted({s for r in guard_hits for lst in r["hits"].values() for s in lst})
+            log(f"BLOCKED by injection guard: categories={categories} roles={roles_hit} "
+                f"matched={matched}")
             matrix_notice(f"[router:{NODE}] BLOCKED — injection guard hit {categories} "
-                           f"(message role(s): {roles_hit})")
+                           f"(message role(s): {roles_hit})\n"
+                           f"Matched: {_truncate('; '.join(matched), 300)}")
             send_email(
                 f"[Hermes Guard] BLOCKED request on {NODE} — {', '.join(categories)}",
                 f"Node: {NODE}\nCategories: {categories}\nMessage role(s): {roles_hit}\n\n"
@@ -543,16 +572,20 @@ class Handler(BaseHTTPRequestHandler):
             )
             hermes_injection_guard.log_event(NODE, "block", guard_hits)
             memory_log_guard_verdict(NODE, "L1", "block",
-                                      {"categories": categories, "roles": roles_hit})
+                                      {"categories": categories, "roles": roles_hit,
+                                       "matched": matched})
             self._send_json(400, {"error": {
                 "message": "request blocked by injection guard", "categories": categories}})
             return
         if guard_severity == "flag":
             categories = sorted({cat for r in guard_hits for cat in r["hits"]})
-            log(f"flagged by injection guard (forwarded anyway): categories={categories}")
-            matrix_notice(f"[router:{NODE}] flagged (forwarded): injection guard hit {categories}")
+            matched = sorted({s for r in guard_hits for lst in r["hits"].values() for s in lst})
+            log(f"flagged by injection guard (forwarded anyway): categories={categories} "
+                f"matched={matched}")
+            matrix_notice(f"[router:{NODE}] flagged (forwarded): injection guard hit {categories}\n"
+                           f"Matched: {_truncate('; '.join(matched), 300)}")
             hermes_injection_guard.log_event(NODE, "flag", guard_hits)
-            memory_log_guard_verdict(NODE, "L1", "flag", {"categories": categories})
+            memory_log_guard_verdict(NODE, "L1", "flag", {"categories": categories, "matched": matched})
 
         # Layer 2 (IMPLEMENTATION_PLAN.md S5): only the newest user/tool message, not the whole
         # history — callers resend the full conversation every request, and every prior turn
@@ -562,16 +595,24 @@ class Handler(BaseHTTPRequestHandler):
         if newest is not None:
             verdict = guard_classify(newest["content"])
             if verdict and verdict.get("hit"):
-                log(f"BLOCKED by Layer 2 guard: label={verdict['label']} score={verdict['score']:.3f}")
+                # Layer 2 has no matched substring the way Layer 1 does -- it classifies the
+                # whole message, so the "triggering string" here is the message itself. Log
+                # and alert on it (truncated for the real-time channels; the email below still
+                # gets the full text, same as before).
+                snippet = _truncate(newest["content"], 200)
+                log(f"BLOCKED by Layer 2 guard: label={verdict['label']} score={verdict['score']:.3f} "
+                    f"text={snippet!r}")
                 matrix_notice(f"[router:{NODE}] BLOCKED — Layer 2 guard hit "
-                               f"(score {verdict['score']:.3f})")
+                               f"(score {verdict['score']:.3f})\n"
+                               f"Prompt: {snippet}")
                 send_email(
                     f"[Hermes Guard] Layer 2 BLOCKED request on {NODE}",
                     f"Node: {NODE}\nLabel: {verdict['label']}\nScore: {verdict['score']:.3f}\n"
                     f"Role: {newest['role']}\n\nText:\n{newest['content']}",
                 )
                 memory_log_guard_verdict(NODE, "L2", "block",
-                                          {"label": verdict["label"], "score": verdict["score"]})
+                                          {"label": verdict["label"], "score": verdict["score"],
+                                           "text": _truncate(newest["content"], 4000)})
                 self._send_json(400, {"error": {
                     "message": "request blocked by Layer 2 guard (Prompt Guard 2)",
                     "score": verdict["score"]}})
