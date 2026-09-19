@@ -9,6 +9,10 @@ Type=simple
 User=pmoney
 WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
 Environment=MC_BOT_USERNAME=Babs
+# 2026-09-19 ("expand their search capabilities... especially the miner and explorer roles"):
+# Babs is the fleet's one Miner -- searches ore/log up to 40 blocks instead of the shared
+# 32-block default (kept under actions.js's own documented 48-block pathfinder OOM ceiling).
+Environment=MC_MINE_SEARCH_RADIUS=40
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

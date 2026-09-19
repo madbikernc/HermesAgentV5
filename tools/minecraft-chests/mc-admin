@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Version: 1.0.1
+# Common Minecraft administration operations, with an audit trail.
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+mc="$script_dir/mc"
+audit_log="${MC_AUDIT_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/minecraft-admin/audit.log}"
+
+usage() {
+  echo "Usage: mc-admin {status|day|weather clear|tp FROM TO|tp-all X Y Z|heal TARGET|clear-inventory TARGET|clear-drops|fill X1 Y1 Z1 X2 Y2 Z2 BLOCK [replace FILTER] [--force]|stop}" >&2
+  exit 2
+}
+
+player() {
+  local player_re='^([A-Za-z0-9_]{3,16}|@[aprs])$'
+  [[ "$1" =~ $player_re ]] || { echo "Invalid player or selector: $1" >&2; exit 2; }
+}
+
+integer() {
+  [[ "$1" =~ ^-?[0-9]+$ ]] || { echo "Expected integer coordinate: $1" >&2; exit 2; }
+}
+
+block() {
+  local block_re='^[a-z0-9_.-]+:[a-z0-9_./-]+$'
+  [[ "$1" =~ $block_re ]] || { echo "Expected namespaced block ID: $1" >&2; exit 2; }
+}
+
+run() {
+  local command="$1" result
+  mkdir -p -- "$(dirname -- "$audit_log")"
+  printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "${MC_ACTOR:-admin}" "$command" >> "$audit_log"
+  "$mc" "$command"
+}
+
+(( $# > 0 )) || usage
+case "$1" in
+  status)
+    (( $# == 1 )) || usage
+    run 'list'
+    ;;
+  day)
+    (( $# == 1 )) || usage
+    run 'time set day'
+    run 'weather clear'
+    ;;
+  weather)
+    (( $# == 2 )) && [[ "$2" == clear ]] || usage
+    run 'weather clear'
+    ;;
+  tp)
+    (( $# == 3 )) || usage
+    player "$2"; player "$3"
+    run "tp $2 $3"
+    ;;
+  tp-all)
+    (( $# == 4 )) || usage
+    integer "$2"; integer "$3"; integer "$4"
+    run "tp @a $2 $3 $4"
+    ;;
+  heal)
+    (( $# == 2 )) || usage
+    player "$2"
+    run "effect give $2 minecraft:instant_health 1 10"
+    run "effect give $2 minecraft:saturation 1 10"
+    ;;
+  clear-inventory)
+    (( $# == 2 )) || usage
+    player "$2"
+    run "clear $2"
+    ;;
+  clear-drops)
+    (( $# == 1 )) || usage
+    run 'kill @e[type=minecraft:item]'
+    ;;
+  fill)
+    (( $# >= 8 && $# <= 11 )) || usage
+    for coordinate in "$2" "$3" "$4" "$5" "$6" "$7"; do integer "$coordinate"; done
+    block "$8"
+    volume=$(( ( ${5} > ${2} ? ${5} - ${2} : ${2} - ${5} ) + 1 ))
+    volume=$(( volume * ( ( ${6} > ${3} ? ${6} - ${3} : ${3} - ${6} ) + 1 ) ))
+    volume=$(( volume * ( ( ${7} > ${4} ? ${7} - ${4} : ${4} - ${7} ) + 1 ) ))
+    suffix=''
+    if (( $# == 10 || $# == 11 )); then
+      [[ "$9" == replace ]] || usage
+      block "${10}"
+      suffix=" replace ${10}"
+    elif (( $# == 9 )) && [[ "$9" != --force ]]; then
+      usage
+    fi
+    if (( $# == 11 )) && [[ "${11}" != --force ]]; then
+      usage
+    fi
+    if (( volume > 100000 )) && [[ "${9:-}" != --force && "${11:-}" != --force ]]; then
+      echo "Region contains $volume blocks; use --force to proceed." >&2
+      exit 2
+    fi
+    echo "Region contains $volume blocks." >&2
+    run "fill $2 $3 $4 $5 $6 $7 $8$suffix"
+    ;;
+  stop)
+    (( $# == 1 )) || usage
+    run 'save-all flush'
+    run 'stop'
+    ;;
+  *) usage ;;
+esac
+
+# Revision History
+# 1.0.0 | 2026-09-19 | Initial audited administration commands.
+# 1.0.1 | 2026-09-19 | Honor --force for fill without a replace filter.

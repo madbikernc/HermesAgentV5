@@ -1888,6 +1888,258 @@ both live, the chronic self-defense-storm and death-rate findings from earlier s
 substantially reduced on their own, without needing further code changes to the throttle/priority
 logic those sections added.
 
+## 36. Enderman joins FLEE_ONLY_MOBS: the same doomed-melee shape as phantom/ghast, caught live (2026-09-18)
+
+Direct live report: "Luke is getting shot, not reacting. there is no mass mob" -- a real-time
+incident, not a log review. Checked live rather than guessed: Luke's health (RCON) matched his own
+logs exactly, a skeleton was genuinely ~8 blocks away and landing hits, and `nearestHostile()`
+(§ various) was confirmed working correctly by inspection -- so the detection path itself wasn't
+the problem.
+
+**Root cause: `selfDefenseInFlight` was legitimately stuck on a different fight.** `checkSelfDefense()`
+returns early and silently whenever a self-defense action is already in progress -- correct
+re-entrancy guarding, but it means a SECOND, unrelated threat gets no response at all until the
+first one resolves. Live logs showed exactly that: Luke's self-defense had been holding
+SELF_DEFENSE-tier control on `attack (threat=enderman)` since 19:08:53, with no `self-defense
+result:` line at all until 19:10:36 -- over 90 seconds later -- when the separate EMERGENCY
+health-critical check (a different, still-live code path) finally force-broke it at ~6 HP. He
+immediately re-engaged the SAME enderman and repeated the exact pattern a second time before
+finally landing on the skeleton as his next target. The whole time, the skeleton was free to keep
+shooting him with zero self-defense response -- not a detection bug, a target-monopolization one.
+
+**Why enderman specifically:** endermen teleport away when hit, defeating `bot.pvp`'s straightforward
+chase-and-melee approach almost as thoroughly as literal flight does for phantom/ghast (§ the
+original FLEE_ONLY_MOBS section) -- the mob isn't unreachable by pathfinding, but the fight rarely
+resolves cleanly either. Checked this wasn't one unlucky encounter before fixing it: counted
+`threat=enderman` self-defense triggers fleet-wide over 24h -- Mayor 42, Babs 30, Amy 27, but
+**Mark 2,800 and Luke 1,770** -- the two bots actually willing to melee-attack (vs. flee) at their
+own tuned health thresholds, exactly the bots that would get stuck holding SELF_DEFENSE-tier
+control this way. A consistent, high-volume pattern, not a fluke.
+
+**Fix:** `FLEE_ONLY_MOBS` (`actions.js` 1.57.0) now includes `"enderman"` alongside `phantom`/`ghast`
+-- self-defense/squad-response flee on sight rather than attempt a melee resolution, same as the
+existing two entries, freeing SELF_DEFENSE-tier control to respond to a genuinely separate threat
+instead of monopolizing it on a fight that rarely closes cleanly anyway. Trade-off, accepted
+deliberately rather than overlooked: bots will no longer fight endermen at all (no more ender
+pearls from self-defense encounters) -- judged a reasonable cost against a confirmed, high-volume
+"gets shot with zero response" failure mode.
+
+Immediate live incident needed no separate intervention: by the time this was investigated, Luke's
+own EMERGENCY flee had already gotten him clear and his health (5.68) had stopped dropping --
+confirmed stable via RCON and fresh logs before moving on to root-cause and fix.
+
+## 37. Fleeing now runs toward a rally point (golem, Soldier, or home) instead of nowhere in particular (2026-09-18)
+
+Direct follow-up to §36's own incident: "why aren't the soldier bots coming to defend Nell?"
+Checked live rather than assumed -- confirmed via RCON positions that Nell (~4.4 HP, repeatedly
+attacked) was ~70 blocks from both Mark and Luke, outside `SQUAD_ASSIST_RANGE` (48 blocks,
+`index.js`). Traced her threat alerts all the way through: `broadcastThreatAlert()` really was
+firing every ~15s as designed, but `withinSquadAssistRange()` silently drops anything past 48
+blocks with no log line either way -- not a bug, a deliberate bound ("no point racing across half
+the map for a fight that's very likely already over by the time she'd arrive"), but it leaves any
+bot who wanders that far with zero backup, confirmed by the complete absence of her name anywhere
+in Mark/Luke's logs. Immediate danger handled the same way as §29's Babs incident: killed the
+nearby zombie via RCON once confirmed she was isolated with no help coming.
+
+Direct request in response: "have the threatened bot run towards safety, run towards golems, or
+soldiers." Checked what "flee" actually did first -- confirmed it had never had a destination at
+all, just `GoalInvert(GoalFollow(threat, 16))`, maximizing distance from the threat with zero
+regard for where that put the bot. Could run her further from home, into water, off a ledge, or
+simply back toward the same danger from a different angle -- "getting away" and "getting safe" were
+never the same thing here.
+
+**Fix:** new `nearestRallyPoint(bot)` (`index.js` 2.74.0), checked in priority order --
+
+1. **A nearby iron golem** (`nearestFriendlyGolem()`, `actions.js` 1.58.0, mirrors `nearestHostile()`)
+   -- golems fight hostiles near them on their own vanilla AI, real backup even with zero teammates
+   anywhere close.
+2. **A nearby Soldier teammate** -- checked via each bot's own `bot.players[name].entity`, already
+   locally tracked world state, no new broadcast infrastructure needed. Deliberately NOT gated by
+   `SQUAD_ASSIST_RANGE` -- that constant bounds whether a Soldier travels to a distant call, not
+   whether a fleeing bot may run toward one who happens to already be close.
+3. **Home** (`loadClaimedBed()` or `spawnPoint`, same fallback chain `checkHomeLighting()` already
+   uses) -- always a safer place to end up than wherever the flee started, even with nobody there.
+
+Returns `null` only when none of the three are known at all, in which case "flee" falls back to its
+original plain away-from-threat behavior -- unchanged, not replaced. Wired into all three
+flee-triggering sites (`checkSelfDefense`, the EMERGENCY health-critical handler,
+`checkSleepingThreat`) via a new `action.rallyPoint` field; `actions.js`'s "flee" case heads
+straight there (`GoalNear`, 3-block radius) when given one instead of the old distance-maximizing
+goal. No path-safety check between the bot and the rally point -- same best-effort level as the
+rest of self-defense; a rally point is a real place to go, not a guarantee the route there is
+threat-free.
+
+## 38. Nighttime mob crisis: real torches placed live, and checkHomeLighting's third straight fix (2026-09-18)
+
+Direct live report: "I am watching a spider attack Mark as he doesn't react" -- checked live rather
+than assumed, and the spider turned out to be a tiny visible piece of something much larger already
+in progress: RCON health checks across the fleet found Dale at 1.7 HP, Wade and Amy at ~5.8, Luke at
+~9, and fresh logs showed at least 7 deaths fleet-wide (Nell, Luke, Bob x2, Mayor x2, Amy) inside
+under a minute -- Mark's own respawn-then-immediate-second-encounter with the spider was just one
+thread of a full nighttime swarm hitting nearly everyone at once. `spawn_phantoms` was re-confirmed
+still `false` (§35 held), so the "killed by phantom" attributions were either stale
+best-guess-killer labels or leftover pre-existing phantoms, not a re-emerging spawn -- the dominant
+cause was the same unlit-base problem flagged live in §17, §32, and §34, none of which had actually
+stuck.
+
+**Immediate stabilization (RCON, live):** cleared hostile mobs around every bot in obvious danger
+(same pattern as §29/§34/§37's own incidents), then placed 11 real torches directly via
+`/setblock ... minecraft:torch keep` in a spread around `bot.spawnPoint` (328, 77, -144) -- verified
+they actually held (a follow-up `keep`-mode placement attempt at the same coordinates correctly
+failed with "Could not set the block," confirming occupied, not popped from missing support).
+Fleet health confirmed recovering within a couple of minutes; night was also naturally ending
+(tick ~22700/24000) by the time this was checked.
+
+**Given the operator's explicit "do both," dug into why `checkHomeLighting()` has now failed THREE
+times running** (2026-09-10's original build, §32's 2026-09-17 "craft your own torches" fix, and
+now). Re-read the live function: its gate was still `if (!bot.inventory... torch) { check fuel+stick
+in inventory, craft or give up }` -- it has ONLY ever consulted this one bot's own personal
+inventory at the exact instant its 90-second interval fires, while not busy/asleep/arbiter-locked.
+Across a fleet whose self-defense re-triggers every few seconds during any real incident (extensively
+documented all session -- §24, §27, §34, §36, §37, and tonight's own crisis), no bot is ever
+reliably BOTH free of higher-priority control AND personally carrying the right materials at the
+same moment -- the same root shape §34 already confirmed via Amy's specific case, now understood as
+the general mechanism behind all three failures, not something specific to her.
+
+**Fix (`index.js` 2.75.0):** before ever falling back to personal-inventory crafting,
+`checkHomeLighting()` now tries a chest first via `performAction(bot, {type:"loot", item:"torch",
+count:4})` -- reusing "loot"'s own existing local-then-remembered-chest search (§19/§30) rather than
+building new plumbing. Cheaper than crafting when it works, and now has a real chance of finding
+something: the shared base has actual chests nearby (confirmed via repeated "Found chest near..."
+log lines all session), and `tools/minecraft-chests/` (§ the tool-review conversation, same day) can
+pre-stock them. Falls through to the original fuel+stick-crafting attempt, then the original
+silent-no-more skip log, exactly as before, if the chest search also comes up empty.
+
+## 39. Search capabilities expanded, and a real gap closed: successful mining wrote nothing to world memory (2026-09-19)
+
+Direct request: "expand their search capabilities further, especially the miner and explorer
+roles. make *sure* that discovered resources are being stored in world memory."
+
+**Audited the existing world-memory-writing paths first (all in `goalTick`, `index.js`) rather than
+assuming they were complete.** Found exactly three: a successfully PLACED crafted object, a FAILED
+mine/craft/etc. ("even after looking around"), and a successful EXPLORE. A real, confirmed gap sat
+right in the middle: a **successful MINE never wrote anything at all** -- only her failures were
+ever shared with the fleet. Babs (the fleet's Miner) could spend all day successfully finding and
+mining iron/coal/copper and nobody else would ever learn where from it; the only trace of her work
+anyone else could see was when she came up empty. Fixed (`index.js` 2.76.0) by extending the exact
+same note-write explore's own success already uses to mine's success too, rather than building a
+second, parallel mechanism.
+
+**Also confirmed neither Miner nor Explorer has ever had a deterministic search mechanism at all**
+-- unlike Soldier (§21) and Builder, both roles rely purely on freeform self-propose with no
+code-level checklist or search logic of their own; their `roles.js` priority lists are advisory
+prompt text only. Two concrete expansions, kept scoped rather than building a full parallel
+priority-function system for both roles in one pass:
+
+1. **Wider, per-bot-tunable search radius.** `MINE_SEARCH_RADIUS`/`EXPLORE_SEARCH_RADIUS`/
+   `EXTENDED_SEARCH_DISTANCE` (`actions.js` 1.59.0) replace the hardcoded 32-block scan radius
+   "mine"/"explore" always used, same env-tunable-per-bot pattern already proven for
+   `MC_SELF_DEFENSE_RANGE` (§21). Babs and Wade's own systemd units now set real, larger values
+   (40-block local search for both, 260-block extended range for Wade specifically) without
+   touching the shared default every other bot's occasional mine/explore call still uses. Kept
+   deliberately under `bot.pathfinder.searchRadius`'s own documented 48-block OOM ceiling (a
+   caution this file already established for `EXPLORE_DISTANCE`) for the two radii that drive an
+   unhopped `collectBlock` pathfind straight to a found block; `EXTENDED_SEARCH_DISTANCE` (the
+   wander "beacon" scan) was raised more freely since that walk is already hop-capped regardless of
+   how far the beacon itself is.
+2. **A real search target for Explorer's own stated "locate a village" priority.** Nothing
+   anywhere ever actually searched for one -- only ore/log/crafted-object names were ever scanned.
+   New `VILLAGE_INDICATOR_NAMES` (`bell`, `composter` -- real villager job-site blocks, genuinely
+   low false-positive in vanilla generation) feeds into `noteNearbyResources()`'s existing scan,
+   note-only by construction (that function only ever reads and writes, never moves or mines) so
+   there's no risk of a bot breaking a village's own infrastructure while "gathering" it.
+
+**Broadened when discovery-sharing actually runs, not just what it covers.** Both a successful mine
+and a successful explore now also trigger a full `noteNearbyResources()` sweep (not just a note
+about the one specific target), catching any other ore/log/village-indicator visible from wherever
+the action left her -- a free look around at zero extra travel, the same mechanism already used for
+scout requests now also firing on ordinary routine success.
+
+## 40. Bots now refuse a "give" that would leave them without a weapon/armor/tool they need, or downgrade its quality (2026-09-19)
+
+Direct request: "Mayor/Leader missions, if they would effectively DOWNGRADE a bot's equipment or
+status, should be rejected by the bot."
+
+**Found the concrete mechanism first, rather than trying to define "downgrade" abstractly.**
+Mayor's own directives are delivered as plain in-game chat (`bot.chat(reply)`,
+`proposeDirectiveForOthers()`), so a receiving bot processes them through the exact same
+`classifyIntent` pipeline as any other message -- there's no separate "this came from the Leader"
+code path to special-case. The one real, already-diagnosed gear-loss vector both a direct command
+("ACTION GIVE") and the autonomous `checkPendingGiveRequests()` fulfillment path funnel through is
+the "give" action itself (`actions.js`) -- and it never checked whether complying would leave the
+GIVER worse off, whoever asked. §34 already found Mark gifted a sword twice by teammates yet ending
+up swordless anyway (that specific case traced to a death between the gifts, a different cause) --
+but the giving side of that same exchange had no safeguard at all: a bot asked to hand over her only
+sword, her only pickaxe, or a piece of armor she's not doubled up on would simply comply.
+
+**Fix (`actions.js` 1.60.0):** "give" now checks, before ever pathing to the recipient, whether the
+requested item's whole category would go from "has one" to "has none." Sword and axe are treated as
+one interchangeable weapon category, matching `equipment.js`'s own `hasWeapon()` definition exactly
+(a bot with a spare axe isn't left defenseless by giving away her sword); armor and tool suffixes
+are each their own category (a spare pickaxe doesn't cover for giving away her only shovel). A
+genuine spare is always still fine to give -- this only blocks the specific case of going to zero.
+Refusal is a real `fail()` with a clear reason (`"won't give away my iron_sword -- that's my only
+weapon..."`), not a silent no-op: visible in her own logs, and reported back exactly like any other
+declined action, so whoever issued the request (Mayor included) sees why.
+
+**Direct follow-up: "must also reject if... the quality of their equipment [would be]
+reduced."** Going to zero was only half the problem -- giving away her BEST piece in a category
+while a worse one stays behind is a downgrade too, even though she'd technically "still have one."
+New `GEAR_TIER_RANK` (`actions.js` 1.61.0) -- a single common-sense material ranking (wood/leather
+< gold < stone/chainmail < iron < diamond < netherite), deliberately not a precise simulation of
+real armor-point/mining-level math (gold in particular is genuinely inconsistent between tools and
+armor in actual vanilla rules) since this only needs to answer "would she end up worse than
+before" -- lets the same check compare the tier of what's being given against the best tier she'd
+still be holding in that exact category afterward. An unrecognized material (e.g. a modded item)
+falls back to the has-one/has-none check alone rather than guessing at a tier that doesn't exist.
+
+**Scoped deliberately to "give," not a general directive-intent classifier.** Trying to detect
+"would this arbitrary instruction downgrade her status" in the abstract (before it's even executed)
+would mean guessing at consequences from a free-text directive with no reliable signal to check
+against. "Give" is different: it names an exact item and count, so what leaving her with can be
+checked directly against real inventory state, the same real-world-state discipline every other
+fix this session relies on rather than a broader heuristic that would risk blocking legitimate
+requests it can't actually evaluate.
+
+## 41. Crafting-table/furnace "craft then never place" trap, root-caused and closed (2026-09-19)
+
+Direct report: "I don't think they really know how to use the crafting table or furnace." Checked
+live rather than assumed, and found a genuine, previously-undiagnosed trap rather than confirming
+the report's own framing at face value.
+
+**The real bug wasn't confusion about crafting -- it was goal abandonment throwing away real
+progress.** Traced Amy's full session: she successfully crafted a `crafting_table` at 01:45:15.
+`nextBuilderPriority()` then re-issued "go home and place a crafting table there" three separate
+times (01:59, 02:13, 02:19) over the next 25 minutes -- and every single time, the very next model
+call claimed `DONE crafting_table` with **zero** real steps attempted in between (no `ACTION PLACE`
+ever logged for it, confirmed by grepping her entire session). `builderPriorityItemSatisfied()`
+(§18) correctly caught every one of these three false claims -- the safety net worked exactly as
+designed -- but the handling code then threw the WHOLE goal away (`currentGoal = null`,
+`clearGoal()`) rather than acting on the one fact already certain: she was still physically
+carrying the table the entire time. The next re-issued directive had no memory of that and
+immediately re-hallucinated DONE again, over and over, apparently indefinitely -- a real trap, not
+a one-off. This same mechanism covers every `builderPriorityItem` (furnace, beehive, crafting_table,
+not just the one instance directly observed).
+
+**Fix (`index.js` 2.77.0):** on this exact rejection, before giving up, check whether she's still
+holding the named item. If so, resolve it directly and deterministically -- `gohome` then `place`,
+both already-robust existing actions -- rather than gambling on another LLM round-trip for
+something this mechanical. Only falls through to the original abandon-the-goal path if that direct
+attempt itself fails (e.g. genuinely no clear spot to place it), so this doesn't risk a new
+infinite-retry shape of its own.
+
+**A second, contributing factor, also fixed:** live logs showed real, sometimes multi-paragraph,
+occasionally self-contradicting reasoning (Amy, Babs) re-deriving from first principles whether
+logs can hand-craft into planks, whether a crafting table is needed to make a crafting table, etc.
+-- `craftItem()`'s own existing auto-chaining of simple intermediates (logs -> planks -> sticks/
+table, already built and working) was never mentioned in `planNextStep`'s own `ACTION CRAFT`
+description at all, so the model had no way to know it didn't need to plan those substeps itself.
+Separately, `ACTION PLACE`'s description only ever framed placement as unlocking a SMELT/CRAFT
+prerequisite, never as the action that actually satisfies a "set one up at home" directive --
+exactly the gap that let "I'm carrying it" get conflated with "done." Both descriptions clarified;
+no behavior change on their own, but removes a real source of wasted reasoning and a plausible
+contributor to the DONE-hallucination pattern this fixes.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -1926,3 +2178,10 @@ logic those sections added.
 | 1.31.0 | 2026-09-18 | New §33, direct request ("if the bot is in need of a piece of equipment... and finds one already crafted in a chest, it should pick up ONE of those pieces... and abandon the quest to craft it"). Craft/loot chest-substitution already existed and worked, but only ever matched the EXACT item id named — a chest's `iron_pickaxe` was invisible to a `craft wooden_pickaxe` check. New `gearCategoryNames()` (`actions.js` 1.56.0) broadens matching to every real tier sharing the same `GEAR_SUFFIXES` suffix, wired into "craft" and both of "loot"'s matching passes; deliberately left raw materials untouched (no "any tier" concept applies to an ingot). "Abandon the quest" needed no new mechanism — the real substituted item already lands in the next `planNextStep` tick's own gear snapshot, and the existing real-world-state DONE-verification closes the goal on its own. |
 | 1.32.0 | 2026-09-18 | New §34, second hallucination review this window. Verified two of the prior review's headline claims directly instead of reporting them as-is: the §32 torch fix was genuinely inert (confirmed why — Amy's self-defense force-cancels action mid-craft every few seconds, so fuel and sticks were essentially never in inventory simultaneously), and Mark really was gifted two swords by teammates and remained swordless — because he died between the two gifts. Chased that one further and found the actual root cause behind both, and most of the fleet's chronic gear churn: 1,555 deaths fleet-wide in 33 hours (~1 every 42 minutes/bot) against a live `keep_inventory=false` gamerule, dropping each bot's entire inventory on every death with no recovery mechanism anywhere in the codebase. Not a repo bug — same shape of finding as §20's `mob_griefing` discovery. Operator chose a live RCON fix (`gamerule keep_inventory true`, confirmed set) over a code-side death-recovery behavior. Also corrected a third claim from the same review: Nell's reported "flower garden" dead-end loop is actually completing regularly (22 of 38 self-proposals logged `goal complete`) — a repetitive low-variety self-propose pattern, not a hallucination. Flagged, not fixed: `nextBuilderPriority()`'s hardcoded `beehive` checklist item has no fallback when its prerequisite chain is structurally unreachable, unlike Soldier's own priority list. |
 | 1.33.0 | 2026-09-18 | New §35, direct request ("turn down the spawn rate, especially of phantoms"). While checking what levers actually exist, found and fixed a real tooling gap: the RCON client reused since §20 only ever read a single response packet, silently truncating any multi-packet reply — `help gamerule`'s real output was being cut off mid-list. Fixed with the standard sentinel-packet read-until-echo pattern, which then revealed this server build exposes a `spawn_phantoms` gamerule beyond standard vanilla (boolean only, no partial rate). Given phantoms' consistent role as the dominant disruptive threat across §17/§24/§27/§34, operator chose to disable them outright (`gamerule spawn_phantoms false`, confirmed) rather than a partial measure that doesn't exist here. Also dropped difficulty Normal → Easy (`difficulty easy`, confirmed) for general (non-phantom) spawn/damage reduction, offered and chosen as a separate decision since it's a broader change. No code changed — both live RCON commands, same category as §20/§34. |
+| 1.34.0 | 2026-09-18 | New §36, direct live report ("Luke is getting shot, not reacting. there is no mass mob"). Verified live via RCON and fresh logs rather than guessed — real skeleton, real damage, `nearestHostile()` working correctly. Root cause: Luke's self-defense had been holding SELF_DEFENSE-tier control on an unresolved `attack (threat=enderman)` for 90+ seconds, silently blocking any response to the separate skeleton sniping him the whole time — not a detection bug, a target-monopolization one, only broken by the unrelated EMERGENCY health-critical flee once he'd dropped to ~6 HP. Confirmed not a one-off: Mark/Luke (the two bots willing to melee-attack rather than flee) logged 2,800/1,770 enderman self-defense triggers in 24h, far above every other bot — endermen's teleport-evasion defeats `bot.pvp`'s chase-and-melee almost as thoroughly as literal flight does for phantom/ghast. `FLEE_ONLY_MOBS` (`actions.js` 1.57.0) now includes `enderman`, same treatment as the existing two entries. Trade-off accepted deliberately: bots no longer fight endermen at all (no more self-defense ender pearls) in exchange for closing a confirmed "gets shot with zero response" failure mode. |
+| 1.35.0 | 2026-09-18 | New §37, direct follow-up ("why aren't the soldier bots coming to defend Nell?" -> "have the threatened bot run towards safety, run towards golems, or soldiers"). Traced live: Nell was genuinely ~70 blocks from both Soldiers, outside `SQUAD_ASSIST_RANGE` (48 blocks) -- `withinSquadAssistRange()` silently drops out-of-range alerts with no log line, a deliberate bound, not a bug, but it leaves far-ranging bots with zero backup. Immediate danger cleared via RCON (same pattern as §29). Root cause of the underlying request: "flee" never had a destination, just maximized distance from the threat with no regard for where that led. New `nearestRallyPoint()` (`index.js` 2.74.0) checks, in order, a nearby iron golem (`nearestFriendlyGolem()`, `actions.js` 1.58.0), a nearby Soldier teammate via each bot's own already-tracked `bot.players`, then home -- wired into all three flee-triggering sites via a new `action.rallyPoint` field; "flee" now heads straight there when one exists, falling back to the original away-from-threat behavior otherwise. |
+| 1.36.0 | 2026-09-18 | New §38, direct live report ("I am watching a spider attack Mark as he doesn't react") that turned out to be one visible thread of a much larger nighttime mob crisis: RCON found Dale at 1.7 HP and 7+ deaths fleet-wide inside under a minute. Stabilized live via RCON mob-clear plus 11 real torches placed directly at `bot.spawnPoint` (verified held, not popped). Operator chose "do both" -- also dug into why `checkHomeLighting()` has now failed THREE times running (2026-09-10, §32, and tonight): confirmed its gate only ever checked the running bot's own personal inventory at the exact moment its 90s check fires, and across a fleet with constant self-defense interrupts, no bot is ever reliably both free and stocked at once -- the general mechanism behind all three failures. Fix (`index.js` 2.75.0): tries a chest first via the existing "loot" action's local-then-remembered-chest search before ever falling back to personal-inventory crafting. |
+| 1.37.0 | 2026-09-19 | New §39, direct request ("expand their search capabilities further, especially the miner and explorer roles. make *sure* that discovered resources are being stored in world memory"). Audited existing memory-write paths and found a real, confirmed gap: a successful MINE never wrote a world-memory note at all, only a failed one did -- fixed (`index.js` 2.76.0) by extending explore's own existing success-note mechanism to mine too. Also confirmed neither Miner nor Explorer has ever had deterministic search logic (unlike Soldier/Builder) -- added env-tunable per-bot search radius (`MINE_SEARCH_RADIUS`/`EXPLORE_SEARCH_RADIUS`/`EXTENDED_SEARCH_DISTANCE`, `actions.js` 1.59.0, same pattern as `MC_SELF_DEFENSE_RANGE`) now set larger on Babs/Wade's own systemd units, kept under the documented 48-block pathfinder OOM ceiling; and new `VILLAGE_INDICATOR_NAMES` (bell, composter) gives Explorer's own stated "locate a village" priority a real, note-only search target for the first time. Both mine and explore now also trigger a full `noteNearbyResources()` sweep on success, not just a note about the one target. |
+| 1.38.0 | 2026-09-19 | New §40, direct request ("Mayor/Leader missions, if they would effectively DOWNGRADE a bot's equipment or status, should be rejected by the bot"). Found the concrete mechanism rather than a general directive classifier: Mayor's own directives are plain chat, routed through the same classifyIntent pipeline as anything else, and the one real gear-loss vector -- "give" (`actions.js`) -- never checked whether complying would leave the giver without a weapon/armor/tool she needs. Fixed (1.60.0): refuses when giving would take an item's whole category (sword/axe as one interchangeable weapon category matching `hasWeapon()`, armor/tools each their own) from "has one" to "has none" -- a genuine spare is still always fine to give. Refusal is a real, visible `fail()`, not a silent no-op. |
+| 1.39.0 | 2026-09-19 | Extended §40, direct follow-up ("the downgrade rejection must also reject if the mayor's instructions would cause the quality of their equipment to be reduced"). Going to zero was only half of it -- giving away her best piece in a category while a worse one stays behind is a downgrade too. New `GEAR_TIER_RANK` (`actions.js` 1.61.0, a single common-sense material ranking, not a precise armor-point/mining-level simulation) lets "give"'s existing check also compare the tier of what's being given against the best tier she'd still hold afterward; an unrecognized material falls back to the has-one/has-none check alone. |
+| 1.40.0 | 2026-09-19 | New §41, direct report ("I don't think they really know how to use the crafting table or furnace"). Root-caused live: Amy crafted a crafting_table at 01:45, then a Builder-priority "place it at home" REJECTED DONE fired three times over 25 minutes -- every time the whole goal was abandoned (`currentGoal = null`) instead of acting on the fact she was still carrying the item the entire time, so the next re-issued directive immediately re-hallucinated DONE again with zero real steps. Fixed (`index.js` 2.77.0): on this rejection, if she's still holding the item, walk home and place it herself right now (reusing `gohome`/`place`) before giving up -- one deterministic shot instead of another unreliable LLM round-trip. Also clarified `planNextStep`'s own `ACTION CRAFT`/`ACTION PLACE` descriptions, which never mentioned CRAFT's existing auto-chaining of simple intermediates or that PLACE is what actually satisfies a "set one up at home" directive -- a real, confirmed contributor to repeated multi-paragraph confused reasoning in live logs. |

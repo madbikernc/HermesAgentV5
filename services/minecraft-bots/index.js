@@ -1,4 +1,55 @@
-// Version: 2.73.0
+// Version: 2.77.0
+//
+// 2.77.0 (2026-09-19) -- direct report: "I don't think they really know how to use the crafting
+// table or furnace." Root-caused live, not guessed: Amy crafted a crafting_table at 01:45, then a
+// Builder-priority "go home and place a crafting table there" REJECTED DONE fired three separate
+// times over the next 25 minutes -- every time, the whole goal was thrown away (currentGoal =
+// null) rather than acting on the one fact already certain: she was STILL CARRYING the table the
+// entire time, she just never walked home and placed it. Abandoning wasted that real progress and
+// left the next re-issued directive to rediscover it from scratch, which kept immediately
+// re-hallucinating DONE instead of ever proposing "place" as a step -- a real trap, not a one-off.
+// Fixed: on this exact rejection, if she's still holding the item, walk home and place it herself
+// right now (reusing "gohome"/"place", both already robust) -- one deterministic shot before
+// giving up on the goal, no extra unreliable LLM round-trip needed for something this mechanical.
+// Also clarified planNextStep's own ACTION CRAFT/PLACE descriptions, which never mentioned CRAFT's
+// existing auto-chaining of simple intermediates (logs->planks->sticks/table) or that PLACE is the
+// action that actually satisfies a "set one up at home" directive -- confirmed live via repeated,
+// lengthy, sometimes-wrong multi-paragraph self-debate (Amy, Babs) about basic crafting mechanics
+// the model shouldn't have needed to re-derive every time. See MINECRAFT_BOTS_DESIGN.md §41.
+//
+// 2.76.0 (2026-09-19) -- direct request: "expand their search capabilities further, especially the
+// miner and explorer roles. make *sure* that discovered resources are being stored in world
+// memory." Real, confirmed gap found: a successful MINE never wrote a world-memory note at all --
+// only a FAILED one did (the existing "no X found" branch). noteNearbyResources/writeMemoryNote
+// call sites now cover mine's own success too, mirroring explore's existing note exactly, and both
+// mine and explore now also trigger a full noteNearbyResources() sweep on success (not just the
+// one target resource) -- a free "look around while you're here" at zero extra travel cost. New
+// VILLAGE_INDICATOR_NAMES (bell, composter -- real, low-false-positive villager job-site blocks)
+// gives Explorer's own stated "locate a village" priority (roles.js) a real mechanical search for
+// the first time; note-only, never a collect target. See MINECRAFT_BOTS_DESIGN.md §39.
+//
+// 2.75.0 (2026-09-18) -- direct live incident: watched a spider hit Mark with no reaction, which
+// turned out to be one tiny symptom of a much bigger nighttime mob crisis (7+ deaths fleet-wide in
+// under a minute, Dale down to 1.7 HP). Stabilized live via RCON (mob clear + a real torch ring
+// placed at bot.spawnPoint), then root-caused checkHomeLighting's THIRD straight failure (after
+// 2026-09-10 and 2026-09-17 fixes, both confirmed dead ends): its "no torches -> try crafting"
+// gate only ever checked THIS bot's own personal inventory at the exact instant this 90s check
+// fires, and across a fleet whose self-defense fires every few seconds during any real incident,
+// no bot is ever reliably both free and stocked at the same moment. Now tries a chest first (reuses
+// "loot"'s own existing local-then-remembered-chest search, §19/§30) before ever falling back to
+// crafting from personal inventory. See MINECRAFT_BOTS_DESIGN.md §38.
+//
+// 2.74.0 (2026-09-18) -- direct request: "have the threatened bot run towards safety, run towards
+// golems, or soldiers." Direct follow-up to confirming SQUAD_ASSIST_RANGE (48 blocks) leaves a
+// fleeing bot beyond it with no real help at all (the live incident that prompted this: Nell,
+// critical, ~70 blocks from both Soldiers, got no response). "Flee" itself never had a
+// destination -- just maximized distance from the threat, which could run a bot deeper into
+// danger as easily as out of it. New nearestRallyPoint() (golem > nearby Soldier teammate via
+// bot.players > home, in that priority) wired into all three flee-triggering sites
+// (checkSelfDefense, the EMERGENCY health-critical handler, checkSleepingThreat) and passed as
+// action.rallyPoint; actions.js's own "flee" case (1.58.0) heads there directly when given one,
+// falling back to its original away-from-threat behavior otherwise. See MINECRAFT_BOTS_DESIGN.md
+// §37.
 //
 // 2.73.0 (2026-09-17) -- direct request "look in new logs for task hallucinations" -> "dig in."
 // Root-caused Amy's chronic multi-goal loop (§30/§31-adjacent, 17+ hours stuck on furnace, then
@@ -1142,7 +1193,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
+import { loadActionPlugins, performAction, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -1667,8 +1718,20 @@ function withinSquadAssistRange(payload) {
 // large the combined target list gets.
 const CRAFTED_OBJECT_NAMES = ["crafting_table", "furnace", "chest", "trapped_chest", "beehive", "bee_nest"];
 
+// Direct request, 2026-09-19 ("expand their search capabilities... especially the miner and
+// explorer roles"): Explorer's own stated priorities (roles.js) name "locate a village" and
+// "locate a notable feature" explicitly, but nothing anywhere ever actually searched for one --
+// only ore/log/crafted-object names were ever scanned. bell and composter are real, low-
+// false-positive village indicator blocks (villager job-site/meeting blocks, not found outside a
+// village in vanilla generation) -- noting one is a genuine "found a village here" fact, not a
+// guess. Deliberately note-only, never a collect target (see noteNearbyResources -- a pure
+// findBlocks + write, no movement or mining): breaking a villager's job-site block would be
+// griefing a real structure, not resource-gathering.
+const VILLAGE_INDICATOR_NAMES = ["bell", "composter"];
+
 async function noteNearbyResources(reason, extraTargets = []) {
-  const targets = new Set([...getResourceBlockNames(bot), ...CRAFTED_OBJECT_NAMES, ...extraTargets]);
+  const targets = new Set([...getResourceBlockNames(bot), ...CRAFTED_OBJECT_NAMES,
+    ...VILLAGE_INDICATOR_NAMES, ...extraTargets]);
   const positions = bot.findBlocks({ matching: (block) => targets.has(block.name), maxDistance: 24, count: 64 });
   const noted = new Set(); // one note per distinct name per sweep is enough -- matches prior behavior
   for (const pos of positions) {
@@ -2300,7 +2363,10 @@ async function planNextStep(goal) {
           `to MINE only once LOOT has already come up empty for this same need, or the recent ` +
           `progress below already shows a LOOT attempt.\n` +
           `ACTION CRAFT <item_id> <count> - craft an item via a crafting-table/grid recipe only. ` +
-          `<item_id> must be the exact modern Minecraft item id -- never invent one.\n` +
+          `<item_id> must be the exact modern Minecraft item id -- never invent one. She handles ` +
+          `simple intermediate steps herself automatically (logs into planks, planks into sticks ` +
+          `or a crafting_table) -- name the FINAL item you actually want, not the raw material; ` +
+          `no need to plan out "craft planks, then craft sticks" yourself first.\n` +
           `ACTION EXPLORE - go looking for any useful raw material (wood, ore) when CRAFT/MINE ` +
           `failed because a needed resource isn't nearby and you don't have a more specific ` +
           `block to try -- gathers whatever's found, worth doing before giving up or asking the ` +
@@ -2309,7 +2375,10 @@ async function planNextStep(goal) {
           `furnace. <item_id> is the OUTPUT (e.g. iron_ingot), the exact modern Minecraft item ` +
           `id -- never invent one.\n` +
           `ACTION PLACE <item_id> - place a furnace or crafting_table she's already carrying, ` +
-          `right next to herself, when SMELT/CRAFT needs one and none is reachable.\n` +
+          `right next to herself. Use this both when SMELT/CRAFT needs one and none is reachable, ` +
+          `AND whenever a goal asks her to set one up in a specific spot (e.g. "at home") -- ` +
+          `crafting or already carrying the item is NOT the same as the goal being done if it ` +
+          `says to place it somewhere; that only happens once PLACE actually succeeds there.\n` +
           `ACTION LOOT <item_id> <count> - check the nearest chest for a SPECIFIC item you ` +
           `actually need right now for this goal. <item_id> must be the exact modern Minecraft ` +
           `item id -- never invent one, and never a generic guess just to "see what's there." ` +
@@ -2954,6 +3023,41 @@ async function goalTick() {
       if (currentGoal.builderPriorityItem && !builderPriorityItemSatisfied(currentGoal.builderPriorityItem)) {
         console.log(`[${USERNAME}] REJECTED DONE (claimed ${currentGoal.builderPriorityItem} ` +
                     `done, but it's still not actually near home): ${currentGoal.description}`);
+
+        // Direct report, 2026-09-19 ("I don't think they really know how to use the crafting
+        // table or furnace"). Root-caused live: Amy crafted a crafting_table at 01:45, then this
+        // exact rejection fired three separate times over the next 25 minutes (01:59, 02:13,
+        // 02:19) -- every time, the goal was thrown away outright (currentGoal = null) rather
+        // than acting on the one thing already known for certain: she was STILL CARRYING the
+        // table the entire time, she just never walked home and placed it. Abandoning wasted
+        // that real progress and left it up to the next re-issued directive, minutes later, to
+        // rediscover from scratch -- which kept immediately re-hallucinating DONE instead of
+        // ever proposing "place" as a step. Rather than another unreliable LLM round-trip for
+        // something this mechanical, do it directly: if she's still holding the item, walk home
+        // and place it herself right now (reusing "gohome"/"place", both already robust), one
+        // deterministic shot, before giving up on the whole goal.
+        const stillHasItem = bot.inventory.items()
+          .some((i) => i.name === currentGoal.builderPriorityItem);
+        let recovered = false;
+        if (stillHasItem) {
+          await performAction(bot, { type: "gohome" }, USERNAME);
+          const placeResult = await performAction(bot,
+            { type: "place", item: currentGoal.builderPriorityItem }, USERNAME);
+          console.log(`[${USERNAME}] builder-priority recovery: ${placeResult.text} ` +
+                      `(ok=${placeResult.ok})`);
+          recovered = placeResult.ok && builderPriorityItemSatisfied(currentGoal.builderPriorityItem);
+        }
+
+        if (recovered) {
+          console.log(`[${USERNAME}] goal complete (recovered): ${currentGoal.description}`);
+          bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
+          recordGoalOutcome(currentGoal.description, "done", null);
+          await broadcastGoalState("done", currentGoal.description, currentGoal.builderPriorityItem);
+          currentGoal = null;
+          await clearGoal(PERSONA_NAME);
+          return;
+        }
+
         bot.chat(await narrateAction(
           `not done yet on "${currentGoal.description}" -- it's still not actually there.`));
         recordGoalOutcome(currentGoal.description, "gave up",
@@ -3098,14 +3202,29 @@ async function goalTick() {
     // Position included (rounded -- exact block precision doesn't matter for "worth checking
     // around here again"), since a note with no location is far less actionable than one with
     // one.
-    if (parsed.action.type === "explore" && result.ok) {
+    //
+    // Direct request, 2026-09-19 ("make *sure* that discovered resources are being stored in
+    // world memory"): a real, confirmed gap -- a successful MINE never wrote anything here at
+    // all, only a FAILED one did (the "no X found" branch above). A Miner who successfully finds
+    // and mines iron ore all day was sharing nothing with the rest of the fleet; only her
+    // failures were visible to anyone else. Now mirrors explore's own note exactly.
+    if ((parsed.action.type === "explore" || parsed.action.type === "mine") && result.ok) {
       try {
         const pos = bot.entity.position.floored();
         await writeMemoryNote({ scope: "world", persona: PERSONA_NAME,
           text: `${result.text} near (${pos.x}, ${pos.y}, ${pos.z}), as of ${new Date().toISOString()}.` });
       } catch (err) {
-        console.error(`[${USERNAME}] exploration memory write failed:`, err.message);
+        console.error(`[${USERNAME}] ${parsed.action.type} memory write failed:`, err.message);
       }
+      // Direct request, 2026-09-19 ("expand their search capabilities further, especially the
+      // miner and explorer roles"): a successful mine/explore already has her standing somewhere
+      // new and worth a proper look, not just recording the one thing she was after -- the same
+      // free "look near itself" sweep noteNearbyResources() already does for a scout request,
+      // now also running for her own routine successes. Catches anything else in range
+      // (ore/log/village indicator) that mining/exploring toward the ONE target happened to pass
+      // near, at zero extra travel cost.
+      noteNearbyResources(`after a successful ${parsed.action.type}`).catch((err) =>
+        console.error(`[${USERNAME}] nearby-resource scan failed:`, err.message));
     }
 
     if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
@@ -3620,6 +3739,41 @@ function noteThreatSeen(threatName) {
   }
 }
 
+// Direct request, 2026-09-18 ("have the threatened bot run towards safety, run towards golems, or
+// soldiers") -- direct follow-up to confirming SQUAD_ASSIST_RANGE (48 blocks) leaves a fleeing bot
+// beyond it with no real help coming (the exact live incident that prompted this: Nell, alone and
+// critical, ~70 blocks from both Soldiers). "Flee" previously had no destination at all -- it just
+// maximized distance from the threat, which could just as easily run a bot deeper into danger as
+// out of it. Priority, cheapest/most-effective first: a nearby iron golem (fights hostiles near it
+// on its own vanilla AI -- real backup even with zero teammates in range) > a nearby Soldier
+// teammate whose entity this bot's own client currently has loaded (bot.players -- no new
+// broadcast infrastructure needed, this is just each bot's own already-tracked world state) > home
+// (always a safer place to end up than wherever the flee happened to start, even with nobody
+// there). Returns null only when none of the three are known at all, in which case "flee" falls
+// back to its original plain away-from-threat behavior.
+const RALLY_SEARCH_RANGE = 32;
+async function nearestRallyPoint(bot) {
+  const golem = nearestFriendlyGolem(bot, RALLY_SEARCH_RANGE);
+  if (golem) return golem.position;
+
+  let nearestSoldierPos = null;
+  let nearestSoldierDist = RALLY_SEARCH_RANGE;
+  for (const name of BOT_USERNAMES) {
+    if (name === USERNAME) continue;
+    if (BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER) continue;
+    const entity = bot.players[name]?.entity;
+    if (!entity) continue;
+    const dist = entity.position.distanceTo(bot.entity.position);
+    if (dist <= nearestSoldierDist) {
+      nearestSoldierPos = entity.position;
+      nearestSoldierDist = dist;
+    }
+  }
+  if (nearestSoldierPos) return nearestSoldierPos;
+
+  return (await loadClaimedBed(bot)) || bot.spawnPoint || null;
+}
+
 // Direct report, 2026-09-08 ("they still don't seem to react to a threatening creature"). Real,
 // confirmed gap: this used to be gated on !acting, same as every other idle-tick check here --
 // but `acting` now spans an entire physical action end-to-end (up to ACTION_TIMEOUT_MS, 90s
@@ -3702,9 +3856,10 @@ async function checkSelfDefense() {
       !hasWeapon(bot) ? "flee" : "attack";
     if (FLEE_ONLY_MOBS.has(threat.name)) lastFleeMobResponseAt = Date.now();
     console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
+    const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
     // action.target: the already-found entity, not re-derived -- see actions.js's own
     // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.
-    const result = await performAction(bot, { type, target: threat }, USERNAME);
+    const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
     console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] self-defense check failed:`, err.message);
@@ -4087,15 +4242,32 @@ async function checkHomeLighting() {
     // only ever depending on already having some. If she genuinely can't (no fuel, no stick),
     // that's now a real, visible log line instead of silence.
     if (!bot.inventory.items().some((i) => i.name === "torch")) {
-      const fuel = bot.inventory.items().find((i) => i.name === "coal" || i.name === "charcoal");
-      const hasStick = bot.inventory.items().some((i) => i.name === "stick");
-      if (!fuel || !hasStick) {
-        console.log(`[${USERNAME}] home lighting: no torches, and no fuel+stick on hand to craft one -- skipping for now.`);
-        return;
+      // Direct live incident, 2026-09-18 (nighttime mob crisis, 7+ deaths in under a minute):
+      // confirmed this whole gate has been the real, recurring blocker -- it only EVER checked
+      // this one bot's own personal inventory at the exact 90s-interval instant this check
+      // happens to fire, while not busy/asleep/arbiter-locked. Across a fleet whose self-defense
+      // triggers every few seconds during any real incident, no bot reliably has fuel+stick AND a
+      // free moment at the same time, so this branch has been silently doing nothing for days
+      // despite two prior fix attempts (see this function's own 2026-09-17 note above). Now tries
+      // a chest first -- reuses "loot"'s own existing local-then-remembered-chest search (§30/§19)
+      // instead of only ever depending on what she happens to be personally carrying; cheaper and
+      // far more likely to succeed than crafting from scratch, especially now that the shared base
+      // chests can be pre-stocked (tools/minecraft-chests/).
+      const lootResult = await performAction(bot, { type: "loot", item: "torch", count: 4 }, USERNAME);
+      if (lootResult.ok) {
+        console.log(`[${USERNAME}] home lighting: grabbed torches from a chest -- ${lootResult.text}`);
+      } else {
+        const fuel = bot.inventory.items().find((i) => i.name === "coal" || i.name === "charcoal");
+        const hasStick = bot.inventory.items().some((i) => i.name === "stick");
+        if (!fuel || !hasStick) {
+          console.log(`[${USERNAME}] home lighting: no torches (chest check came up empty too: ` +
+            `${lootResult.text}), and no fuel+stick on hand to craft one -- skipping for now.`);
+          return;
+        }
+        const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME);
+        console.log(`[${USERNAME}] home lighting: crafted torches first -- ${craftResult.text} (ok=${craftResult.ok})`);
+        if (!craftResult.ok) return;
       }
-      const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME);
-      console.log(`[${USERNAME}] home lighting: crafted torches first -- ${craftResult.text} (ok=${craftResult.ok})`);
-      if (!craftResult.ok) return;
     }
     const result = await performAction(bot, { type: "light_area", near: home }, USERNAME);
     console.log(`[${USERNAME}] home lighting: ${result.text} (ok=${result.ok})`);
@@ -4731,7 +4903,8 @@ bot.on("health", () => {
       return;
     }
     try {
-      const result = await performAction(bot, { type: "flee", target: threat }, USERNAME);
+      const rallyPoint = await nearestRallyPoint(bot);
+      const result = await performAction(bot, { type: "flee", target: threat, rallyPoint }, USERNAME);
       console.log(`[${USERNAME}] emergency flee: ${result.text} (ok=${result.ok})`);
     } catch (err) {
       console.error(`[${USERNAME}] emergency flee failed:`, err.message);
@@ -4910,7 +5083,8 @@ async function checkSleepingThreat() {
     // else when she has no weapon to fight it with.
     const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH ||
       !hasWeapon(bot) ? "flee" : "attack";
-    const result = await performAction(bot, { type, target: threat }, USERNAME);
+    const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
+    const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
     console.log(`[${USERNAME}] post-wake defense: ${type} -> ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] post-wake defense failed:`, err.message);

@@ -9,6 +9,13 @@ Type=simple
 User=pmoney
 WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
 Environment=MC_BOT_USERNAME=Wade
+# 2026-09-19 ("expand their search capabilities... especially the miner and explorer roles"):
+# Wade is the fleet's one Explorer -- searches up to 40 blocks locally (same OOM-safe ceiling as
+# Babs's own bump) and ranges out to 260 blocks (vs. the shared 150-block default) when nothing's
+# found nearby, since that farther "beacon" walk is already hop-capped and doesn't carry the same
+# pathfinder-search-radius risk.
+Environment=MC_EXPLORE_SEARCH_RADIUS=40
+Environment=MC_EXTENDED_SEARCH_DISTANCE=260
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

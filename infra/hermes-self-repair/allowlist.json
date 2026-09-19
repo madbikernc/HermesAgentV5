@@ -1,0 +1,25 @@
+{
+  "_comment": "Scoped read allowlist for tools/hermes-self-repair-read.py (stepped self-repair plan, Step 1). Governs what a self-repair task may read INSIDE the dedicated NAS2-tracking checkout (SELF_REPAIR_REPO_DIR) -- never a live node's own autopull working tree, never the operator's own dev checkout. This file itself lives in the tool's own installation (the normal HermesAgentV5 checkout), never inside the target checkout it governs -- if it lived there instead, a self-repair task could edit its own permission file and widen its own future access, the exact self-modifying-privilege hole this project's 'no LLM turn load-bearing for a privileged action' rule exists to prevent. allowed_prefixes are repo-relative directories a task may read from; deny_patterns are checked in ADDITION, even inside an allowed prefix -- NAS2's own smtp.env.template held a live SMTP password despite its template-looking name (LESSONS_LEARNED.md), so a directory being allowed never overrides a filename-shaped secret risk. Starts narrow on purpose -- add a prefix only when a real task needs it, not speculatively.",
+  "allowed_prefixes": [
+    "tools",
+    "skills",
+    "agents",
+    "services"
+  ],
+  "deny_patterns": [
+    "*.env",
+    "*.env.*",
+    "*secret*",
+    "*password*",
+    "*.pem",
+    "*.key",
+    "id_rsa*",
+    "id_ed25519*",
+    "known_hosts*",
+    "*vault*",
+    "*.p12",
+    "*.pfx",
+    ".git",
+    ".git/*"
+  ]
+}

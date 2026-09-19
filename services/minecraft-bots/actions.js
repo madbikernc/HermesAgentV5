@@ -1,4 +1,51 @@
-// Version: 1.56.0
+// Version: 1.61.0
+//
+// 1.61.0 (2026-09-19) -- direct follow-up: "the downgrade rejection must also reject if the
+// mayor's instructions would cause the quality of their equipment to be reduced." §40's own "give"
+// check only ever caught going from "has one" to "has none" -- giving away a diamond sword while a
+// wooden one stays behind is a downgrade too, even though she'd technically still have "a sword."
+// New GEAR_TIER_RANK (a single common-sense material ranking, not a precise armor-point/mining-
+// level simulation -- good enough to answer "worse than before") lets the same check also compare
+// the tier of what's being given against the best tier she'd be left holding in that category.
+// See MINECRAFT_BOTS_DESIGN.md §40 (updated).
+//
+// 1.60.0 (2026-09-19) -- direct request: "Mayor/Leader missions, if they would effectively
+// DOWNGRADE a bot's equipment or status, should be rejected by the bot." "give" (the concrete
+// gear-loss vector -- both a direct chat command and the autonomous checkPendingGiveRequests
+// fulfillment path route through this same case) never checked whether complying would leave the
+// giver without a weapon/armor/tool she still needs, whoever asked -- the exact mechanism behind
+// Mark being gifted a sword twice by teammates yet ending up swordless anyway (§34: he died
+// between the gifts, a separate cause, but this closes the OTHER real way that keeps happening --
+// a bot handing away her own last one on request). Now refuses (a clear fail(), not a silent
+// no-op) when giving would take the item's whole category from "has one" to "has none": sword/axe
+// treated as one interchangeable weapon category (matching equipment.js's own hasWeapon()),
+// armor/tool suffixes each their own. A genuine spare is always still fine to give. See
+// MINECRAFT_BOTS_DESIGN.md §40.
+//
+// 1.59.0 (2026-09-19) -- direct request: "expand their search capabilities further, especially the
+// miner and explorer roles." New env-tunable MINE_SEARCH_RADIUS/EXPLORE_SEARCH_RADIUS/
+// EXTENDED_SEARCH_DISTANCE (same per-bot-tuning pattern as MC_SELF_DEFENSE_RANGE, §21) replace
+// "mine"/"explore"'s own hardcoded 32-block scan radius -- Babs (Miner) and Wade (Explorer) now
+// search meaningfully farther via their own systemd units without touching the shared default for
+// everyone else. MINE/EXPLORE_SEARCH_RADIUS kept well under bot.pathfinder.searchRadius's own
+// documented 48-block OOM ceiling (this file's own established caution) since a found block gets
+// one unhopped collectBlock pathfind straight to it; EXTENDED_SEARCH_DISTANCE raised more freely
+// since wanderAndRetryFind's own walk there is already hop-capped regardless of beacon distance.
+// See MINECRAFT_BOTS_DESIGN.md §39.
+//
+// 1.58.0 (2026-09-18) -- direct request: "have the threatened bot run towards safety, run towards
+// golems, or soldiers." New nearestFriendlyGolem() (alongside nearestHostile()) and "flee" now
+// heads directly to an action.rallyPoint when index.js supplies one (via its own new
+// nearestRallyPoint() -- golem > nearby Soldier teammate > home) instead of only ever maximizing
+// distance from the threat with no destination in mind. See MINECRAFT_BOTS_DESIGN.md §37.
+//
+// 1.57.0 (2026-09-18) -- direct live report: "Luke is getting shot, not reacting. there is no mass
+// mob." Root-caused: Luke's self-defense held SELF_DEFENSE-tier control on an unproductive
+// "attack" against an enderman for over a minute (teleport-evasion defeats bot.pvp's chase-and-
+// melee the same way flight defeats it for phantom/ghast), silently blocking any response to a
+// SEPARATE skeleton sniping him the whole time. Confirmed not a one-off: Mark/Luke logged
+// 2,800/1,770 enderman self-defense triggers in 24h, far above every other bot. FLEE_ONLY_MOBS
+// now includes "enderman" -- see its own updated header below for the full reasoning.
 //
 // 1.56.0 (2026-09-18) -- direct request: "if the bot is in need of a piece of equipment (sword,
 // armor, pickaxe, etc), and finds one already crafted in a chest, it should pick up ONE of those
@@ -891,6 +938,16 @@ export function nearestHostile(bot, maxDistance = 16) {
     e.position.distanceTo(bot.entity.position) <= maxDistance);
 }
 
+// Direct request, 2026-09-18 ("have the threatened bot run towards safety, run towards golems, or
+// soldiers"), direct follow-up to the SQUAD_ASSIST_RANGE finding (a fleeing bot beyond 48 blocks
+// of both Soldiers gets no help at all). Same shape as nearestHostile -- an iron golem fights
+// nearby hostiles on its own vanilla AI once a bot leads a threat near one, real backup a bot can
+// reach on foot even when no teammate is close enough to come to her.
+export function nearestFriendlyGolem(bot, maxDistance = 32) {
+  return bot.nearestEntity((e) => e.name === "iron_golem" &&
+    e.position.distanceTo(bot.entity.position) <= maxDistance);
+}
+
 // Real bug found live 2026-09-10 (direct report: "they don't seem to be able to fight, or run
 // from, phantoms"), AFTER both the detection gap above (1.43.0) and the combat-resolution bug
 // (1.42.0) were already fixed: a ground-bound bot's "attack" (bot.pvp.attack() -> a pathfinder
@@ -905,7 +962,20 @@ export function nearestHostile(bot, maxDistance = 16) {
 // reach the target -- already confirmed live to genuinely create real distance every cycle. Mobs
 // in this set are always fled from, never melee-attacked, regardless of health -- ghast included
 // on the same reasoning (also a flyer, also effectively unreachable on foot).
-export const FLEE_ONLY_MOBS = new Set(["phantom", "ghast"]);
+//
+// Direct report, 2026-09-18 ("Luke is getting shot, not reacting. there is no mass mob"): enderman
+// added on the same underlying reasoning, confirmed live -- Luke's own self-defense held
+// SELF_DEFENSE-tier control on an "attack (threat=enderman)" for over a minute straight (silently
+// re-returning on every 2s checkSelfDefense tick the whole time, since selfDefenseInFlight was
+// still true) while a skeleton he had no ability to respond to sniped him from range, only broken
+// by the separate EMERGENCY health-critical flee once he'd already dropped to ~6 HP -- then
+// immediately re-engaged the SAME enderman and repeated. Endermen aren't flightless-unreachable
+// like phantom/ghast, but teleporting away whenever hit makes bot.pvp's chase-and-melee approach
+// close to it in practice: confirmed fleet-wide, Mark and Luke (the two bots actually willing to
+// melee-attack rather than flee at their own tuned health thresholds) logged 2,800 and 1,770
+// enderman self-defense triggers respectively in 24h -- far above every other bot -- consistent
+// with the same doomed-retry shape, not an occasional unlucky fight.
+export const FLEE_ONLY_MOBS = new Set(["phantom", "ghast", "enderman"]);
 
 // Direct request, 2026-09-07 ("look for more ways to improve their autonomy" -> hunger). Checked
 // live: minecraft-data's own item registry carries no food/nutrition field at all (bread/apple
@@ -926,6 +996,30 @@ export const FOOD_NAMES = [
 const GEAR_SUFFIXES = [
   "_helmet", "_chestplate", "_leggings", "_boots", "_sword", "_axe", "_pickaxe", "_shovel", "_hoe",
 ];
+
+// Direct request, 2026-09-19 ("the downgrade rejection must also reject if the mayor's
+// instructions would cause the quality of their equipment to be reduced") -- direct follow-up to
+// "give"'s own §40 fix below, which only ever caught going from "has one" to "has none." Giving
+// away a diamond sword while a wooden one stays behind is just as much a downgrade as giving away
+// her only sword outright. A single common-sense material ranking, not a precise simulation of
+// real armor-point/mining-level math (gold in particular is inconsistent in actual vanilla rules
+// between tools and armor) -- good enough to answer "would she end up worse than before," which
+// is all this check needs.
+const GEAR_TIER_RANK = {
+  wood: 0, wooden: 0, leather: 0,
+  golden: 1, gold: 1,
+  stone: 2, chainmail: 2,
+  iron: 3,
+  diamond: 4,
+  netherite: 5,
+};
+
+// Returns -1 for an unrecognized material (e.g. a modded item) rather than guessing -- callers
+// treat that as "no tier data, don't block on quality" and fall back to the has-one/has-none check.
+function gearTierRank(itemName, suffix) {
+  const material = itemName.slice(0, itemName.length - suffix.length);
+  return material in GEAR_TIER_RANK ? GEAR_TIER_RANK[material] : -1;
+}
 
 // Direct request, 2026-09-18 ("if the bot is in need of a piece of equipment... and finds one
 // already crafted in a chest, it should pick up ONE of those pieces... and abandon the quest to
@@ -1170,7 +1264,19 @@ export function isProtectedBlockName(name) {
 // the normal search radius to find it now," not the extended one.
 const EXPLORE_DISTANCE = 40;
 const EXPLORE_TIMEOUT_MS = 15_000;
-const EXTENDED_SEARCH_DISTANCE = 150;
+// Direct request, 2026-09-19 ("expand their search capabilities further, especially the miner and
+// explorer roles"): env-tunable per-bot, same pattern as MC_SELF_DEFENSE_RANGE (§21) -- lets
+// Babs/Wade's own systemd units search farther than the shared 32-block default without touching
+// every other bot. EXTENDED_SEARCH_DISTANCE (the wanderAndRetryFind "beacon" scan) is safe to raise
+// freely -- the actual walk there is already hop-capped at EXPLORE_DISTANCE regardless of how far
+// the beacon itself is (see wanderAndRetryFind's own step = Math.min(EXPLORE_DISTANCE, dist)
+// below). MINE_SEARCH_RADIUS/EXPLORE_SEARCH_RADIUS are a different risk: a found block up to that
+// many blocks away gets ONE unhopped bot.collectBlock.collect() pathfind straight to it, not a
+// hop-capped walk -- kept well under bot.pathfinder.searchRadius's own 48-block OOM ceiling (this
+// file's own established caution, see EXPLORE_DISTANCE's header above) even when raised.
+const MINE_SEARCH_RADIUS = parseInt(process.env.MC_MINE_SEARCH_RADIUS || "32", 10);
+const EXPLORE_SEARCH_RADIUS = parseInt(process.env.MC_EXPLORE_SEARCH_RADIUS || "32", 10);
+const EXTENDED_SEARCH_DISTANCE = parseInt(process.env.MC_EXTENDED_SEARCH_DISTANCE || "150", 10);
 const MAX_DIRECTED_HOPS = 4;
 
 // Hoisted to module scope (was a local const inside "explore" alone) and exported, 2026-09-11
@@ -2082,7 +2188,7 @@ export async function performAction(bot, action, speaker) {
       }
 
       const wantCount = action.count || 1;
-      const findOptions = { matching: blockIds, maxDistance: 32, count: wantCount * CONTENTION_SEARCH_OVERFETCH };
+      const findOptions = { matching: blockIds, maxDistance: MINE_SEARCH_RADIUS, count: wantCount * CONTENTION_SEARCH_OVERFETCH };
       let positions = bot.findBlocks(findOptions);
       // Direct request, 2026-09-11 ("each bot uses the global world memory to gather a resource
       // it needs, if it's not in their immediate vicinity"): a remembered position -- her own
@@ -2166,7 +2272,7 @@ export async function performAction(bot, action, speaker) {
         return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to explore for it.`);
       }
 
-      const findOptions = { matching: blockIds, maxDistance: 32, count: EXPLORE_BATCH_COUNT * CONTENTION_SEARCH_OVERFETCH };
+      const findOptions = { matching: blockIds, maxDistance: EXPLORE_SEARCH_RADIUS, count: EXPLORE_BATCH_COUNT * CONTENTION_SEARCH_OVERFETCH };
       let positions = bot.findBlocks(findOptions);
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
       if (!positions.length) return fail("didn't find anything useful nearby, even after looking around.");
@@ -2512,16 +2618,28 @@ export async function performAction(bot, action, speaker) {
       // instead of racing a second nearestHostile(bot) lookup against it moving/despawning.
       const target = action.target || nearestHostile(bot);
       if (!target) return ok("nothing to flee from.");
+      // Direct request, 2026-09-18 ("run towards safety, run towards golems, or soldiers"):
+      // index.js's checkSelfDefense/checkSleepingThreat/respondToSquadCall compute this (golem >
+      // nearby Soldier teammate > home, in that priority -- see their own nearestRallyPoint())
+      // since they're the ones with role/teammate-position knowledge; this action just heads
+      // there instead of blindly maximizing distance with no destination in mind. Deliberately no
+      // path-safety check between here and the rally point (same best-effort level as the rest of
+      // self-defense) -- a rally point is only ever picked when it's a real place to go, not a
+      // guarantee the route there is threat-free.
+      const rally = action.rallyPoint;
       try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalInvert(new goals.GoalFollow(target, 16))),
-          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        const goal = rally
+          ? new goals.GoalNear(rally.x, rally.y, rally.z, 3)
+          : new goals.GoalInvert(new goals.GoalFollow(target, 16));
+        await withTimeout(bot.pathfinder.goto(goal), ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
       } catch (err) {
         if (token.cancelled) return ok("stopped fleeing.");
         return fail(`couldn't get away: ${err.message}`);
       } finally {
         bot.pathfinder.setGoal(null);
       }
-      return token.cancelled ? ok("stopped fleeing.") : ok("got some distance from it.");
+      if (token.cancelled) return ok("stopped fleeing.");
+      return ok(rally ? "made it to safety." : "got some distance from it.");
     }
 
     case "eat": {
@@ -2602,6 +2720,48 @@ export async function performAction(bot, action, speaker) {
       const have = bot.inventory.count(itemDef.id, null);
       if (!have) return fail(`don't have any ${action.item} to give.`);
       const giveCount = Math.min(action.count, have);
+
+      // Direct request, 2026-09-19 ("Mayor/Leader missions, if they would effectively DOWNGRADE a
+      // bot's equipment or status, should be rejected by the bot"). Real, already-confirmed
+      // failure shape (§34/MINECRAFT_BOTS_DESIGN.md): Mark was gifted a sword twice by teammates
+      // responding to a request, yet a give this blind can just as easily strip the GIVER bare --
+      // "give" never checked whether complying would leave her without a weapon/armor/tool she
+      // still needs, whoever asked. Sword and axe are treated as one interchangeable "weapon"
+      // category (matching equipment.js's own hasWeapon() definition); armor/tool suffixes are
+      // each their own category (a spare pickaxe doesn't cover for giving away her only shovel).
+      //
+      // Direct follow-up, 2026-09-19 ("must also reject if... the quality of their equipment
+      // [would be] reduced"): going to zero was only half of it -- giving away her BEST piece in
+      // a category while a worse one stays behind is a downgrade too, even though she'd technically
+      // "still have one." Checks the highest GEAR_TIER_RANK she'd be left with in this exact
+      // category against the tier of what's being given away.
+      const giveSuffix = GEAR_SUFFIXES.find((s) => action.item.endsWith(s));
+      if (giveSuffix) {
+        const isWeapon = giveSuffix === "_sword" || giveSuffix === "_axe";
+        const category = isWeapon ? ["_sword", "_axe"] : [giveSuffix];
+        const categoryItems = bot.inventory.items().filter((i) => category.some((s) => i.name.endsWith(s)));
+        const totalOfCategory = categoryItems.reduce((sum, i) => sum + i.count, 0);
+        const remainingAfterGive = totalOfCategory - giveCount;
+
+        const givingSuffix = category.find((s) => action.item.endsWith(s));
+        const givingTier = gearTierRank(action.item, givingSuffix);
+        const bestRemainingTier = categoryItems.reduce((best, i) => {
+          const remaining = i.name === action.item ? i.count - giveCount : i.count;
+          if (remaining <= 0) return best;
+          const s = category.find((suf) => i.name.endsWith(suf));
+          return Math.max(best, gearTierRank(i.name, s));
+        }, -1);
+
+        const wouldZeroOut = remainingAfterGive <= 0;
+        const wouldDowngradeQuality = !wouldZeroOut && givingTier >= 0 && givingTier > bestRemainingTier;
+        if (wouldZeroOut || wouldDowngradeQuality) {
+          const label = isWeapon ? "weapon" : giveSuffix.slice(1);
+          const reason = wouldZeroOut ? `that's my only ${label}`
+            : `it's my best ${label} and I'd be left with a worse one`;
+          return fail(`won't give away my ${action.item} -- ${reason}, and that would leave me ` +
+            `worse off than before.`);
+        }
+      }
 
       try {
         await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(target, 2)), ACTION_TIMEOUT_MS,

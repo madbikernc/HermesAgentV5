@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.0.23
+# Version: 2.0.24
+#
+# 2.0.24 (2026-09-19) — added `selfrepair`, `operator` to `KNOWN_AGENTS` (which folds `selfrepair`
+# into `KNOWN_TOPICS` via the union just below; `operator` needs no topic of its own, only a valid
+# `from` identity). Same exact bug class 2.0.21's own note documents, reproduced live on first
+# deploy: hermes-self-repair-generate.py's `claim_next('selfrepair')` failed with a 400
+# immediately on startup, because neither the `selfrepair` topic it subscribes to nor the
+# `selfrepair` identity it publishes results as (nor `operator`, the identity
+# hermes-self-repair-submit.py uses to submit a new task) were registered here yet.
 #
 # 2.0.23 (2026-09-13) — added `mc-nell`, `mc-wade`, `mc-dale` to `KNOWN_AGENTS`, ahead of three
 # new Minecraft bots (direct request: "rebalance the bots so they each have exactly one role...
@@ -237,7 +245,7 @@ MAX_BODY = 64 * 1024  # generous for a chat-shaped message, bounded
 # KNOWN_AGENTS: who may publish. `dispatch` added S6, `presenter` S7, `media` S10 — each
 # publishes pointer envelopes/results as itself. Added proactively this time: S6 found the hard
 # way that forgetting a new sender identity here crashes its caller.
-KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "mc-mark", "mc-luke", "mc-mayor", "mc-bob", "mc-nell", "mc-wade", "mc-dale", "minecraft-triage", "gameadmin"}
+KNOWN_AGENTS = {"sintra", "amy", "dispatch", "presenter", "media", "logs", "retrieve", "code", "screen", "websearch", "status", "probe", "reolink", "dualcoder", "node-baseline", "mc-babs", "mc-amy", "mc-mark", "mc-luke", "mc-mayor", "mc-bob", "mc-nell", "mc-wade", "mc-dale", "minecraft-triage", "gameadmin", "selfrepair", "operator"}
 # KNOWN_TOPICS: what may be published to. The two persona names (so today's 1:1 traffic keeps
 # working unchanged) plus target §4.4's internal topic set plus `results` (§10.1) plus
 # `minecraft` (shared broadcast topic for the bot coordination traffic KNOWN_AGENTS' mc-babs/

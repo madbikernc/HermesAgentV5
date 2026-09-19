@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes self-repair apply - Step 3 non-LLM apply worker (broker selfrepair-apply job consumer)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-self-repair/README.md
+After=network-online.target hermes-broker.service hermes-memory.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-self-repair-apply-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
