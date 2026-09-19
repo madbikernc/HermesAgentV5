@@ -1,4 +1,15 @@
-// Version: 2.75.0
+// Version: 2.76.0
+//
+// 2.76.0 (2026-09-19) -- direct request: "expand their search capabilities further, especially the
+// miner and explorer roles. make *sure* that discovered resources are being stored in world
+// memory." Real, confirmed gap found: a successful MINE never wrote a world-memory note at all --
+// only a FAILED one did (the existing "no X found" branch). noteNearbyResources/writeMemoryNote
+// call sites now cover mine's own success too, mirroring explore's existing note exactly, and both
+// mine and explore now also trigger a full noteNearbyResources() sweep on success (not just the
+// one target resource) -- a free "look around while you're here" at zero extra travel cost. New
+// VILLAGE_INDICATOR_NAMES (bell, composter -- real, low-false-positive villager job-site blocks)
+// gives Explorer's own stated "locate a village" priority (roles.js) a real mechanical search for
+// the first time; note-only, never a collect target. See MINECRAFT_BOTS_DESIGN.md §39.
 //
 // 2.75.0 (2026-09-18) -- direct live incident: watched a spider hit Mark with no reaction, which
 // turned out to be one tiny symptom of a much bigger nighttime mob crisis (7+ deaths fleet-wide in
@@ -1690,8 +1701,20 @@ function withinSquadAssistRange(payload) {
 // large the combined target list gets.
 const CRAFTED_OBJECT_NAMES = ["crafting_table", "furnace", "chest", "trapped_chest", "beehive", "bee_nest"];
 
+// Direct request, 2026-09-19 ("expand their search capabilities... especially the miner and
+// explorer roles"): Explorer's own stated priorities (roles.js) name "locate a village" and
+// "locate a notable feature" explicitly, but nothing anywhere ever actually searched for one --
+// only ore/log/crafted-object names were ever scanned. bell and composter are real, low-
+// false-positive village indicator blocks (villager job-site/meeting blocks, not found outside a
+// village in vanilla generation) -- noting one is a genuine "found a village here" fact, not a
+// guess. Deliberately note-only, never a collect target (see noteNearbyResources -- a pure
+// findBlocks + write, no movement or mining): breaking a villager's job-site block would be
+// griefing a real structure, not resource-gathering.
+const VILLAGE_INDICATOR_NAMES = ["bell", "composter"];
+
 async function noteNearbyResources(reason, extraTargets = []) {
-  const targets = new Set([...getResourceBlockNames(bot), ...CRAFTED_OBJECT_NAMES, ...extraTargets]);
+  const targets = new Set([...getResourceBlockNames(bot), ...CRAFTED_OBJECT_NAMES,
+    ...VILLAGE_INDICATOR_NAMES, ...extraTargets]);
   const positions = bot.findBlocks({ matching: (block) => targets.has(block.name), maxDistance: 24, count: 64 });
   const noted = new Set(); // one note per distinct name per sweep is enough -- matches prior behavior
   for (const pos of positions) {
@@ -3121,14 +3144,29 @@ async function goalTick() {
     // Position included (rounded -- exact block precision doesn't matter for "worth checking
     // around here again"), since a note with no location is far less actionable than one with
     // one.
-    if (parsed.action.type === "explore" && result.ok) {
+    //
+    // Direct request, 2026-09-19 ("make *sure* that discovered resources are being stored in
+    // world memory"): a real, confirmed gap -- a successful MINE never wrote anything here at
+    // all, only a FAILED one did (the "no X found" branch above). A Miner who successfully finds
+    // and mines iron ore all day was sharing nothing with the rest of the fleet; only her
+    // failures were visible to anyone else. Now mirrors explore's own note exactly.
+    if ((parsed.action.type === "explore" || parsed.action.type === "mine") && result.ok) {
       try {
         const pos = bot.entity.position.floored();
         await writeMemoryNote({ scope: "world", persona: PERSONA_NAME,
           text: `${result.text} near (${pos.x}, ${pos.y}, ${pos.z}), as of ${new Date().toISOString()}.` });
       } catch (err) {
-        console.error(`[${USERNAME}] exploration memory write failed:`, err.message);
+        console.error(`[${USERNAME}] ${parsed.action.type} memory write failed:`, err.message);
       }
+      // Direct request, 2026-09-19 ("expand their search capabilities further, especially the
+      // miner and explorer roles"): a successful mine/explore already has her standing somewhere
+      // new and worth a proper look, not just recording the one thing she was after -- the same
+      // free "look near itself" sweep noteNearbyResources() already does for a scout request,
+      // now also running for her own routine successes. Catches anything else in range
+      // (ore/log/village indicator) that mining/exploring toward the ONE target happened to pass
+      // near, at zero extra travel cost.
+      noteNearbyResources(`after a successful ${parsed.action.type}`).catch((err) =>
+        console.error(`[${USERNAME}] nearby-resource scan failed:`, err.message));
     }
 
     if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {

@@ -1,4 +1,15 @@
-// Version: 1.58.0
+// Version: 1.59.0
+//
+// 1.59.0 (2026-09-19) -- direct request: "expand their search capabilities further, especially the
+// miner and explorer roles." New env-tunable MINE_SEARCH_RADIUS/EXPLORE_SEARCH_RADIUS/
+// EXTENDED_SEARCH_DISTANCE (same per-bot-tuning pattern as MC_SELF_DEFENSE_RANGE, §21) replace
+// "mine"/"explore"'s own hardcoded 32-block scan radius -- Babs (Miner) and Wade (Explorer) now
+// search meaningfully farther via their own systemd units without touching the shared default for
+// everyone else. MINE/EXPLORE_SEARCH_RADIUS kept well under bot.pathfinder.searchRadius's own
+// documented 48-block OOM ceiling (this file's own established caution) since a found block gets
+// one unhopped collectBlock pathfind straight to it; EXTENDED_SEARCH_DISTANCE raised more freely
+// since wanderAndRetryFind's own walk there is already hop-capped regardless of beacon distance.
+// See MINECRAFT_BOTS_DESIGN.md §39.
 //
 // 1.58.0 (2026-09-18) -- direct request: "have the threatened bot run towards safety, run towards
 // golems, or soldiers." New nearestFriendlyGolem() (alongside nearestHostile()) and "flee" now
@@ -1207,7 +1218,19 @@ export function isProtectedBlockName(name) {
 // the normal search radius to find it now," not the extended one.
 const EXPLORE_DISTANCE = 40;
 const EXPLORE_TIMEOUT_MS = 15_000;
-const EXTENDED_SEARCH_DISTANCE = 150;
+// Direct request, 2026-09-19 ("expand their search capabilities further, especially the miner and
+// explorer roles"): env-tunable per-bot, same pattern as MC_SELF_DEFENSE_RANGE (§21) -- lets
+// Babs/Wade's own systemd units search farther than the shared 32-block default without touching
+// every other bot. EXTENDED_SEARCH_DISTANCE (the wanderAndRetryFind "beacon" scan) is safe to raise
+// freely -- the actual walk there is already hop-capped at EXPLORE_DISTANCE regardless of how far
+// the beacon itself is (see wanderAndRetryFind's own step = Math.min(EXPLORE_DISTANCE, dist)
+// below). MINE_SEARCH_RADIUS/EXPLORE_SEARCH_RADIUS are a different risk: a found block up to that
+// many blocks away gets ONE unhopped bot.collectBlock.collect() pathfind straight to it, not a
+// hop-capped walk -- kept well under bot.pathfinder.searchRadius's own 48-block OOM ceiling (this
+// file's own established caution, see EXPLORE_DISTANCE's header above) even when raised.
+const MINE_SEARCH_RADIUS = parseInt(process.env.MC_MINE_SEARCH_RADIUS || "32", 10);
+const EXPLORE_SEARCH_RADIUS = parseInt(process.env.MC_EXPLORE_SEARCH_RADIUS || "32", 10);
+const EXTENDED_SEARCH_DISTANCE = parseInt(process.env.MC_EXTENDED_SEARCH_DISTANCE || "150", 10);
 const MAX_DIRECTED_HOPS = 4;
 
 // Hoisted to module scope (was a local const inside "explore" alone) and exported, 2026-09-11
@@ -2119,7 +2142,7 @@ export async function performAction(bot, action, speaker) {
       }
 
       const wantCount = action.count || 1;
-      const findOptions = { matching: blockIds, maxDistance: 32, count: wantCount * CONTENTION_SEARCH_OVERFETCH };
+      const findOptions = { matching: blockIds, maxDistance: MINE_SEARCH_RADIUS, count: wantCount * CONTENTION_SEARCH_OVERFETCH };
       let positions = bot.findBlocks(findOptions);
       // Direct request, 2026-09-11 ("each bot uses the global world memory to gather a resource
       // it needs, if it's not in their immediate vicinity"): a remembered position -- her own
@@ -2203,7 +2226,7 @@ export async function performAction(bot, action, speaker) {
         return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to explore for it.`);
       }
 
-      const findOptions = { matching: blockIds, maxDistance: 32, count: EXPLORE_BATCH_COUNT * CONTENTION_SEARCH_OVERFETCH };
+      const findOptions = { matching: blockIds, maxDistance: EXPLORE_SEARCH_RADIUS, count: EXPLORE_BATCH_COUNT * CONTENTION_SEARCH_OVERFETCH };
       let positions = bot.findBlocks(findOptions);
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
       if (!positions.length) return fail("didn't find anything useful nearby, even after looking around.");

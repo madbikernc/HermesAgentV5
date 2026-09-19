@@ -2010,6 +2010,51 @@ log lines all session), and `tools/minecraft-chests/` (§ the tool-review conver
 pre-stock them. Falls through to the original fuel+stick-crafting attempt, then the original
 silent-no-more skip log, exactly as before, if the chest search also comes up empty.
 
+## 39. Search capabilities expanded, and a real gap closed: successful mining wrote nothing to world memory (2026-09-19)
+
+Direct request: "expand their search capabilities further, especially the miner and explorer
+roles. make *sure* that discovered resources are being stored in world memory."
+
+**Audited the existing world-memory-writing paths first (all in `goalTick`, `index.js`) rather than
+assuming they were complete.** Found exactly three: a successfully PLACED crafted object, a FAILED
+mine/craft/etc. ("even after looking around"), and a successful EXPLORE. A real, confirmed gap sat
+right in the middle: a **successful MINE never wrote anything at all** -- only her failures were
+ever shared with the fleet. Babs (the fleet's Miner) could spend all day successfully finding and
+mining iron/coal/copper and nobody else would ever learn where from it; the only trace of her work
+anyone else could see was when she came up empty. Fixed (`index.js` 2.76.0) by extending the exact
+same note-write explore's own success already uses to mine's success too, rather than building a
+second, parallel mechanism.
+
+**Also confirmed neither Miner nor Explorer has ever had a deterministic search mechanism at all**
+-- unlike Soldier (§21) and Builder, both roles rely purely on freeform self-propose with no
+code-level checklist or search logic of their own; their `roles.js` priority lists are advisory
+prompt text only. Two concrete expansions, kept scoped rather than building a full parallel
+priority-function system for both roles in one pass:
+
+1. **Wider, per-bot-tunable search radius.** `MINE_SEARCH_RADIUS`/`EXPLORE_SEARCH_RADIUS`/
+   `EXTENDED_SEARCH_DISTANCE` (`actions.js` 1.59.0) replace the hardcoded 32-block scan radius
+   "mine"/"explore" always used, same env-tunable-per-bot pattern already proven for
+   `MC_SELF_DEFENSE_RANGE` (§21). Babs and Wade's own systemd units now set real, larger values
+   (40-block local search for both, 260-block extended range for Wade specifically) without
+   touching the shared default every other bot's occasional mine/explore call still uses. Kept
+   deliberately under `bot.pathfinder.searchRadius`'s own documented 48-block OOM ceiling (a
+   caution this file already established for `EXPLORE_DISTANCE`) for the two radii that drive an
+   unhopped `collectBlock` pathfind straight to a found block; `EXTENDED_SEARCH_DISTANCE` (the
+   wander "beacon" scan) was raised more freely since that walk is already hop-capped regardless of
+   how far the beacon itself is.
+2. **A real search target for Explorer's own stated "locate a village" priority.** Nothing
+   anywhere ever actually searched for one -- only ore/log/crafted-object names were ever scanned.
+   New `VILLAGE_INDICATOR_NAMES` (`bell`, `composter` -- real villager job-site blocks, genuinely
+   low false-positive in vanilla generation) feeds into `noteNearbyResources()`'s existing scan,
+   note-only by construction (that function only ever reads and writes, never moves or mines) so
+   there's no risk of a bot breaking a village's own infrastructure while "gathering" it.
+
+**Broadened when discovery-sharing actually runs, not just what it covers.** Both a successful mine
+and a successful explore now also trigger a full `noteNearbyResources()` sweep (not just a note
+about the one specific target), catching any other ore/log/village-indicator visible from wherever
+the action left her -- a free look around at zero extra travel, the same mechanism already used for
+scout requests now also firing on ordinary routine success.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2051,3 +2096,4 @@ silent-no-more skip log, exactly as before, if the chest search also comes up em
 | 1.34.0 | 2026-09-18 | New §36, direct live report ("Luke is getting shot, not reacting. there is no mass mob"). Verified live via RCON and fresh logs rather than guessed — real skeleton, real damage, `nearestHostile()` working correctly. Root cause: Luke's self-defense had been holding SELF_DEFENSE-tier control on an unresolved `attack (threat=enderman)` for 90+ seconds, silently blocking any response to the separate skeleton sniping him the whole time — not a detection bug, a target-monopolization one, only broken by the unrelated EMERGENCY health-critical flee once he'd dropped to ~6 HP. Confirmed not a one-off: Mark/Luke (the two bots willing to melee-attack rather than flee) logged 2,800/1,770 enderman self-defense triggers in 24h, far above every other bot — endermen's teleport-evasion defeats `bot.pvp`'s chase-and-melee almost as thoroughly as literal flight does for phantom/ghast. `FLEE_ONLY_MOBS` (`actions.js` 1.57.0) now includes `enderman`, same treatment as the existing two entries. Trade-off accepted deliberately: bots no longer fight endermen at all (no more self-defense ender pearls) in exchange for closing a confirmed "gets shot with zero response" failure mode. |
 | 1.35.0 | 2026-09-18 | New §37, direct follow-up ("why aren't the soldier bots coming to defend Nell?" -> "have the threatened bot run towards safety, run towards golems, or soldiers"). Traced live: Nell was genuinely ~70 blocks from both Soldiers, outside `SQUAD_ASSIST_RANGE` (48 blocks) -- `withinSquadAssistRange()` silently drops out-of-range alerts with no log line, a deliberate bound, not a bug, but it leaves far-ranging bots with zero backup. Immediate danger cleared via RCON (same pattern as §29). Root cause of the underlying request: "flee" never had a destination, just maximized distance from the threat with no regard for where that led. New `nearestRallyPoint()` (`index.js` 2.74.0) checks, in order, a nearby iron golem (`nearestFriendlyGolem()`, `actions.js` 1.58.0), a nearby Soldier teammate via each bot's own already-tracked `bot.players`, then home -- wired into all three flee-triggering sites via a new `action.rallyPoint` field; "flee" now heads straight there when one exists, falling back to the original away-from-threat behavior otherwise. |
 | 1.36.0 | 2026-09-18 | New §38, direct live report ("I am watching a spider attack Mark as he doesn't react") that turned out to be one visible thread of a much larger nighttime mob crisis: RCON found Dale at 1.7 HP and 7+ deaths fleet-wide inside under a minute. Stabilized live via RCON mob-clear plus 11 real torches placed directly at `bot.spawnPoint` (verified held, not popped). Operator chose "do both" -- also dug into why `checkHomeLighting()` has now failed THREE times running (2026-09-10, §32, and tonight): confirmed its gate only ever checked the running bot's own personal inventory at the exact moment its 90s check fires, and across a fleet with constant self-defense interrupts, no bot is ever reliably both free and stocked at once -- the general mechanism behind all three failures. Fix (`index.js` 2.75.0): tries a chest first via the existing "loot" action's local-then-remembered-chest search before ever falling back to personal-inventory crafting. |
+| 1.37.0 | 2026-09-19 | New §39, direct request ("expand their search capabilities further, especially the miner and explorer roles. make *sure* that discovered resources are being stored in world memory"). Audited existing memory-write paths and found a real, confirmed gap: a successful MINE never wrote a world-memory note at all, only a failed one did -- fixed (`index.js` 2.76.0) by extending explore's own existing success-note mechanism to mine too. Also confirmed neither Miner nor Explorer has ever had deterministic search logic (unlike Soldier/Builder) -- added env-tunable per-bot search radius (`MINE_SEARCH_RADIUS`/`EXPLORE_SEARCH_RADIUS`/`EXTENDED_SEARCH_DISTANCE`, `actions.js` 1.59.0, same pattern as `MC_SELF_DEFENSE_RANGE`) now set larger on Babs/Wade's own systemd units, kept under the documented 48-block pathfinder OOM ceiling; and new `VILLAGE_INDICATOR_NAMES` (bell, composter) gives Explorer's own stated "locate a village" priority a real, note-only search target for the first time. Both mine and explore now also trigger a full `noteNearbyResources()` sweep on success, not just a note about the one target. |
