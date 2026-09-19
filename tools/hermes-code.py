@@ -260,5 +260,5 @@ def main():
             time.sleep(POLL_SECONDS)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':  # step5 conflict test C1
     main()
