@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Version: 1.0.0
+# Send one or more Minecraft console commands through the configured RCON client.
+
+set -euo pipefail
+
+if (( $# == 0 )); then
+  echo "Usage: mc COMMAND [COMMAND ...]" >&2
+  exit 2
+fi
+if [[ -z "${MCRCON_PASS:-}" ]]; then
+  echo "MCRCON_PASS must be set in the environment." >&2
+  exit 2
+fi
+
+rcon_bin="${MCRCON_BIN:-mcrcon}"
+if ! command -v "$rcon_bin" >/dev/null 2>&1; then
+  echo "RCON client not found: $rcon_bin" >&2
+  exit 127
+fi
+
+export MCRCON_HOST="${MCRCON_HOST:-127.0.0.1}"
+export MCRCON_PORT="${MCRCON_PORT:-25581}"
+
+"$rcon_bin" "$@"
+
+# Revision History
+# 1.0.0 | 2026-09-19 | Initial shared RCON command wrapper.
