@@ -1,4 +1,13 @@
-// Version: 1.60.0
+// Version: 1.61.0
+//
+// 1.61.0 (2026-09-19) -- direct follow-up: "the downgrade rejection must also reject if the
+// mayor's instructions would cause the quality of their equipment to be reduced." §40's own "give"
+// check only ever caught going from "has one" to "has none" -- giving away a diamond sword while a
+// wooden one stays behind is a downgrade too, even though she'd technically still have "a sword."
+// New GEAR_TIER_RANK (a single common-sense material ranking, not a precise armor-point/mining-
+// level simulation -- good enough to answer "worse than before") lets the same check also compare
+// the tier of what's being given against the best tier she'd be left holding in that category.
+// See MINECRAFT_BOTS_DESIGN.md §40 (updated).
 //
 // 1.60.0 (2026-09-19) -- direct request: "Mayor/Leader missions, if they would effectively
 // DOWNGRADE a bot's equipment or status, should be rejected by the bot." "give" (the concrete
@@ -987,6 +996,30 @@ export const FOOD_NAMES = [
 const GEAR_SUFFIXES = [
   "_helmet", "_chestplate", "_leggings", "_boots", "_sword", "_axe", "_pickaxe", "_shovel", "_hoe",
 ];
+
+// Direct request, 2026-09-19 ("the downgrade rejection must also reject if the mayor's
+// instructions would cause the quality of their equipment to be reduced") -- direct follow-up to
+// "give"'s own §40 fix below, which only ever caught going from "has one" to "has none." Giving
+// away a diamond sword while a wooden one stays behind is just as much a downgrade as giving away
+// her only sword outright. A single common-sense material ranking, not a precise simulation of
+// real armor-point/mining-level math (gold in particular is inconsistent in actual vanilla rules
+// between tools and armor) -- good enough to answer "would she end up worse than before," which
+// is all this check needs.
+const GEAR_TIER_RANK = {
+  wood: 0, wooden: 0, leather: 0,
+  golden: 1, gold: 1,
+  stone: 2, chainmail: 2,
+  iron: 3,
+  diamond: 4,
+  netherite: 5,
+};
+
+// Returns -1 for an unrecognized material (e.g. a modded item) rather than guessing -- callers
+// treat that as "no tier data, don't block on quality" and fall back to the has-one/has-none check.
+function gearTierRank(itemName, suffix) {
+  const material = itemName.slice(0, itemName.length - suffix.length);
+  return material in GEAR_TIER_RANK ? GEAR_TIER_RANK[material] : -1;
+}
 
 // Direct request, 2026-09-18 ("if the bot is in need of a piece of equipment... and finds one
 // already crafted in a chest, it should pick up ONE of those pieces... and abandon the quest to
@@ -2696,18 +2729,36 @@ export async function performAction(bot, action, speaker) {
       // still needs, whoever asked. Sword and axe are treated as one interchangeable "weapon"
       // category (matching equipment.js's own hasWeapon() definition); armor/tool suffixes are
       // each their own category (a spare pickaxe doesn't cover for giving away her only shovel).
-      // Only blocks going from "has one" to "has none" -- a genuine spare is always fine to give.
+      //
+      // Direct follow-up, 2026-09-19 ("must also reject if... the quality of their equipment
+      // [would be] reduced"): going to zero was only half of it -- giving away her BEST piece in
+      // a category while a worse one stays behind is a downgrade too, even though she'd technically
+      // "still have one." Checks the highest GEAR_TIER_RANK she'd be left with in this exact
+      // category against the tier of what's being given away.
       const giveSuffix = GEAR_SUFFIXES.find((s) => action.item.endsWith(s));
       if (giveSuffix) {
         const isWeapon = giveSuffix === "_sword" || giveSuffix === "_axe";
         const category = isWeapon ? ["_sword", "_axe"] : [giveSuffix];
-        const totalOfCategory = bot.inventory.items()
-          .filter((i) => category.some((s) => i.name.endsWith(s)))
-          .reduce((sum, i) => sum + i.count, 0);
+        const categoryItems = bot.inventory.items().filter((i) => category.some((s) => i.name.endsWith(s)));
+        const totalOfCategory = categoryItems.reduce((sum, i) => sum + i.count, 0);
         const remainingAfterGive = totalOfCategory - giveCount;
-        if (remainingAfterGive <= 0) {
-          return fail(`won't give away my ${action.item} -- that's my only ` +
-            `${isWeapon ? "weapon" : giveSuffix.slice(1)}, and giving it up would leave me ` +
+
+        const givingSuffix = category.find((s) => action.item.endsWith(s));
+        const givingTier = gearTierRank(action.item, givingSuffix);
+        const bestRemainingTier = categoryItems.reduce((best, i) => {
+          const remaining = i.name === action.item ? i.count - giveCount : i.count;
+          if (remaining <= 0) return best;
+          const s = category.find((suf) => i.name.endsWith(suf));
+          return Math.max(best, gearTierRank(i.name, s));
+        }, -1);
+
+        const wouldZeroOut = remainingAfterGive <= 0;
+        const wouldDowngradeQuality = !wouldZeroOut && givingTier >= 0 && givingTier > bestRemainingTier;
+        if (wouldZeroOut || wouldDowngradeQuality) {
+          const label = isWeapon ? "weapon" : giveSuffix.slice(1);
+          const reason = wouldZeroOut ? `that's my only ${label}`
+            : `it's my best ${label} and I'd be left with a worse one`;
+          return fail(`won't give away my ${action.item} -- ${reason}, and that would leave me ` +
             `worse off than before.`);
         }
       }

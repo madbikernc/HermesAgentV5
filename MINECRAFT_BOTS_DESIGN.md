@@ -2055,7 +2055,7 @@ about the one specific target), catching any other ore/log/village-indicator vis
 the action left her -- a free look around at zero extra travel, the same mechanism already used for
 scout requests now also firing on ordinary routine success.
 
-## 40. Bots now refuse a "give" that would leave them without a weapon/armor/tool they need (2026-09-19)
+## 40. Bots now refuse a "give" that would leave them without a weapon/armor/tool they need, or downgrade its quality (2026-09-19)
 
 Direct request: "Mayor/Leader missions, if they would effectively DOWNGRADE a bot's equipment or
 status, should be rejected by the bot."
@@ -2081,6 +2081,17 @@ genuine spare is always still fine to give -- this only blocks the specific case
 Refusal is a real `fail()` with a clear reason (`"won't give away my iron_sword -- that's my only
 weapon..."`), not a silent no-op: visible in her own logs, and reported back exactly like any other
 declined action, so whoever issued the request (Mayor included) sees why.
+
+**Direct follow-up: "must also reject if... the quality of their equipment [would be]
+reduced."** Going to zero was only half the problem -- giving away her BEST piece in a category
+while a worse one stays behind is a downgrade too, even though she'd technically "still have one."
+New `GEAR_TIER_RANK` (`actions.js` 1.61.0) -- a single common-sense material ranking (wood/leather
+< gold < stone/chainmail < iron < diamond < netherite), deliberately not a precise simulation of
+real armor-point/mining-level math (gold in particular is genuinely inconsistent between tools and
+armor in actual vanilla rules) since this only needs to answer "would she end up worse than
+before" -- lets the same check compare the tier of what's being given against the best tier she'd
+still be holding in that exact category afterward. An unrecognized material (e.g. a modded item)
+falls back to the has-one/has-none check alone rather than guessing at a tier that doesn't exist.
 
 **Scoped deliberately to "give," not a general directive-intent classifier.** Trying to detect
 "would this arbitrary instruction downgrade her status" in the abstract (before it's even executed)
@@ -2133,3 +2144,4 @@ requests it can't actually evaluate.
 | 1.36.0 | 2026-09-18 | New §38, direct live report ("I am watching a spider attack Mark as he doesn't react") that turned out to be one visible thread of a much larger nighttime mob crisis: RCON found Dale at 1.7 HP and 7+ deaths fleet-wide inside under a minute. Stabilized live via RCON mob-clear plus 11 real torches placed directly at `bot.spawnPoint` (verified held, not popped). Operator chose "do both" -- also dug into why `checkHomeLighting()` has now failed THREE times running (2026-09-10, §32, and tonight): confirmed its gate only ever checked the running bot's own personal inventory at the exact moment its 90s check fires, and across a fleet with constant self-defense interrupts, no bot is ever reliably both free and stocked at once -- the general mechanism behind all three failures. Fix (`index.js` 2.75.0): tries a chest first via the existing "loot" action's local-then-remembered-chest search before ever falling back to personal-inventory crafting. |
 | 1.37.0 | 2026-09-19 | New §39, direct request ("expand their search capabilities further, especially the miner and explorer roles. make *sure* that discovered resources are being stored in world memory"). Audited existing memory-write paths and found a real, confirmed gap: a successful MINE never wrote a world-memory note at all, only a failed one did -- fixed (`index.js` 2.76.0) by extending explore's own existing success-note mechanism to mine too. Also confirmed neither Miner nor Explorer has ever had deterministic search logic (unlike Soldier/Builder) -- added env-tunable per-bot search radius (`MINE_SEARCH_RADIUS`/`EXPLORE_SEARCH_RADIUS`/`EXTENDED_SEARCH_DISTANCE`, `actions.js` 1.59.0, same pattern as `MC_SELF_DEFENSE_RANGE`) now set larger on Babs/Wade's own systemd units, kept under the documented 48-block pathfinder OOM ceiling; and new `VILLAGE_INDICATOR_NAMES` (bell, composter) gives Explorer's own stated "locate a village" priority a real, note-only search target for the first time. Both mine and explore now also trigger a full `noteNearbyResources()` sweep on success, not just a note about the one target. |
 | 1.38.0 | 2026-09-19 | New §40, direct request ("Mayor/Leader missions, if they would effectively DOWNGRADE a bot's equipment or status, should be rejected by the bot"). Found the concrete mechanism rather than a general directive classifier: Mayor's own directives are plain chat, routed through the same classifyIntent pipeline as anything else, and the one real gear-loss vector -- "give" (`actions.js`) -- never checked whether complying would leave the giver without a weapon/armor/tool she needs. Fixed (1.60.0): refuses when giving would take an item's whole category (sword/axe as one interchangeable weapon category matching `hasWeapon()`, armor/tools each their own) from "has one" to "has none" -- a genuine spare is still always fine to give. Refusal is a real, visible `fail()`, not a silent no-op. |
+| 1.39.0 | 2026-09-19 | Extended §40, direct follow-up ("the downgrade rejection must also reject if the mayor's instructions would cause the quality of their equipment to be reduced"). Going to zero was only half of it -- giving away her best piece in a category while a worse one stays behind is a downgrade too. New `GEAR_TIER_RANK` (`actions.js` 1.61.0, a single common-sense material ranking, not a precise armor-point/mining-level simulation) lets "give"'s existing check also compare the tier of what's being given against the best tier she'd still hold afterward; an unrecognized material falls back to the has-one/has-none check alone. |
