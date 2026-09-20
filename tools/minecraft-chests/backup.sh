@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.0.0
+# Version: 1.1.0
 # Snapshot a local Minecraft server world while RCON saves are paused.
 
 set -euo pipefail
@@ -29,8 +29,8 @@ archive="$MC_BACKUP_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$label.tar.gz"
 
 save_on() { "$mc" 'save-on' >/dev/null; }
 "$mc" 'save-all flush'
-"$mc" 'save-off'
 trap save_on EXIT
+"$mc" 'save-off'
 tar -C "$(dirname -- "$MC_WORLD_DIR")" -czf "$archive" -- "$(basename -- "$MC_WORLD_DIR")"
 trap - EXIT
 save_on
@@ -38,3 +38,4 @@ echo "$archive"
 
 # Revision History
 # 1.0.0 | 2026-09-19 | Initial consistent local world snapshot.
+# 1.1.0 | 2026-09-19 | Move `trap save_on EXIT` before the `save-off` call -- previously, a failed/dropped `save-off` (e.g. transient network blip) could exit under `set -e` before the trap was armed, leaving autosave disabled on the server with nothing to restore it.
