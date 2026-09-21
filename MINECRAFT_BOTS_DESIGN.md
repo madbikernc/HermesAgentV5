@@ -2329,6 +2329,40 @@ fight, not another flee attempt), just triggered by repetition instead of an exp
 result. Resets on any attack (the standoff is broken) or once enough time has passed that a new
 trigger is clearly an unrelated encounter, not a continuation of the same one.
 
+## 47. "Can't get out of the home": §44's own digCost fix was a self-inflicted regression (2026-09-21)
+
+Direct live report: "they can't get out of the home." Investigated immediately as a possible
+regression from the last real pathfinding change (§44) rather than a brand-new, unrelated gap --
+correctly, as it turned out.
+
+**Confirmed live, precisely.** A position snapshot found 7 of 9 bots crammed into a single ~2x5
+block area -- one shared shelter. Mayor's own logs showed **239** `path_update status=noPath`
+results in a 2-hour window, and zero successful `mine`/`explore`/`gohome` actions in that entire
+span -- not merely slow or costly travel, a hard, total inability to go anywhere.
+
+**Root cause: `astar.js`'s own maxCost ceiling, not just a cost preference.** Read
+mineflayer-pathfinder's actual search implementation: `this.maxCost = startNode.h + searchRadius`,
+and any node whose cost exceeds it is **pruned from the search entirely** --
+`if (this.maxCost > 0 && gFromThisNode + heuristic > this.maxCost) continue`. This codebase pins
+`searchRadius` at 48 (`bot.pathfinder.searchRadius = 48`, an existing OOM-safety cap). For a nearby
+goal (heuristic near zero -- exactly "get out of this small room"), the ENTIRE search budget is
+only ~48-58 cost-units total. §44's `digCost = 30` meant a single dig on an ordinary block could
+cost `(1 + 3*digTime/1000) * 30` -- **40-120+** on its own, consuming the whole budget in one step.
+Not "more expensive, still findable" -- mathematically pruned, indistinguishable from a genuine
+dead end to the search. §44's own stated goal ("she'll still dig through a genuine dead end... not
+banned outright") was quietly false the entire time it shipped, for exactly the search-radius range
+this codebase actually uses.
+
+**Fix (`index.js` 2.81.0):** lowered `digCost` from 30 to 5. Still a real, meaningful 5x
+discouragement over a plain walk step -- §44's actual goal (prefer doors/walking over wall-breach
+shortcuts) is unchanged and still holds -- but a slow block's dig now costs comfortably under the
+~48+ budget with room left for genuine walking alongside it, so a real exit is never mathematically
+impossible again. The same class of risk exists in principle for `liquidCost` (20, unchanged, in
+place since well before this session's own work) -- not touched here since it hasn't been
+implicated in any live report, but worth remembering if a "can't cross water" symptom ever surfaces:
+the search-radius-derived maxCost ceiling applies to every additive cost tuning in this file, not
+just `digCost`.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2379,3 +2413,4 @@ trigger is clearly an unrelated encounter, not a continuation of the same one.
 | 1.43.0 | 2026-09-21 | New §44, direct report ("they still destroy walls instead of using doors"). Distinct from §18/§19's own door-protection fix, still intact and verified -- doors themselves genuinely can't be dug through. The gap was cost, not permission: an ordinary wall block has no such protection (rightly so in general), and mineflayer-pathfinder's own cost formula (`laborCost = (1 + 3*digTime/1000) * digCost`, default `digCost` 1) made a quick-to-break wall shortcut cheaper than detouring to the actual door. Fixed (`index.js` 2.79.0): `movements.digCost = 30`, same "strongly prefer, don't forbid" reasoning as the existing `movements.liquidCost = 20`. Verified this reaches every pathfinding call site -- `bot.collectBlock`/`bot.pvp` both already had their own internal movements references pointed at this same shared object from an earlier plugin-swap fix, and `mineflayer-tool` never touches movements at all. |
 | 1.44.0 | 2026-09-21 | New §45, direct request ("I want real confirmation they can use the crafting table and furnace"). A live single-bot test attempt was derailed by teammates repeatedly requesting away the test materials and an idle-reassignment gap -- pivoted to a fleet-wide 24h log sweep instead, which found something far more consequential than a missing positive example: every single smelt attempt fleet-wide had failed for 24+ hours (`"found furnaces nearby, but couldn't use any of them"`, ~80 occurrences on Bob alone), zero successes anywhere. Root cause confirmed directly from the smelt action's own diagnostic logging: the fleet's two real furnaces were jammed with 63-64 `coal_block` already maxing out their fuel slots (one also had 16 stranded `iron_ingot` in its output) -- `putFuel()` was called unconditionally every attempt with no check for existing fuel, so once a slot capped out, every future call threw `"destination full"` and aborted the whole smelt before ever reaching `putInput()`. Fixed (`actions.js` 1.63.0): collects any existing output first (recovering stranded items), and treats a failed `putFuel()` as "already has fuel" rather than fatal, falling through to `putInput()` with whatever's already there. |
 | 1.45.0 | 2026-09-21 | New §46, direct live follow-up ("they still wont fight back when pressured... a single zombie... systematically attacking them, with no reprisals"). §43's rule was working as written -- confirmed Amy had recently won a real fight -- but live pressure found a real gap: Mayor at 16-20 HP (above `HALF_HEALTH`) got re-engaged by the same zombie every ~2s in a cramped house, "successfully" fleeing nearly every time, never taking enough cumulative damage to cross the fight threshold, for minutes at a stretch -- functionally unable to flee even though every individual result reported `ok=true`, so `attackAsLastResort()` (fires only on an outright flee failure) never triggered either. Fixed (`index.js` 2.80.0): `decideFightType()` now tracks consecutive flee decisions and escalates to fighting after 3 in a row without a long-enough gap, regardless of health or role. |
+| 1.46.0 | 2026-09-21 | New §47, direct live report ("they can't get out of the home") -- a real, self-inflicted regression from §44's own `digCost=30`, confirmed live rather than assumed a new gap. 7 of 9 bots found crammed in one shelter; Mayor alone logged 239 `noPath` results in 2 hours, zero successful travel the entire window. Root cause: mineflayer-pathfinder's own `astar.js` maxCost ceiling (`startNode.h + searchRadius`, with `searchRadius` pinned at 48 in this codebase) PRUNES any node exceeding it rather than just deprioritizing it -- for a nearby goal, the whole search budget is only ~48-58, and a single dig at `digCost=30` could cost 40-120+ on its own, silently turning "expensive but valid path" into a hard `noPath`. Fixed (`index.js` 2.81.0): lowered `digCost` to 5 -- still a real 5x discouragement (§44's actual goal unchanged), but no longer capable of making a real exit mathematically impossible. Flagged: the same maxCost-ceiling risk applies to any additive cost tuning in this file, including the untouched `liquidCost=20`. |

@@ -1,4 +1,16 @@
-// Version: 2.80.0
+// Version: 2.81.0
+//
+// 2.81.0 (2026-09-21) -- direct live report: "they can't get out of the home." A real, self-
+// inflicted regression from §44's own digCost=30, not a new gap -- confirmed live via
+// mineflayer-pathfinder's own astar.js: its maxCost ceiling (startNode.h + searchRadius, 48 here)
+// PRUNES any node whose cost exceeds it, not just deprioritizes it. For a nearby goal, the whole
+// search budget is only ~48-58 -- and a single dig at digCost 30 could cost 40-120+ on its own,
+// consuming that entire budget and turning a merely-expensive route into a hard noPath. Confirmed
+// live: 7 bots crammed into one small shelter, one alone logging 239 noPath results in 2 hours,
+// zero successful travel the whole window -- exactly "can't get out." Lowered digCost 30 -> 5:
+// still a real 5x discouragement over a plain walk step (the original §44 goal, unchanged), just
+// no longer capable of making a real exit mathematically impossible on its own. See
+// MINECRAFT_BOTS_DESIGN.md §47.
 //
 // 2.80.0 (2026-09-21) -- direct live follow-up: "they still wont fight back when pressured. Just
 // found a single zombie in a 'house' with most of the bots, and it was systematically attacking
@@ -1450,7 +1462,21 @@ bot.once("spawn", async () => {
   // above a typical walking route's cost, same "strongly prefer, don't forbid" reasoning as
   // liquidCost above -- she'll still dig through a genuine dead end with no path around it, just
   // never again as a shortcut past a door that was right there.
-  movements.digCost = 30;
+  //
+  // Direct live follow-up, 2026-09-21 ("they can't get out of the home"): the original value here
+  // (30) was a real, self-inflicted regression, not a tuning nitpick -- confirmed live via
+  // astar.js's own maxCost ceiling (this.maxCost = startNode.h + searchRadius, and any node whose
+  // cost exceeds it gets PRUNED from the search entirely, not just deprioritized). With
+  // searchRadius fixed at 48 (below) and a nearby goal's own heuristic near zero, the entire
+  // search budget for a short local trip is only ~48-58 -- and laborCost = (1 + 3*digTime/1000) *
+  // digCost means a SINGLE dig on an ordinary block at digCost 30 could cost 40-120+ on its own,
+  // consuming the whole budget in one step and turning "expensive but valid path" into a hard
+  // noPath. Confirmed live: 7 bots crammed into one small shelter, one bot alone logging 239
+  // noPath results in 2 hours, zero successful travel the entire window. Lowered to a value that
+  // keeps even a slow block's dig comfortably under that budget with room left for real walking --
+  // still a genuine 5x discouragement over a plain walk step, just not one capable of making a
+  // real exit mathematically impossible.
+  movements.digCost = 5;
   // Direct request, 2026-09-08 ("before they dig or destroy a block, they should make sure it
   // is not a functional block like a bed or a furnace... or any other form of crafted item or
   // block"). Confirmed against mineflayer-pathfinder's own movements.js source: its default
