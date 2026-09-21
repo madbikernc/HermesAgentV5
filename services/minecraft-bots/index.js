@@ -1,4 +1,20 @@
-// Version: 2.84.0
+// Version: 2.85.0
+//
+// 2.85.0 (2026-09-21) -- direct live report: "group of bots standing in the open, not moving or
+// running, being actively attacked -- automation failure." Traced back to 2.84.0's own
+// MAX_DIG_LABOR_COST cap: confirmed live via the dig_error diagnostic that Mayor/Nell/Bob were
+// all independently hammering `dig_error target: netherite_block` at the same home coordinates.
+// Measured real digTime: netherite_block/obsidian take 75000ms even with a netherite pickaxe +
+// efficiency 5 -- a real 75-second dig, but the labor-cost cap flattened it down to look as
+// "cheap" as a plank wall, so pathfinder kept choosing it, starting a real long dig, and getting
+// aborted almost immediately by some other periodic check (self-defense fires every 2s),
+// recomputing the identical route into the identical failure forever -- exactly what "frozen mid-
+// combat" looks like when the same shared movements object drives attack's own chase-to-target
+// movement. Fixed: excludes any block with real hardness >= 10 (a wide, clean gap -- every normal
+// terrain/building material tops out at hardness 5, obsidian/netherite_block/ancient_debris sit
+// at 30-50) from movements.blocksCantBreak, the same "can't be an incidental pathfinding
+// shortcut" protection already applied to doors/chests/furnaces, without touching "mine"'s own
+// ability to deliberately target one. See MINECRAFT_BOTS_DESIGN.md §51.
 //
 // 2.84.0 (2026-09-21) -- direct report: "now they are back to digging through the wall instead
 // of opening the door" -- the exact regression §44 originally fixed, reopened by §47's own
@@ -1534,6 +1550,46 @@ bot.once("spawn", async () => {
   // deliberate target check.
   for (const block of bot.registry.blocksArray) {
     if (isProtectedBlockName(block.name)) movements.blocksCantBreak.add(block.id);
+  }
+  // Direct live report, 2026-09-21 ("group of bots standing in the open, not moving or running,
+  // being actively attacked -- automation failure"), traced back to this same day's own
+  // MAX_DIG_LABOR_COST fix (swim-movements.js 1.1.0, added to solve the wall-vs-door regression).
+  // Confirmed live: Mayor, Nell, and Bob were all independently hitting
+  // `dig_error target: netherite_block` at nearly the same home-base coordinates, over and over.
+  // Measured the real digTime: netherite_block/obsidian take 75000ms to dig even with a netherite
+  // pickaxe + efficiency 5 (hardness 50 barely responds to efficiency at all) -- a REAL 75-second
+  // dig attempt, not a cheap one. The labor-cost cap that makes doors-vs-walls tuning safe has a
+  // real cost: it flattens laborCost for EVERY diggable block down to the same ceiling regardless
+  // of actual hardness, so a block that should cost 3000+ (and therefore never look worth
+  // attempting) now reads as identically "cheap" as a plank wall. Pathfinder kept choosing this
+  // route, starting a real 75-second dig, and almost immediately getting interrupted by some
+  // OTHER periodic check in the same process (self-defense fires every 2s) -- bot.stopDigging()
+  // aborts the in-flight dig, which the library reports as the same dig_error, and the next tick
+  // recomputes the identical "cheap" route into the identical abort, forever. During combat, this
+  // is exactly what "standing still while being hit" looks like from outside: attack's own
+  // chase-to-target movement (bot.pvp shares this same movements object) thrashing on this loop
+  // instead of ever actually closing distance or landing a hit.
+  //
+  // The right fix isn't to lower the cap back down (that reopens §50's own wall-vs-door
+  // regression) -- it's to stop letting the cap apply to blocks no reasonable cost tuning should
+  // ever call "cheap" in the first place. blocksCantBreak already excludes furnaces/chests/doors
+  // from casual auto-dig-while-routing without making them permanently unbreakable outright (a
+  // bot that wants one gone still can via a deliberate action); the same reasoning extends
+  // naturally to real-world hardness. HARDNESS_THRESHOLD=10 is a wide, deliberately conservative
+  // gap: every normal terrain/building material this fleet actually builds with or digs through
+  // tops out at hardness 5 (iron_block, diamond_block, coal_block) or well under (stone 1.5,
+  // deepslate 3) -- obsidian/netherite_block/ancient_debris/crying_obsidian/respawn_anchor all
+  // sit at 30-50, a clean, wide separation with nothing real in between. Deliberately excluded
+  // from isProtectedBlockName() (which also drives "mine"'s own deliberate-target refusal, with
+  // an explicit "that's a placed/crafted block" message) rather than added there -- a bot
+  // deliberately choosing to reclaim a stored netherite/diamond/iron block should still be able
+  // to via "mine"; this only ever stops pathfinder from treating one as an incidental shortcut
+  // while routing to somewhere else entirely.
+  const HARDNESS_THRESHOLD = 10;
+  for (const block of bot.registry.blocksArray) {
+    if (typeof block.hardness === "number" && block.hardness >= HARDNESS_THRESHOLD) {
+      movements.blocksCantBreak.add(block.id);
+    }
   }
   bot.pathfinder.setMovements(movements);
   // Real bug found live 2026-09-11 (direct report: "what's wrong with the bots now" -> repeated
