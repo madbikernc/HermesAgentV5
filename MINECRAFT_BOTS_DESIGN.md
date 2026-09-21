@@ -2189,6 +2189,40 @@ worth a real design decision (not assumed here): should a bot who has just faile
 under threat, and still has a weapon, attack as a last resort rather than repeat a doomed flee
 attempt indefinitely?
 
+## 43. Role-based fight-or-flee rule, and fighting back when fleeing genuinely fails (2026-09-21)
+
+Direct answer to §42's own open question, plus a broader rule change: "if truly unable to flee,
+they should all fight. Soldiers fight *always*, others fight when under half health."
+
+**Replaced the flat health threshold with an explicit role rule.** The old decision (`checkSelfDefense`,
+`checkSleepingThreat`) was a single number, `SELF_DEFENSE_FLEE_HEALTH` (default 10, env-overridden to
+4 on Mark/Luke's own systemd units) -- attack above it, flee at or below, the same shape for every
+bot, only ever tuned by a magnitude, not a rule. New `decideFightType()` (`index.js` 2.78.0) makes
+the rule explicit instead: a Soldier's whole job is combat, so health alone never sends her running
+(she still flees `FLEE_ONLY_MOBS` or when unarmed -- those are a real inability to land a hit, not a
+courage judgment call, see `actions.js`'s own `FLEE_ONLY_MOBS` header). Anyone else avoids a fight
+while healthy -- better spent doing her actual role -- but stops retreating and finishes it once
+genuinely hurt (health < 10/20). The now-superseded per-bot `MC_SELF_DEFENSE_FLEE_HEALTH` override
+was removed from Mark/Luke's own unit files rather than left in place silently doing nothing.
+
+**Closed the one place the old rule was never actually applied at all.** The EMERGENCY health-critical
+handler (`bot.on("health")`, fires only at 6 HP or below -- always "under half health" by definition)
+had always hardcoded an unconditional flee, regardless of role, the entire time self-defense's own
+threshold logic existed alongside it. Now uses the exact same `decideFightType()` -- a Soldier fights
+here too, and so does anyone else, since this handler firing at all already satisfies the "under
+half health" condition the new rule fights on.
+
+**Directly answers §42's open question: a failed flee now triggers a fight, not a shrug.** New
+`attackAsLastResort()`, called from all three flee-triggering sites (`checkSelfDefense`, the
+EMERGENCY handler, `checkSleepingThreat`) whenever a flee attempt comes back `!ok` -- meaning
+pathfinder genuinely couldn't create distance, a fast and clean failure now rather than an infinite
+stuck loop thanks to §42's own dig-disable fix. Retreating not working is retreating not working
+regardless of why "flee" was chosen in the first place; standing still and absorbing hits because
+running away didn't pan out is strictly worse than fighting, provided there's a weapon to fight
+with. Deliberately still excludes `FLEE_ONLY_MOBS` even as a last resort -- a flyer or a
+teleport-evader stays genuinely unreachable no matter how desperate the situation gets, the exact
+doomed-melee shape that set already exists to prevent.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2235,3 +2269,4 @@ attempt indefinitely?
 | 1.39.0 | 2026-09-19 | Extended §40, direct follow-up ("the downgrade rejection must also reject if the mayor's instructions would cause the quality of their equipment to be reduced"). Going to zero was only half of it -- giving away her best piece in a category while a worse one stays behind is a downgrade too. New `GEAR_TIER_RANK` (`actions.js` 1.61.0, a single common-sense material ranking, not a precise armor-point/mining-level simulation) lets "give"'s existing check also compare the tier of what's being given against the best tier she'd still hold afterward; an unrecognized material falls back to the has-one/has-none check alone. |
 | 1.40.0 | 2026-09-19 | New §41, direct report ("I don't think they really know how to use the crafting table or furnace"). Root-caused live: Amy crafted a crafting_table at 01:45, then a Builder-priority "place it at home" REJECTED DONE fired three times over 25 minutes -- every time the whole goal was abandoned (`currentGoal = null`) instead of acting on the fact she was still carrying the item the entire time, so the next re-issued directive immediately re-hallucinated DONE again with zero real steps. Fixed (`index.js` 2.77.0): on this rejection, if she's still holding the item, walk home and place it herself right now (reusing `gohome`/`place`) before giving up -- one deterministic shot instead of another unreliable LLM round-trip. Also clarified `planNextStep`'s own `ACTION CRAFT`/`ACTION PLACE` descriptions, which never mentioned CRAFT's existing auto-chaining of simple intermediates or that PLACE is what actually satisfies a "set one up at home" directive -- a real, confirmed contributor to repeated multi-paragraph confused reasoning in live logs. |
 | 1.41.0 | 2026-09-21 | New §42, direct request (24h behavioral review) that surfaced ~4,271 fleet-wide deaths, a 408-death streak, still live during investigation -- stabilized via RCON mob-clear. Operator's own direct observation ("one zombie camped out... none of them fight back including the soldiers... if the bots are inside a building with a zombie, they seem to act as if they are trapped") reframed the theory and led to the real mechanism: EMERGENCY-critical health commits a bot to flee-only (never attacks, any role), and flee's pathfind shares the fleet's canDig-enabled Movements -- in an enclosed room, escape can require digging through a wall, and a failed dig makes pathfinder recompute the IDENTICAL path and fail again immediately, confirmed live via `path_reset: dig_error` firing dozens of times a second with an unchanged cost signature. Fixed (`actions.js` 1.62.0): "flee" now disables digging for its own pathfind, forcing a real walkable route or a clean fast failure instead of an infinite stuck loop. Flagged, not fixed: a bot with zero real escape route still won't fight back afterward (EMERGENCY's own no-attack design is unchanged) -- a real policy decision left open. |
+| 1.42.0 | 2026-09-21 | New §43, direct answer to §42's own open question plus a rule change: "if truly unable to flee, they should all fight. Soldiers fight *always*, others fight when under half health." New `decideFightType()` (`index.js` 2.78.0) replaces the flat `SELF_DEFENSE_FLEE_HEALTH` threshold with an explicit role rule -- Soldiers never flee for health reasons (only `FLEE_ONLY_MOBS`/no-weapon), others fight once below half health (10/20). Retired the now-superseded per-bot env override on Mark/Luke's units. Also closed the one place the old rule was never applied: the EMERGENCY health-critical handler used to hardcode an unconditional flee for every role; now uses the same decision (and always ends up fighting, since it only fires under half health by definition). New `attackAsLastResort()` fires from all three flee-triggering sites whenever a flee attempt genuinely fails -- standing still after a failed retreat is worse than fighting, provided there's a weapon; `FLEE_ONLY_MOBS` still excluded even here, since that's a real inability to land a hit, not a courage call. |

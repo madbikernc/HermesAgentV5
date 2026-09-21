@@ -9,7 +9,8 @@ Type=simple
 User=pmoney
 WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
 Environment=MC_BOT_USERNAME=Mark
-Environment=MC_SELF_DEFENSE_FLEE_HEALTH=4
+# MC_SELF_DEFENSE_FLEE_HEALTH retired 2026-09-21: replaced by index.js's own role-based
+# decideFightType() (Soldiers fight always, regardless of any per-bot health threshold).
 Environment=MC_SELF_DEFENSE_RANGE=20
 Environment=MC_SQUAD_RESPONDER=true
 Environment=MC_FALLBACK_COORDINATOR=true

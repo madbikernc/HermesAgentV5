@@ -1,4 +1,16 @@
-// Version: 2.77.0
+// Version: 2.78.0
+//
+// 2.78.0 (2026-09-21) -- direct follow-up to §42's flee dig-loop fix: "if truly unable to flee,
+// they should all fight. Soldiers fight *always*, others fight when under half health." Replaces
+// the flat SELF_DEFENSE_FLEE_HEALTH threshold (per-bot env-tuned only) with a role-based
+// decideFightType(): a Soldier never backs off for health reasons, anyone else fights once
+// genuinely hurt (< 10/20) rather than staying passive; FLEE_ONLY_MOBS/no-weapon still override
+// both. Also closes the one place this rule wasn't applied at all -- the EMERGENCY health-critical
+// handler used to hardcode an unconditional flee regardless of role, now uses the same decision.
+// New attackAsLastResort(): when a flee genuinely fails (couldn't create distance -- a fast, clean
+// failure now thanks to §42, not an infinite stuck loop), immediately try to fight instead of
+// silently giving up for that tick, for all three flee-triggering sites. See
+// MINECRAFT_BOTS_DESIGN.md §43.
 //
 // 2.77.0 (2026-09-19) -- direct report: "I don't think they really know how to use the crafting
 // table or furnace." Root-caused live, not guessed: Amy crafted a crafting_table at 01:45, then a
@@ -3688,8 +3700,38 @@ const SELF_DEFENSE_CHECK_MS = parseInt(process.env.MC_SELF_DEFENSE_CHECK_MS || "
 // themselves and defending the spawn point") so a combat-postured bot (Mark/Luke) can run a
 // lower flee threshold and a wider detection range than the default -- same code, per-bot tuning
 // via each unit's own Environment= lines, no behavior change for Babs/Amy who don't set these.
-const SELF_DEFENSE_FLEE_HEALTH = parseInt(process.env.MC_SELF_DEFENSE_FLEE_HEALTH || "10", 10);
 const SELF_DEFENSE_RANGE = parseInt(process.env.MC_SELF_DEFENSE_RANGE || "12", 10);
+
+// Direct request, 2026-09-21 ("if truly unable to flee, they should all fight. Soldiers fight
+// *always*, others fight when under half health"). Replaces the flat SELF_DEFENSE_FLEE_HEALTH
+// threshold (a single number, previously tuned per-bot only via each unit's own env override --
+// see the retired MC_SELF_DEFENSE_FLEE_HEALTH, now superseded) with an explicit role-based rule.
+// A Soldier's whole job is fighting, so health alone never sends her running; anyone else avoids
+// a fight while healthy (better spent doing her actual role) but stops retreating and finishes it
+// once she's already hurt badly enough for it to matter. FLEE_ONLY_MOBS and no-weapon still
+// override both roles -- those aren't a courage judgment call, they're a genuine inability to
+// land a hit (see FLEE_ONLY_MOBS's own header in actions.js).
+const HALF_HEALTH = 10; // out of a max of 20
+function decideFightType(threatName) {
+  if (FLEE_ONLY_MOBS.has(threatName) || !hasWeapon(bot)) return "flee";
+  if (myRole?.primary === ROLES.SOLDIER) return "attack";
+  return bot.health < HALF_HEALTH ? "attack" : "flee";
+}
+
+// Direct follow-up, same request ("if truly unable to flee, they should all fight"): a failed
+// flee (pathfinder genuinely couldn't create distance -- see actions.js 1.62.0's own dig-loop
+// fix, which makes this a fast, clean failure now instead of an infinite stuck retry) means
+// retreating just isn't working right now, independent of why "flee" was chosen in the first
+// place. Standing there and absorbing hits because running away didn't pan out is strictly worse
+// than fighting back, as long as there's actually a weapon to fight with. Deliberately excludes
+// FLEE_ONLY_MOBS -- a flyer or teleport-evader is still unreachable no matter how desperate this
+// gets, the exact doomed-melee shape FLEE_ONLY_MOBS exists to prevent (actions.js).
+async function attackAsLastResort(threat, label) {
+  if (FLEE_ONLY_MOBS.has(threat.name) || !hasWeapon(bot)) return;
+  const result = await performAction(bot, { type: "attack", target: threat }, USERNAME);
+  console.log(`[${USERNAME}] ${label}: couldn't get away, fighting instead -- ${result.text} ` +
+              `(ok=${result.ok})`);
+}
 
 // Item #6 of "fix all the above" (squad response). Real gap: self-defense was purely individual
 // -- Mark/Luke's own "military... defending the spawn point" framing (2026-09-07) implied a
@@ -3851,9 +3893,8 @@ async function checkSelfDefense() {
     // which kept her bare-handed, which kept every future encounter doomed the same way. Now
     // checked alongside the other two flee conditions: no weapon means flee, regardless of mob
     // type or health, breaking the cycle by actually surviving long enough between encounters to
-    // get equipped.
-    const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH ||
-      !hasWeapon(bot) ? "flee" : "attack";
+    // get equipped. See decideFightType()'s own header for the current role/health rule.
+    const type = decideFightType(threat.name);
     if (FLEE_ONLY_MOBS.has(threat.name)) lastFleeMobResponseAt = Date.now();
     console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
     const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
@@ -3861,6 +3902,7 @@ async function checkSelfDefense() {
     // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.
     const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
     console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
+    if (type === "flee" && !result.ok) await attackAsLastResort(threat, "self-defense");
   } catch (err) {
     console.error(`[${USERNAME}] self-defense check failed:`, err.message);
   } finally {
@@ -4875,8 +4917,15 @@ bot.on("health", () => {
   if (!threat) return;
 
   emergencyInFlight = true;
+  // Direct request, 2026-09-21 ("Soldiers fight *always*, others fight when under half health").
+  // This handler only ever fires at EMERGENCY_HEALTH_THRESHOLD (6) or below -- always "under
+  // half health" by definition -- so it used to hardcode an unconditional flee regardless of
+  // role, the one place decideFightType()'s own rule wasn't actually applied. Now it is: a
+  // Soldier fights here too, and so does anyone else, since being this hurt is exactly the
+  // "under half health" condition that rule fights on. FLEE_ONLY_MOBS/no-weapon still flee.
+  const type = decideFightType(threat.name);
   console.log(`[${USERNAME}] EMERGENCY: health critical (${bot.health}) with ${threat.name} ` +
-              `nearby -- force-cancelling current action to flee`);
+              `nearby -- force-cancelling current action to ${type}`);
   noteThreatSeen(threat.name);
   // Real gap found live, 2026-09-07 ("they don't seem to be fighting back... when woken up from
   // sleeping"): the force-cancel primitives alone don't touch sleep. The in-flight "sleep"
@@ -4903,11 +4952,12 @@ bot.on("health", () => {
       return;
     }
     try {
-      const rallyPoint = await nearestRallyPoint(bot);
-      const result = await performAction(bot, { type: "flee", target: threat, rallyPoint }, USERNAME);
-      console.log(`[${USERNAME}] emergency flee: ${result.text} (ok=${result.ok})`);
+      const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
+      const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
+      console.log(`[${USERNAME}] emergency ${type}: ${result.text} (ok=${result.ok})`);
+      if (type === "flee" && !result.ok) await attackAsLastResort(threat, "emergency");
     } catch (err) {
-      console.error(`[${USERNAME}] emergency flee failed:`, err.message);
+      console.error(`[${USERNAME}] emergency ${type} failed:`, err.message);
     } finally {
       handle.release();
       emergencyInFlight = false;
@@ -5078,14 +5128,14 @@ async function checkSleepingThreat() {
     return;
   }
   try {
-    // See checkSelfDefense's own 2026-09-10/2026-09-15 notes (actions.js's FLEE_ONLY_MOBS
-    // header) -- a flyer is never worth attacking regardless of health, and neither is anything
-    // else when she has no weapon to fight it with.
-    const type = FLEE_ONLY_MOBS.has(threat.name) || bot.health <= SELF_DEFENSE_FLEE_HEALTH ||
-      !hasWeapon(bot) ? "flee" : "attack";
+    // See checkSelfDefense's own 2026-09-10/2026-09-15 notes and decideFightType()'s own header
+    // (actions.js's FLEE_ONLY_MOBS) -- a flyer is never worth attacking regardless of health, and
+    // neither is anything else when she has no weapon to fight it with.
+    const type = decideFightType(threat.name);
     const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
     const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
     console.log(`[${USERNAME}] post-wake defense: ${type} -> ${result.text} (ok=${result.ok})`);
+    if (type === "flee" && !result.ok) await attackAsLastResort(threat, "post-wake defense");
   } catch (err) {
     console.error(`[${USERNAME}] post-wake defense failed:`, err.message);
   } finally {
