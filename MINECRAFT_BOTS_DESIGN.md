@@ -2572,6 +2572,103 @@ an incidental shortcut while routing to somewhere else entirely. Verified live p
 `netherite_block` dig_error occurrences from any bot's fresh process since restart, versus the
 old process still producing them right up until it was replaced.
 
+## 52. "Zombie is in the building again": flee's own home-fallback breaks when the threat is already inside (2026-09-21)
+
+Direct live report, immediately after §51 shipped: "zombie is in the building again, attacking the
+crowd of bots." Live evidence showed something different from every prior incident in this chain:
+bots were NOT frozen and NOT silent -- every one of them was actively attempting both `attack` and
+`flee` in response, and both kept failing. `attack` repeatedly timed out ("gave up on the fight --
+took too long"); `flee` repeatedly returned `"No path to the goal!"` within 2-4ms -- fast,
+consistent failures, not an exhausted search.
+
+**Root cause:** `nearestRallyPoint()` (added 2026-09-18, "run towards safety, run towards golems, or
+soldiers") falls back to the bot's own home/bed when no golem or Soldier teammate is in range, on
+the explicit original assumption that home is "always a safer place to end up... even with nobody
+there." That assumption fails completely in exactly this incident's shape: the threat is already
+INSIDE home, and most of the fleet is already there too. Fleeing "toward home" when already
+effectively home is either a no-op, or -- when the bed sits in a different room of the same
+structure than wherever she's currently cornered -- asks pathfinder to route all the way across the
+building to one specific point instead of taking one step toward any nearby exit, which is both far
+more likely to fail outright and, even when it succeeds, walks her further INTO the same building
+the threat occupies rather than away from it.
+
+**Fix (`index.js` 2.86.0):** `nearestRallyPoint()`'s home/bed fallback now only returns a value when
+that point is at least 20 blocks from the bot's current position -- real progress toward a
+genuinely different, farther-away place. Closer than that, it returns `null`, letting `flee` fall
+through to its own original plain maximize-distance goal (`GoalInvert(GoalFollow(target, 16))`),
+which needs no specific destination and only requires finding ANY nearby improvement in separation
+-- far more resilient to "already home, threat inside" than a fixed-point route across the building.
+Immediate relief for the live incident: RCON-killed the zombie directly while this was being
+investigated, same pattern as prior live incidents in this chain.
+
+## 53. Full defense-scheme re-evaluation after a mass-death incident (2026-09-21)
+
+Direct request: "standing right out in the open, a single zombie is killing bot after bot.
+Re-evaluate the entire defense scheme." A live log sweep during the incident found something far
+more serious than any single prior bug in this chain: **5 bot deaths within roughly 90 seconds**
+(Mayor died 3 times, Bob, Mark, and Luke each died once, several "in quick succession" per this
+codebase's own rapid-death tracking), despite RCON confirming only **1-2 zombies** were actually
+involved -- a fight 9 bots should never lose, let alone this badly. Rather than patch another single
+mechanical bug, this section covers a genuine architectural review.
+
+**Systemic findings, in order of impact:**
+
+1. **EMERGENCY-tier combat had no escape hatch.** §43's rule ("Soldiers fight always, others fight
+   under half health") made `decideFightType()` return "attack" unconditionally once health drops
+   to `EMERGENCY_HEALTH_THRESHOLD` (6) or below -- correct as a FIRST choice, but until now that
+   commitment rode out the full `ACTION_TIMEOUT_MS` (90 seconds) no matter how the fight was
+   actually going, with `HEALTH_CRITICAL` sitting above every other real-combat arbiter tier so
+   nothing could preempt it. Confirmed live: Wade's own logs showed `self-defense: yielded to
+   (HEALTH_CRITICAL)` repeating for **over 20 straight seconds** -- a single stuck emergency attack
+   holding control that entire time while he stayed at critical health with zero ability to
+   reconsider. Every second spent in a fight that isn't working is a second closer to death with no
+   upside once already this hurt.
+
+2. **Severe entity crowding degrades both movement and combat execution.** Most of the fleet sleeps
+   in one small shared area (the same "home" location this whole investigative chain keeps
+   returning to). Live logs during the incident showed constant `path_reset: stuck` for whichever
+   bots were packed tightest -- a "success" path immediately followed by getting stuck again a few
+   seconds later, recomputing trivial 1-3-node routes that never actually complete.
+   mineflayer-pathfinder's own `entityCost` (default 1, the same magnitude as a single walk step)
+   barely discourages routing through a square another bot occupies -- with 7-9 entities packed
+   into a tight space, nearly every route touches an occupied square, and Minecraft's real collision
+   (unlike the search's own cost model) can make that square genuinely unreachable at execution
+   time even though the plan said "success." This plausibly also explains why `attack` kept timing
+   out despite overwhelming numbers -- bots very likely getting in each other's way trying to reach
+   the same one or two targets in a cramped space, the same contention shape already confirmed for
+   digging (§51's own investigation, Amy/Mark both targeting the same block simultaneously).
+
+3. **Squad response structurally can't help in exactly this scenario, though not because of a bug.**
+   `respondToSquadCall()` acquires `SQUAD_RESPONSE` (priority 20), below `SELF_DEFENSE` (30) --
+   correct in principle (a bot's own survival should outrank rushing to help someone else), but
+   moot here regardless: the whole point of squad response is bringing a distant bot TO the fight,
+   and here everyone was already there. The real gap isn't coordination-at-a-distance, it's that
+   crowded close-quarters combat itself (finding #2) wasn't reliable.
+
+4. **Flagged, not fixed: home lighting.** Recurring `"no torches ... skipping for now"` log lines
+   throughout this session's history mean the sleeping area likely isn't reliably lit, letting
+   hostiles keep spawning there at all -- the true upstream cause of a zombie being available to
+   attack a sleeping crowd on a semi-regular basis. This is a resource/logistics gap (torch supply
+   chain), not a defense-logic bug, and is flagged here for separate follow-up rather than addressed
+   in this pass.
+
+**Fixes shipped this section:**
+
+- **`EMERGENCY_ATTACK_TIMEOUT_MS` (8s) + `fleeAsLastResort()` (`index.js` 2.87.0, `actions.js`
+  1.64.0):** "attack" now accepts an optional `action.maxDurationMs` (defaults to the unchanged
+  `ACTION_TIMEOUT_MS` for every other caller). EMERGENCY-tier attacks use the new 8-second ceiling
+  instead -- still the first choice at critical health, per §43's own direct instruction, unchanged
+  -- but a fight that isn't won within that short, bounded window now falls back to `flee` (mirroring
+  `attackAsLastResort`'s own existing shape in the opposite direction) instead of continuing blind
+  for up to 90 seconds with nothing able to intervene.
+- **`movements.entityCost` raised from the library default (1) to 8 (`index.js` 2.87.0):** same
+  "strongly prefer, don't forbid" tuning already applied to `liquidCost`/`digCost` -- routing around
+  a crowd is now preferred whenever an alternative exists, while a genuinely crowd-only route
+  remains possible rather than refusing to move at all.
+
+Immediate relief for the live incident: RCON-killed 2 zombies directly (confirming the true mob
+count) while this investigation was underway.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2627,3 +2724,5 @@ old process still producing them right up until it was replaced.
 | 1.48.0 | 2026-09-21 | New §49, same live incident (§47/§48) -- while restarting the fleet to test §48's fix, live evidence surfaced a second, unrelated root cause for 4 of 9 bots: the existing `teleportToSpawn()` self-rescue mechanism (`bot.chat("/tp ...")`, fires after 3 same-spot reconnects) logged `TELEPORT: ...` successfully for Nell/Wade/Dale, but their actual position never changed -- confirmed via RCON `op <name>` that these three plus Bob (all `dgx-spark2`-hosted) had never been granted server op, so their own `/tp` command had been silently failing since the code's existing comment already named only the `dgx-spark`-hosted bots (Mayor/Mark/Luke/Babs/Amy) as having been added to `ops.json`. No code change needed -- `teleportToSpawn()` was already correct, it just never had permission to act for these four accounts. Fixed live via RCON `op` grants (now persisted in the server's own `ops.json`) plus a direct `tp` to recover the three still-trapped bots immediately; confirmed all 9 physically out via a full position sweep. |
 | 1.49.0 | 2026-09-21 | New §50, direct report immediately after §47-§49 shipped: "now they are back to digging through the wall instead of opening the door" -- the exact issue §44 fixed, reopened by §47's own digCost 30->5 fix. Measured real `block.digTime()` values and confirmed digCost alone can't satisfy both live reports: digTime for the same block varies over 100x by tool (cobblestone: 100ms with netherite pickaxe+efficiency5, common gear in this fleet, vs 10000ms with none), so a digCost strong enough to deter the well-tooled case (~15) blows the search-cost budget for the untooled case, while one safe for the untooled case (~5, §47's own value) is nearly free for the well-tooled one. Fixed (`swim-movements.js` 1.1.0): overrides `safeOrBreak` to cap the per-block labor-cost contribution at `MAX_DIG_LABOR_COST=20` regardless of digTime, decoupling "prefer doors when digging is cheap" from "never make an exit impossible when digging is expensive." `digCost` raised back to 15 (`index.js` 2.84.0) now that doing so is safe. |
 | 1.50.0 | 2026-09-21 | New §51, direct live report immediately after §50 shipped: "group of bots standing in the open, not moving or running, being actively attacked -- automation failure." Traced to §50's own `MAX_DIG_LABOR_COST` cap: confirmed live that Mayor/Nell/Bob were all independently hammering `dig_error target: netherite_block` at the same home coordinates, and measured real digTime at 75000ms (netherite pickaxe + efficiency 5, hardness 50 barely responds to efficiency) -- but the cap flattened that down to look as cheap as a plank wall, so pathfinder kept choosing it, starting a real 75-second dig, and getting aborted almost immediately by an unrelated periodic check (self-defense fires every 2s), recomputing the identical route into the identical failure forever -- including during combat, since `attack`'s own chase movement shares the same `movements` object, explaining the "frozen, not fighting" symptom directly. Also retroactively explains an ~89-second freeze investigated live on Luke earlier in this same incident. Fixed (`index.js` 2.85.0): excludes any block with real hardness >= 10 from `movements.blocksCantBreak` (obsidian/netherite_block/ancient_debris sit at 30-50; every normal building material tops out at 5) -- the same "not an incidental pathfinding shortcut" protection already applied to doors/chests/furnaces, without blocking "mine" from deliberately targeting one. Verified live: zero netherite_block dig_error occurrences fleet-wide since restart. |
+| 1.51.0 | 2026-09-21 | New §52, direct live report immediately after §51 shipped: "zombie is in the building again, attacking the crowd of bots." Different shape from every prior incident: bots were actively attempting both attack and flee, both kept failing -- attack timing out, flee returning "No path to the goal!" within 2-4ms. Root cause: `nearestRallyPoint()`'s own home/bed fallback ("always a safer place... even with nobody there") breaks completely when the threat is already inside home and the fleet is already clustered there -- fleeing "toward home" is either a no-op or routes across the building to a specific, possibly-unreachable point instead of away from the threat. Fixed (`index.js` 2.86.0): home/bed fallback now only returns when at least 20 blocks from the bot's current position; closer than that, flee falls through to its own plain maximize-distance goal, far more resilient to "already home, threat inside." |
+| 1.52.0 | 2026-09-21 | New §53, direct request: "standing right out in the open, a single zombie is killing bot after bot. Re-evaluate the entire defense scheme." Live sweep found 5 bot deaths in ~90 seconds against only 1-2 real zombies (RCON-confirmed). Two systemic root causes, not one mechanical bug: (1) EMERGENCY-tier combat had no escape hatch -- "attack" is mandatory under critical health (§43) but previously rode out the full 90s ACTION_TIMEOUT_MS with HEALTH_CRITICAL blocking every other tier; confirmed live (Wade) a single stuck emergency attack held control for 20+ straight seconds. (2) Severe entity crowding (most of the fleet sleeps in one small area) degrades both movement and combat -- constant `path_reset: stuck` live, mineflayer-pathfinder's own entityCost (default 1) barely discourages routing through occupied squares, plausibly also explaining attack timeouts despite overwhelming numbers (same contention shape already confirmed for digging in §51). Fixed: new `EMERGENCY_ATTACK_TIMEOUT_MS` (8s) + `fleeAsLastResort()` (`actions.js` 1.64.0, `index.js` 2.87.0) -- attack still first choice at critical health, but bails to flee if not won quickly; `movements.entityCost` raised 1 -> 8, same "strongly prefer, don't forbid" tuning as liquidCost/digCost. Flagged, not fixed: recurring "no torches" log lines suggest the sleeping area isn't reliably lit, the likely upstream reason hostiles keep spawning there at all -- a resource/logistics gap, not a defense-logic bug. |

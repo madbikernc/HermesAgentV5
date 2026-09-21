@@ -1,4 +1,12 @@
-// Version: 1.63.0
+// Version: 1.64.0
+//
+// 1.64.0 (2026-09-21) -- direct request: "re-evaluate the entire defense scheme," root-caused
+// from a live mass-death incident (5 bots died within ~90 seconds). "attack" now accepts an
+// optional `action.maxDurationMs` (falls back to ACTION_TIMEOUT_MS unchanged for every existing
+// caller) so EMERGENCY-tier combat (index.js) can give a critically-hurt bot a short, bounded shot
+// instead of committing to the full 90s timeout with no way to reconsider -- confirmed live that a
+// single stuck emergency attack held the arbiter's HEALTH_CRITICAL tier for over 20 straight
+// seconds with nothing able to preempt it. See MINECRAFT_BOTS_DESIGN.md §52.
 //
 // 1.63.0 (2026-09-21) -- direct request: "I want real confirmation they can use the crafting
 // table and furnace." Investigating turned up a real, severe, already-live bug rather than just
@@ -2618,8 +2626,19 @@ export async function performAction(bot, action, speaker) {
       // directly against real pathfinder/collectBlock rejection, never guessed at). Also aborts
       // promptly on a genuine higher-priority preemption (token.cancelled) rather than only on the
       // full ACTION_TIMEOUT_MS ceiling.
+      // Direct request, 2026-09-21 ("re-evaluate the entire defense scheme"), root-caused from a
+      // live mass-death incident: EMERGENCY-tier combat (bot.on("health"), index.js) commits to
+      // "attack" unconditionally once health is critical, with no way to reconsider if the fight
+      // simply isn't going well -- and until now that meant riding out the FULL ACTION_TIMEOUT_MS
+      // (90s) with nothing able to preempt it (HEALTH_CRITICAL sits above every other tier except
+      // the cancel-only TELEPORT_HOME). Confirmed live: Wade logged "yielded to (HEALTH_CRITICAL)"
+      // for over 20 straight seconds -- a single stuck emergency attack holding control that whole
+      // time while he stayed at critical health with no way out. `action.maxDurationMs` lets a
+      // caller give a MUCH shorter leash for exactly this situation (see index.js's own EMERGENCY
+      // handler, which now bails to flee if this returns non-ok) -- defaults to the normal
+      // ACTION_TIMEOUT_MS for every other caller, unchanged.
       const FIGHT_POLL_MS = 250;
-      const deadline = Date.now() + ACTION_TIMEOUT_MS;
+      const deadline = Date.now() + (action.maxDurationMs ?? ACTION_TIMEOUT_MS);
       try {
         while (bot.entities[target.id] && !token.cancelled && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, FIGHT_POLL_MS));

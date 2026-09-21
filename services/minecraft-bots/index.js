@@ -1,4 +1,21 @@
-// Version: 2.86.0
+// Version: 2.87.0
+//
+// 2.87.0 (2026-09-21) -- direct request: "re-evaluate the entire defense scheme," triggered by a
+// live mass-death incident (5 bots died within ~90 seconds, several repeatedly in quick
+// succession, while RCON confirmed only 1-2 zombies were actually involved). Two real, distinct
+// fixes from the same live evidence: (1) EMERGENCY's own unconditional "fight, no matter what"
+// rule at critical health had no escape hatch -- confirmed live (Wade) that a single stuck
+// emergency attack held HEALTH_CRITICAL-tier arbiter control for over 20 straight seconds with
+// nothing able to preempt it. New EMERGENCY_ATTACK_TIMEOUT_MS (8s, vs the standard 90s
+// ACTION_TIMEOUT_MS) plus fleeAsLastResort() -- attack is still the first choice at critical
+// health, unchanged, but now only gets a short bounded shot before falling back to flee instead of
+// riding out the full timeout blind. (2) Most of the fleet sleeps in one small shared area;
+// live logs showed constant `path_reset: stuck` for whichever bots were packed tightest --
+// mineflayer-pathfinder's own entityCost (default 1) barely discourages routing through a
+// crowded square, and real collision can make a "success"-planned square genuinely unreachable at
+// execution time. Raised entityCost to 8 (same "strongly prefer, don't forbid" tuning as
+// liquidCost/digCost) so routing around a crowd is preferred whenever an alternative exists. See
+// MINECRAFT_BOTS_DESIGN.md §52.
 //
 // 2.86.0 (2026-09-21) -- direct live report: "zombie is in the building again, attacking the
 // crowd of bots." Confirmed live that every bot's own "flee" attempt was failing with "No path to
@@ -1515,6 +1532,21 @@ bot.once("spawn", async () => {
   // deprioritized) when it's genuinely the only way through -- not banned outright, since that
   // would strand her at any water-crossed goal with no alternative route.
   movements.liquidCost = 20;
+  // Direct request, 2026-09-21 ("re-evaluate the entire defense scheme"), root-caused from a live
+  // mass-death incident (5 bots died within ~90 seconds, several repeatedly): most of the fleet
+  // sleeps in one small shared area, and a live log sweep during the incident showed constant
+  // `path_reset: stuck` for whichever bots were packed in tightest -- a "success" path immediately
+  // followed by getting stuck again a few seconds later, over and over, recomputing trivial 1-3
+  // node routes that never actually complete. mineflayer-pathfinder's own entityCost (default 1,
+  // the SAME magnitude as a single walk step) barely discourages routing through a square another
+  // bot is standing in or near -- with 7-9 entities packed into a tight space, nearly every route
+  // touches at least one occupied square, and Minecraft's own real collision (unlike the search's
+  // cost model) can make that square genuinely unreachable at execution time even though the plan
+  // said "success," triggering the stuck-detection/recompute loop seen live. Raised well above a
+  // plain step's cost, same "strongly prefer, don't forbid" reasoning as liquidCost/digCost --
+  // encourages routing AROUND a crowd instead of through it whenever an alternative exists, while
+  // still leaving a genuinely crowd-only route possible rather than refusing to move at all.
+  movements.entityCost = 8;
   // Direct report, 2026-09-21 ("they still destroy walls instead of using doors"). A real,
   // distinct gap from the door-protection fix just below this comment: doors/trapdoors/fence
   // gates are already protected from being dug through outright (blocksCantBreak), but an
@@ -4012,6 +4044,25 @@ async function attackAsLastResort(threat, label) {
               `(ok=${result.ok})`);
 }
 
+// Direct request, 2026-09-21 ("re-evaluate the entire defense scheme"), the mirror image of
+// attackAsLastResort just above -- root-caused from a live mass-death incident where EMERGENCY's
+// own unconditional "fight, no matter what" rule at critical health had no escape hatch: once
+// committed to "attack," nothing short of the target actually dying (or the new short
+// EMERGENCY_ATTACK_TIMEOUT_MS below) would end it, riding out up to the full 90s ACTION_TIMEOUT_MS
+// at critical health with zero re-evaluation. That's fine when the fight is actually winnable --
+// it's exactly how a bot that's this hurt should behave -- but a fight that's CLEARLY not working
+// (still not dead after several real seconds of trying) means every additional second spent
+// swinging is a second closer to death with no upside. Symmetric with attackAsLastResort: fighting
+// is still the first choice at critical health (unchanged, direct request), this only fires when
+// that first choice has already had a fair, bounded shot and hasn't paid off.
+async function fleeAsLastResort(threat, label) {
+  if (bot.health <= 0) return;
+  const rallyPoint = await nearestRallyPoint(bot);
+  const result = await performAction(bot, { type: "flee", target: threat, rallyPoint }, USERNAME);
+  console.log(`[${USERNAME}] ${label}: fight wasn't working, fleeing instead -- ${result.text} ` +
+              `(ok=${result.ok})`);
+}
+
 // Item #6 of "fix all the above" (squad response). Real gap: self-defense was purely individual
 // -- Mark/Luke's own "military... defending the spawn point" framing (2026-09-07) implied a
 // squad that backs each other up, but nothing ever told a teammate someone else was under
@@ -5207,6 +5258,18 @@ const EMERGENCY_HEALTH_THRESHOLD = 6; // out of 20 -- stricter than checkSelfDef
                                        // reserved for genuine near-death, not routine caution
 let emergencyInFlight = false;
 
+// Direct request, 2026-09-21 ("re-evaluate the entire defense scheme"), root-caused from a live
+// mass-death incident: 5 bots died within ~90 seconds, several of them multiple times in quick
+// succession. Confirmed live via Wade's own logs: "self-defense: yielded to (HEALTH_CRITICAL)"
+// repeated for over 20 STRAIGHT seconds -- a single EMERGENCY-triggered "attack" (mandatory at
+// critical health, no exceptions) holding the arbiter's highest real-combat tier that whole time,
+// with nothing able to preempt it and no way for the bot herself to reconsider whether the fight
+// was actually going anywhere. The standard ACTION_TIMEOUT_MS (90s) is far too generous a leash
+// for a bot who's already at 6 HP or below -- she doesn't have 90 seconds of margin to lose while
+// finding out a fight isn't working. A short, bounded window instead: if the target isn't dead by
+// then, fleeAsLastResort() (below) takes over rather than continuing to slug it out blind.
+const EMERGENCY_ATTACK_TIMEOUT_MS = 8_000;
+
 bot.on("health", () => {
   if (!AUTONOMY_ENABLED || emergencyInFlight) return;
   if (bot.health <= 0 || bot.health > EMERGENCY_HEALTH_THRESHOLD) return;
@@ -5250,9 +5313,15 @@ bot.on("health", () => {
     }
     try {
       const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
-      const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
+      // EMERGENCY_ATTACK_TIMEOUT_MS (not the standard ACTION_TIMEOUT_MS -- see its own comment
+      // just below): a fight this bot is already losing badly enough to be at critical health
+      // gets one short, bounded shot, not a 90-second commitment with no way to reconsider.
+      const maxDurationMs = type === "attack" ? EMERGENCY_ATTACK_TIMEOUT_MS : undefined;
+      const result = await performAction(bot, { type, target: threat, rallyPoint, maxDurationMs },
+        USERNAME);
       console.log(`[${USERNAME}] emergency ${type}: ${result.text} (ok=${result.ok})`);
       if (type === "flee" && !result.ok) await attackAsLastResort(threat, "emergency");
+      if (type === "attack" && !result.ok) await fleeAsLastResort(threat, "emergency");
     } catch (err) {
       console.error(`[${USERNAME}] emergency ${type} failed:`, err.message);
     } finally {
