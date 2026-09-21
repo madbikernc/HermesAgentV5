@@ -1,4 +1,4 @@
-// Version: 1.0.0
+// Version: 1.1.0
 //
 // 1.0.0 (2026-09-07) -- direct request: "build the water crossing mechanic," following the
 // anti-drowning reflex (index.js 2.29.0), which fixes SURVIVAL but not CAPABILITY: stock
@@ -24,12 +24,36 @@
 // water crossing POSSIBLE, not cheap.
 import pathfinderPkg from "mineflayer-pathfinder";
 import Move from "mineflayer-pathfinder/lib/move.js";
+import nbt from "prismarine-nbt";
 
 const { Movements } = pathfinderPkg;
 
 function isWater(block) {
   return !!block && (block.name === "water" || block.name === "flowing_water" || block.name === "bubble_column");
 }
+
+// 1.1.0 (2026-09-21) -- direct report ("they still destroy walls instead of using doors") after
+// two prior swings at the SAME digCost knob (index.js 2.79.0/2.81.0) both ended up wrong in
+// opposite directions: 30 was strong enough to deter, but blew the search-cost budget for a slow
+// dig and made real exits unreachable (§47); 5 fixed that, but made a well-tooled dig nearly free
+// again (§this section), reopening the original wall-vs-door gap. Root cause, confirmed by
+// directly measuring `block.digTime()` (the same call movements.js's own safeOrBreak makes):
+// digTime for the SAME block varies over 100x depending on what tool the bot happens to own --
+// cobblestone measured 100ms with a netherite pickaxe + efficiency 5, 10000ms with no tool at
+// all. `laborCost = (1 + 3*digTime/1000) * digCost` means those two cases scale by roughly 1.3x
+// and 31x the same digCost respectively -- no single flat digCost can be both a meaningful
+// deterrent for the common (well-tooled) case and safe against the same maxCost pruning §47
+// already fixed once for the rare (untooled/slow) case; raising it enough for the former
+// recreates the latter's crisis outright. Capping the labor-cost contribution directly
+// sidesteps the tradeoff instead of chasing an unsatisfiable single number: MAX_DIG_LABOR_COST
+// bounds what any ONE dig step can cost the search regardless of digTime, so it can never
+// single-handedly exceed the ~48-58 budget (bot.pathfinder.searchRadius=48), while digCost
+// itself (15, unchanged intent from §44/§47, just now actually reaching well-tooled digs) still
+// sets a real, comparable-to-a-real-detour cost for the common case the cap doesn't touch.
+// Flagged: a route needing 3+ digs in one path could still approach the budget even capped
+// (3 * 20 = 60) -- not addressed here since no live report has ever shown more than one dig
+// being the actual blocker, matching liquidCost's own still-open flag from §47.
+const MAX_DIG_LABOR_COST = 20;
 
 export class SwimMovements extends Movements {
   getMoveDown(node, neighbors) {
@@ -58,5 +82,31 @@ export class SwimMovements extends Movements {
     if (!block2.safe) return;
 
     neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks, 1 + this.liquidCost));
+  }
+
+  // See MAX_DIG_LABOR_COST's own comment above for why this exists. Deliberately a full
+  // reimplementation rather than a call-super-then-adjust wrapper -- safeOrBreak fuses
+  // exclusionStep/entityCost/laborCost into one returned number with no way to recover just the
+  // labor-cost component afterward, and this codebase already has a direct precedent for
+  // reimplementing a small vendor method wholesale (getMoveDown/getMoveUp above) rather than
+  // fighting the library's own return shape. Every line before the final `cost +=` is copied
+  // verbatim from mineflayer-pathfinder's own movements.js so behavior stays identical except for
+  // the one clamp this override exists to add.
+  safeOrBreak(block, toBreak) {
+    let cost = 0;
+    cost += this.exclusionStep(block);
+    cost += this.getNumEntitiesAt(block.position, 0, 0, 0) * this.entityCost;
+    if (block.safe) return cost;
+    if (!this.safeToBreak(block)) return 100;
+    toBreak.push(block.position);
+    if (block.physical) cost += this.getNumEntitiesAt(block.position, 0, 1, 0) * this.entityCost;
+
+    const tool = this.bot.pathfinder.bestHarvestTool(block);
+    const enchants = (tool && tool.nbt) ? nbt.simplify(tool.nbt).Enchantments : [];
+    const effects = this.bot.entity.effects;
+    const digTime = block.digTime(tool ? tool.type : null, false, false, false, enchants, effects);
+    const laborCost = (1 + 3 * digTime / 1000) * this.digCost;
+    cost += Math.min(laborCost, MAX_DIG_LABOR_COST);
+    return cost;
   }
 }

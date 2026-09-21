@@ -1,4 +1,16 @@
-// Version: 2.83.0
+// Version: 2.84.0
+//
+// 2.84.0 (2026-09-21) -- direct report: "now they are back to digging through the wall instead
+// of opening the door" -- the exact regression §44 originally fixed, reopened by §47's own
+// digCost 30->5 fix. Measured real block.digTime() values and found digCost alone can never
+// satisfy both live reports: digTime for the same block varies 100x+ by tool availability, so a
+// value strong enough to deter a well-tooled bot's near-instant dig (needs ~15) makes an
+// untooled bot's slow dig blow the search-cost budget again (needs <=5 to stay safe), and no
+// single number sits in both ranges. Raised digCost back to 15 (real deterrence for the common,
+// well-tooled case) now that SwimMovements caps the per-block labor-cost contribution directly
+// (MAX_DIG_LABOR_COST=20, swim-movements.js 1.1.0), decoupling "prefer doors" from "never make an
+// exit mathematically impossible" instead of fighting them with one shared knob. See
+// MINECRAFT_BOTS_DESIGN.md §50.
 //
 // 2.83.0 (2026-09-21) -- live diagnostic added right after shipping 2.82.0's burst detector:
 // confirmed live that the burst detector works (stops the infinite spin, forces a clean
@@ -1494,11 +1506,22 @@ bot.once("spawn", async () => {
   // digCost means a SINGLE dig on an ordinary block at digCost 30 could cost 40-120+ on its own,
   // consuming the whole budget in one step and turning "expensive but valid path" into a hard
   // noPath. Confirmed live: 7 bots crammed into one small shelter, one bot alone logging 239
-  // noPath results in 2 hours, zero successful travel the entire window. Lowered to a value that
-  // keeps even a slow block's dig comfortably under that budget with room left for real walking --
-  // still a genuine 5x discouragement over a plain walk step, just not one capable of making a
-  // real exit mathematically impossible.
-  movements.digCost = 5;
+  // noPath results in 2 hours, zero successful travel the entire window. Lowered to 5, which
+  // fixed that crisis -- but reopened the ORIGINAL one it was chasing: direct report, again,
+  // "they are back to digging through the wall instead of opening the door."
+  //
+  // Direct live follow-up, same day: confirmed by measuring real block.digTime() values (the
+  // same call movements.js's own cost formula makes) that digCost alone can never satisfy both
+  // reports at once. digTime for the identical block varies over 100x by tool: cobblestone
+  // measured 100ms with a netherite pickaxe + efficiency 5 (common gear in this fleet) vs 10000ms
+  // with no tool. At digCost 5, the well-tooled case costs barely more than a plain walk step
+  // (~6.5) -- nowhere near enough to prefer a door a few blocks out of the way, exactly the
+  // regression just reported. Raising digCost enough to fix that (~15, chosen below) makes the
+  // untooled case cost 400+ again, recreating the exact pruning crisis this value was just
+  // lowered to fix. SwimMovements now caps the per-block labor-cost contribution directly
+  // (MAX_DIG_LABOR_COST, swim-movements.js 1.1.0) so raising digCost back up is finally safe --
+  // see that file's own comment for the full reasoning.
+  movements.digCost = 15;
   // Direct request, 2026-09-08 ("before they dig or destroy a block, they should make sure it
   // is not a functional block like a bed or a furnace... or any other form of crafted item or
   // block"). Confirmed against mineflayer-pathfinder's own movements.js source: its default
