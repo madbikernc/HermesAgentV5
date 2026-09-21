@@ -1,4 +1,13 @@
-// Version: 2.82.0
+// Version: 2.83.0
+//
+// 2.83.0 (2026-09-21) -- live diagnostic added right after shipping 2.82.0's burst detector:
+// confirmed live that the burst detector works (stops the infinite spin, forces a clean
+// noPath/walk-only failure) but Luke is still stuck in a repeating cycle (success path found ->
+// dig_error burst -> no walk-only route exists -> canDig restored -> same success path found
+// again). The plugin discards the real per-dig failure reason, so the crowding theory in 2.82.0's
+// own comment was still a guess. Logs the actual target block (type/position/distance) and any
+// other entity within 3 blocks of it on every dig_error, to get real evidence instead of another
+// guess before deciding the next fix.
 //
 // 2.82.0 (2026-09-21) -- direct live follow-up, same "can't get out of the home" report: §47's
 // digCost fix made a real path findable again (confirmed: Luke went from permanent noPath to
@@ -1594,12 +1603,35 @@ bot.once("spawn", async () => {
   // what pathfinder itself actually concluded, the same evidence-based approach that found
   // every other real bug this build. Kept permanently, not stripped after one use --
   // correctness/diagnosability over minimizing log volume, per direct instruction.
+  let lastPathToBreak = null;
   bot.on("path_update", (r) => {
     console.log(`[${USERNAME}] path_update status=${r.status} nodes=${r.path?.length ?? 0} ` +
                 `visited=${r.visitedNodes ?? "?"} cost=${r.cost?.toFixed?.(1) ?? "?"} ` +
                 `time=${r.time?.toFixed?.(0) ?? "?"}ms`);
+    lastPathToBreak = r.path && r.path.length ? r.path[0].toBreak : null;
   });
   bot.on("goal_reached", () => console.log(`[${USERNAME}] goal_reached`));
+
+  // Live diagnostic added alongside the burst detector below, 2026-09-21: mineflayer-pathfinder
+  // discards the REAL reason bot.dig() rejected (`.catch(_ignoreError => resetPath('dig_error'))`
+  // -- see the burst-detector comment just below), so which block and why has been pure
+  // speculation ("a teammate's hitbox in the way" was the leading guess, not a confirmed cause).
+  // This logs the actual target block (type, position, distance) plus every other bot within 3
+  // blocks of it the moment a dig_error fires, straight from `path_update`'s own `toBreak` list
+  // (captured just above) -- enough to confirm or rule out the crowding theory, or surface
+  // something else entirely (wrong tool, block already gone, out of reach) from real evidence
+  // instead of another guess.
+  bot.on("path_reset", (reason) => {
+    if (reason !== "dig_error" || !lastPathToBreak || !lastPathToBreak.length) return;
+    const pos = lastPathToBreak[0];
+    const block = bot.blockAt(new Vec3(pos.x, pos.y, pos.z));
+    const dist = bot.entity.position.distanceTo(pos);
+    const nearby = Object.values(bot.entities)
+      .filter((e) => e !== bot.entity && e.position && e.position.distanceTo(pos) < 3)
+      .map((e) => `${e.username || e.name}@${e.position.distanceTo(pos).toFixed(1)}`);
+    console.log(`[${USERNAME}] dig_error target: ${block?.name ?? "?"} at (${pos.x},${pos.y},` +
+                `${pos.z}) dist=${dist.toFixed(2)} nearbyEntities=[${nearby.join(", ")}]`);
+  });
 
   // Direct live follow-up ("they can't get out of the home"), 2026-09-21: §47's digCost fix
   // (30->5) made a real path findable again where the search cost ceiling had previously
