@@ -2140,6 +2140,55 @@ exactly the gap that let "I'm carrying it" get conflated with "done." Both descr
 no behavior change on their own, but removes a real source of wasted reasoning and a plausible
 contributor to the DONE-hallucination pattern this fixes.
 
+## 42. "Trapped with a zombie" root-caused to an infinite flee dig-loop, not a lack of will to fight (2026-09-21)
+
+Direct request: review the last 24 hours for behavioral problems -- which surfaced the single
+worst incident yet found this session: ~4,271 deaths fleet-wide, one bot (Mark) hitting a 408-
+death streak in one spot, still actively ongoing at review time (three different bots died within
+a 10-second span while this was being checked live). Stabilized short-term via two RCON mob-clear
+sweeps (same pattern as §29/§34/§38), but this was clearly a recurrence of the same unlit-base
+problem (§17/§32/§34/§38) at a much larger scale, with two prior code fixes and a manual
+intervention already having failed to hold.
+
+**Direct live correction from the operator, based on first-hand observation, reframed the whole
+investigation**: "usually one zombie camped out, killing them over and over. none of them fight
+back including the soldiers. the zombies get killed in the sun or by a golem. If the bots are
+inside a building with a zombie, they seem to act as if they are trapped." This did not match a
+"swarm overwhelms them" theory -- it pointed at something mechanically preventing combat/escape
+entirely, for every role, which is exactly what live logs confirmed.
+
+**Root cause, confirmed live, not guessed:** watched a real death-streak window (Mark, 06:00:41
+onward) and found the actual mechanism. Once health crosses into EMERGENCY-critical, a separate
+handler takes over and commits to fleeing only -- by design, it never attacks, regardless of role
+or weapon (the same is true of ordinary self-defense once health drops below its own flee
+threshold). Fleeing pathfinds using the SAME canDig-enabled `Movements` every other action shares
+(`canDig` has never been explicitly set anywhere, so it sits at mineflayer-pathfinder's own
+default of `true`). In a small enclosed room, the only path that genuinely increases distance from
+the threat can require digging through a wall -- and when that dig fails, pathfinder recomputes
+the IDENTICAL best-cost path (same digging step) and fails again immediately. Confirmed directly in
+the log: `path_reset: dig_error` firing dozens of times per SECOND with an completely unchanged
+`nodes=13 visited=18 cost=17.5` signature -- a tight, un-backed-off infinite loop, not a slow
+retry. This holds SELF_DEFENSE/EMERGENCY-tier control continuously: she never successfully moves,
+never attacks (flee-committed), and just absorbs hits until she dies -- explaining every one of the
+operator's three observations at once (nobody fights back regardless of role; only an external
+factor like sunlight or a golem ever actually kills the zombie; "trapped" is a literal, accurate
+description of what's happening, not a figure of speech).
+
+**Fix (`actions.js` 1.62.0):** "flee" now temporarily disables digging (`bot.pathfinder.movements.
+canDig = false`) for the duration of its own pathfind, restoring the prior value in `finally`
+regardless of outcome. This forces pathfinder to either find a genuinely walkable escape route or
+fail cleanly and fast -- closing the infinite-loop failure mode outright. It does NOT by itself
+make a truly cornered bot fight back (EMERGENCY-tier flee's own no-attack design is unchanged) --
+see the note below.
+
+**Deliberately not addressed in this fix, flagged for a follow-up decision:** even with the loop
+closed, a bot with genuinely zero non-dig escape route will now fail to flee quickly and repeatedly
+rather than fighting back, since EMERGENCY/critical-health self-defense is designed to never
+attack. Given the operator's own framing treated "soldiers don't fight back" as itself a problem,
+worth a real design decision (not assumed here): should a bot who has just failed to flee, is still
+under threat, and still has a weapon, attack as a last resort rather than repeat a doomed flee
+attempt indefinitely?
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2185,3 +2234,4 @@ contributor to the DONE-hallucination pattern this fixes.
 | 1.38.0 | 2026-09-19 | New §40, direct request ("Mayor/Leader missions, if they would effectively DOWNGRADE a bot's equipment or status, should be rejected by the bot"). Found the concrete mechanism rather than a general directive classifier: Mayor's own directives are plain chat, routed through the same classifyIntent pipeline as anything else, and the one real gear-loss vector -- "give" (`actions.js`) -- never checked whether complying would leave the giver without a weapon/armor/tool she needs. Fixed (1.60.0): refuses when giving would take an item's whole category (sword/axe as one interchangeable weapon category matching `hasWeapon()`, armor/tools each their own) from "has one" to "has none" -- a genuine spare is still always fine to give. Refusal is a real, visible `fail()`, not a silent no-op. |
 | 1.39.0 | 2026-09-19 | Extended §40, direct follow-up ("the downgrade rejection must also reject if the mayor's instructions would cause the quality of their equipment to be reduced"). Going to zero was only half of it -- giving away her best piece in a category while a worse one stays behind is a downgrade too. New `GEAR_TIER_RANK` (`actions.js` 1.61.0, a single common-sense material ranking, not a precise armor-point/mining-level simulation) lets "give"'s existing check also compare the tier of what's being given against the best tier she'd still hold afterward; an unrecognized material falls back to the has-one/has-none check alone. |
 | 1.40.0 | 2026-09-19 | New §41, direct report ("I don't think they really know how to use the crafting table or furnace"). Root-caused live: Amy crafted a crafting_table at 01:45, then a Builder-priority "place it at home" REJECTED DONE fired three times over 25 minutes -- every time the whole goal was abandoned (`currentGoal = null`) instead of acting on the fact she was still carrying the item the entire time, so the next re-issued directive immediately re-hallucinated DONE again with zero real steps. Fixed (`index.js` 2.77.0): on this rejection, if she's still holding the item, walk home and place it herself right now (reusing `gohome`/`place`) before giving up -- one deterministic shot instead of another unreliable LLM round-trip. Also clarified `planNextStep`'s own `ACTION CRAFT`/`ACTION PLACE` descriptions, which never mentioned CRAFT's existing auto-chaining of simple intermediates or that PLACE is what actually satisfies a "set one up at home" directive -- a real, confirmed contributor to repeated multi-paragraph confused reasoning in live logs. |
+| 1.41.0 | 2026-09-21 | New §42, direct request (24h behavioral review) that surfaced ~4,271 fleet-wide deaths, a 408-death streak, still live during investigation -- stabilized via RCON mob-clear. Operator's own direct observation ("one zombie camped out... none of them fight back including the soldiers... if the bots are inside a building with a zombie, they seem to act as if they are trapped") reframed the theory and led to the real mechanism: EMERGENCY-critical health commits a bot to flee-only (never attacks, any role), and flee's pathfind shares the fleet's canDig-enabled Movements -- in an enclosed room, escape can require digging through a wall, and a failed dig makes pathfinder recompute the IDENTICAL path and fail again immediately, confirmed live via `path_reset: dig_error` firing dozens of times a second with an unchanged cost signature. Fixed (`actions.js` 1.62.0): "flee" now disables digging for its own pathfind, forcing a real walkable route or a clean fast failure instead of an infinite stuck loop. Flagged, not fixed: a bot with zero real escape route still won't fight back afterward (EMERGENCY's own no-attack design is unchanged) -- a real policy decision left open. |

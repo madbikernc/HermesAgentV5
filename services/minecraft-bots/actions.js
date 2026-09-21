@@ -1,4 +1,16 @@
-// Version: 1.61.0
+// Version: 1.62.0
+//
+// 1.62.0 (2026-09-21) -- direct live observation: "none of them fight back including the
+// soldiers... if the bots are inside a building with a zombie, they seem to act as if they are
+// trapped." Root-caused live during a 24h fleet review (~4,271 deaths, one bot a 408-death streak
+// in one spot): "flee" shares the same canDig-enabled Movements every other action uses; in an
+// enclosed room, the only path that increases distance from a threat can require digging through
+// a wall, and when that dig fails, pathfinder recomputes the IDENTICAL best-cost path and fails
+// again immediately -- confirmed live via path_reset: dig_error firing dozens of times a SECOND
+// with an unchanged nodes/cost signature, holding SELF_DEFENSE/EMERGENCY control the whole time
+// while she's still taking hits and (EMERGENCY-tier flee never attacks) never fighting back
+// either. Disabling digging for just this one pathfind now forces a real walkable escape or a
+// clean, fast failure instead of an infinite stuck loop. See MINECRAFT_BOTS_DESIGN.md §42.
 //
 // 1.61.0 (2026-09-19) -- direct follow-up: "the downgrade rejection must also reject if the
 // mayor's instructions would cause the quality of their equipment to be reduced." §40's own "give"
@@ -2627,6 +2639,21 @@ export async function performAction(bot, action, speaker) {
       // self-defense) -- a rally point is only ever picked when it's a real place to go, not a
       // guarantee the route there is threat-free.
       const rally = action.rallyPoint;
+      // Direct live observation, 2026-09-21 ("none of them fight back including the soldiers...
+      // if the bots are inside a building with a zombie, they seem to act as if they are
+      // trapped"). Root-caused live: fleeing shares the same canDig-enabled Movements every
+      // other action uses (never explicitly set, so it's at mineflayer-pathfinder's own
+      // default). In a small enclosed room, the only path that "increases distance" can require
+      // digging through a wall -- when that dig fails, pathfinder recomputes the IDENTICAL
+      // best-cost path (same dig step) and fails again immediately, forever: confirmed live via
+      // path_reset: dig_error firing dozens of times a SECOND with an unchanged nodes/cost
+      // signature, holding control the whole time while she's still being hit and (critically,
+      // this is EMERGENCY/self-defense's own flee, which never attacks) never fights back
+      // either. Disabling digging for just this one pathfind forces pathfinder to either find a
+      // real walkable escape route or fail cleanly and fast, instead of spinning on an
+      // impossible one until death.
+      const canDigBefore = bot.pathfinder.movements.canDig;
+      bot.pathfinder.movements.canDig = false;
       try {
         const goal = rally
           ? new goals.GoalNear(rally.x, rally.y, rally.z, 3)
@@ -2637,6 +2664,7 @@ export async function performAction(bot, action, speaker) {
         return fail(`couldn't get away: ${err.message}`);
       } finally {
         bot.pathfinder.setGoal(null);
+        bot.pathfinder.movements.canDig = canDigBefore;
       }
       if (token.cancelled) return ok("stopped fleeing.");
       return ok(rally ? "made it to safety." : "got some distance from it.");
