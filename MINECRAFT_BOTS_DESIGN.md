@@ -2470,6 +2470,52 @@ this gap went undetected for as long as it did specifically because a failed `/t
 client-side error mineflayer surfaces -- the log line for "I issued this command" and "this command
 actually took effect" look identical from the bot process's own point of view.
 
+## 50. Wall-vs-door regression: digCost alone can never satisfy both live reports at once (2026-09-21)
+
+Direct report, immediately after §47/§48/§49 shipped: "now they are back to digging through the
+wall instead of opening the door." This is the exact symptom §44 originally fixed -- and the
+regression traces directly back to §47's own fix, which lowered `digCost` from 30 to 5 specifically
+to stop exits from becoming mathematically unreachable (the maxCost-pruning bug). Both reports are
+real, and both fixes were individually correct for the problem in front of them -- the two problems
+just turned out to be in direct tension along the same single knob.
+
+**Root cause, confirmed by measuring real `block.digTime()` values (the same call movements.js's
+own cost formula makes), not assumed:**
+
+| Block | Tool | digTime |
+|---|---|---|
+| cobblestone | none | 10000ms |
+| cobblestone | netherite pickaxe, no enchant | 350ms |
+| cobblestone | netherite pickaxe + efficiency 5 | 100ms |
+| oak_planks | none | 3000ms |
+| oak_planks | netherite axe + efficiency 5 | 100ms |
+
+`laborCost = (1 + 3*digTime/1000) * digCost` means digTime alone scales the SAME digCost by
+roughly **1.3x** for a well-tooled dig (common in this fleet -- multiple bots carry netherite gear
+with efficiency 5) versus **31x** for an untooled one on the same block. No single flat `digCost`
+value can sit in both safe ranges simultaneously:
+- Strong enough to actually deter a well-tooled dig (needs roughly 15, giving laborCost ~19.5 --
+  comparable to a real multi-block detour to an actual door) makes an untooled dig on the same
+  block cost 400+, blowing straight past the ~48-58 search budget and reintroducing §47's exact
+  pruning crisis.
+- Safe against that crisis for an untooled dig (§47's own chosen value, 5) makes a well-tooled
+  dig cost barely more than a plain walk step (~6.5) -- nowhere near enough to outweigh even a
+  short detour to a door, reopening §44's original gap.
+
+**Fix (`swim-movements.js` 1.1.0, `index.js` 2.84.0):** stop trying to solve both problems with one
+number. `SwimMovements` now overrides `safeOrBreak` (a full reimplementation of
+mineflayer-pathfinder's own method, matching the existing precedent set by this same file's
+`getMoveDown`/`getMoveUp` overrides for water, since the library fuses labor cost into one returned
+number with no way to isolate and clamp it after the fact) to cap the per-block labor-cost
+contribution at `MAX_DIG_LABOR_COST = 20`, regardless of digTime. This decouples the two goals
+entirely: `digCost` raised back to 15 restores real deterrence for the common well-tooled case
+(19.5, just under the cap, so the cap doesn't even engage there), while the cap itself guarantees
+no single dig step can ever again single-handedly exceed the search budget, no matter how slow or
+untooled. Flagged, not fixed: a route requiring 3+ separate digs in one path could still approach
+the budget even with each one individually capped (3 x 20 = 60) -- no live report has ever shown
+more than one dig being the actual blocker, so this is left as an open flag rather than chased
+further, the same posture already taken toward `liquidCost`'s own theoretical version of this risk.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2523,3 +2569,4 @@ actually took effect" look identical from the bot process's own point of view.
 | 1.46.0 | 2026-09-21 | New §47, direct live report ("they can't get out of the home") -- a real, self-inflicted regression from §44's own `digCost=30`, confirmed live rather than assumed a new gap. 7 of 9 bots found crammed in one shelter; Mayor alone logged 239 `noPath` results in 2 hours, zero successful travel the entire window. Root cause: mineflayer-pathfinder's own `astar.js` maxCost ceiling (`startNode.h + searchRadius`, with `searchRadius` pinned at 48 in this codebase) PRUNES any node exceeding it rather than just deprioritizing it -- for a nearby goal, the whole search budget is only ~48-58, and a single dig at `digCost=30` could cost 40-120+ on its own, silently turning "expensive but valid path" into a hard `noPath`. Fixed (`index.js` 2.81.0): lowered `digCost` to 5 -- still a real 5x discouragement (§44's actual goal unchanged), but no longer capable of making a real exit mathematically impossible. Flagged: the same maxCost-ceiling risk applies to any additive cost tuning in this file, including the untouched `liquidCost=20`. |
 | 1.47.0 | 2026-09-21 | New §48, direct live follow-up to §47, same "can't get out of the home" report -- §47's digCost fix genuinely resolved the noPath problem (confirmed: Luke went from permanent noPath to status=success cost=24.5) but executing that path hit a NEW infinite tight loop: mineflayer-pathfinder's own `bot.dig().catch(() => resetPath('dig_error'))` discards the real failure reason and immediately recomputes the identical path into the identical failure (live: the same success/cost=24.5 path_update dozens of times within ~1 second). Same failure shape §42 already fixed for "flee" specifically, but no other `goto()` call site -- `gohome` included -- had the same protection. Fixed (`index.js` 2.82.0): a global burst detector on the existing `path_reset` listener forces `canDig` off for 15s after 4+ dig_error resets within 3s, so the next recompute is walk-only; timestamp-gated restore avoids racing a second, later burst's own suppression window. |
 | 1.48.0 | 2026-09-21 | New §49, same live incident (§47/§48) -- while restarting the fleet to test §48's fix, live evidence surfaced a second, unrelated root cause for 4 of 9 bots: the existing `teleportToSpawn()` self-rescue mechanism (`bot.chat("/tp ...")`, fires after 3 same-spot reconnects) logged `TELEPORT: ...` successfully for Nell/Wade/Dale, but their actual position never changed -- confirmed via RCON `op <name>` that these three plus Bob (all `dgx-spark2`-hosted) had never been granted server op, so their own `/tp` command had been silently failing since the code's existing comment already named only the `dgx-spark`-hosted bots (Mayor/Mark/Luke/Babs/Amy) as having been added to `ops.json`. No code change needed -- `teleportToSpawn()` was already correct, it just never had permission to act for these four accounts. Fixed live via RCON `op` grants (now persisted in the server's own `ops.json`) plus a direct `tp` to recover the three still-trapped bots immediately; confirmed all 9 physically out via a full position sweep. |
+| 1.49.0 | 2026-09-21 | New §50, direct report immediately after §47-§49 shipped: "now they are back to digging through the wall instead of opening the door" -- the exact issue §44 fixed, reopened by §47's own digCost 30->5 fix. Measured real `block.digTime()` values and confirmed digCost alone can't satisfy both live reports: digTime for the same block varies over 100x by tool (cobblestone: 100ms with netherite pickaxe+efficiency5, common gear in this fleet, vs 10000ms with none), so a digCost strong enough to deter the well-tooled case (~15) blows the search-cost budget for the untooled case, while one safe for the untooled case (~5, §47's own value) is nearly free for the well-tooled one. Fixed (`swim-movements.js` 1.1.0): overrides `safeOrBreak` to cap the per-block labor-cost contribution at `MAX_DIG_LABOR_COST=20` regardless of digTime, decoupling "prefer doors when digging is cheap" from "never make an exit impossible when digging is expensive." `digCost` raised back to 15 (`index.js` 2.84.0) now that doing so is safe. |
