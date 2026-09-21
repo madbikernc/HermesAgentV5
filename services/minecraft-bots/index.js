@@ -1,4 +1,17 @@
-// Version: 2.79.0
+// Version: 2.80.0
+//
+// 2.80.0 (2026-09-21) -- direct live follow-up: "they still wont fight back when pressured. Just
+// found a single zombie in a 'house' with most of the bots, and it was systematically attacking
+// them, with no reprisals from the bots." Confirmed live, not guessed: Mayor at 16-20 HP (well
+// above §43's own HALF_HEALTH threshold) got re-engaged by the SAME zombie every ~2s
+// (SELF_DEFENSE_CHECK_MS) in a cramped space, "successfully" fleeing every single time -- a few
+// blocks of separation isn't real safety when the zombie closes it again before the next check --
+// so she never took enough CUMULATIVE damage to cross the fight threshold, for minutes at a
+// stretch. Functionally "truly unable to flee," even though every individual flee call itself
+// reported ok=true, so §43's own attackAsLastResort() (which only fires on an outright flee
+// FAILURE) never got a chance to run either. New consecutive-flee counter in decideFightType()
+// escalates to fighting once repeated re-engagement piles up (3 in a row without a long-enough
+// real gap), regardless of health or role. See MINECRAFT_BOTS_DESIGN.md §46.
 //
 // 2.79.0 (2026-09-21) -- direct report: "they still destroy walls instead of using doors." A real
 // gap distinct from the existing door PROTECTION (doors/trapdoors/fence gates already can't be dug
@@ -3740,10 +3753,36 @@ const SELF_DEFENSE_RANGE = parseInt(process.env.MC_SELF_DEFENSE_RANGE || "12", 1
 // override both roles -- those aren't a courage judgment call, they're a genuine inability to
 // land a hit (see FLEE_ONLY_MOBS's own header in actions.js).
 const HALF_HEALTH = 10; // out of a max of 20
+
+// Direct live follow-up, 2026-09-21 ("they still wont fight back when pressured... a single
+// zombie... systematically attacking them, with no reprisals"). Confirmed live: a healthy bot
+// (Mayor, 16-20 HP -- well above HALF_HEALTH) can get re-engaged by the SAME zombie every ~2s
+// (SELF_DEFENSE_CHECK_MS) in a cramped space, "successfully" fleeing every single time -- a few
+// blocks of separation isn't real safety when the zombie closes it again before the next check --
+// so she never takes enough CUMULATIVE damage to cross the health threshold above, and never
+// escalates, for minutes at a stretch. That is "truly unable to flee" in every way that actually
+// matters, even though each individual flee call itself reports ok=true. Tracks consecutive flee
+// decisions and escalates to fighting once they pile up, same reasoning as attackAsLastResort's
+// own header just below -- resets on any attack (the cycle's broken) or once enough real time has
+// passed since the last one that it's clearly a new, unrelated encounter, not the same standoff.
+const CONSECUTIVE_FLEE_ESCALATE_AFTER = 3;
+const CONSECUTIVE_FLEE_RESET_MS = 15_000;
+let consecutiveFleeCount = 0;
+let lastFleeDecisionAt = 0;
 function decideFightType(threatName) {
   if (FLEE_ONLY_MOBS.has(threatName) || !hasWeapon(bot)) return "flee";
-  if (myRole?.primary === ROLES.SOLDIER) return "attack";
-  return bot.health < HALF_HEALTH ? "attack" : "flee";
+  if (myRole?.primary === ROLES.SOLDIER || bot.health < HALF_HEALTH) {
+    consecutiveFleeCount = 0;
+    return "attack";
+  }
+  if (Date.now() - lastFleeDecisionAt > CONSECUTIVE_FLEE_RESET_MS) consecutiveFleeCount = 0;
+  if (consecutiveFleeCount >= CONSECUTIVE_FLEE_ESCALATE_AFTER) {
+    consecutiveFleeCount = 0;
+    return "attack";
+  }
+  consecutiveFleeCount++;
+  lastFleeDecisionAt = Date.now();
+  return "flee";
 }
 
 // Direct follow-up, same request ("if truly unable to flee, they should all fight"): a failed

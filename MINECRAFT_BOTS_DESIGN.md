@@ -2301,6 +2301,34 @@ furnaces with no upper bound.
    through to `putInput()` using whatever's already in the fuel slot, instead of aborting the
    whole attempt over a top-up that was never actually needed.
 
+## 46. §43's fight-or-flee rule closed one loophole, live pressure found another: a healthy bot chased forever never escalates (2026-09-21)
+
+Direct live follow-up: "they still wont fight back when pressured. Just found a single zombie in a
+'house' with most of the bots, and it was systematically attacking them, with no reprisals from
+the bots." Checked live immediately rather than assumed a regression -- §43's own rule was working
+exactly as written; the live pressure surfaced a real gap in what "as written" actually covered.
+
+**Confirmed live, not guessed.** Fleet health snapshot found Amy freshly recovering from a self-
+defense fight she'd actually won ("threat while sleeping... post-wake defense: attack -> took care
+of it") -- so the rule does work in general. The real, still-open case was Mayor: health steady at
+16-20 (well above §43's `HALF_HEALTH` threshold), re-engaged by the SAME zombie roughly every 2
+seconds (`SELF_DEFENSE_CHECK_MS`) for minutes at a stretch, "successfully" fleeing on nearly every
+single trigger (`self-defense result: made it to safety. (ok=true)`, over and over). A few blocks
+of separation in a cramped house isn't real safety when the zombie closes it again before the next
+check fires -- so he never took enough CUMULATIVE damage to cross the health threshold, and never
+escalated. §43's own `attackAsLastResort()` didn't help either, since it only fires on an outright
+flee FAILURE (`!result.ok`) -- and these flees kept reporting success. Functionally "truly unable
+to flee" in every way that matters to an observer watching a bot get harassed with zero reprisal,
+even though the code's own bookkeeping showed a string of individual successes.
+
+**Fix (`index.js` 2.80.0):** `decideFightType()` now tracks consecutive flee decisions and
+escalates to fighting once they pile up (3 in a row without a long-enough real gap since the last
+one), regardless of health or role -- the exact same underlying reasoning §43's own
+`attackAsLastResort()` already established (repeated failure to actually resolve a threat means
+fight, not another flee attempt), just triggered by repetition instead of an explicit failure
+result. Resets on any attack (the standoff is broken) or once enough time has passed that a new
+trigger is clearly an unrelated encounter, not a continuation of the same one.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2350,3 +2378,4 @@ furnaces with no upper bound.
 | 1.42.0 | 2026-09-21 | New §43, direct answer to §42's own open question plus a rule change: "if truly unable to flee, they should all fight. Soldiers fight *always*, others fight when under half health." New `decideFightType()` (`index.js` 2.78.0) replaces the flat `SELF_DEFENSE_FLEE_HEALTH` threshold with an explicit role rule -- Soldiers never flee for health reasons (only `FLEE_ONLY_MOBS`/no-weapon), others fight once below half health (10/20). Retired the now-superseded per-bot env override on Mark/Luke's units. Also closed the one place the old rule was never applied: the EMERGENCY health-critical handler used to hardcode an unconditional flee for every role; now uses the same decision (and always ends up fighting, since it only fires under half health by definition). New `attackAsLastResort()` fires from all three flee-triggering sites whenever a flee attempt genuinely fails -- standing still after a failed retreat is worse than fighting, provided there's a weapon; `FLEE_ONLY_MOBS` still excluded even here, since that's a real inability to land a hit, not a courage call. |
 | 1.43.0 | 2026-09-21 | New §44, direct report ("they still destroy walls instead of using doors"). Distinct from §18/§19's own door-protection fix, still intact and verified -- doors themselves genuinely can't be dug through. The gap was cost, not permission: an ordinary wall block has no such protection (rightly so in general), and mineflayer-pathfinder's own cost formula (`laborCost = (1 + 3*digTime/1000) * digCost`, default `digCost` 1) made a quick-to-break wall shortcut cheaper than detouring to the actual door. Fixed (`index.js` 2.79.0): `movements.digCost = 30`, same "strongly prefer, don't forbid" reasoning as the existing `movements.liquidCost = 20`. Verified this reaches every pathfinding call site -- `bot.collectBlock`/`bot.pvp` both already had their own internal movements references pointed at this same shared object from an earlier plugin-swap fix, and `mineflayer-tool` never touches movements at all. |
 | 1.44.0 | 2026-09-21 | New §45, direct request ("I want real confirmation they can use the crafting table and furnace"). A live single-bot test attempt was derailed by teammates repeatedly requesting away the test materials and an idle-reassignment gap -- pivoted to a fleet-wide 24h log sweep instead, which found something far more consequential than a missing positive example: every single smelt attempt fleet-wide had failed for 24+ hours (`"found furnaces nearby, but couldn't use any of them"`, ~80 occurrences on Bob alone), zero successes anywhere. Root cause confirmed directly from the smelt action's own diagnostic logging: the fleet's two real furnaces were jammed with 63-64 `coal_block` already maxing out their fuel slots (one also had 16 stranded `iron_ingot` in its output) -- `putFuel()` was called unconditionally every attempt with no check for existing fuel, so once a slot capped out, every future call threw `"destination full"` and aborted the whole smelt before ever reaching `putInput()`. Fixed (`actions.js` 1.63.0): collects any existing output first (recovering stranded items), and treats a failed `putFuel()` as "already has fuel" rather than fatal, falling through to `putInput()` with whatever's already there. |
+| 1.45.0 | 2026-09-21 | New §46, direct live follow-up ("they still wont fight back when pressured... a single zombie... systematically attacking them, with no reprisals"). §43's rule was working as written -- confirmed Amy had recently won a real fight -- but live pressure found a real gap: Mayor at 16-20 HP (above `HALF_HEALTH`) got re-engaged by the same zombie every ~2s in a cramped house, "successfully" fleeing nearly every time, never taking enough cumulative damage to cross the fight threshold, for minutes at a stretch -- functionally unable to flee even though every individual result reported `ok=true`, so `attackAsLastResort()` (fires only on an outright flee failure) never triggered either. Fixed (`index.js` 2.80.0): `decideFightType()` now tracks consecutive flee decisions and escalates to fighting after 3 in a row without a long-enough gap, regardless of health or role. |
