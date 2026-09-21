@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Version: 1.0.0
+# Version: 1.1.0
 #
-# Fill a double chest with common raw materials in stacks of 64.
+# Place a double chest in front of X Y Z and fill it with materials.
 
 set -euo pipefail
 
@@ -42,3 +42,4 @@ fill_double_chest "$@"
 
 # Revision History
 # 1.0.0 | 2026-09-18 | Initial double-chest loadout of common raw materials in 64-item stacks.
+# 1.1.0 | 2026-09-19 | Place the chest using a coordinate and direction.

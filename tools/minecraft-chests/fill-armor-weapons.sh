@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Version: 1.1.0
+# Version: 1.2.0
 #
-# Fill a double chest with armor, shields, bows, and melee weapons.
+# Place a double chest in front of X Y Z and fill it with combat gear.
 
 set -euo pipefail
 
@@ -43,3 +43,4 @@ fill_double_chest "$@"
 # Revision History
 # 1.0.0 | 2026-09-18 | Initial double-chest loadout of armor and weapons.
 # 1.1.0 | 2026-09-19 | Add matching enchantments to armor, weapons, and shields.
+# 1.2.0 | 2026-09-19 | Place the chest using a coordinate and direction.

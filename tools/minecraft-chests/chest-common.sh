@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Version: 1.1.0
+# Version: 1.2.0
 #
 # Shared RCON support for the Minecraft double-chest fill scripts.
 
 set -euo pipefail
 
 fill_double_chest() {
-  if (( $# != 6 )); then
-    echo "Usage: $(basename "$0") HALF_1_X HALF_1_Y HALF_1_Z HALF_2_X HALF_2_Y HALF_2_Z" >&2
+  if (( $# != 4 )); then
+    echo "Usage: $(basename "$0") X Y Z {north|south|east|west}" >&2
     return 2
   fi
 
@@ -22,8 +22,8 @@ fill_double_chest() {
   fi
 
   local coordinate
-  for coordinate in "$@"; do
-    if [[ ! "$coordinate" =~ ^-?[0-9]+$ ]]; then
+  for coordinate in "$1" "$2" "$3"; do
+    if [[ ! "$coordinate" =~ ^-?(0|[1-9][0-9]*)$ ]]; then
       echo "Chest coordinates must be integers; received: $coordinate" >&2
       return 2
     fi
@@ -47,13 +47,20 @@ fill_double_chest() {
   # is 25581. Getting this wrong silently talks to the wrong server.
   export MCRCON_PORT="${MCRCON_PORT:-25581}"
 
-  local half_1_x="$1"
-  local half_1_y="$2"
-  local half_1_z="$3"
-  local half_2_x="$4"
-  local half_2_y="$5"
-  local half_2_z="$6"
-  local -a commands=()
+  local half_1_x="$1" half_1_y="$2" half_1_z="$3"
+  local half_2_x half_2_y half_2_z chest_facing
+  case "$4" in
+    north) half_1_z=$(( half_1_z - 1 )); half_2_x=$(( half_1_x + 1 )); half_2_z="$half_1_z"; chest_facing=south ;;
+    south) half_1_z=$(( half_1_z + 1 )); half_2_x=$(( half_1_x - 1 )); half_2_z="$half_1_z"; chest_facing=north ;;
+    east) half_1_x=$(( half_1_x + 1 )); half_2_x="$half_1_x"; half_2_z=$(( half_1_z + 1 )); chest_facing=west ;;
+    west) half_1_x=$(( half_1_x - 1 )); half_2_x="$half_1_x"; half_2_z=$(( half_1_z - 1 )); chest_facing=east ;;
+    *) echo "Direction must be north, south, east, or west: $4" >&2; return 2 ;;
+  esac
+  half_2_y="$half_1_y"
+  local -a commands=(
+    "execute in $dimension run setblock $half_1_x $half_1_y $half_1_z minecraft:chest[facing=$chest_facing,type=left]"
+    "execute in $dimension run setblock $half_2_x $half_2_y $half_2_z minecraft:chest[facing=$chest_facing,type=right]"
+  )
   local slot
 
   for slot in "${!CHEST_ITEMS[@]}"; do
@@ -67,3 +74,4 @@ fill_double_chest() {
 # Revision History
 # 1.0.0 | 2026-09-18 | Initial shared validation and RCON implementation for filling both halves of a double chest.
 # 1.1.0 | 2026-09-18 | MCRCON_PORT default corrected 25575 -> 25581 -- the vanilla-default port belongs to an unrelated Minecraft instance on the same host; the real bot world's RCON is 25581.
+# 1.2.0 | 2026-09-19 | Place a double chest in front of a coordinate before filling it.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Version: 1.0.0
+# Version: 1.1.0
 #
-# Fill a double chest with mining, farming, and utility tools.
+# Place a double chest in front of X Y Z and fill it with tools.
 
 set -euo pipefail
 
@@ -42,3 +42,4 @@ fill_double_chest "$@"
 
 # Revision History
 # 1.0.0 | 2026-09-18 | Initial double-chest loadout of mining, farming, and utility tools.
+# 1.1.0 | 2026-09-19 | Place the chest using a coordinate and direction.
