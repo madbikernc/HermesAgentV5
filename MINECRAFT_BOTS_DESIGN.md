@@ -2363,6 +2363,63 @@ implicated in any live report, but worth remembering if a "can't cross water" sy
 the search-radius-derived maxCost ceiling applies to every additive cost tuning in this file, not
 just `digCost`.
 
+## 48. "Can't get out of the home", part 2: a valid path was found, but executing its dig kept failing in an infinite loop (2026-09-21)
+
+Direct live follow-up to §47, same underlying complaint. §47's `digCost` fix (30 -> 5) was
+deployed and, in one important respect, confirmed working immediately: Luke -- left at the
+original cramped location, unaffected by an unrelated teleport-safety-net that had moved three
+other bots -- went from permanent `path_update status=noPath` to a genuine
+`status=success nodes=4 visited=52 cost=24.5`, comfortably inside the ~48+ search budget. The
+maxCost-pruning problem §47 diagnosed really was fixed: a valid route out was being found again.
+
+**But finding the path wasn't the same as walking it.** The very next log lines showed
+`path_reset: dig_error`, immediately followed by the IDENTICAL `path_update status=success
+cost=24.5` being recomputed, immediately followed by another `dig_error` -- dozens of times within
+about one second, with no sign of resolving on its own.
+
+**Root cause, confirmed by reading mineflayer-pathfinder's own move-execution code
+(`node_modules/mineflayer-pathfinder/index.js`):**
+
+```javascript
+bot.dig(block, true)
+  .catch(_ignoreError => {
+    resetPath('dig_error')
+  })
+```
+
+Whatever the real reason `bot.dig()` failed is discarded outright (`_ignoreError`) -- the plugin
+only ever tells the outside world "dig_error" happened, never why. `resetPath()` tears the current
+path down with no cooldown and no memory of the failure; since nothing about the world changed,
+the very next tick's recompute finds the exact same path and walks straight back into the same
+failing dig. This is precisely the same failure shape §42 already fixed once -- but §42's fix
+(disable `canDig` before pathfinding) was scoped narrowly to the "flee" action's own `goto()` call.
+`gohome` and every other `bot.pathfinder.goto()` call site in this codebase never got the same
+protection, so any of them can fall into the identical trap whenever their found route happens to
+require a dig that keeps failing.
+
+The specific per-block reason `bot.dig()` failed is invisible to us (the plugin swallows it before
+it ever reaches this codebase's own error handling). The leading suspect, given 7 bots were packed
+into roughly a 2x5 block shelter at the time: a teammate's own hitbox physically blocking line of
+sight between the digging bot and its target block, which mineflayer's dig validity check rejects.
+It doesn't materially matter which exact cause it is -- the fix needed to defend against the
+*symptom* (an infinite tight retry loop that never makes progress) regardless of cause, the same
+pragmatic stance `digCost`/`liquidCost` already took toward search costs rather than trying to
+enumerate every possible obstruction.
+
+**Fix (`index.js` 2.82.0):** a global burst detector on the existing `path_reset` listener. Four or
+more `dig_error` resets within a 3-second window forces `movements.canDig = false` for 15 seconds,
+so the very next recompute is walk-only -- a real building hit by this almost always still has a
+door-based route once digging stops being on the table, which is exactly what direct reports have
+been asking for all along (§44) over wall-breaching. The restore is timestamp-gated (`if (Date.now()
+>= digSuppressedUntil) movements.canDig = true`) rather than an unconditional blind restore, so a
+second burst that extends the suppression window can't be undone early by the first burst's own
+stale timer. Deliberately global rather than scoped to one action (unlike §42's flee-only fix): the
+underlying `path_reset`/`path_update` events this hooks are already fleet-wide diagnostics logged
+for every action, and the user's complaint here was about ordinary travel (`gohome`), not flee --
+the same class of bug can equally surface during `mine`/`explore`/pursuit, and this now defends all
+of them at once from a single choke point instead of requiring an equivalent patch at every
+individual `goto()` call site.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2414,3 +2471,4 @@ just `digCost`.
 | 1.44.0 | 2026-09-21 | New §45, direct request ("I want real confirmation they can use the crafting table and furnace"). A live single-bot test attempt was derailed by teammates repeatedly requesting away the test materials and an idle-reassignment gap -- pivoted to a fleet-wide 24h log sweep instead, which found something far more consequential than a missing positive example: every single smelt attempt fleet-wide had failed for 24+ hours (`"found furnaces nearby, but couldn't use any of them"`, ~80 occurrences on Bob alone), zero successes anywhere. Root cause confirmed directly from the smelt action's own diagnostic logging: the fleet's two real furnaces were jammed with 63-64 `coal_block` already maxing out their fuel slots (one also had 16 stranded `iron_ingot` in its output) -- `putFuel()` was called unconditionally every attempt with no check for existing fuel, so once a slot capped out, every future call threw `"destination full"` and aborted the whole smelt before ever reaching `putInput()`. Fixed (`actions.js` 1.63.0): collects any existing output first (recovering stranded items), and treats a failed `putFuel()` as "already has fuel" rather than fatal, falling through to `putInput()` with whatever's already there. |
 | 1.45.0 | 2026-09-21 | New §46, direct live follow-up ("they still wont fight back when pressured... a single zombie... systematically attacking them, with no reprisals"). §43's rule was working as written -- confirmed Amy had recently won a real fight -- but live pressure found a real gap: Mayor at 16-20 HP (above `HALF_HEALTH`) got re-engaged by the same zombie every ~2s in a cramped house, "successfully" fleeing nearly every time, never taking enough cumulative damage to cross the fight threshold, for minutes at a stretch -- functionally unable to flee even though every individual result reported `ok=true`, so `attackAsLastResort()` (fires only on an outright flee failure) never triggered either. Fixed (`index.js` 2.80.0): `decideFightType()` now tracks consecutive flee decisions and escalates to fighting after 3 in a row without a long-enough gap, regardless of health or role. |
 | 1.46.0 | 2026-09-21 | New §47, direct live report ("they can't get out of the home") -- a real, self-inflicted regression from §44's own `digCost=30`, confirmed live rather than assumed a new gap. 7 of 9 bots found crammed in one shelter; Mayor alone logged 239 `noPath` results in 2 hours, zero successful travel the entire window. Root cause: mineflayer-pathfinder's own `astar.js` maxCost ceiling (`startNode.h + searchRadius`, with `searchRadius` pinned at 48 in this codebase) PRUNES any node exceeding it rather than just deprioritizing it -- for a nearby goal, the whole search budget is only ~48-58, and a single dig at `digCost=30` could cost 40-120+ on its own, silently turning "expensive but valid path" into a hard `noPath`. Fixed (`index.js` 2.81.0): lowered `digCost` to 5 -- still a real 5x discouragement (§44's actual goal unchanged), but no longer capable of making a real exit mathematically impossible. Flagged: the same maxCost-ceiling risk applies to any additive cost tuning in this file, including the untouched `liquidCost=20`. |
+| 1.47.0 | 2026-09-21 | New §48, direct live follow-up to §47, same "can't get out of the home" report -- §47's digCost fix genuinely resolved the noPath problem (confirmed: Luke went from permanent noPath to status=success cost=24.5) but executing that path hit a NEW infinite tight loop: mineflayer-pathfinder's own `bot.dig().catch(() => resetPath('dig_error'))` discards the real failure reason and immediately recomputes the identical path into the identical failure (live: the same success/cost=24.5 path_update dozens of times within ~1 second). Same failure shape §42 already fixed for "flee" specifically, but no other `goto()` call site -- `gohome` included -- had the same protection. Fixed (`index.js` 2.82.0): a global burst detector on the existing `path_reset` listener forces `canDig` off for 15s after 4+ dig_error resets within 3s, so the next recompute is walk-only; timestamp-gated restore avoids racing a second, later burst's own suppression window. |

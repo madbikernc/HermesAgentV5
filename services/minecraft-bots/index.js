@@ -1,4 +1,17 @@
-// Version: 2.81.0
+// Version: 2.82.0
+//
+// 2.82.0 (2026-09-21) -- direct live follow-up, same "can't get out of the home" report: §47's
+// digCost fix made a real path findable again (confirmed: Luke went from permanent noPath to
+// status=success cost=24.5), but executing it hit a NEW infinite tight loop -- mineflayer-
+// pathfinder's own move code swallows the real dig failure and just resets the path, which the
+// very next tick recomputes identically and fails identically again (live: same
+// success/cost=24.5 path_update dozens of times in ~1s, each followed immediately by
+// path_reset: dig_error). Same failure shape §42 already fixed for "flee" specifically
+// (disable canDig before that action's own goto), but no other action -- gohome included -- had
+// the same protection. Added a global burst detector: 4+ dig_error resets within 3s forces
+// canDig off for 15s so the next recompute is walk-only, on the theory a real building almost
+// always still has a door route once digging stops being an option. See
+// MINECRAFT_BOTS_DESIGN.md §48.
 //
 // 2.81.0 (2026-09-21) -- direct live report: "they can't get out of the home." A real, self-
 // inflicted regression from §44's own digCost=30, not a new gap -- confirmed live via
@@ -1587,7 +1600,54 @@ bot.once("spawn", async () => {
                 `time=${r.time?.toFixed?.(0) ?? "?"}ms`);
   });
   bot.on("goal_reached", () => console.log(`[${USERNAME}] goal_reached`));
-  bot.on("path_reset", (reason) => console.log(`[${USERNAME}] path_reset: ${reason}`));
+
+  // Direct live follow-up ("they can't get out of the home"), 2026-09-21: §47's digCost fix
+  // (30->5) made a real path findable again where the search cost ceiling had previously
+  // pruned it outright -- confirmed live, Luke's own path_update went from permanent noPath to
+  // status=success cost=24.5. But finding the path isn't the same as walking it: mineflayer-
+  // pathfinder's own move-execution code (index.js: `bot.dig(block, true).catch(_ignoreError =>
+  // resetPath('dig_error'))`) SWALLOWS whatever the real dig failure was and just tears the
+  // path down -- with nothing about the world having changed, the very next tick recomputes the
+  // IDENTICAL path and hits the IDENTICAL dig failure again. Live evidence matches exactly:
+  // Luke logged the same path_update status=success/cost=24.5 dozens of times within about one
+  // second, each immediately followed by path_reset: dig_error, a true infinite tight loop (not
+  // merely slow -- ACTION_TIMEOUT_MS would eventually cut off any ONE attempt, but the very next
+  // attempt just re-enters the same trap, so functionally she never leaves). §42 already solved
+  // this exact failure shape once, but only for "flee" (disabling canDig for that one action's
+  // own goto before it runs) -- gohome and every other pathfinder.goto() call site never got the
+  // same protection, so any of them can fall into it whenever their found route happens to
+  // require a dig that keeps failing. The real per-block reason is invisible to us (the plugin
+  // discards it), but with 7 bots packed into one ~2x5 shelter, a teammate's own hitbox blocking
+  // line of sight to the target block is the leading suspect -- not that it matters: this
+  // defends against the SYMPTOM regardless of cause, the same pragmatic choice digCost/liquidCost
+  // already made. Fix: watch for a burst of dig_error resets in a short window and temporarily
+  // force canDig off so the very next recompute is walk-only -- a real building hit by this
+  // almost always still has a door-based route, which is exactly what direct reports have asked
+  // for over digging anyway. Restore is timestamp-gated (only fires if nothing re-armed a longer
+  // suppression since) so it can't race a newer burst's own restore.
+  const DIG_ERROR_BURST_THRESHOLD = 4;
+  const DIG_ERROR_BURST_WINDOW_MS = 3000;
+  const DIG_DISABLE_COOLDOWN_MS = 15000;
+  let digErrorTimestamps = [];
+  let digSuppressedUntil = 0;
+  bot.on("path_reset", (reason) => {
+    console.log(`[${USERNAME}] path_reset: ${reason}`);
+    if (reason !== "dig_error") return;
+    const now = Date.now();
+    digErrorTimestamps.push(now);
+    digErrorTimestamps = digErrorTimestamps.filter((t) => now - t < DIG_ERROR_BURST_WINDOW_MS);
+    if (digErrorTimestamps.length < DIG_ERROR_BURST_THRESHOLD) return;
+    digErrorTimestamps = [];
+    digSuppressedUntil = now + DIG_DISABLE_COOLDOWN_MS;
+    if (movements.canDig) {
+      console.log(`[${USERNAME}] dig_error burst -- forcing walk-only pathing for ` +
+                  `${DIG_DISABLE_COOLDOWN_MS}ms`);
+      movements.canDig = false;
+    }
+    setTimeout(() => {
+      if (Date.now() >= digSuppressedUntil) movements.canDig = true;
+    }, DIG_DISABLE_COOLDOWN_MS);
+  });
 
   // Inventory persists across restarts (it's tied to the player's UUID in the world save, not
   // this process) -- worth checking gear right away, not only after an action changes it.
