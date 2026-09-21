@@ -2223,6 +2223,39 @@ with. Deliberately still excludes `FLEE_ONLY_MOBS` even as a last resort -- a fl
 teleport-evader stays genuinely unreachable no matter how desperate the situation gets, the exact
 doomed-melee shape that set already exists to prevent.
 
+## 44. Wall-breaching shortcuts past doors closed with a dig-cost penalty, not a new protection rule (2026-09-21)
+
+Direct report: "they still destroy walls instead of using doors." A real, distinct gap from
+§19/§18's own door-protection fix, not a regression of it -- confirmed the existing protection is
+still intact (doors, trapdoors, and fence gates are all still in `isProtectedBlockName()`, feeding
+`movements.blocksCantBreak`, so the door block itself genuinely can't be dug through). The gap was
+never about permission to dig the door -- it was that an ORDINARY wall block right next to it has
+no such protection, correctly so in general (she has to be able to dig through real terrain
+obstructions), and nothing ever discouraged treating that as a shortcut instead of the door.
+
+**Confirmed the actual mechanism** against mineflayer-pathfinder's own cost formula
+(`movements.js`): `laborCost = (1 + 3 * digTime/1000) * digCost`, with `digCost` defaulting to `1`.
+For anything quick to break -- planks, dirt, most ordinary wall material -- that labor cost is
+often cheaper than the walk around a building to its actual door, so pathfinder simply chose the
+shortcut every time cost, not correctness, decided the route.
+
+**Fix (`index.js` 2.79.0):** `movements.digCost = 30`, set right alongside the existing
+`movements.liquidCost = 20` and reasoned about identically -- strongly discourage, don't forbid.
+She'll still dig through a genuine dead end with no path around it at all (digCost only raises the
+cost of that move, it doesn't remove it as an option, the same "not banned outright" design
+`liquidCost` already established for water), but a shortcut past a door that was right there is no
+longer cheaper than just using it.
+
+**Verified this actually reaches every pathfinding call site, not just direct `goto()` calls.**
+`bot.collectBlock` (mine/explore's own collection walk) and `bot.pvp` (combat) both maintain their
+own internal `Movements` instances by default -- the exact "silently swapped back to a generic,
+unconfigured Movements" bug already found and fixed once for each of them (§18-era). Both already
+have their own `.movements` property reassigned to point at this SAME shared object
+(`bot.collectBlock.movements = movements` / `bot.pvp.movements = movements`, both set once at
+spawn) -- so `digCost` didn't need a second fix for either plugin, it's already the one object
+every pathfinding caller shares. Checked `mineflayer-tool` too, the fleet's third pathfinding-
+adjacent plugin -- it never touches `Movements` at all, nothing to fix there.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2270,3 +2303,4 @@ doomed-melee shape that set already exists to prevent.
 | 1.40.0 | 2026-09-19 | New §41, direct report ("I don't think they really know how to use the crafting table or furnace"). Root-caused live: Amy crafted a crafting_table at 01:45, then a Builder-priority "place it at home" REJECTED DONE fired three times over 25 minutes -- every time the whole goal was abandoned (`currentGoal = null`) instead of acting on the fact she was still carrying the item the entire time, so the next re-issued directive immediately re-hallucinated DONE again with zero real steps. Fixed (`index.js` 2.77.0): on this rejection, if she's still holding the item, walk home and place it herself right now (reusing `gohome`/`place`) before giving up -- one deterministic shot instead of another unreliable LLM round-trip. Also clarified `planNextStep`'s own `ACTION CRAFT`/`ACTION PLACE` descriptions, which never mentioned CRAFT's existing auto-chaining of simple intermediates or that PLACE is what actually satisfies a "set one up at home" directive -- a real, confirmed contributor to repeated multi-paragraph confused reasoning in live logs. |
 | 1.41.0 | 2026-09-21 | New §42, direct request (24h behavioral review) that surfaced ~4,271 fleet-wide deaths, a 408-death streak, still live during investigation -- stabilized via RCON mob-clear. Operator's own direct observation ("one zombie camped out... none of them fight back including the soldiers... if the bots are inside a building with a zombie, they seem to act as if they are trapped") reframed the theory and led to the real mechanism: EMERGENCY-critical health commits a bot to flee-only (never attacks, any role), and flee's pathfind shares the fleet's canDig-enabled Movements -- in an enclosed room, escape can require digging through a wall, and a failed dig makes pathfinder recompute the IDENTICAL path and fail again immediately, confirmed live via `path_reset: dig_error` firing dozens of times a second with an unchanged cost signature. Fixed (`actions.js` 1.62.0): "flee" now disables digging for its own pathfind, forcing a real walkable route or a clean fast failure instead of an infinite stuck loop. Flagged, not fixed: a bot with zero real escape route still won't fight back afterward (EMERGENCY's own no-attack design is unchanged) -- a real policy decision left open. |
 | 1.42.0 | 2026-09-21 | New §43, direct answer to §42's own open question plus a rule change: "if truly unable to flee, they should all fight. Soldiers fight *always*, others fight when under half health." New `decideFightType()` (`index.js` 2.78.0) replaces the flat `SELF_DEFENSE_FLEE_HEALTH` threshold with an explicit role rule -- Soldiers never flee for health reasons (only `FLEE_ONLY_MOBS`/no-weapon), others fight once below half health (10/20). Retired the now-superseded per-bot env override on Mark/Luke's units. Also closed the one place the old rule was never applied: the EMERGENCY health-critical handler used to hardcode an unconditional flee for every role; now uses the same decision (and always ends up fighting, since it only fires under half health by definition). New `attackAsLastResort()` fires from all three flee-triggering sites whenever a flee attempt genuinely fails -- standing still after a failed retreat is worse than fighting, provided there's a weapon; `FLEE_ONLY_MOBS` still excluded even here, since that's a real inability to land a hit, not a courage call. |
+| 1.43.0 | 2026-09-21 | New §44, direct report ("they still destroy walls instead of using doors"). Distinct from §18/§19's own door-protection fix, still intact and verified -- doors themselves genuinely can't be dug through. The gap was cost, not permission: an ordinary wall block has no such protection (rightly so in general), and mineflayer-pathfinder's own cost formula (`laborCost = (1 + 3*digTime/1000) * digCost`, default `digCost` 1) made a quick-to-break wall shortcut cheaper than detouring to the actual door. Fixed (`index.js` 2.79.0): `movements.digCost = 30`, same "strongly prefer, don't forbid" reasoning as the existing `movements.liquidCost = 20`. Verified this reaches every pathfinding call site -- `bot.collectBlock`/`bot.pvp` both already had their own internal movements references pointed at this same shared object from an earlier plugin-swap fix, and `mineflayer-tool` never touches movements at all. |

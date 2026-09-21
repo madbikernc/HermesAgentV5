@@ -1,4 +1,19 @@
-// Version: 2.78.0
+// Version: 2.79.0
+//
+// 2.79.0 (2026-09-21) -- direct report: "they still destroy walls instead of using doors." A real
+// gap distinct from the existing door PROTECTION (doors/trapdoors/fence gates already can't be dug
+// through, blocksCantBreak) -- an ordinary wall block has no such protection, rightly so in
+// general, but that also means nothing discouraged digging one as a shortcut when it's cheaper
+// than detouring to the actual door. Confirmed against mineflayer-pathfinder's own cost formula
+// (movements.js: laborCost = (1 + 3*digTime/1000) * digCost, default digCost 1) -- for anything
+// quick to break that's often cheaper than walking around. New movements.digCost = 30, same
+// "strongly prefer, don't forbid" reasoning already proven for movements.liquidCost just above it
+// -- she'll still dig through a genuine dead end with no path around it, just never again as a
+// shortcut past a door that was right there. Verified this propagates everywhere pathfinding
+// happens (mine/explore, attack, flee, travel), not just direct goto calls: bot.collectBlock/
+// bot.pvp both already had their own internal movements references pointed at this SAME shared
+// object (an earlier fix for a related plugin-swap bug), so one change here covers all of them. See
+// MINECRAFT_BOTS_DESIGN.md §44.
 //
 // 2.78.0 (2026-09-21) -- direct follow-up to §42's flee dig-loop fix: "if truly unable to flee,
 // they should all fight. Soldiers fight *always*, others fight when under half health." Replaces
@@ -1410,6 +1425,19 @@ bot.once("spawn", async () => {
   // deprioritized) when it's genuinely the only way through -- not banned outright, since that
   // would strand her at any water-crossed goal with no alternative route.
   movements.liquidCost = 20;
+  // Direct report, 2026-09-21 ("they still destroy walls instead of using doors"). A real,
+  // distinct gap from the door-protection fix just below this comment: doors/trapdoors/fence
+  // gates are already protected from being dug through outright (blocksCantBreak), but an
+  // ORDINARY wall block -- stone, planks, whatever the building is actually made of -- is not,
+  // rightly so in general (she needs to be able to dig through genuine terrain obstructions).
+  // The problem is cost, not permission: confirmed against this same astar.js-fed cost formula
+  // liquidCost already tunes -- digCost (default 1) multiplies straight into a node's cost, and
+  // for anything quick to break (planks, dirt) that's often cheaper than detouring around a
+  // building to its actual door, so pathfinder happily punches a new hole instead. Raised well
+  // above a typical walking route's cost, same "strongly prefer, don't forbid" reasoning as
+  // liquidCost above -- she'll still dig through a genuine dead end with no path around it, just
+  // never again as a shortcut past a door that was right there.
+  movements.digCost = 30;
   // Direct request, 2026-09-08 ("before they dig or destroy a block, they should make sure it
   // is not a functional block like a bed or a furnace... or any other form of crafted item or
   // block"). Confirmed against mineflayer-pathfinder's own movements.js source: its default
