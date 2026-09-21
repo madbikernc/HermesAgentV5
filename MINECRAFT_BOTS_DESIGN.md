@@ -2420,6 +2420,56 @@ the same class of bug can equally surface during `mine`/`explore`/pursuit, and t
 of them at once from a single choke point instead of requiring an equivalent patch at every
 individual `goto()` call site.
 
+## 49. "Can't get out of the home", part 3: the real root cause for 4 of 9 bots was a missing server-side op grant, not pathfinding at all (2026-09-21)
+
+Direct continuation of the same live incident (§47, §48). §48's dig_error diagnostic was deployed
+and, while waiting for it to fire again, live evidence turned up a much more direct explanation for
+why the fleet's own EXISTING self-rescue mechanism had never kicked in on its own.
+
+**The fleet already has a designed-for-exactly-this escape hatch.** `teleportToSpawn()` (`index.js`,
+originally 2026-09-07) fires when a bot reconnects at essentially the same spot `RESTART_STUCK_THRESHOLD`
+(2) times in a row, or after `MAX_STUCK_NUDGES` failed nudge attempts -- it issues `bot.chat("/tp ...")`
+to her own `bot.spawnPoint`, a real server-side teleport, not a pathfinding action, so it works even
+when every walkable AND dig-requiring route is genuinely exhausted. Restarting the fleet for §47/§48
+repeatedly tripped this exact mechanism live: Luke, Nell, Wade, Mark, Amy, and Dale each logged
+`TELEPORT: reconnected at the same spot 3 times in a row -- heading back to spawn (87, 63, 68)`.
+
+**But the position sweep after those restarts showed something wrong: Mayor/Mark/Luke/Babs/Amy's
+positions actually changed to the new spawn coordinate -- Nell/Wade/Dale's did not, despite logging
+the identical TELEPORT line.** `/tp` is an operator-only vanilla command; `bot.chat("/tp ...")` only
+works if the bot account itself holds server op status. The code's own existing comment already
+half-explained this ("Babs/Amy/Mark/Luke were added to ops.json at level 2 ... for exactly this") --
+naming exactly the four `dgx-spark`-hosted bots, and silently leaving out all four `dgx-spark2`-hosted
+ones (Bob/Nell/Wade/Dale). Confirmed directly via RCON `op <name>`: Wade, Nell, Dale, and Bob each
+returned `"Made X a server operator"` (a real state change) where Mayor returned `"Nothing changed.
+The player already is an operator"`. The four spark2 bots' own `/tp` self-rescue command had been
+silently failing every single time it ever fired, for as long as they've existed on this server --
+the log line claiming success was genuine (the command was issued), but the actual server-side
+effect never happened, because permission was never granted for that host's bots at deploy time.
+
+**This means the true, fleet-wide "can't get out of the home" incident was two independent problems
+layered together, not one:** §47/§48's pathfinding fixes (digCost tuning, dig_error burst detection)
+are real and correctly address the pathfinding side for whichever bots' self-rescue teleport DOES
+work -- but for the four spark2 bots, no amount of pathfinding tuning could ever have gotten them out
+on its own, since even a perfect path discovery still depends on the SAME dig-execution machinery
+that (per §48) was failing for reasons still not fully root-caused; only the teleport escape hatch
+truly guarantees an exit regardless of geometry, and it was silently dead for exactly the bots that
+needed it during this incident.
+
+**Fix, immediate (RCON, this session):** `op Wade`, `op Nell`, `op Dale`, `op Bob`, then `tp` each of
+the three still-trapped ones (Wade/Nell/Dale; Mark/Amy had already self-rescued once granted op
+retroactively enabled their own already-pending TELEPORT logic on the next trigger) directly to
+spawn. All 9 bots confirmed physically out of the shelter afterward via a full RCON position sweep.
+
+**Fix, durable:** grant is now live in the server's own `ops.json`, which persists across restarts
+independently of this codebase -- no code change was required, since `teleportToSpawn()` was already
+correct; it just never had permission to act on any of these four accounts. Worth adding to whatever
+runbook covers onboarding a new bot account to this fleet: an op grant is as load-bearing as the
+`config.json`/`ops.json` player entry that lets the account log in at all, not an optional extra, and
+this gap went undetected for as long as it did specifically because a failed `/tp` produces no
+client-side error mineflayer surfaces -- the log line for "I issued this command" and "this command
+actually took effect" look identical from the bot process's own point of view.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2472,3 +2522,4 @@ individual `goto()` call site.
 | 1.45.0 | 2026-09-21 | New §46, direct live follow-up ("they still wont fight back when pressured... a single zombie... systematically attacking them, with no reprisals"). §43's rule was working as written -- confirmed Amy had recently won a real fight -- but live pressure found a real gap: Mayor at 16-20 HP (above `HALF_HEALTH`) got re-engaged by the same zombie every ~2s in a cramped house, "successfully" fleeing nearly every time, never taking enough cumulative damage to cross the fight threshold, for minutes at a stretch -- functionally unable to flee even though every individual result reported `ok=true`, so `attackAsLastResort()` (fires only on an outright flee failure) never triggered either. Fixed (`index.js` 2.80.0): `decideFightType()` now tracks consecutive flee decisions and escalates to fighting after 3 in a row without a long-enough gap, regardless of health or role. |
 | 1.46.0 | 2026-09-21 | New §47, direct live report ("they can't get out of the home") -- a real, self-inflicted regression from §44's own `digCost=30`, confirmed live rather than assumed a new gap. 7 of 9 bots found crammed in one shelter; Mayor alone logged 239 `noPath` results in 2 hours, zero successful travel the entire window. Root cause: mineflayer-pathfinder's own `astar.js` maxCost ceiling (`startNode.h + searchRadius`, with `searchRadius` pinned at 48 in this codebase) PRUNES any node exceeding it rather than just deprioritizing it -- for a nearby goal, the whole search budget is only ~48-58, and a single dig at `digCost=30` could cost 40-120+ on its own, silently turning "expensive but valid path" into a hard `noPath`. Fixed (`index.js` 2.81.0): lowered `digCost` to 5 -- still a real 5x discouragement (§44's actual goal unchanged), but no longer capable of making a real exit mathematically impossible. Flagged: the same maxCost-ceiling risk applies to any additive cost tuning in this file, including the untouched `liquidCost=20`. |
 | 1.47.0 | 2026-09-21 | New §48, direct live follow-up to §47, same "can't get out of the home" report -- §47's digCost fix genuinely resolved the noPath problem (confirmed: Luke went from permanent noPath to status=success cost=24.5) but executing that path hit a NEW infinite tight loop: mineflayer-pathfinder's own `bot.dig().catch(() => resetPath('dig_error'))` discards the real failure reason and immediately recomputes the identical path into the identical failure (live: the same success/cost=24.5 path_update dozens of times within ~1 second). Same failure shape §42 already fixed for "flee" specifically, but no other `goto()` call site -- `gohome` included -- had the same protection. Fixed (`index.js` 2.82.0): a global burst detector on the existing `path_reset` listener forces `canDig` off for 15s after 4+ dig_error resets within 3s, so the next recompute is walk-only; timestamp-gated restore avoids racing a second, later burst's own suppression window. |
+| 1.48.0 | 2026-09-21 | New §49, same live incident (§47/§48) -- while restarting the fleet to test §48's fix, live evidence surfaced a second, unrelated root cause for 4 of 9 bots: the existing `teleportToSpawn()` self-rescue mechanism (`bot.chat("/tp ...")`, fires after 3 same-spot reconnects) logged `TELEPORT: ...` successfully for Nell/Wade/Dale, but their actual position never changed -- confirmed via RCON `op <name>` that these three plus Bob (all `dgx-spark2`-hosted) had never been granted server op, so their own `/tp` command had been silently failing since the code's existing comment already named only the `dgx-spark`-hosted bots (Mayor/Mark/Luke/Babs/Amy) as having been added to `ops.json`. No code change needed -- `teleportToSpawn()` was already correct, it just never had permission to act for these four accounts. Fixed live via RCON `op` grants (now persisted in the server's own `ops.json`) plus a direct `tp` to recover the three still-trapped bots immediately; confirmed all 9 physically out via a full position sweep. |
