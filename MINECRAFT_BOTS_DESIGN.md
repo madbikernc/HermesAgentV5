@@ -2256,6 +2256,51 @@ spawn) -- so `digCost` didn't need a second fix for either plugin, it's already 
 every pathfinding caller shares. Checked `mineflayer-tool` too, the fleet's third pathfinding-
 adjacent plugin -- it never touches `Movements` at all, nothing to fix there.
 
+## 45. Real confirmation requested, real bug found instead: every furnace in the world was jammed (2026-09-21)
+
+Direct request: "I want real confirmation they can use the crafting table and furnace." Not
+satisfied by the code-level proof already given for mining (§ the prior turn) -- pushed for actual
+live evidence. That investigation is what surfaced this section, not a clean confirmation.
+
+**Live-testing attempt derailed into the real finding.** Gave Amy exactly the raw materials for a
+controlled crafting-table test (oak logs, cobblestone, coal, raw iron) and set up background
+watches for her and Mayor's own real craft/place/smelt results. Both watches ran their full
+duration with zero events -- neither bot attempted a single real craft or place step, chewed up
+instead by teammates repeatedly requesting away the exact materials just given (raw materials
+aren't gear, so §40's give-downgrade rejection doesn't apply, correctly) and a `GOAL_TICK_MS`/
+`IDLE_BEFORE_SELF_GOAL_MS` idle-reassignment gap left both bots without an active goal for
+several minutes straight. Rather than keep fighting an increasingly artificial single-bot test,
+broadened to a fleet-wide 24-hour log sweep for genuine (non-chest-substitution) craft/place/smelt
+results instead.
+
+**That sweep found something much more consequential than a missing positive example.** Crafting-
+table usage does have real historical evidence earlier this session (§41's own investigation
+directly observed a successful craft). Furnace usage did not: across all 9 bots, 24+ hours, **every
+single smelt attempt failed**, with the exact same message -- `"found furnaces nearby, but couldn't
+use any of them"` -- dozens of times per bot (Bob alone: ~80 occurrences). Not one successful smelt
+anywhere in the fleet in that entire window.
+
+**Root cause, confirmed directly from this codebase's own diagnostic logging** (the per-furnace
+slot dump added back in the original smelt build, 2026-09-07) -- the two furnaces the fleet
+actually uses were both jammed: `(94,63,64)` had 63 `coal_block` already sitting in its fuel slot
+(coal_block smelts 800 items each -- effectively unlimited fuel) plus 16 `iron_ingot` stranded in
+its output slot, uncollected; `(94,63,63)` had exactly 64 `coal_block`, the hard per-slot cap.
+`"smelt"` called `furnace.putFuel()` UNCONDITIONALLY on every single attempt, with no check for
+whether the furnace already had fuel. Once a slot maxes out, every subsequent `putFuel()` throws
+`"destination full"` -- and the code treated that as fatal, aborting the entire smelt attempt
+before it ever reached `putInput()`, even though the furnace already had far more fuel than it
+could ever need. A textbook case of a well-intentioned safety action (topping up fuel so a bot
+never runs out mid-smelt) becoming self-defeating once repeated by many bots against the same two
+furnaces with no upper bound.
+
+**Fix (`actions.js` 1.63.0), two parts:**
+1. Collect any output already sitting in the furnace *before* adding new input -- recovers
+   whatever a prior successful smelt (this bot's own or another bot's) left stranded, and frees
+   the slot rather than leaving it jammed for the next attempt.
+2. Treat a failed `putFuel()` as "already has enough fuel," not a fatal error -- log it and fall
+   through to `putInput()` using whatever's already in the fuel slot, instead of aborting the
+   whole attempt over a top-up that was never actually needed.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2304,3 +2349,4 @@ adjacent plugin -- it never touches `Movements` at all, nothing to fix there.
 | 1.41.0 | 2026-09-21 | New §42, direct request (24h behavioral review) that surfaced ~4,271 fleet-wide deaths, a 408-death streak, still live during investigation -- stabilized via RCON mob-clear. Operator's own direct observation ("one zombie camped out... none of them fight back including the soldiers... if the bots are inside a building with a zombie, they seem to act as if they are trapped") reframed the theory and led to the real mechanism: EMERGENCY-critical health commits a bot to flee-only (never attacks, any role), and flee's pathfind shares the fleet's canDig-enabled Movements -- in an enclosed room, escape can require digging through a wall, and a failed dig makes pathfinder recompute the IDENTICAL path and fail again immediately, confirmed live via `path_reset: dig_error` firing dozens of times a second with an unchanged cost signature. Fixed (`actions.js` 1.62.0): "flee" now disables digging for its own pathfind, forcing a real walkable route or a clean fast failure instead of an infinite stuck loop. Flagged, not fixed: a bot with zero real escape route still won't fight back afterward (EMERGENCY's own no-attack design is unchanged) -- a real policy decision left open. |
 | 1.42.0 | 2026-09-21 | New §43, direct answer to §42's own open question plus a rule change: "if truly unable to flee, they should all fight. Soldiers fight *always*, others fight when under half health." New `decideFightType()` (`index.js` 2.78.0) replaces the flat `SELF_DEFENSE_FLEE_HEALTH` threshold with an explicit role rule -- Soldiers never flee for health reasons (only `FLEE_ONLY_MOBS`/no-weapon), others fight once below half health (10/20). Retired the now-superseded per-bot env override on Mark/Luke's units. Also closed the one place the old rule was never applied: the EMERGENCY health-critical handler used to hardcode an unconditional flee for every role; now uses the same decision (and always ends up fighting, since it only fires under half health by definition). New `attackAsLastResort()` fires from all three flee-triggering sites whenever a flee attempt genuinely fails -- standing still after a failed retreat is worse than fighting, provided there's a weapon; `FLEE_ONLY_MOBS` still excluded even here, since that's a real inability to land a hit, not a courage call. |
 | 1.43.0 | 2026-09-21 | New §44, direct report ("they still destroy walls instead of using doors"). Distinct from §18/§19's own door-protection fix, still intact and verified -- doors themselves genuinely can't be dug through. The gap was cost, not permission: an ordinary wall block has no such protection (rightly so in general), and mineflayer-pathfinder's own cost formula (`laborCost = (1 + 3*digTime/1000) * digCost`, default `digCost` 1) made a quick-to-break wall shortcut cheaper than detouring to the actual door. Fixed (`index.js` 2.79.0): `movements.digCost = 30`, same "strongly prefer, don't forbid" reasoning as the existing `movements.liquidCost = 20`. Verified this reaches every pathfinding call site -- `bot.collectBlock`/`bot.pvp` both already had their own internal movements references pointed at this same shared object from an earlier plugin-swap fix, and `mineflayer-tool` never touches movements at all. |
+| 1.44.0 | 2026-09-21 | New §45, direct request ("I want real confirmation they can use the crafting table and furnace"). A live single-bot test attempt was derailed by teammates repeatedly requesting away the test materials and an idle-reassignment gap -- pivoted to a fleet-wide 24h log sweep instead, which found something far more consequential than a missing positive example: every single smelt attempt fleet-wide had failed for 24+ hours (`"found furnaces nearby, but couldn't use any of them"`, ~80 occurrences on Bob alone), zero successes anywhere. Root cause confirmed directly from the smelt action's own diagnostic logging: the fleet's two real furnaces were jammed with 63-64 `coal_block` already maxing out their fuel slots (one also had 16 stranded `iron_ingot` in its output) -- `putFuel()` was called unconditionally every attempt with no check for existing fuel, so once a slot capped out, every future call threw `"destination full"` and aborted the whole smelt before ever reaching `putInput()`. Fixed (`actions.js` 1.63.0): collects any existing output first (recovering stranded items), and treats a failed `putFuel()` as "already has fuel" rather than fatal, falling through to `putInput()` with whatever's already there. |

@@ -1,4 +1,18 @@
-// Version: 1.62.0
+// Version: 1.63.0
+//
+// 1.63.0 (2026-09-21) -- direct request: "I want real confirmation they can use the crafting
+// table and furnace." Investigating turned up a real, severe, already-live bug rather than just
+// confirming one: a 24h fleet-wide log sweep found ZERO successful smelts anywhere, every single
+// attempt failing "found furnaces nearby, but couldn't use any of them." Root cause confirmed via
+// this file's own per-furnace slot diagnostic logging (2026-09-07): the fleet's two real furnaces
+// were jammed with 63-64 coal_block already sitting in their fuel slots (the hard per-slot cap)
+// plus 16 iron_ingot stranded in one's output, uncollected -- "smelt" called putFuel()
+// UNCONDITIONALLY every attempt regardless of existing fuel, so once a slot maxed out, every
+// future call threw "destination full" and aborted the whole smelt before ever reaching putInput,
+// even though the furnace already had more than enough fuel to work with. Fixed: collects any
+// existing output first (recovers whatever was stranded), and treats a failed putFuel() as
+// "already has fuel" rather than fatal -- falls through to putInput using what's already there.
+// See MINECRAFT_BOTS_DESIGN.md §45.
 //
 // 1.62.0 (2026-09-21) -- direct live observation: "none of them fight back including the
 // soldiers... if the bots are inside a building with a zombie, they seem to act as if they are
@@ -2998,9 +3012,36 @@ export async function performAction(bot, action, speaker) {
         }
 
         try {
-          // One fuel item per item smelted is a generous overestimate for any fuel type (coal
-          // alone smelts 8 per item) -- errs toward "definitely enough fuel" over precision.
-          await furnace.putFuel(fuelItem.type, null, Math.min(fuelItem.count, smeltCount));
+          // Direct request, 2026-09-21 ("I want real confirmation they can use the crafting
+          // table and furnace"). Investigating turned up a real, severe, already-live bug: a
+          // fleet-wide 24h log sweep found ZERO successful smelts, every single attempt failing
+          // "found furnaces nearby, but couldn't use any of them." This codebase's own per-
+          // furnace slot logging (2026-09-07) caught the real cause directly: furnace at
+          // (94,63,64) had 63 coal_block already sitting in its fuel slot (coal_block smelts 800
+          // items each -- decades of fuel) plus 16 iron_ingot stranded in output, uncollected;
+          // furnace at (94,63,63) had exactly 64 coal_block, the hard per-slot cap. putFuel() was
+          // called UNCONDITIONALLY on every single attempt regardless of how much fuel a furnace
+          // already had -- once a slot maxes out, every future putFuel() throws "destination
+          // full" and the whole smelt aborted right there, before ever reaching putInput, even
+          // though the furnace already had more than enough fuel to actually smelt with.
+          //
+          // Fix, two parts: (1) collect any output already sitting there first -- recovers
+          // whatever a prior successful smelt (ours or another bot's) left stranded, and frees
+          // the slot; (2) treat a failed putFuel() as "already has fuel," not fatal -- log it and
+          // fall through to putInput using whatever's already in the fuel slot, rather than
+          // aborting the entire attempt over a top-up that was never actually needed.
+          const existingOutput = furnace.outputItem();
+          if (existingOutput && existingOutput.count > 0) {
+            await furnace.takeOutput();
+          }
+          try {
+            // One fuel item per item smelted is a generous overestimate for any fuel type (coal
+            // alone smelts 8 per item) -- errs toward "definitely enough fuel" over precision.
+            await furnace.putFuel(fuelItem.type, null, Math.min(fuelItem.count, smeltCount));
+          } catch (fuelErr) {
+            console.log(`[smelt] furnace at ${furnaceBlock.position} already has fuel, ` +
+              `skipping top-up: ${fuelErr.message}`);
+          }
           await furnace.putInput(inputItem.type, null, smeltCount);
 
           // furnace.js has no built-in "wait until done" -- poll its own 'update' event (fired
