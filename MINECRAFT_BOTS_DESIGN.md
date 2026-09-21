@@ -2516,6 +2516,62 @@ the budget even with each one individually capped (3 x 20 = 60) -- no live repor
 more than one dig being the actual blocker, so this is left as an open flag rather than chased
 further, the same posture already taken toward `liquidCost`'s own theoretical version of this risk.
 
+## 51. §50's own cap flattened extreme-hardness blocks, freezing bots mid-combat (2026-09-21)
+
+Direct live report, immediately after §50 shipped: "the group of bots is now standing in the open,
+not moving or running, being actively attacked by a zombie -- automation failure." §50's own
+flagged risk section didn't anticipate this specific shape, but it's the same underlying tradeoff
+biting from a different angle.
+
+**Investigation, live:** checked Luke specifically first, since his own logs showed something
+concrete -- a real ~89-second span (16:05:28-16:06:57) where `checkSleepingThreat()` fired every 5
+seconds, tried to acquire `SELF_DEFENSE`-tier arbiter control, and repeatedly failed
+(`yielded to something more urgent (SELF_DEFENSE)`) before finally succeeding. Ruled out several
+candidate causes directly: `checkSelfDefense()` never fired (gated on `!bot.isSleeping` the whole
+time), no `path_update`/`path_reset` lines appeared at all during the freeze (ruling out a stuck
+`flee` pathfind), and `attack`'s own poll loop is bounded by `ACTION_TIMEOUT_MS` with no way to
+hang indefinitely by design. The ~89-second duration itself turned out to be the real clue once a
+second, independent data point landed: a live fleet-wide log sweep showed Mayor, Nell, and Bob all
+independently hammering `dig_error target: netherite_block` at nearly the same home-base
+coordinates, in rapid repeating bursts.
+
+**Root cause, confirmed by measuring real digTime (not assumed):** `netherite_block` and
+`obsidian` take **75000ms** to dig even with a netherite pickaxe + efficiency 5 -- hardness 50
+barely responds to efficiency at all, unlike ordinary blocks. §50's own `MAX_DIG_LABOR_COST` cap
+(added to make raising `digCost` safe again) clamps the labor-cost contribution of EVERY diggable
+block to the same ceiling regardless of actual hardness -- so a block that should cost 3000+ in the
+search's own cost function (and therefore never look worth attempting) instead reads as identically
+"cheap" as a plank wall. Pathfinder kept choosing this route, starting a real 75-second dig attempt
+-- and almost immediately getting interrupted by some OTHER periodic check in the same process
+(`checkSelfDefense` alone runs every 2 seconds), which calls `bot.stopDigging()` as part of its own
+normal physical-interrupt sequence, aborting the in-flight dig. mineflayer-pathfinder reports this
+exactly like any other dig failure (`dig_error`), and with nothing about the world having changed,
+the next tick recomputes the identical "cheap" route into the identical abort -- forever, or until
+something external breaks the cycle. During combat this is precisely what "frozen, not moving, not
+fighting" looks like from outside the process: `attack`'s own chase-to-target movement shares the
+exact same `movements` object (`bot.pvp.movements`, pointed at it since an earlier fix), so it
+thrashes on this same loop instead of ever closing distance or landing a hit. This also
+retroactively explains Luke's own ~89-second freeze -- the same failure shape, whichever specific
+high-hardness block his own route happened to touch.
+
+**Fix (`index.js` 2.85.0):** lowering `MAX_DIG_LABOR_COST` back down would simply reopen §50's own
+wall-vs-door regression -- the real fix is to stop letting the cap apply to blocks no reasonable
+cost tuning should ever call "cheap" in the first place. `movements.blocksCantBreak` already
+excludes furnaces/chests/doors from casual auto-dig-while-routing without making them permanently
+unbreakable outright (a bot that wants one gone can still act on it deliberately) -- the same
+reasoning extends naturally to real hardness. Every block with `hardness >= 10` is now added to
+`blocksCantBreak`: a wide, deliberately conservative gap, chosen from the real registry values, not
+guessed -- every normal terrain/building material this fleet actually touches tops out at hardness
+5 (`iron_block`, `diamond_block`, `coal_block`) or well under (`stone` 1.5, `deepslate` 3), while
+`obsidian`/`netherite_block`/`ancient_debris`/`crying_obsidian`/`respawn_anchor` all sit at 30-50 --
+nothing real falls in between. Deliberately kept separate from `isProtectedBlockName()` (which also
+drives "mine"'s own deliberate-target refusal, with an explicit "that's a placed/crafted block"
+message) rather than folded into it -- a bot that deliberately wants to reclaim a stored
+netherite/diamond/iron block via "mine" still can; this only stops pathfinder from treating one as
+an incidental shortcut while routing to somewhere else entirely. Verified live post-deploy: zero
+`netherite_block` dig_error occurrences from any bot's fresh process since restart, versus the
+old process still producing them right up until it was replaced.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2570,3 +2626,4 @@ further, the same posture already taken toward `liquidCost`'s own theoretical ve
 | 1.47.0 | 2026-09-21 | New §48, direct live follow-up to §47, same "can't get out of the home" report -- §47's digCost fix genuinely resolved the noPath problem (confirmed: Luke went from permanent noPath to status=success cost=24.5) but executing that path hit a NEW infinite tight loop: mineflayer-pathfinder's own `bot.dig().catch(() => resetPath('dig_error'))` discards the real failure reason and immediately recomputes the identical path into the identical failure (live: the same success/cost=24.5 path_update dozens of times within ~1 second). Same failure shape §42 already fixed for "flee" specifically, but no other `goto()` call site -- `gohome` included -- had the same protection. Fixed (`index.js` 2.82.0): a global burst detector on the existing `path_reset` listener forces `canDig` off for 15s after 4+ dig_error resets within 3s, so the next recompute is walk-only; timestamp-gated restore avoids racing a second, later burst's own suppression window. |
 | 1.48.0 | 2026-09-21 | New §49, same live incident (§47/§48) -- while restarting the fleet to test §48's fix, live evidence surfaced a second, unrelated root cause for 4 of 9 bots: the existing `teleportToSpawn()` self-rescue mechanism (`bot.chat("/tp ...")`, fires after 3 same-spot reconnects) logged `TELEPORT: ...` successfully for Nell/Wade/Dale, but their actual position never changed -- confirmed via RCON `op <name>` that these three plus Bob (all `dgx-spark2`-hosted) had never been granted server op, so their own `/tp` command had been silently failing since the code's existing comment already named only the `dgx-spark`-hosted bots (Mayor/Mark/Luke/Babs/Amy) as having been added to `ops.json`. No code change needed -- `teleportToSpawn()` was already correct, it just never had permission to act for these four accounts. Fixed live via RCON `op` grants (now persisted in the server's own `ops.json`) plus a direct `tp` to recover the three still-trapped bots immediately; confirmed all 9 physically out via a full position sweep. |
 | 1.49.0 | 2026-09-21 | New §50, direct report immediately after §47-§49 shipped: "now they are back to digging through the wall instead of opening the door" -- the exact issue §44 fixed, reopened by §47's own digCost 30->5 fix. Measured real `block.digTime()` values and confirmed digCost alone can't satisfy both live reports: digTime for the same block varies over 100x by tool (cobblestone: 100ms with netherite pickaxe+efficiency5, common gear in this fleet, vs 10000ms with none), so a digCost strong enough to deter the well-tooled case (~15) blows the search-cost budget for the untooled case, while one safe for the untooled case (~5, §47's own value) is nearly free for the well-tooled one. Fixed (`swim-movements.js` 1.1.0): overrides `safeOrBreak` to cap the per-block labor-cost contribution at `MAX_DIG_LABOR_COST=20` regardless of digTime, decoupling "prefer doors when digging is cheap" from "never make an exit impossible when digging is expensive." `digCost` raised back to 15 (`index.js` 2.84.0) now that doing so is safe. |
+| 1.50.0 | 2026-09-21 | New §51, direct live report immediately after §50 shipped: "group of bots standing in the open, not moving or running, being actively attacked -- automation failure." Traced to §50's own `MAX_DIG_LABOR_COST` cap: confirmed live that Mayor/Nell/Bob were all independently hammering `dig_error target: netherite_block` at the same home coordinates, and measured real digTime at 75000ms (netherite pickaxe + efficiency 5, hardness 50 barely responds to efficiency) -- but the cap flattened that down to look as cheap as a plank wall, so pathfinder kept choosing it, starting a real 75-second dig, and getting aborted almost immediately by an unrelated periodic check (self-defense fires every 2s), recomputing the identical route into the identical failure forever -- including during combat, since `attack`'s own chase movement shares the same `movements` object, explaining the "frozen, not fighting" symptom directly. Also retroactively explains an ~89-second freeze investigated live on Luke earlier in this same incident. Fixed (`index.js` 2.85.0): excludes any block with real hardness >= 10 from `movements.blocksCantBreak` (obsidian/netherite_block/ancient_debris sit at 30-50; every normal building material tops out at 5) -- the same "not an incidental pathfinding shortcut" protection already applied to doors/chests/furnaces, without blocking "mine" from deliberately targeting one. Verified live: zero netherite_block dig_error occurrences fleet-wide since restart. |
