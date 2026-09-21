@@ -1,4 +1,19 @@
-// Version: 2.85.0
+// Version: 2.86.0
+//
+// 2.86.0 (2026-09-21) -- direct live report: "zombie is in the building again, attacking the
+// crowd of bots." Confirmed live that every bot's own "flee" attempt was failing with "No path to
+// the goal!" (fast, 2-4ms failures -- a genuinely unreachable GoalNear, not an exhausted search),
+// while "attack" separately kept timing out without landing a kill. Root cause:
+// nearestRallyPoint()'s own home/bed fallback assumed home is "always a safer place... even with
+// nobody there" -- false when the threat is already INSIDE home and most of the fleet is already
+// there too, turning "take one step toward any exit" into "path across the building to one
+// specific point" (often unreachable) or, even when reachable, walking her further INTO the same
+// building the threat is in. Now only returns home/bed when it's at least 20 blocks from her
+// current position -- real progress toward an actually-different, farther-away place; otherwise
+// returns null so flee falls through to its own plain maximize-distance goal, which needs no
+// specific destination and is far more resilient to exactly this "already home, threat inside"
+// shape. Immediate relief for the live incident: RCON-killed the zombie directly while this was
+// being investigated.
 //
 // 2.85.0 (2026-09-21) -- direct live report: "group of bots standing in the open, not moving or
 // running, being actively attacked -- automation failure." Traced back to 2.84.0's own
@@ -4077,7 +4092,25 @@ async function nearestRallyPoint(bot) {
   }
   if (nearestSoldierPos) return nearestSoldierPos;
 
-  return (await loadClaimedBed(bot)) || bot.spawnPoint || null;
+  // Direct live report, 2026-09-21 ("zombie is in the building again, attacking the crowd of
+  // bots"): this fallback's own original assumption -- home is "always a safer place to end up...
+  // even with nobody there" -- breaks down completely for the exact incident this session keeps
+  // returning to: the threat is INSIDE home, and most of the fleet is already there. Confirmed
+  // live: every bot's own "self-defense: flee" attempt failed with "No path to the goal!" the
+  // whole time this was happening, fast failures (2-4ms) consistent with a genuinely unreachable
+  // GoalNear rather than a slow, exhausted search. A bed/spawnPoint that sits in a different room
+  // of the same structure than wherever she's currently cornered turns what should be "take one
+  // step toward any nearby exit" into "path all the way across the building to one specific
+  // point" -- far more likely to fail outright, and even when it succeeds, walks her TOWARD the
+  // same building the threat is already in rather than away from it. Only worth returning when it
+  // represents real progress toward a genuinely different, farther-away place -- close enough and
+  // she's arguably already home, in which case this fallback can only hurt, never help, and flee
+  // is better off falling through to its own plain maximize-distance goal below (no specific
+  // destination required, just any nearby improvement, exactly what a real doorway or gap needs).
+  const HOME_RALLY_MIN_DISTANCE = 20;
+  const home = (await loadClaimedBed(bot)) || bot.spawnPoint || null;
+  if (home && home.distanceTo(bot.entity.position) >= HOME_RALLY_MIN_DISTANCE) return home;
+  return null;
 }
 
 // Direct report, 2026-09-08 ("they still don't seem to react to a threatening creature"). Real,
