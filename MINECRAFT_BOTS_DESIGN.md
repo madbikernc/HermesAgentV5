@@ -2669,6 +2669,56 @@ mechanical bug, this section covers a genuine architectural review.
 Immediate relief for the live incident: RCON-killed 2 zombies directly (confirming the true mob
 count) while this investigation was underway.
 
+## 54. "Combat is not fixed": the real problem was a mob swarm, not the combat logic (2026-09-21)
+
+Direct follow-up, immediately after §53 shipped: "combat is not fixed. they just stand there and
+get killed." §53's own two fixes (EMERGENCY_ATTACK_TIMEOUT_MS, entityCost) were real and correct
+for the problems they targeted, but the fleet kept dying anyway -- 6+ more deaths inside a few
+minutes, several bots dying repeatedly, all with full netherite gear (confirmed live: Luke still
+had his sharpness-5 netherite sword after 3 deaths -- this server runs `keepInventory`, ruling out
+"fighting unarmed" as a cause).
+
+**The real story, found by checking how many hostiles actually existed rather than assuming "one
+zombie":** an RCON kill sweep around Mayor's position (20-block radius) killed 1 zombie. A second
+sweep at the same coordinates but 80-block radius killed **7 more**. A third, wider sweep (100
+blocks) after setting `time set day` killed **13 more** -- **21 zombies total** around one unlit
+base. This was never "a single zombie killing bot after bot" -- it was a genuine night-time mob
+swarm that had been accumulating, almost certainly for multiple in-game nights, at a base with no
+working light source. No amount of per-bot, single-target reactive combat tuning was ever going to
+survive that: `nearestHostile()` (the function every self-defense/EMERGENCY/sleeping-threat check
+is built on) only ever tracks the ONE closest threat -- with several zombies converged on the same
+crowded sleeping area, every bot was "handling" the one she noticed while 2+ others hit her
+completely unopposed, matching the user's own description exactly: from the bot's own decision-
+making perspective, nothing was "standing still doing nothing" -- she just had no awareness of, or
+response to, the attackers she wasn't actively targeting.
+
+**Root cause of the swarm itself, confirmed live:** `checkHomeLighting()` (which places torches
+near home to stop hostiles spawning there at all) has a real history here -- this is its **third**
+documented live incident, following two PRIOR fix attempts (2026-09-17, 2026-09-18) that each
+closed a different way the check went silent. This time: its own pre-check for whether she could
+craft a torch tested for an ALREADY-MADE `stick` specifically (`bot.inventory.items().some(i =>
+i.name === "stick")`). But `craftItem()` (actions.js, already used by every other crafting call
+site in this codebase) auto-chains `stick <- planks <- log` up to 3 levels deep via
+`simpleSourceFor()` -- a bot carrying LOGS, which routine wood-gathering makes extremely common,
+can craft a torch from them without ever holding a loose stick first, since the auto-chain handles
+planks and the stick itself along the way. This gate never gave that auto-chain a chance to run: it
+bailed out with `"no fuel+stick on hand"` and skipped the whole lighting sweep any time a bot
+happened to be holding logs instead of a finished stick -- which, for a fleet whose bots mostly
+carry raw materials rather than half-finished intermediates, was apparently most of the time. The
+base stayed dark not because nobody ever tried to light it, but because the ONE gate standing
+between "has real wood" and "actually attempts the craft" was checking the wrong thing.
+
+**Fix (`index.js` 2.88.0):** the pre-check now accepts any real wood source (`stick`, `*_planks`,
+`*_log`, or `*_stem`), not just a finished stick, letting `craft`'s own already-correct auto-chain
+do the rest -- exactly matching how every other crafting call site in this codebase already relies
+on it. §53's own EMERGENCY-timeout and entityCost fixes are kept, unchanged and still correct for
+the failure modes they specifically targeted -- this section's fix addresses the actual upstream
+cause the user was really describing, not a replacement for the prior two.
+
+Immediate relief for the live incident: RCON `time set day` (stops further night-time spawning and
+exposes existing zombies to sunlight) plus killing all 21 confirmed zombies directly, while this
+investigation was underway.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -2726,3 +2776,4 @@ count) while this investigation was underway.
 | 1.50.0 | 2026-09-21 | New §51, direct live report immediately after §50 shipped: "group of bots standing in the open, not moving or running, being actively attacked -- automation failure." Traced to §50's own `MAX_DIG_LABOR_COST` cap: confirmed live that Mayor/Nell/Bob were all independently hammering `dig_error target: netherite_block` at the same home coordinates, and measured real digTime at 75000ms (netherite pickaxe + efficiency 5, hardness 50 barely responds to efficiency) -- but the cap flattened that down to look as cheap as a plank wall, so pathfinder kept choosing it, starting a real 75-second dig, and getting aborted almost immediately by an unrelated periodic check (self-defense fires every 2s), recomputing the identical route into the identical failure forever -- including during combat, since `attack`'s own chase movement shares the same `movements` object, explaining the "frozen, not fighting" symptom directly. Also retroactively explains an ~89-second freeze investigated live on Luke earlier in this same incident. Fixed (`index.js` 2.85.0): excludes any block with real hardness >= 10 from `movements.blocksCantBreak` (obsidian/netherite_block/ancient_debris sit at 30-50; every normal building material tops out at 5) -- the same "not an incidental pathfinding shortcut" protection already applied to doors/chests/furnaces, without blocking "mine" from deliberately targeting one. Verified live: zero netherite_block dig_error occurrences fleet-wide since restart. |
 | 1.51.0 | 2026-09-21 | New §52, direct live report immediately after §51 shipped: "zombie is in the building again, attacking the crowd of bots." Different shape from every prior incident: bots were actively attempting both attack and flee, both kept failing -- attack timing out, flee returning "No path to the goal!" within 2-4ms. Root cause: `nearestRallyPoint()`'s own home/bed fallback ("always a safer place... even with nobody there") breaks completely when the threat is already inside home and the fleet is already clustered there -- fleeing "toward home" is either a no-op or routes across the building to a specific, possibly-unreachable point instead of away from the threat. Fixed (`index.js` 2.86.0): home/bed fallback now only returns when at least 20 blocks from the bot's current position; closer than that, flee falls through to its own plain maximize-distance goal, far more resilient to "already home, threat inside." |
 | 1.52.0 | 2026-09-21 | New §53, direct request: "standing right out in the open, a single zombie is killing bot after bot. Re-evaluate the entire defense scheme." Live sweep found 5 bot deaths in ~90 seconds against only 1-2 real zombies (RCON-confirmed). Two systemic root causes, not one mechanical bug: (1) EMERGENCY-tier combat had no escape hatch -- "attack" is mandatory under critical health (§43) but previously rode out the full 90s ACTION_TIMEOUT_MS with HEALTH_CRITICAL blocking every other tier; confirmed live (Wade) a single stuck emergency attack held control for 20+ straight seconds. (2) Severe entity crowding (most of the fleet sleeps in one small area) degrades both movement and combat -- constant `path_reset: stuck` live, mineflayer-pathfinder's own entityCost (default 1) barely discourages routing through occupied squares, plausibly also explaining attack timeouts despite overwhelming numbers (same contention shape already confirmed for digging in §51). Fixed: new `EMERGENCY_ATTACK_TIMEOUT_MS` (8s) + `fleeAsLastResort()` (`actions.js` 1.64.0, `index.js` 2.87.0) -- attack still first choice at critical health, but bails to flee if not won quickly; `movements.entityCost` raised 1 -> 8, same "strongly prefer, don't forbid" tuning as liquidCost/digCost. Flagged, not fixed: recurring "no torches" log lines suggest the sleeping area isn't reliably lit, the likely upstream reason hostiles keep spawning there at all -- a resource/logistics gap, not a defense-logic bug. |
+| 1.53.0 | 2026-09-21 | New §54, direct follow-up: "combat is not fixed. they just stand there and get killed." §53's fixes were real but the fleet kept dying -- checked how many hostiles actually existed rather than assuming "one zombie": RCON sweeps found 21 total zombies around one unlit base (1, then 7 more, then 13 more at widening radii), a genuine night-time swarm, not a single persistent attacker. No per-bot single-target combat tuning could survive that -- nearestHostile() only ever tracks the closest threat, so every bot fought the one zombie she noticed while others hit her unopposed. Root-caused the swarm itself: checkHomeLighting()'s own torch-craft gate (a THIRD documented live incident, after 2026-09-17 and 2026-09-18) checked for an already-made stick specifically, when craftItem() already auto-chains stick <- planks <- log -- a bot carrying logs (routine, common) could never trigger the craft because this gate never gave the existing auto-chain a chance to run. Fixed (`index.js` 2.88.0): gate now accepts any real wood source (stick/planks/log/stem), not just a finished stick. §53's own fixes kept, unchanged. Immediate relief: RCON `time set day` plus killing all 21 confirmed zombies. |

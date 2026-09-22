@@ -1,4 +1,20 @@
-// Version: 2.87.0
+// Version: 2.88.0
+//
+// 2.88.0 (2026-09-21) -- direct follow-up: "combat is not fixed. they just stand there and get
+// killed." Live investigation found the real story: RCON kill sweeps around one unlit base pulled
+// in 1, then 7, then 13 more zombies (21 total) -- a genuine night-time mob swarm, not "a zombie."
+// No amount of per-bot single-target combat tuning (§53's own EMERGENCY timeout/entityCost fixes,
+// still correct, still kept) was ever going to survive hostiles spawning faster than 9 bots could
+// kill them; nearestHostile() only ever tracks the ONE nearest threat, so every bot was "handling"
+// one attacker while 2+ others hit her unopposed. Root-caused the actual upstream cause --
+// checkHomeLighting's own torch-crafting gate, which has already had two prior fix attempts
+// (2026-09-17, 2026-09-18) for two DIFFERENT ways it went silent: it checked for an ALREADY-MADE
+// stick specifically, when craftItem() (actions.js) already auto-chains stick <- planks <- log up
+// to 3 levels deep -- a bot carrying logs (routine wood-gathering makes this common) could craft a
+// torch from them without ever holding a loose stick, but this gate bailed out before ever trying.
+// Now checks for any real wood source (stick/planks/log/stem), not just a finished stick, letting
+// craft's own existing auto-chain do the rest. Immediate relief: RCON `time set day` plus killing
+// all 21 zombies while this was being investigated. See MINECRAFT_BOTS_DESIGN.md §54.
 //
 // 2.87.0 (2026-09-21) -- direct request: "re-evaluate the entire defense scheme," triggered by a
 // live mass-death incident (5 bots died within ~90 seconds, several repeatedly in quick
@@ -4647,11 +4663,27 @@ async function checkHomeLighting() {
       if (lootResult.ok) {
         console.log(`[${USERNAME}] home lighting: grabbed torches from a chest -- ${lootResult.text}`);
       } else {
+        // Direct live incident, 2026-09-21 (a full nighttime mob swarm -- 21 zombies killed via
+        // RCON around one unlit base in a single sweep -- "combat is not fixed, they just stand
+        // there and get killed": no amount of per-bot combat tuning was ever going to survive an
+        // environment spawning hostiles faster than 9 bots could kill them; this gate is the real
+        // upstream cause). Root-caused live: `craftItem()` (this file's own reuse of actions.js's
+        // helper) already auto-chains stick <- planks <- log up to 3 levels deep
+        // (`simpleSourceFor()`) -- a bot carrying logs, which routine wood-gathering makes common,
+        // can craft a torch from them without ever holding a loose stick first. This gate was
+        // checking for an ALREADY-MADE stick specifically, which almost nothing keeps around once
+        // consumed into other crafts -- so it kept bailing out here even when a torch was
+        // trivially craftable, exactly the same shape as this function's own two PRIOR fix
+        // attempts (2026-09-17, 2026-09-18) each closed a different way this gate went silent.
+        // Now checks for ANY real wood source (stick, planks, or a log/stem craft() can chain
+        // through), not just a finished stick -- letting craft's own existing auto-chain do the
+        // rest, same as every other caller already relies on it for.
         const fuel = bot.inventory.items().find((i) => i.name === "coal" || i.name === "charcoal");
-        const hasStick = bot.inventory.items().some((i) => i.name === "stick");
-        if (!fuel || !hasStick) {
+        const hasWoodSource = bot.inventory.items().some((i) => i.name === "stick" ||
+          i.name.endsWith("_planks") || i.name.endsWith("_log") || i.name.endsWith("_stem"));
+        if (!fuel || !hasWoodSource) {
           console.log(`[${USERNAME}] home lighting: no torches (chest check came up empty too: ` +
-            `${lootResult.text}), and no fuel+stick on hand to craft one -- skipping for now.`);
+            `${lootResult.text}), and no fuel+wood on hand to craft one -- skipping for now.`);
           return;
         }
         const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME);
