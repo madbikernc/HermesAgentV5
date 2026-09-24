@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 2.12.0
+# Version: 2.13.0
+#
+# 2.13.0 (2026-09-24) — `omni`'s backend swapped from Nemotron-3-Nano-Omni-30B-A3B to
+# gemma-4-26B-A4B-it (Google, stock, MoE/4B-active). Metadata-only change here; no routing shape,
+# port, or residency change. Driven by a real bake-off on six genuine Reolink motion-event frames
+# pulled from the NAS archive, not benchmark cards: Nemotron missed a second parked vehicle gemma
+# caught, and asserted a car was "driving" from a single still -- a direct breach of the caller's
+# own "do not speculate" instruction, verified by looking at the actual image. gemma also obeys the
+# callers' "one or two sentences" limit (a third candidate, Qwen3-VL-8B, matched gemma on accuracy
+# but ignored the length limit and ran ~3.5x slower on 4K frames). Cost: ~0.6s more per frame than
+# Nemotron; saves ~7.4GB resident. Nemotron's weights are NOT deleted and
+# `/opt/llama.cpp/start-omni.sh.nemotron` is the one-file rollback.
 #
 # 2.12.0 (2026-09-19) — Direct request: guard alerting only ever named which category fired,
 # not what text actually tripped it. Layer 1's email already embedded matched snippets (via
@@ -252,7 +263,7 @@ if NODE == "spark":
         "super": ("http://127.0.0.1:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
         "coder": ("http://127.0.0.1:8094", True, "Qwen3.8-27B-abliterated", True),
         "muse": (f"http://{SPARK2_IP}:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
-        "omni": (f"http://{SPARK2_IP}:8091", False, "Nemotron-3-Nano-Omni-30B-A3B", False),
+        "omni": (f"http://{SPARK2_IP}:8091", False, "gemma-4-26B-A4B-it (Google, stock)", False),
         # Port 8097, not the target's proposed 8088 -- that was nano's port and moving dispatch onto
         # it now that nano is retired (S13) would mean touching start-dispatch.sh, this unit, ufw,
         # and S12's DISPATCH_CHAT_URL standby override in the same pass for a cosmetic port-number
@@ -269,7 +280,7 @@ else:
         "super": (f"http://{SPARK_IP}:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
         "coder": (f"http://{SPARK_IP}:8094", True, "Qwen3.8-27B-abliterated", True),
         "muse": ("http://127.0.0.1:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
-        "omni": ("http://127.0.0.1:8091", False, "Nemotron-3-Nano-Omni-30B-A3B", False),
+        "omni": ("http://127.0.0.1:8091", False, "gemma-4-26B-A4B-it (Google, stock)", False),
         "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
         "coder2": ("http://127.0.0.1:8099", True, "Muse-Glimmer-30B (Meta, stock, Apache-2.0)", False),
     }
