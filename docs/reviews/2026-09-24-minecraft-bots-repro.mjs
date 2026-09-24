@@ -1,16 +1,17 @@
-// Version: 1.0.0
+// Version: 1.0.1
 // Review-only source-extraction checks. No Minecraft connection or dependencies needed.
 // Revision History: 1.0.0 | 2026-09-24 | Initial behavioral defect reproductions.
+// 1.0.1 | 2026-09-24 | Import arbiter via file URL so the script also runs on Windows.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = fileURLToPath(new URL('../../services/minecraft-bots/', import.meta.url));
 const actions = await readFile(root + 'actions.js', 'utf8');
 const index = await readFile(root + 'index.js', 'utf8');
 const equipment = await readFile(root + 'equipment.js', 'utf8');
 const skills = await readFile(root + 'skills.js', 'utf8');
-const arbiter = await import(root + 'arbiter.js');
+const arbiter = await import(pathToFileURL(root + 'arbiter.js').href);
 function between(source, start, end) {
   const from = source.indexOf(start);
   assert(from >= 0, start);
