@@ -1,0 +1,26 @@
+{
+  "bots": [
+    "Bob",
+    "Dale",
+    "Nell",
+    "Wade"
+  ],
+  "hours": 24,
+  "values": {
+    "deaths_per_bot_day": 229.25,
+    "attack_win_rate": 0.438,
+    "planner_action_ratio": 0.295,
+    "planner_calls_per_bot_day": 315.5,
+    "guard_goals_per_bot_day": 0,
+    "home_lighting_attempts_per_bot_day": 415,
+    "home_lighting_success_rate": 0,
+    "store_failure_rate": 0.493,
+    "dropped_messages_per_bot_day": 98.5,
+    "stuck_teleports_per_bot_day": 2,
+    "rejected_done_per_bot_day": 140.75,
+    "crashes_per_bot_day": 0
+  },
+  "host": "spark-2",
+  "recorded_at": "2026-09-24T21:20:59.235Z",
+  "commit": "9091ea8"
+}

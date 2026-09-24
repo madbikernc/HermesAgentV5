@@ -1,0 +1,16 @@
+[Unit]
+Description=Firmament Minecraft bot tests (unit + live + behavior baseline)
+Documentation=file:///home/pmoney/HermesAgentV5/services/minecraft-bots/tests/README.md
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/hermes-data
+
+[Service]
+Type=oneshot
+User=pmoney
+WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
+# spark runs everything; spark2 overrides MB_TEST_SUITE=baseline (one live tester is enough).
+Environment=MB_TEST_SUITE=all
+Environment=MB_TEST_REPORT_DIR=/mnt/hermes-data/minecraft-memory/test-reports
+ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/tests/run.sh ${MB_TEST_SUITE}
+TimeoutStartSec=15min

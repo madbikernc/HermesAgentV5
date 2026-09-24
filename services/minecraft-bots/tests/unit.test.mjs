@@ -2,7 +2,7 @@
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
-// Run: node services/minecraft-bots/tests/remediation.test.mjs
+// Run: node services/minecraft-bots/tests/unit.test.mjs  (or tests/run.sh unit)
 // Revision History: 1.0.0 | 2026-09-24 | Initial checks for MB-01..MB-11 and MB-22 remediations.
 // 1.1.0 | 2026-09-24 | Checks for MB-13, MB-14, MB-16, MB-17, MB-20.
 // 1.2.0 | 2026-09-24 | Efficiency checks: standing guard, home-lighting backoff, storage backoff.
@@ -302,4 +302,4 @@ await check('EFF storage pauses after only full/obstructed chests, resumes on su
   assert.equal(vm.runInContext('storageBlockedUntil', c), 0, 'item-specific failures do not pause storage');
 });
 
-console.log(`${passed} remediation checks passed.`);
+console.log(`${passed} unit checks passed.`);
