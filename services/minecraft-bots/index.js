@@ -1,4 +1,13 @@
-// Version: 2.90.0
+// Version: 2.91.0
+//
+// 2.91.0 (2026-09-24) -- efficiency pass from a measured day of fleet logs (2026-09-23, all 9 bots).
+// Soldier guard duty is a standing goal held without planner calls (was ~800 propose/DONE cycles a
+// day). Self-proposed goals name a TARGET item; one already in hand is rejected before it becomes
+// a goal, and a goal whose target turns up in inventory completes without a planner call (~83% of
+// planner calls produced no action). "done" broadcasts carry every held curriculum item so Mayor
+// gets full stage evidence at once. Home lighting runs on one maintainer (the Builder, or
+// MC_HOME_LIGHTING) with exponential backoff (6,195 attempts/day at 1.5% success). Surplus storing
+// pauses 20 min after finding only full/obstructed chests (404 failed trips vs 177 successful).
 //
 // 2.90.0 (2026-09-24) -- review remediation, tier 4. MB-12: goal heartbeat every 2 min, a
 // resumed goal is announced, and peers' goal entries expire after a missed lease. MB-13: item
@@ -1947,6 +1956,9 @@ function isActingCoordinator(speaker) {
 // couple of outcomes are relevant to "should I try this again right now."
 const RECENT_GOAL_OUTCOMES_MAX = 4;
 let recentGoalOutcomes = [];
+const SELF_PROPOSE_BACKOFF_MS = 10 * 60_000;
+let selfProposalRejections = 0;
+let selfProposeResumeAt = 0;
 
 function recordGoalOutcome(description, outcome, reason) {
   recentGoalOutcomes.push({ description, outcome, reason });
@@ -2023,9 +2035,12 @@ function otherGoalsNote(intro) {
 // (proposeDirectiveForOthers/checkCurriculumProgress below): a trustworthy, structured "bot X
 // really has item Y now" signal, not another text description to fuzzy-match against.
 async function broadcastGoalState(status, description, item = null, heartbeat = false) {
+  // Efficiency pass, 2026-09-24: a "done" also reports every curriculum item she holds, so Mayor
+  // gets complete stage evidence in one message instead of re-assigning the stage item by item.
+  const have = status === "done" ? heldCurriculumItems() : undefined;
   try {
     await buzzPublish(AGENT_ID, "minecraft-coordination",
-      JSON.stringify({ type: "goal", status, description, item, heartbeat }));
+      JSON.stringify({ type: "goal", status, description, item, heartbeat, have }));
   } catch (err) {
     console.error(`[${USERNAME}] goal broadcast failed:`, err.message);
   }
@@ -3166,6 +3181,11 @@ async function proposeOwnGoal() {
     const priority = nextSoldierPriority();
     if (priority) {
       currentGoal = newGoal({ description: priority.directive, source: "self" });
+      // Efficiency pass, 2026-09-24 (measured: 811 guard goals/day for Mark+Luke, almost all
+      // "completed" by an immediate planner DONE, then re-proposed ~3 min later). Guard duty is
+      // now a STANDING goal: goalTick holds it without planner calls (see guardTick) until the
+      // Soldier's priority changes, and the goal heartbeat keeps Mayor from re-assigning it.
+      if (priority.name === "guard") currentGoal.standing = "guard";
       await saveGoal(PERSONA_NAME, currentGoal);
       await broadcastGoalState("active", priority.directive);
       console.log(`[${USERNAME}] Soldier priority goal (${priority.name}): ${priority.directive}`);
@@ -3228,19 +3248,41 @@ async function proposeOwnGoal() {
           `Phrase the goal around the OUTCOME you want (e.g. "get some copper armor," ` +
           `"stock up on iron") rather than one specific method, since more than one way to get ` +
           `there might work -- naming smelting/crafting/the small fixed shelter as part of it is ` +
-          `all fine now. Respond with ONLY a short phrase naming the goal, ` +
-          `in your own words -- nothing else, no quotes.\n\n${gearNote}${memoryNote}` +
+          `all fine now. Respond in EXACTLY this form: a short phrase naming the goal in your own ` +
+          `words, then " | TARGET: " and the exact item id that proves it's done (e.g. ` +
+          `"stock up on iron | TARGET: iron_ingot"), or "| TARGET: NONE" if no single item ` +
+          `proves it. Never pick a goal whose target you already have.\n\n${gearNote}${memoryNote}` +
           `${recentOutcomesNote}${otherGoalNote}${roleBiasNote()}`,
       },
       { role: "user", content: "What's your goal?" },
     ],
     { maxTokens: 30, temperature: 0.9 },
   );
-  let description = text.trim().replace(/^["']|["']$/g, "").slice(0, 120);
+  // Efficiency pass, 2026-09-24 (measured: ~83% of planner calls fleet-wide produced no action,
+  // mostly an instant DONE on a self-proposed goal the bot had already satisfied). The proposal
+  // names its target item; a target already in hand is rejected here -- no goal, no planner call,
+  // no narration -- and recorded so the next proposal picks something else. Three rejections in a
+  // row back self-proposal off for SELF_PROPOSE_BACKOFF_MS.
+  const [rawDescription, rawTarget = ""] = text.split(/\|\s*TARGET:/i);
+  let description = rawDescription.trim().replace(/^["']|["']$/g, "").slice(0, 120);
   if (!description) return;
+  const targetId = rawTarget.trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+  const targetItem = targetId && targetId !== "none" && bot.registry.itemsByName[targetId] ? targetId : null;
+  if (targetItem && holdsItem(targetItem)) {
+    selfProposalRejections += 1;
+    recordGoalOutcome(description, "skipped", `already have ${targetItem}`);
+    console.log(`[${USERNAME}] self-proposal rejected (already have ${targetItem}): ${description}`);
+    if (selfProposalRejections >= 3) {
+      selfProposalRejections = 0;
+      selfProposeResumeAt = Date.now() + SELF_PROPOSE_BACKOFF_MS;
+    }
+    return;
+  }
+  selfProposalRejections = 0;
   description = await arbitrateGoalConflict(description);
 
   currentGoal = newGoal({ description, source: "self" });
+  if (targetItem) currentGoal.targetItem = targetItem;
   await saveGoal(PERSONA_NAME, currentGoal);
   await broadcastGoalState("active", description);
   console.log(`[${USERNAME}] self-proposed goal: ${description}`);
@@ -3267,6 +3309,31 @@ async function saveGoalIfCurrent(goal) {
 
 const SKILL_RECHECK_MS = 10 * 60_000;
 
+// Standing guard duty (efficiency pass, 2026-09-24): no planner call. Ends the goal as soon as the
+// Soldier's real priority is something else (no weapon, a monster to hunt), otherwise just keeps
+// her within GUARD_RADIUS of home. Threats themselves are handled by checkSelfDefense as always.
+const GUARD_RADIUS = 12;
+async function guardTick(goal, takeControl, getHandle) {
+  const priority = nextSoldierPriority();
+  if (priority.name !== "guard") {
+    console.log(`[${USERNAME}] guard duty ends -- new priority: ${priority.name}`);
+    recordGoalOutcome(goal.description, "done", null);
+    await broadcastGoalState("done", goal.description);
+    await retireGoal(goal);
+    return;
+  }
+  const home = bot.spawnPoint;
+  if (!home || !bot.entity || bot.entity.position.distanceTo(home) <= GUARD_RADIUS) return;
+  if (currentGoal !== goal || !(await takeControl())) return;
+  const result = await performAction(bot, { type: "gohome" }, USERNAME, getHandle());
+  console.log(`[${USERNAME}] guard duty: back to post -- ${result.text} (ok=${result.ok})`);
+}
+
+function holdsItem(name) {
+  return bot.inventory.items().some((i) => i.name === name) ||
+    [5, 6, 7, 8, 45].some((slot) => bot.inventory.slots[slot]?.name === name);
+}
+
 async function goalTick() {
   if (!AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
   // Review MB-14: no new work or goal steps from dusk to dawn (the goal is paused, not dropped).
@@ -3274,6 +3341,7 @@ async function goalTick() {
 
   if (!currentGoal) {
     if (!SELF_PROPOSE_GOALS || Date.now() - lastActivityAt < IDLE_BEFORE_SELF_GOAL_MS) return;
+    if (Date.now() < selfProposeResumeAt) return; // backing off after repeated already-done proposals
     busy = true;
     try {
       await proposeOwnGoal();
@@ -3315,6 +3383,19 @@ async function goalTick() {
   // paths never actually ran a craft/smelt step.
   let craftedOk = false;
   try {
+    if (goal.standing === "guard") {
+      await guardTick(goal, takeControl, () => handle);
+      return;
+    }
+    // Efficiency pass, 2026-09-24: a goal whose target item is already in hand is done -- no
+    // planner call needed to notice (see targetItemFor / proposeOwnGoal's TARGET).
+    if (goal.targetItem && holdsItem(goal.targetItem)) {
+      console.log(`[${USERNAME}] goal complete (already have ${goal.targetItem}): ${goal.description}`);
+      recordGoalOutcome(goal.description, "done", null);
+      await broadcastGoalState("done", goal.description, goal.targetItem);
+      await retireGoal(goal);
+      return;
+    }
     // Skill retrieval (MINECRAFT_BOTS_DESIGN.md §14, 2026-09-08): before spending a
     // planNextStep call, check for an existing, trusted skill whose description matches this
     // goal closely enough to just run directly -- skips per-tick planning entirely on a hit,
@@ -3789,6 +3870,12 @@ const TECH_TREE_STAGES = [
 
 function stageSatisfied(stage, itemNames) {
   return stage.requires.every((group) => group.some((name) => itemNames.has(name)));
+}
+
+function heldCurriculumItems() {
+  const names = new Set(bot.inventory.items().map((i) => i.name));
+  for (const slot of [5, 6, 7, 8, 45]) if (bot.inventory.slots[slot]) names.add(bot.inventory.slots[slot].name);
+  return [...names].filter(isCurriculumItem);
 }
 
 function isCurriculumItem(name) {
@@ -4680,13 +4767,28 @@ const INVENTORY_MAIN_HOTBAR_SLOTS = 36;
 
 // Extracted so checkInventoryInsurance() (below) can trigger the exact same store pass off a
 // different condition, instead of a second copy drifting out of sync.
+// Efficiency pass, 2026-09-24 (measured: 404 failed store trips/day vs 177 successful, 929
+// "destination full"). Once a store attempt finds only full or obstructed chests, all surplus
+// storing pauses for STORAGE_BACKOFF_MS instead of walking back to the same full chests.
+const STORAGE_BACKOFF_MS = 20 * 60_000;
+let storageBlockedUntil = 0;
+function noteStoreResult(result) {
+  if (result.ok) {
+    storageBlockedUntil = 0;
+  } else if (!result.cancelled && /found chests nearby, but|no chests? (nearby|found)/i.test(result.text)) {
+    storageBlockedUntil = Date.now() + STORAGE_BACKOFF_MS;
+    console.log(`[${USERNAME}] storage: no usable chest space -- pausing surplus storing for ${STORAGE_BACKOFF_MS / 60_000} min`);
+  }
+}
+
 async function storeSurplusValuables(reason) {
   // Saplings excluded, 2026-09-09: checkSaplings() (below) exists specifically to plant them,
   // not warehouse them -- without this, a bot with a near-full inventory would chest away her
   // largest sapling stack before ever getting a chance to plant it, since a sapling is otherwise
   // just as "non-essential" as any other raw material by isEssentialItem()'s own gear/fuel/food
   // definition.
-  const surplus = bot.inventory.items().filter((i) => !isEssentialItem(i.name) && !i.name.endsWith("_sapling"));
+  if (Date.now() < storageBlockedUntil) return;
+  const surplus = bot.inventory.items().filter((i) => !isEssentialItem(i.name) && !isKeptItem(i.name) && !i.name.endsWith("_sapling"));
   if (!surplus.length) return; // genuinely nothing spare to store this tick
   surplus.sort((a, b) => b.count - a.count);
   const target = surplus[0];
@@ -4697,6 +4799,7 @@ async function storeSurplusValuables(reason) {
   try {
     const result = await performAction(bot, { type: "store", item: target.name, count: target.count }, USERNAME, handle);
     console.log(`[${USERNAME}] ${reason}: ${result.text} (ok=${result.ok})`);
+    noteStoreResult(result);
   } catch (err) {
     console.error(`[${USERNAME}] ${reason} failed:`, err.message);
   } finally {
@@ -4749,6 +4852,7 @@ setInterval(() => {
 }, 30_000);
 
 async function storeSurplusNearHome(reason) {
+  if (Date.now() < storageBlockedUntil) return;
   const surplusNames = [...new Set(bot.inventory.items()
     .filter((i) => !isEssentialItem(i.name) && !isKeptItem(i.name) && !i.name.endsWith("_sapling"))
     .map((i) => i.name))].slice(0, STORE_NEAR_HOME_BATCH_LIMIT);
@@ -4768,6 +4872,8 @@ async function storeSurplusNearHome(reason) {
       const result = await performAction(bot, { type: "store", item: name, count: Infinity, near: home }, USERNAME, handle);
       console.log(`[${USERNAME}] ${reason}: ${result.text} (ok=${result.ok})`);
       if (result.cancelled) break; // MB-02: lost control -- stop the batch, not just this item
+      noteStoreResult(result);
+      if (Date.now() < storageBlockedUntil) break; // chests are full -- the rest won't fit either
       // Real live gap found 2026-09-09 ("monitor their behavior, look for issues"): a real
       // failure was observed for one item ("can't find dirt in slots..." -- pathfinder's own
       // scaffolding mechanic had consumed it mid-travel between when this item was picked as
@@ -4911,14 +5017,39 @@ const HOME_LIGHTING_CHECK_MS = parseInt(process.env.MC_HOME_LIGHTING_CHECK_MS ||
 // use for exactly this "before a bed exists yet" bootstrapping reason) instead of giving up
 // outright -- a claimed bed is still preferred once one exists, since it's a more precise
 // "where she actually sleeps" point than the wider world spawn.
+// Efficiency pass, 2026-09-24 (measured: 6,195 home-lighting attempts/day across the fleet, 96
+// successful -- every bot tried every ~90s, most walking to a chest for torches that weren't
+// there). Now one maintainer (the Builder by default; MC_HOME_LIGHTING=true/false overrides per
+// bot), and every failed attempt doubles the wait (up to 30 min) until one succeeds. Each bot's
+// immediate local torch placement (checkLighting) is unchanged.
+const HOME_LIGHTING_MAINTAINER = process.env.MC_HOME_LIGHTING
+  ? process.env.MC_HOME_LIGHTING === "true"
+  : myRole?.primary === ROLES.BUILDER;
+const HOME_LIGHTING_MAX_BACKOFF_MS = 30 * 60_000;
+let homeLightingFailures = 0;
+let homeLightingNextAt = 0;
+
 async function checkHomeLighting() {
+  if (!HOME_LIGHTING_MAINTAINER || Date.now() < homeLightingNextAt) return;
   if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
+  let succeeded = false;
+  try {
+    succeeded = await lightHomeOnce();
+  } finally {
+    homeLightingFailures = succeeded ? 0 : homeLightingFailures + 1;
+    homeLightingNextAt = succeeded ? 0 : Date.now() +
+      Math.min(HOME_LIGHTING_CHECK_MS * 2 ** homeLightingFailures, HOME_LIGHTING_MAX_BACKOFF_MS);
+  }
+}
+
+// One home-lighting attempt; true only if the area actually got (or already was) lit.
+async function lightHomeOnce() {
   const home = (await loadClaimedBed(bot)) || bot.spawnPoint;
-  if (!home) return; // no claimed bed AND no spawn point known yet -- genuinely nothing to anchor on
+  if (!home) return false; // no claimed bed AND no spawn point known yet -- genuinely nothing to anchor on
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
-  if (!handle) return;
+  if (!handle) return true; // busy this tick -- not a failure
   try {
     // Direct report, 2026-09-17 ("dig in" -> Amy's chronic near-home danger, root-caused live):
     // the old "no torches -> return" used to be COMPLETELY SILENT -- no log line at all -- so a
@@ -4945,7 +5076,7 @@ async function checkHomeLighting() {
       if (lootResult.ok) {
         console.log(`[${USERNAME}] home lighting: grabbed torches from a chest -- ${lootResult.text}`);
       } else if (lootResult.cancelled) {
-        return;
+        return true;
       } else {
         // Direct live incident, 2026-09-21 (a full nighttime mob swarm -- 21 zombies killed via
         // RCON around one unlit base in a single sweep -- "combat is not fixed, they just stand
@@ -4968,17 +5099,19 @@ async function checkHomeLighting() {
         if (!fuel || !hasWoodSource) {
           console.log(`[${USERNAME}] home lighting: no torches (chest check came up empty too: ` +
             `${lootResult.text}), and no fuel+wood on hand to craft one -- skipping for now.`);
-          return;
+          return false;
         }
         const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME, handle);
         console.log(`[${USERNAME}] home lighting: crafted torches first -- ${craftResult.text} (ok=${craftResult.ok})`);
-        if (!craftResult.ok) return;
+        if (!craftResult.ok) return !!craftResult.cancelled;
       }
     }
     const result = await performAction(bot, { type: "light_area", near: home }, USERNAME, handle);
     console.log(`[${USERNAME}] home lighting: ${result.text} (ok=${result.ok})`);
+    return result.ok || !!result.cancelled;
   } catch (err) {
     console.error(`[${USERNAME}] home lighting check failed:`, err.message);
+    return false;
   } finally {
     handle.release();
   }
@@ -5424,13 +5557,15 @@ bot.once("spawn", () => {
         // DONE <item_id>, not a self-reported claim) is the only trustworthy signal available
         // for tracking someone else's progress -- payload.item is null for a skill-served
         // completion or a NONE-typed goal, both harmlessly no-ops here.
-        if (USERNAME === MAYOR_USERNAME && payload.status === "done" && payload.item &&
+        if (USERNAME === MAYOR_USERNAME && payload.status === "done" && (payload.item || payload.have?.length) &&
             curriculumStageIndex < TECH_TREE_STAGES.length) {
           const stage = TECH_TREE_STAGES[curriculumStageIndex];
           const agentName = [...BOT_USERNAMES].find((name) => `mc-${name.toLowerCase()}` === msg.from_agent);
           // MB-20: one item is evidence toward a stage, not the whole stage.
-          if (agentName && recordCurriculumEvidence(agentName, payload.item)) {
-            console.log(`[${USERNAME}] curriculum: ${agentName} cleared "${stage.name}" (last item: ${payload.item})`);
+          const evidence = [...new Set([payload.item, ...(payload.have ?? [])].filter(Boolean))];
+          const cleared = agentName && evidence.map((it) => recordCurriculumEvidence(agentName, it)).some(Boolean);
+          if (cleared) {
+            console.log(`[${USERNAME}] curriculum: ${agentName} cleared "${stage.name}"`);
             checkCurriculumAdvance().catch((err) =>
               console.error(`[${USERNAME}] checkCurriculumAdvance error:`, err.message));
           }

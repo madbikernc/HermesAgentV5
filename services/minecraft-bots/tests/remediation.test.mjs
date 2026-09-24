@@ -1,10 +1,11 @@
-// Version: 1.1.0
+// Version: 1.2.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
 // Run: node services/minecraft-bots/tests/remediation.test.mjs
 // Revision History: 1.0.0 | 2026-09-24 | Initial checks for MB-01..MB-11 and MB-22 remediations.
 // 1.1.0 | 2026-09-24 | Checks for MB-13, MB-14, MB-16, MB-17, MB-20.
+// 1.2.0 | 2026-09-24 | Efficiency checks: standing guard, home-lighting backoff, storage backoff.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -248,6 +249,57 @@ await check('MB-13 exactly one claimant wins a give request', async () => {
     if (vm.runInContext('pendingGiveRequest', c)) winners.push(me);
   }
   assert.deepEqual(winners, ['Amy']);
+});
+
+await check('EFF guard duty is a standing goal: no planner, back to post, ends on a new priority', async () => {
+  const bot = makeBot(); const moves = []; let retired = 0;
+  bot.spawnPoint = { x: 0, y: 64, z: 0 };
+  bot.entity = { position: { distanceTo: () => 30 } };
+  const goal = { description: 'stand guard', standing: 'guard' };
+  let priority = 'guard';
+  const c = vm.createContext({ bot, console: { log() {} }, USERNAME: 'Mark', currentGoal: goal,
+    nextSoldierPriority: () => ({ name: priority }), recordGoalOutcome() {}, broadcastGoalState: async () => {},
+    retireGoal: async () => { retired++; },
+    performAction: async (_, a) => { moves.push(a.type); return { ok: true, text: 'home' }; } });
+  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, 'const GUARD_RADIUS', 'function holdsItem('), c);
+  await c.guardTick(goal, async () => true, () => ({}));
+  assert.deepEqual(moves, ['gohome']); assert.equal(retired, 0);
+  bot.entity.position.distanceTo = () => 3;
+  await c.guardTick(goal, async () => true, () => ({}));
+  assert.deepEqual(moves, ['gohome'], 'already at post -- nothing to do');
+  priority = 'weapon';
+  await c.guardTick(goal, async () => true, () => ({}));
+  assert.equal(retired, 1);
+});
+
+await check('EFF home lighting backs off exponentially and only runs on the maintainer', async () => {
+  let attempts = 0; let outcome = false;
+  const src = between(index, 'const HOME_LIGHTING_MAX_BACKOFF_MS', 'async function lightHomeOnce(');
+  const c = vm.createContext({ Date, Math, HOME_LIGHTING_MAINTAINER: true, HOME_LIGHTING_CHECK_MS: 90_000,
+    AUTONOMY_ENABLED: true, busy: false, arbiter: { isBusy: () => false }, bot: { isSleeping: false },
+    lightHomeOnce: async () => { attempts++; return outcome; } });
+  vm.runInContext(src, c);
+  await c.checkHomeLighting(); await c.checkHomeLighting();
+  assert.equal(attempts, 1, 'second call waits out the backoff');
+  const wait = vm.runInContext('homeLightingNextAt', c) - Date.now();
+  assert(wait > 170_000 && wait <= 180_000, `first backoff ~180s, got ${wait}`);
+  vm.runInContext('homeLightingNextAt = 0', c); outcome = true; await c.checkHomeLighting();
+  assert.equal(vm.runInContext('homeLightingFailures', c), 0);
+  const off = vm.createContext({ ...c, HOME_LIGHTING_MAINTAINER: false, lightHomeOnce: async () => { attempts++; return true; } });
+  vm.runInContext(src, off); await off.checkHomeLighting();
+  assert.equal(attempts, 2, 'non-maintainers never try');
+});
+
+await check('EFF storage pauses after only full/obstructed chests, resumes on success', async () => {
+  const c = vm.createContext({ Date, console: { log() {} }, USERNAME: 'Babs' });
+  vm.runInContext(between(index, 'const STORAGE_BACKOFF_MS', 'async function storeSurplusValuables('), c);
+  c.noteStoreResult({ ok: false, text: "found chests nearby, but couldn't store anything in any of them." });
+  assert(vm.runInContext('storageBlockedUntil', c) > Date.now());
+  c.noteStoreResult({ ok: false, cancelled: true, text: 'found chests nearby, but they are all obstructed' });
+  c.noteStoreResult({ ok: true, text: 'stored 3 dirt' });
+  assert.equal(vm.runInContext('storageBlockedUntil', c), 0);
+  c.noteStoreResult({ ok: false, text: "can't find dirt in slots" });
+  assert.equal(vm.runInContext('storageBlockedUntil', c), 0, 'item-specific failures do not pause storage');
 });
 
 console.log(`${passed} remediation checks passed.`);
