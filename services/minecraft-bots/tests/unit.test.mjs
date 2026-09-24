@@ -1,4 +1,4 @@
-// Version: 1.2.0
+// Version: 1.3.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -6,6 +6,7 @@
 // Revision History: 1.0.0 | 2026-09-24 | Initial checks for MB-01..MB-11 and MB-22 remediations.
 // 1.1.0 | 2026-09-24 | Checks for MB-13, MB-14, MB-16, MB-17, MB-20.
 // 1.2.0 | 2026-09-24 | Efficiency checks: standing guard, home-lighting backoff, storage backoff.
+// 1.3.0 | 2026-09-24 | MB-11 check also asserts server echoes (Rcon) and the live-test bot are ignored.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -127,7 +128,7 @@ await check('MB-08 goal parser accepts GOHOME', async () => {
   assert.deepEqual({ ...c.parseGoalStep('ACTION GOHOME').action }, { type: 'gohome' });
 });
 
-await check('MB-11 fallback coordinator is accepted once Mayor is unreachable', async () => {
+await check('MB-11 fallback coordinator accepted once Mayor is unreachable; server echoes ignored', async () => {
   let classified = 0;
   const c = vm.createContext({ bot: { username: 'Amy' }, MATRIX_USER_ID: '@mc-amy:spark', USERNAME: 'Amy',
     MAYOR_USERNAME: 'Mayor', MAYOR_LIVENESS_TIMEOUT_MS: 0, lastMayorSeenAt: 0, busy: false,
@@ -135,11 +136,13 @@ await check('MB-11 fallback coordinator is accepted once Mayor is unreachable', 
     isAnotherBot: (s) => ['Mark', 'Mayor', 'Luke'].includes(s), isMayor: (s) => s === 'Mayor',
     classifyIntent: async () => { classified++; return { type: 'none' }; }, console: { log() {}, error() {} } });
   vm.runInContext('var lastMayorSeenAt = 0;' + between(index, 'const PROCESS_STARTED_AT', '// Real gap found live (2026-09-07): with no memory') +
-    between(index, 'function handleIncoming(', 'bot.on("chat"'), c);
+    between(index, 'const NON_PLAYER_SPEAKERS', 'bot.on("chat"'), c);
   c.handleIncoming('Mark', 'Amy, gather wood', { alreadyAddressed: false, send() {} });
   c.handleIncoming('Luke', 'Amy, gather wood', { alreadyAddressed: false, send() {} });
+  c.handleIncoming('Rcon', 'Teleported MBTester to 2000, 201, 2000', { alreadyAddressed: false, send() {} });
+  c.handleIncoming('MBTester', 'Amy, stop', { alreadyAddressed: false, send() {} });
   await sleep(0);
-  assert.equal(classified, 1, 'Mark accepted, Luke still ignored');
+  assert.equal(classified, 1, 'Mark accepted; Luke, the server echo (Rcon) and the live-test bot ignored');
 });
 
 await check('MB-06 an addressed STOP is recognized without the model', async () => {

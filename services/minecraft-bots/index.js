@@ -1,4 +1,9 @@
-// Version: 2.91.0
+// Version: 2.92.0
+//
+// 2.92.0 (2026-09-24) -- found by the new behavior baseline on its first post-deploy run: every
+// bot is an op, so the server echoes each RCON/console command to it as chat from "Rcon"; the
+// live-test run's RCON setup flooded all nine bots' classifier and message queues. handleIncoming
+// now ignores NON_PLAYER_SPEAKERS (Rcon, Server, the live-test bot).
 //
 // 2.91.0 (2026-09-24) -- efficiency pass from a measured day of fleet logs (2026-09-23, all 9 bots).
 // Soldier guard duty is a standing goal held without planner calls (was ~800 propose/DONE cycles a
@@ -5341,8 +5346,15 @@ async function setNewGoal(description, speaker) {
   return currentGoal;
 }
 
+// Not players: every bot is an op, so the server echoes each RCON/console command to it as chat
+// from "Rcon"/"Server" (found by the behavior baseline, 2026-09-24 -- a live-test run flooded all
+// nine bots' model classifier and message queues). The live-test bot (tests/live.test.mjs) is
+// ignored too.
+const NON_PLAYER_SPEAKERS = new Set(["Rcon", "Server", process.env.MC_TEST_USERNAME || "MBTester"]);
+
 function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   if (speaker === bot.username || speaker === MATRIX_USER_ID) return;
+  if (NON_PLAYER_SPEAKERS.has(speaker)) return;
   // isMayor(speaker) exception, 2026-09-08: USERNAME !== MAYOR_USERNAME guards Mayor's own
   // process from ever treating himself as "a player talking to him" (redundant with the
   // bot.username check above in practice, kept explicit since this condition is the one place
