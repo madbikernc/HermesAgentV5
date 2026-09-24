@@ -1,6 +1,6 @@
 # hermes-reolink — recreate checklist
 
-**Version:** 2.3.0
+**Version:** 2.4.1
 
 Reolink camera agent (`tools/hermes-reolink.py`) — owns the Buzz `reolink` topic (on-demand "check
 the camera" from Matrix chat) and runs an AI-detection poll loop (person/vehicle/pet, email-
@@ -197,10 +197,44 @@ password to avoid this becoming a real problem later.
 `channels` field (pick whatever channel number the Hub assigns it — don't assume 2) and re-run step
 1 for that channel before trusting it.
 
+## NAS2 footage archive — `/mnt/nas2-reolink` (added 2026-09-24)
+
+The Home Hub writes motion-event captures to NAS2's own `ReoLink` share: one date folder per day,
+and per event a `<camera>_<channel>_home hub_<YYYYMMDDHHMMSS>.jpg` thumbnail beside a matching
+`.mp4`. Retention observed at ~5 days. Both Sparks now mount it **read-only**, on demand:
+
+```
+10.129.1.167:/volume1/ReoLink /mnt/nas2-reolink nfs ro,soft,timeo=50,retrans=3,intr,noauto,x-systemd.automount,x-systemd.idle-timeout=300 0 0
+```
+
+Deliberately identical in shape to the existing `/mnt/nas2-hermes-backup` entry — `soft` plus
+`noauto`/`x-systemd.automount` means a NAS outage can never block boot or hang a caller
+indefinitely, and the idle timeout drops the connection when nothing is reading. `ro` is added
+because nothing in this fleet should ever write to the camera archive.
+
+**Two gotchas, both real and both hit during setup:**
+
+- **The export's client allowlist is the thing to check first.** It initially granted
+  `10.129.1.167` — the NAS's own IP — so `showmount -e` listed the export while every mount attempt
+  returned `access denied by server`. It needs `10.129.1.15` and `10.129.1.17` explicitly, same as
+  the `PMoney` share already has.
+- **The share root was initially mode `d---------` (000, root-owned), so `pmoney` could not
+  traverse it** — worth checking first if the archive ever stops being readable. **Fixed DSM-side
+  2026-09-24**: the root is now `drwxr-xr-x` and files are `-rwxrwxrwx` (owned `1027:users`), and
+  `pmoney` was confirmed reading real JPEG bytes on both nodes. This was deliberately fixed on the
+  NAS rather than worked around by running the camera agent as root, which would have been a real
+  trust-boundary regression.
+
+Synology also scatters `@eaDir` metadata directories through the tree that shadow real filenames
+(a directory named `foo.jpg` beside the actual `foo.jpg`). Any traversal must `-path "*@eaDir*"
+-prune` and match `-type f`, or it will hand back directories where files are expected.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 2.4.1 | 2026-09-24 | Share permissions fixed DSM-side the same day: root is now `drwxr-xr-x`, files `-rwxrwxrwx`, and `pmoney` confirmed reading real JPEG bytes on both nodes — the archive is usable by `hermes-reolink.py` as of now. 2.4.0's "cannot use this mount" caveat is superseded; the mode-000 note is kept as a first thing to check if it ever regresses. |
+| 2.4.0 | 2026-09-24 | NAS2 `ReoLink` share (the Hub's own motion-event archive: per-event JPG+MP4 in date folders, ~5 days retained) mounted read-only on both Sparks at `/mnt/nas2-reolink`, mirroring the proven `/mnt/nas2-hermes-backup` fstab shape. Two real blockers found and recorded: the NFS export initially allowlisted the NAS's own IP rather than the Sparks, so `showmount` listed it while every mount returned `access denied`; and the share root is mode `000`, so only root can traverse it — `hermes-reolink.py` runs as `pmoney` and **cannot use the mount until that is fixed DSM-side**, deliberately not worked around by running the agent as root. Also noted Synology `@eaDir` metadata directories shadowing real filenames, which breaks naive `find`. Added while sourcing real frames for an `omni`-replacement bake-off. |
 | 2.3.0 | 2026-09-11 | Third camera ("Driveway") paired to the Hub and all three renamed (`garden`, `housefront`, `Driveway`); real channels now `[0, 1, 2]`. Caught and fixed a real channel/name mismatch: the vault's `channels` field initially had 0 and 2 swapped relative to what the cameras' own on-screen overlays show — confirmed by pulling real snapshots and reading each camera's burned-in name, not just trusting metadata. Also documented that a vault read shortly after an edit can reflect the pre-edit value for up to `VAULT_AGENT_REFRESH_SECONDS` (10 min) — restarting `hermes-vault-agent.service` forces an immediate resync. Re-verified live post-fix: snapshot/AI-state for all three channels, both on-demand routing cases with real camera names. |
 | 2.2.0 | 2026-09-07 | Verification complete: a real, unprompted vehicle + person walk-by on cam2 confirmed rising-edge detection, per-channel cooldown suppression (23s/32s repeats correctly dropped and logged), and accurate alert emails. `hermes-reolink-mail-watch.service` disabled and stopped on spark-2 — fully redundant now that this path is confirmed live end to end (login, snapshot, both on-demand routing cases, AI-detection). |
 | 2.1.0 | 2026-09-07 | Live-verified against the real Hub: login/snapshot/AI-state work for the two actually-paired cameras (cam1, cam2); the third camera ("Driveway") isn't paired to the Hub yet and was dropped from the vault config until it is. Real `get_ai_state()` keys are `('dog_cat', 'face', 'package', 'people', 'vehicle', 'other')` — three more than assumed — so `AI_LABELS` in `hermes-reolink.py` was expanded to all six. Both on-demand routing cases confirmed live end to end. Found (non-blocking): `reolink_aio` warns the Hub account's password has a character outside its preferred set. Still open: a real AI-detection walk-by test, which gates disabling `hermes-reolink-mail-watch.service`. |
