@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# Version: 2.2.1
+# Version: 2.3.0
+#
+# 2.3.0 (2026-09-24) — real bug, found in spark-2's own router log while verifying an unrelated
+# change: every FleetOps notice raised on spark-2 was failing with
+# `notice delivery failed: <urlopen error [Errno 111] Connection refused>`, repeatedly, for an
+# unknown length of time. Cause: this wrapper exports FLEETOPS_MATRIX_TOKEN and FLEETOPS_ROOM but
+# never MATRIX_HOMESERVER, so hermes-router.py fell back to its own `http://127.0.0.1:6167`
+# default -- correct on spark, where Continuwuity runs, and pointing at nothing on spark-2.
+# Confirmed live from spark-2: `10.129.1.15:6167` returns HTTP 200 (ufw already allows the whole
+# /24), `127.0.0.1:6167` refuses. Now set node-awarely below. No new firewall rule or vault item.
 #
 # 2.2.1 (2026-08-30) — HermesAgentV5 consolidation: REPO_DIR default repointed from
 # HermesAgentV4 to HermesAgentV5 as part of consolidating the fleet's tools/skills/infra
@@ -72,5 +81,20 @@ else
 fi
 
 : "${HERMES_NODE:?HERMES_NODE must be set in the systemd unit for this service (spark or spark-2)}"
+
+# Continuwuity runs on `spark` (Watch) only, bound 0.0.0.0:6167. hermes-router.py defaults
+# MATRIX_HOMESERVER to http://127.0.0.1:6167, which is correct on spark and resolves to nothing on
+# spark-2 -- so every real-time FleetOps notice raised on spark-2 died with ECONNREFUSED while the
+# router itself stayed healthy and served traffic normally. Silent by construction:
+# matrix_notice() is best-effort and must never fail a proxied request, so the only trace was a log
+# line. Set it here rather than in the unit, because this wrapper is the one place that already
+# knows which node it is; an explicit MATRIX_HOMESERVER in the environment still wins.
+#
+# Same shape as the bug S12 hit and fixed in hermes-dispatch-standby-check.sh 1.0.1 -- a loopback
+# default copied from scripts that only ever run co-located with Continuwuity, then deployed onto
+# Forge. Worth checking on any future spark-2 component that sends Matrix notices.
+if [ -z "${MATRIX_HOMESERVER:-}" ] && [ "$HERMES_NODE" = "spark-2" ]; then
+  export MATRIX_HOMESERVER="http://${SPARK_LAN_IP:-10.129.1.15}:6167"
+fi
 
 exec /usr/bin/python3 "$REPO_DIR/tools/hermes-router.py"
