@@ -1,4 +1,11 @@
-// Version: 1.65.0
+// Version: 1.66.0
+//
+// 1.66.0 (2026-09-24) -- review remediation, tier 4 (docs/reviews/2026-09-24-minecraft-bots-review.md).
+// MB-15: raw fish/meat are edible (ranked after cooked food; golden apples last) and SMELT_RECIPES
+// can cook them, closing the fishing-for-food loop. MB-16: EXPLORE no longer "succeeds" by
+// withdrawing chest stock; EXPLORE <feature> scouts for SCOUT_FEATURE_BLOCKS and succeeds only when
+// the feature is actually found. MB-17: chest withdrawal spans mixed item types (oak + birch logs)
+// instead of asking one type for the family total, and always closes the window.
 //
 // 1.65.0 (2026-09-24) -- review remediation (docs/reviews/2026-09-24-minecraft-bots-review.md).
 // MB-01: "attack" actually starts combat again -- 1.42.0's polling rewrite dropped the
@@ -1033,6 +1040,10 @@ export const FOOD_NAMES = [
   "baked_potato", "potato", "carrot", "golden_carrot", "melon_slice", "sweet_berries",
   "glow_berries", "cookie", "pumpkin_pie", "mushroom_stew", "rabbit_stew", "beetroot",
   "beetroot_soup", "dried_kelp",
+  // Review MB-15, 2026-09-24: raw catches/drops safe to eat uncooked, listed LAST so "eat" prefers
+  // anything cooked. Fishing is checkHunger's fallback, and raw cod/salmon used to be inedible
+  // here with no cooking recipe either -- the food loop never closed. (Raw chicken omitted: poison.)
+  "cod", "salmon", "beef", "porkchop", "mutton", "rabbit",
 ];
 
 // Suffix-matched, same convention as equipment.js -- what's worth pulling out of a chest.
@@ -1136,6 +1147,10 @@ const SMELT_RECIPES = {
   gold_ingot: ["raw_gold", "gold_ore", "deepslate_gold_ore", "nether_gold_ore"],
   glass: ["sand", "red_sand"],
   stone: ["cobblestone"],
+  // Review MB-15: cooking, so raw food can be upgraded at a furnace.
+  cooked_cod: ["cod"], cooked_salmon: ["salmon"], cooked_beef: ["beef"],
+  cooked_porkchop: ["porkchop"], cooked_mutton: ["mutton"], cooked_chicken: ["chicken"],
+  cooked_rabbit: ["rabbit"], baked_potato: ["potato"],
 };
 
 // Preferred fuels in order; coal/charcoal burn far longer per item than planks/logs (which are
@@ -1320,6 +1335,14 @@ const EXPLORE_TIMEOUT_MS = 15_000;
 // file's own established caution, see EXPLORE_DISTANCE's header above) even when raised.
 const MINE_SEARCH_RADIUS = parseInt(process.env.MC_MINE_SEARCH_RADIUS || "32", 10);
 const EXPLORE_SEARCH_RADIUS = parseInt(process.env.MC_EXPLORE_SEARCH_RADIUS || "32", 10);
+// Review MB-16: blocks that only (or overwhelmingly) occur at a given feature -- what EXPLORE
+// <feature> scouts for. Keys are the feature words the planner/classifier may pass.
+export const SCOUT_FEATURE_BLOCKS = {
+  village: ["bell", "composter", "lectern", "fletching_table", "cartography_table", "smithing_table"],
+  bee_nest: ["bee_nest"],
+  mineshaft: ["rail", "cobweb"],
+  stronghold: ["end_portal_frame", "infested_stone_bricks", "cracked_stone_bricks"],
+};
 const EXTENDED_SEARCH_DISTANCE = parseInt(process.env.MC_EXTENDED_SEARCH_DISTANCE || "150", 10);
 const MAX_DIRECTED_HOPS = 4;
 
@@ -1802,8 +1825,9 @@ async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount
   }
   if (token.cancelled) return "cancelled";
 
+  let chest = null;
   try {
-    const chest = await bot.openChest(chestBlock);
+    chest = await bot.openChest(chestBlock);
     const contents = chest.containerItems();
     // Real bug found live 2026-09-12 (direct report: "a chest with sticks already made is
     // ignored when they need sticks"). This used to require ONE slot to independently hold
@@ -1823,20 +1847,37 @@ async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount
       // Real, current truth either way -- an empty/wrong-contents chest is worth recording too,
       // so a stale known-chests entry gets corrected rather than kept forever.
       await recordChestSnapshot(chestBlock.position, contents);
-      await chest.close();
       return null;
     }
-    const takeCount = Math.min(wantCount, totalAvailable);
-    await chest.withdraw(matches[0].type, null, takeCount);
+    // Review MB-17, 2026-09-24: `matches` can span several concrete item types (oak + birch logs
+    // for a "logs" request), but withdraw() takes ONE type -- asking for the family total of
+    // matches[0].type threw whenever that one type alone fell short. Withdraw per type, each
+    // capped at what that type actually has.
+    const perType = new Map();
+    for (const item of matches) {
+      const entry = perType.get(item.type) ?? { name: item.name, count: 0 };
+      entry.count += item.count;
+      perType.set(item.type, entry);
+    }
+    let taken = 0;
+    let firstName = null;
+    for (const [type, { name, count }] of perType) {
+      if (taken >= wantCount || token.cancelled) break;
+      const take = Math.min(wantCount - taken, count);
+      await chest.withdraw(type, null, take);
+      taken += take;
+      firstName ??= name;
+    }
     // Direct request, 2026-09-13 ("remember what is in chests when someone opens it, if someone
     // takes the item out redact it from global memory"): a fresh post-withdraw snapshot IS the
     // redaction -- whatever was just taken is naturally absent from this real, current-truth
     // read, no separate delete-this-item step to get subtly out of sync with reality.
     await recordChestSnapshot(chestBlock.position, chest.containerItems());
-    await chest.close();
-    return { name: matches[0].name, count: takeCount };
+    return taken ? { name: firstName, count: taken } : null;
   } catch {
     return null; // couldn't open this one -- try the next candidate
+  } finally {
+    try { await chest?.close(); } catch { /* already closed */ }
   }
 }
 
@@ -2323,21 +2364,29 @@ async function performActionAs(bot, action, speaker, token) {
       // whatever's found first, not just enough for right now -- the travel is the real cost
       // here, not the extra inventory slots, so "find resources for later" means actually
       // stockpiling while she's already out looking, not just solving today's shortage.
+      // Review MB-16, 2026-09-24: EXPLORE used to succeed on the spot whenever a nearby chest held
+      // any common resource -- Wade could "explore" by withdrawing home stock, and a "find a
+      // village" goal was satisfied by a stocked chest. Chest withdrawal is LOOT's job, so that
+      // shortcut is gone. `action.feature` (EXPLORE <feature>) is a separate scouting mode that
+      // only succeeds when a block unique to that feature is actually found.
+      if (action.feature) {
+        const featureBlocks = SCOUT_FEATURE_BLOCKS[action.feature];
+        if (!featureBlocks) return fail(`don't know how to recognize a ${action.feature}.`);
+        const ids = featureBlocks.map((name) => bot.registry.blocksByName[name]?.id).filter((id) => id !== undefined);
+        const scoutOptions = { matching: ids, maxDistance: EXPLORE_SEARCH_RADIUS * 2, count: 1 };
+        let found = bot.findBlocks(scoutOptions);
+        if (!found.length) found = await wanderAndRetryFind(bot, token, scoutOptions);
+        if (token.cancelled) return ok("stopped scouting early.");
+        if (!found.length) return fail(`scouted around but found no sign of a ${action.feature}.`);
+        const at = found[0].floored?.() ?? found[0];
+        return ok(`found a ${action.feature} (${bot.blockAt(found[0])?.name ?? "landmark"} at ${at.x}, ${at.y}, ${at.z})`);
+      }
+
       const blockIds = getResourceBlockNames(bot)
         .map((name) => bot.registry.blocksByName[name]?.id)
         .filter((id) => id !== undefined);
 
-      // Direct request, 2026-09-08 ("if a resource is in a nearby chest, they should not mine
-      // it") -- same reasoning as "mine"'s own check, applied to explore's own broader target
-      // list: no reason to go looking for wood/ore at all if a chest nearby already has a full
-      // batch of one of them.
       const EXPLORE_BATCH_COUNT = 8;
-      const chestMatch = await tryTakeFromNearbyChest(bot, token,
-        itemNamesForMinedBlocks(bot, blockIds), EXPLORE_BATCH_COUNT);
-      if (chestMatch) {
-        await refreshGear(bot);
-        return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to explore for it.`);
-      }
 
       const findOptions = { matching: blockIds, maxDistance: EXPLORE_SEARCH_RADIUS, count: EXPLORE_BATCH_COUNT * CONTENTION_SEARCH_OVERFETCH };
       let positions = bot.findBlocks(findOptions);
@@ -2764,7 +2813,11 @@ async function performActionAs(bot, action, speaker, token) {
       // consume() (confirmed against inventory.js source: requires the food already equipped
       // to hand -- bot.equip() first, the same pattern already used for fuel/tools elsewhere in
       // this file).
-      const foodItem = bot.inventory.items().find((i) => FOOD_NAMES.includes(i.name));
+      // Review MB-15: best-first by FOOD_NAMES order (cooked before raw), golden apples saved for last
+      // -- not whatever inventory slot happens to come first.
+      const eatRank = (name) => (name.includes("golden_apple") ? 1000 : 0) + FOOD_NAMES.indexOf(name);
+      const foodItem = bot.inventory.items().filter((i) => FOOD_NAMES.includes(i.name))
+        .sort((a, b) => eatRank(a.name) - eatRank(b.name))[0];
       if (!foodItem) return fail("don't have anything to eat.");
       try {
         await bot.equip(foodItem, "hand");

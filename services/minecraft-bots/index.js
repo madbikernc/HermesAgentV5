@@ -1,4 +1,16 @@
-// Version: 2.89.0
+// Version: 2.90.0
+//
+// 2.90.0 (2026-09-24) -- review remediation, tier 4. MB-12: goal heartbeat every 2 min, a
+// resumed goal is announced, and peers' goal entries expire after a missed lease. MB-13: item
+// requests use a claim window with one deterministic winner, never give away a last essential
+// item, and re-queue interrupted deliveries. MB-14: dusk pauses goals instead of abandoning them;
+// going home and sleeping retry (bounded) until they succeed; no new work at night unless a player
+// asked for it tonight. MB-15: critical hunger preempts goal steps and chores (HUNGER_CRITICAL).
+// MB-16: EXPLORE <feature> in both parsers and the planner vocabulary. MB-20: curriculum stages
+// need every requirement (tier-aware), per-bot evidence accumulates and persists, and stage work
+// goes to non-Soldier participants with role fairness. MB-21: goalTick plans without holding the
+// body and releases it right after acting; runAction releases before narration; skill-lookup
+// misses are cached for 10 minutes.
 //
 // 2.89.0 (2026-09-24) -- review remediation (docs/reviews/2026-09-24-minecraft-bots-review.md).
 // Every performAction() call passes its arbiter handle (MB-02); emergency/squad/drowning travel
@@ -1358,7 +1370,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -1960,7 +1972,37 @@ const otherBotGoals = new Map(); // from_agent -> last-known active goal descrip
 // fed into a bot's own role-lean. Timestamped alongside otherBotGoals itself, same Buzz handler,
 // so this is genuinely free -- no new message, no new poll.
 const otherBotActivityAt = new Map(); // from_agent -> Date.now() of their last "active" goal broadcast
-let pendingGiveRequest = null; // {forPlayer, item, count} she's agreed to fulfill, or null
+let pendingGiveRequest = null; // {forPlayer, item, count, expiresAt} she's won and must fulfill, or null
+// Review MB-13, 2026-09-24: every bot holding enough used to answer the same request, so several
+// dropped their work to deliver duplicates. Eligible donors now publish a "claim"; after
+// GIVE_CLAIM_WINDOW_MS (longer than two Buzz poll intervals, so every claim has arrived) each
+// claimant applies the same deterministic rule -- lowest-sorted name wins -- so exactly one bot
+// delivers. requestId -> { request, claimants: Set<name>, decideAt }.
+const GIVE_CLAIM_WINDOW_MS = 15_000;
+const GIVE_REQUEST_TTL_MS = 5 * 60_000;
+const giveClaims = new Map();
+
+// A donor never gives away its last essential/kept item, or something its own goal names.
+function canSpareForRequest(item, count) {
+  const itemDef = bot.registry.itemsByName[item];
+  const have = itemDef ? bot.inventory.count(itemDef.id, null) : 0;
+  const mustKeep = isEssentialItem(item) || isKeptItem(item) ? 1 : 0;
+  if (have - count < mustKeep) return false;
+  return !(currentGoal && currentGoal.description.toLowerCase().includes(item.replace(/_/g, " ")));
+}
+
+function settleGiveClaims() {
+  const now = Date.now();
+  for (const [requestId, claim] of giveClaims) {
+    if (now < claim.decideAt) continue;
+    giveClaims.delete(requestId);
+    const winner = [...claim.claimants].sort()[0];
+    if (winner !== USERNAME || pendingGiveRequest) continue;
+    if (!canSpareForRequest(claim.request.item, claim.request.count)) continue;
+    pendingGiveRequest = { ...claim.request, expiresAt: now + GIVE_REQUEST_TTL_MS };
+    console.log(`[${USERNAME}] won the claim for ${requestId} (${claim.claimants.size} claimant(s))`);
+  }
+}
 
 // Shared by planNextStep and proposeOwnGoal (previously two near-identical inline blocks, one
 // per singular `otherBotGoal` -- now one function over the Map, listing every other bot with an
@@ -1980,14 +2022,32 @@ function otherGoalsNote(intro) {
 // fires -- see that fix's own header). Added for Mayor's tech-tree curriculum
 // (proposeDirectiveForOthers/checkCurriculumProgress below): a trustworthy, structured "bot X
 // really has item Y now" signal, not another text description to fuzzy-match against.
-async function broadcastGoalState(status, description, item = null) {
+async function broadcastGoalState(status, description, item = null, heartbeat = false) {
   try {
     await buzzPublish(AGENT_ID, "minecraft-coordination",
-      JSON.stringify({ type: "goal", status, description, item }));
+      JSON.stringify({ type: "goal", status, description, item, heartbeat }));
   } catch (err) {
     console.error(`[${USERNAME}] goal broadcast failed:`, err.message);
   }
 }
+
+// Review MB-12, 2026-09-24: peers only ever learned about goal TRANSITIONS, Buzz skips history on
+// startup, and a resumed goal was never announced -- a restarted Mayor saw busy bots as idle, and
+// a bot that disconnected mid-goal stayed "busy" forever. Every bot now re-announces its current
+// goal every GOAL_HEARTBEAT_MS, and peers expire an entry not heard for GOAL_LEASE_MS.
+const GOAL_HEARTBEAT_MS = 2 * 60_000;
+const GOAL_LEASE_MS = GOAL_HEARTBEAT_MS * 3 + 30_000;
+const otherBotGoalSeenAt = new Map(); // from_agent -> Date.now() of their last "active" broadcast
+
+setInterval(() => {
+  if (currentGoal) broadcastGoalState("active", currentGoal.description, null, true);
+  const now = Date.now();
+  for (const [agent, at] of otherBotGoalSeenAt) {
+    if (now - at <= GOAL_LEASE_MS) continue;
+    otherBotGoalSeenAt.delete(agent);
+    if (otherBotGoals.delete(agent)) console.log(`[${USERNAME}] ${agent}'s goal lease expired -- treating as idle`);
+  }
+}, GOAL_HEARTBEAT_MS);
 
 // Item #6 of "fix all the above" (squad response for Mark/Luke). Same best-effort broadcast
 // pattern as broadcastGoalState -- see checkSelfDefense's own call site for the cooldown that
@@ -2092,7 +2152,10 @@ async function noteNearbyResources(reason, extraTargets = []) {
 
 loadGoal(PERSONA_NAME).then((g) => {
   currentGoal = g;
-  if (g) console.log(`[${USERNAME}] resumed goal: ${g.description} (${g.steps} steps so far)`);
+  if (g) {
+    console.log(`[${USERNAME}] resumed goal: ${g.description} (${g.steps} steps so far)`);
+    broadcastGoalState("active", g.description); // MB-12: peers can't see a resume otherwise
+  }
 }).catch((err) => console.error(`[${USERNAME}] failed to load saved goal:`, err.message));
 
 // One dispatch call classifies relevance AND detects an action request together, replacing
@@ -2251,7 +2314,10 @@ async function classifyIntent(speaker, message) {
     }
     if (verb === "HARVEST") return { type: "action", action: { type: "harvest" } };
     if (verb === "BUILD") return { type: "action", action: { type: "build" } };
-    if (verb === "EXPLORE") return { type: "action", action: { type: "explore" } };
+    if (verb === "EXPLORE") {
+      const feature = (parts[2] || "").toLowerCase();
+      return { type: "action", action: SCOUT_FEATURE_BLOCKS[feature] ? { type: "explore", feature } : { type: "explore" } };
+    }
     if (verb === "BREED") {
       const species = (parts[2] || "").toLowerCase();
       if (species) return { type: "action", action: { type: "breed", species } };
@@ -2482,9 +2548,16 @@ async function runAction(action, speaker, message, send) {
       trade: "let's see what the villager has.", harvest: "checking on the crops.",
       breed: `let's get some ${action.species}s together.`, enchant: `let's enchant this ${action.item}.`,
     }[action.type];
-    if (startLine) send(await narrateAction(startLine));
+    // Review MB-21, 2026-09-24: the body used to stay locked through BOTH narration model calls
+    // and the memory writes. The opening line is now narrated in parallel with the action, and
+    // control is released as soon as the physical action ends.
+    if (startLine) {
+      narrateAction(startLine).then(send)
+        .catch((err) => console.error(`[${USERNAME}] start narration failed:`, err.message));
+    }
 
     const result = await performAction(bot, action, speaker, handle);
+    handle.release();
     // Direct request, 2026-09-17 ("put any leftovers... in a chest"): a targeted loot that
     // actually withdrew something (action.item set) is just as worth an immediate cleanup pass
     // as a craft/smelt -- new inventory contents that might not all still be needed. A bare,
@@ -2576,7 +2649,10 @@ function parseGoalStep(text) {
       // farm, breed, enchant, or fish. Same parsing shape as every verb above.
       if (verb === "HARVEST") return { type: "step", action: { type: "harvest" } };
       if (verb === "BUILD") return { type: "step", action: { type: "build" } };
-      if (verb === "EXPLORE") return { type: "step", action: { type: "explore" } };
+      if (verb === "EXPLORE") {
+        const feature = (parts[2] || "").toLowerCase();
+        return { type: "step", action: SCOUT_FEATURE_BLOCKS[feature] ? { type: "explore", feature } : { type: "explore" } };
+      }
       // Review MB-08: Builder goals say "go home and place X" -- the planner needs the verb for it.
       if (verb === "GOHOME") return { type: "step", action: { type: "gohome" } };
       if (verb === "BREED") {
@@ -2710,6 +2786,8 @@ async function planNextStep(goal) {
           `simple intermediate steps herself automatically (logs into planks, planks into sticks ` +
           `or a crafting_table) -- name the FINAL item you actually want, not the raw material; ` +
           `no need to plan out "craft planks, then craft sticks" yourself first.\n` +
+          `ACTION EXPLORE <feature> - scout for a map feature instead of gathering; <feature> is ` +
+          `one of: ${Object.keys(SCOUT_FEATURE_BLOCKS).join(", ")}. Succeeds only if it's actually found.\n` +
           `ACTION GOHOME - walk back to home (your bed or spawn point). Use it first whenever the ` +
           `goal says to do something at or near home, before PLACE or BUILD.\n` +
           `ACTION EXPLORE - go looking for any useful raw material (wood, ore) when CRAFT/MINE ` +
@@ -3187,8 +3265,12 @@ async function saveGoalIfCurrent(goal) {
   if (currentGoal === goal) await saveGoal(PERSONA_NAME, goal);
 }
 
+const SKILL_RECHECK_MS = 10 * 60_000;
+
 async function goalTick() {
   if (!AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
+  // Review MB-14: no new work or goal steps from dusk to dawn (the goal is paused, not dropped).
+  if (goalPausedForNight(currentGoal)) return;
 
   if (!currentGoal) {
     if (!SELF_PROPOSE_GOALS || Date.now() - lastActivityAt < IDLE_BEFORE_SELF_GOAL_MS) return;
@@ -3208,8 +3290,16 @@ async function goalTick() {
   // requestControl() failure here means another ROUTINE/GOAL_STEP-tier action is already running
   // this tick -- exactly the old `acting` check's own early-bail, just moved to the point where
   // an async acquisition can actually happen instead of a synchronous flag read.
-  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.GOAL_STEP);
-  if (!handle) return;
+  // Review MB-21, 2026-09-24: control used to be held from here through skill lookup, the
+  // planning model call, memory writes and narration -- hunger and chores (same tier) starved
+  // behind a slow model. It's now taken lazily, right before the first physical action; a tick
+  // that can't get it just ends, and nothing below moves the body without it.
+  let handle = null;
+  const takeControl = async () => {
+    if (handle) return arbiter.holdsControl(handle);
+    handle = await arbiter.requestControl(bot, arbiter.OWNERS.GOAL_STEP);
+    return !!handle;
+  };
   // Review MB-05, 2026-09-24: pin this tick to the goal it started with. STOP, dusk, respawn,
   // teleport, and setNewGoal() can all replace or clear the global currentGoal while this tick is
   // awaiting a model call or a physical action; every mutation below goes to `goal`, and
@@ -3234,9 +3324,12 @@ async function goalTick() {
     // close match, or every close match already untrusted) costs one cheap search call and
     // falls through to normal planning unchanged. Checked once per goal (servedBySkill), not
     // every tick, once a goal has already gone one way or the other.
-    if (!goal.servedBySkill) {
+    // MB-21: a miss is remembered for SKILL_RECHECK_MS instead of re-searching every tick.
+    if (!goal.servedBySkill && Date.now() - (goal.skillMissAt ?? 0) >= SKILL_RECHECK_MS) {
       const skill = await findSkill(goal.description);
+      if (!skill) goal.skillMissAt = Date.now();
       if (skill) {
+        if (replaced() || !(await takeControl())) return;
         console.log(`[${USERNAME}] running stored skill "${skill.name}" for goal: ${goal.description}`);
         const result = await runSkill((b, a, s) => performAction(b, a, s, handle), bot, skill, goal.setBy || USERNAME);
         // Preempted mid-replay: neither the skill's nor the goal's fault -- don't score either,
@@ -3281,7 +3374,7 @@ async function goalTick() {
     busy = true;
     try {
       stepLine = await planNextStep(goal);
-      if (replaced() || !arbiter.holdsControl(handle)) return; // plan is for a goal/turn that's gone
+      if (replaced()) return; // plan is for a goal that's gone
       parsed = parseGoalStep(stepLine);
       console.log(`[${USERNAME}] goal plan: ${stepLine}`);
 
@@ -3407,7 +3500,7 @@ async function goalTick() {
         const stillHasItem = bot.inventory.items()
           .some((i) => i.name === goal.builderPriorityItem);
         let recovered = false;
-        if (stillHasItem) {
+        if (stillHasItem && await takeControl()) {
           await performAction(bot, { type: "gohome" }, USERNAME, handle);
           const placeResult = await performAction(bot,
             { type: "place", item: goal.builderPriorityItem }, USERNAME, handle);
@@ -3499,7 +3592,9 @@ async function goalTick() {
       return;
     }
 
+    if (replaced() || !(await takeControl())) return; // something else has the body this tick
     const result = await performAction(bot, parsed.action, goal.setBy || USERNAME, handle);
+    handle.release(); // MB-21: the body is free again before memory writes and narration
     // Review MB-04/MB-05, 2026-09-24: an interrupted step is neither progress nor a genuine
     // failure, and a result for a goal that was replaced mid-action belongs to nobody -- drop both
     // rather than logging them into (or failing) whatever goal is current now.
@@ -3615,7 +3710,7 @@ async function goalTick() {
   } catch (err) {
     console.error(`[${USERNAME}] goal tick failed:`, err.message);
   } finally {
-    handle.release();
+    handle?.release();
     if (craftedOk) surplusCleanupDueAt = Date.now() + SURPLUS_CLEANUP_QUIET_MS; // MB-09: deferred
   }
 }
@@ -3648,41 +3743,57 @@ const MAYOR_DIRECTIVE_MS = parseInt(process.env.MC_MAYOR_DIRECTIVE_MS || "300000
 // completion, not a self-reported claim. Farming's stage is proven by a harvested crop ITEM
 // (wheat/carrot/potato/beetroot/bread), not "a farm exists somewhere" -- a real, unambiguous,
 // checkable fact instead of something that would need its own separate detection method.
+//
+// Review MB-20, 2026-09-24: doneItems was matched with .some(), so ONE listed item cleared a
+// stage -- a lone axe satisfied "a pickaxe and an axe", a lone iron sword "full iron armor and a
+// sword". Each stage is now `requires`: groups that must ALL be satisfied, each by ANY one of its
+// items. Groups are tier-aware (better materials count toward a lower stage).
+const withTiers = (materials, piece) => materials.map((m) => `${m}_${piece}`);
+const TOOL_TIERS = ["wooden", "stone", "iron", "golden", "diamond", "netherite"];
+const ARMOR_TIERS = ["leather", "chainmail", "iron", "golden", "diamond", "netherite"];
+const IRON_UP = ["iron", "diamond", "netherite"];
+const ARMOR_PIECES = ["helmet", "chestplate", "leggings", "boots"];
 const TECH_TREE_STAGES = [
   {
     name: "basic tools",
     directive: "make sure you have basic tools -- at least a pickaxe and an axe, wood or stone is fine to start",
-    doneItems: ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe", "netherite_pickaxe",
-                "wooden_axe", "stone_axe", "iron_axe", "diamond_axe", "netherite_axe"],
+    requires: [withTiers(TOOL_TIERS, "pickaxe"), withTiers(TOOL_TIERS, "axe")],
   },
   {
     name: "basic armor",
-    directive: "get yourself some armor -- leather is fine to start, iron is better",
-    doneItems: ["leather_helmet", "leather_chestplate", "leather_leggings", "leather_boots",
-                "iron_helmet", "iron_chestplate", "iron_leggings", "iron_boots",
-                "chainmail_helmet", "chainmail_chestplate", "chainmail_leggings", "chainmail_boots"],
+    directive: "get yourself a full set of armor -- helmet, chestplate, leggings and boots; leather is fine to start, iron is better",
+    requires: ARMOR_PIECES.map((piece) => withTiers(ARMOR_TIERS, piece)),
   },
   {
     name: "farming",
     directive: "start a farm and bring back some real food from it -- till ground, plant seeds, and harvest what you grow",
-    doneItems: ["wheat", "carrot", "potato", "beetroot", "bread"],
+    requires: [["wheat", "carrot", "potato", "beetroot", "bread"]],
   },
   {
     name: "iron gear",
     directive: "mine iron and smelt enough for a full set of iron armor and an iron sword",
-    doneItems: ["iron_chestplate", "iron_sword"],
+    requires: [...ARMOR_PIECES.map((piece) => withTiers(IRON_UP, piece)), withTiers(IRON_UP, "sword")],
   },
   {
     name: "diamond gear",
     directive: "find diamonds -- you'll need an iron pickaxe first -- and craft diamond tools or armor",
-    doneItems: ["diamond_pickaxe", "diamond_sword", "diamond_chestplate", "diamond_helmet"],
+    requires: [["diamond_pickaxe", "diamond_sword", "diamond_axe", "diamond_chestplate", "diamond_helmet",
+                "diamond_leggings", "diamond_boots"]],
   },
   {
     name: "enchanting",
     directive: "set up an enchanting table (needs obsidian and diamonds) and get some lapis lazuli for it",
-    doneItems: ["enchanting_table"],
+    requires: [["enchanting_table"]],
   },
 ];
+
+function stageSatisfied(stage, itemNames) {
+  return stage.requires.every((group) => group.some((name) => itemNames.has(name)));
+}
+
+function isCurriculumItem(name) {
+  return TECH_TREE_STAGES.some((stage) => stage.requires.some((group) => group.includes(name)));
+}
 
 // Persisted so Mayor's own process restarting doesn't reset the whole fleet back to "basic
 // tools" -- same small-JSON-file-under-the-durable-mount pattern actions.js's bed-ownership fix
@@ -3694,11 +3805,19 @@ const CURRICULUM_FILE = "/mnt/hermes-data/minecraft-memory/mayor-curriculum.json
 let curriculumStageIndex = 0;
 // Bot names (plain, e.g. "Mark") who've provably cleared the CURRENT stage -- reset on advance.
 let stageProgress = new Set();
+// Review MB-20: per-bot curriculum evidence (agent name -> Set of verified curriculum item ids),
+// accumulated across "done" broadcasts because each broadcast proves only ONE item while stages
+// now need several. Persisted with the stage index so a Mayor restart doesn't reset progress.
+let stageEvidence = new Map();
 
 async function loadCurriculumStage() {
   try {
     const data = JSON.parse(await readFile(CURRICULUM_FILE, "utf8"));
     if (Number.isInteger(data.stageIndex)) curriculumStageIndex = data.stageIndex;
+    if (Array.isArray(data.stageProgress)) stageProgress = new Set(data.stageProgress);
+    if (data.evidence && typeof data.evidence === "object") {
+      stageEvidence = new Map(Object.entries(data.evidence).map(([name, items]) => [name, new Set(items)]));
+    }
   } catch {
     // no saved progress yet -- start at stage 0, the normal first-ever-run case
   }
@@ -3707,7 +3826,11 @@ async function loadCurriculumStage() {
 async function saveCurriculumStage() {
   try {
     await mkdir("/mnt/hermes-data/minecraft-memory", { recursive: true });
-    await writeFile(CURRICULUM_FILE, JSON.stringify({ stageIndex: curriculumStageIndex }), "utf8");
+    await writeFile(CURRICULUM_FILE, JSON.stringify({
+      stageIndex: curriculumStageIndex,
+      stageProgress: [...stageProgress],
+      evidence: Object.fromEntries([...stageEvidence].map(([name, items]) => [name, [...items]])),
+    }), "utf8");
   } catch (err) {
     console.error(`[${USERNAME}] failed to persist curriculum stage:`, err.message);
   }
@@ -3718,8 +3841,30 @@ async function saveCurriculumStage() {
 // progress arrives via their own verified "done" broadcasts (see the minecraft-coordination
 // subscriber below) since Mayor has no direct view into their inventories.
 function mayorHasStageItem(stage) {
-  return bot.inventory.items().some((i) => stage.doneItems.includes(i.name)) ||
-    [5, 6, 7, 8].some((slot) => stage.doneItems.includes(bot.inventory.slots[slot]?.name));
+  const names = new Set(bot.inventory.items().map((i) => i.name));
+  for (const slot of [5, 6, 7, 8, 45]) if (bot.inventory.slots[slot]) names.add(bot.inventory.slots[slot].name);
+  return stageSatisfied(stage, names);
+}
+
+// Stage participants: everyone the stage's completion waits on (Soldiers are exempt).
+function isCurriculumParticipant(name) {
+  return BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER;
+}
+
+// Records one bot's verified "done" item; returns true if it newly clears the current stage.
+function recordCurriculumEvidence(agentName, item) {
+  if (!isCurriculumItem(item)) return false;
+  const items = stageEvidence.get(agentName) ?? new Set();
+  items.add(item);
+  stageEvidence.set(agentName, items);
+  const stage = TECH_TREE_STAGES[curriculumStageIndex];
+  if (!stage || stageProgress.has(agentName) || !stageSatisfied(stage, items)) {
+    saveCurriculumStage();
+    return false;
+  }
+  stageProgress.add(agentName);
+  saveCurriculumStage();
+  return true;
 }
 
 // Checked after every relevant "done" broadcast AND once per directive tick -- advancing
@@ -3735,11 +3880,15 @@ async function checkCurriculumAdvance() {
   // them to independently produce a farming/enchanting-table/etc. item just to unblock the
   // WHOLE FLEET's advancement would either stall the curriculum forever or reward wandering
   // outside their restricted lane. The curriculum is a non-Soldier fleet ladder now.
-  const everyone = [...BOT_USERNAMES].filter((name) => BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER);
+  const everyone = [...BOT_USERNAMES].filter(isCurriculumParticipant);
   if (!everyone.every((name) => stageProgress.has(name))) return;
 
   curriculumStageIndex += 1;
-  stageProgress = new Set();
+  // Evidence already gathered may clear the NEXT stage too (e.g. iron armor from "basic armor").
+  const nextStage = TECH_TREE_STAGES[curriculumStageIndex];
+  stageProgress = new Set(nextStage
+    ? [...stageEvidence].filter(([, items]) => stageSatisfied(nextStage, items)).map(([name]) => name)
+    : []);
   await saveCurriculumStage();
   const next = TECH_TREE_STAGES[curriculumStageIndex];
   console.log(`[${USERNAME}] curriculum stage complete: "${stage.name}" -- advancing to ` +
@@ -3795,7 +3944,11 @@ async function proposeDirectiveForOthers() {
   // matching "increasingly useful larger goals as they successfully meet earlier goals" means
   // pushing the ones behind, not re-nagging someone already done. §15.5(b): the final fallback
   // (nobody's behind, or the whole curriculum's cleared) is now role-aware, not purely random.
-  const target = idleBots.find((name) => !stageProgress.has(name)) || pickIdleTarget(idleBots);
+  // Review MB-20: stage work goes to stage participants who haven't cleared it, with role
+  // fairness among them -- an idle Soldier no longer grabs the slot ahead of later workers.
+  const stageCandidates = curriculumStageIndex < TECH_TREE_STAGES.length
+    ? idleBots.filter((name) => isCurriculumParticipant(name) && !stageProgress.has(name)) : [];
+  const target = stageCandidates.length ? pickIdleTarget(stageCandidates) : pickIdleTarget(idleBots);
   const targetRole = BOT_ROLES[target.toLowerCase()];
   // A Soldier target never gets a curriculum-stage directive, regardless of where the rest of
   // the fleet's own progression stands -- see SOLDIER_DIRECTIVE_NOTE's own comment.
@@ -3816,7 +3969,10 @@ async function proposeDirectiveForOthers() {
           : stage
           ? `${persona}\n\n---\n\n${target} currently has no active goal. The fleet's current ` +
             `curriculum stage is "${stage.name}": ${stage.directive}. Tell ${target} to do ` +
-            `exactly that, in your own voice -- don't invent a different objective. Address ` +
+            `exactly that, in your own voice -- don't invent a different objective. ` +
+            (targetRole ? `Where it fits naturally, frame it around ${target}'s role as ` +
+              `${targetRole.primary.name} (${targetRole.primary.domain}). ` : "") +
+            `Address ` +
             `${target} by name, exactly like a real chat message you'd actually send. One or ` +
             `two sentences, nothing else -- no quotes, no stage directions.`
           // §15.5(b): role folded into the post-curriculum branch, replacing the previous fully
@@ -3944,10 +4100,22 @@ setInterval(() => {
 // anyway). Uses the same busy/acting mutex as everything else, so it never fires mid-command and
 // a live command always interrupts it (actions.js's stopCurrent() forces a wake for that).
 const SLEEP_CHECK_MS = parseInt(process.env.MC_SLEEP_CHECK_MS || "30000", 10);
-// Tracks whether tonight's sleep has already been tried (successfully or not) so a bed-less
-// bot doesn't retry every 30s and spam chat for the whole ~7-real-minute length of one night --
-// resets the moment it's day again, ready for the next night.
-let sleepAttemptedThisNight = false;
+// Review MB-14, 2026-09-24: the night used to be one-shot intent -- the "tried tonight" flags were
+// set before control was even acquired, so a failed or preempted trip home or bed attempt was
+// never retried, and dusk abandoned the standing goal (even a player's) before trying to leave.
+// Now each nightly step records success, retries a bounded number of times with spacing (so a
+// bed-less bot still doesn't spam chat all night), and dusk only PAUSES goals -- goalTick skips
+// work during the night phase and picks the same goal back up in the morning.
+const NIGHT_RETRY_MS = 2 * 60_000;
+const MAX_NIGHT_ATTEMPTS = 3;
+const nightStep = () => ({ done: false, attempts: 0, lastAt: 0 });
+let sleepTonight = nightStep();
+let homeTonight = nightStep();
+
+// True if a nightly step should be tried now; false once done, out of attempts, or too soon.
+function nightStepDue(step) {
+  return !step.done && step.attempts < MAX_NIGHT_ATTEMPTS && Date.now() - step.lastAt >= NIGHT_RETRY_MS;
+}
 
 async function checkSleep() {
   if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
@@ -3955,11 +4123,10 @@ async function checkSleep() {
   const thunderstorm = bot.isRaining && bot.thunderState > 0;
   const isNight = thunderstorm || (bot.time.timeOfDay >= 12541 && bot.time.timeOfDay <= 23458);
   if (!isNight) {
-    sleepAttemptedThisNight = false;
+    sleepTonight = nightStep();
     return;
   }
-  if (sleepAttemptedThisNight) return;
-  sleepAttemptedThisNight = true;
+  if (!nightStepDue(sleepTonight)) return;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note on why an
   // idle-tick physical action shouldn't block handleIncoming's `busy` check. The arbiter's
@@ -3967,11 +4134,16 @@ async function checkSleep() {
   // one runs (coherence arbiter Phase 4, 2026-09-10).
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
+  sleepTonight.attempts += 1;
+  sleepTonight.lastAt = Date.now();
   try {
-    bot.chat(await narrateAction("getting sleepy -- heading to bed."));
+    if (sleepTonight.attempts === 1) bot.chat(await narrateAction("getting sleepy -- heading to bed."));
     const result = await performAction(bot, { type: "sleep" }, USERNAME, handle);
-    console.log(`[${USERNAME}] sleep: ${result.text} (ok=${result.ok})`);
-    bot.chat(await narrateAction(result.ok ? result.text : `couldn't get to sleep: ${result.text}`));
+    console.log(`[${USERNAME}] sleep (attempt ${sleepTonight.attempts}): ${result.text} (ok=${result.ok})`);
+    if (result.ok) sleepTonight.done = true;
+    if (!result.cancelled && (result.ok || sleepTonight.attempts >= MAX_NIGHT_ATTEMPTS)) {
+      bot.chat(await narrateAction(result.ok ? result.text : `couldn't get to sleep: ${result.text}`));
+    }
   } catch (err) {
     console.error(`[${USERNAME}] sleep check failed:`, err.message);
   } finally {
@@ -3995,37 +4167,48 @@ setInterval(() => {
 // teleport-when-stuck mechanism already uses, not a second notion of home.
 const DUSK_CHECK_MS = parseInt(process.env.MC_DUSK_CHECK_MS || "30000", 10);
 const DUSK_START_TICK = parseInt(process.env.MC_DUSK_START_TICK || "10000", 10);
-// Tracks whether tonight's trip home has already been tried so she doesn't retry every 30s for
-// the rest of the ~13000-tick night window -- resets the moment a new day's tick count is back
-// below DUSK_START_TICK, ready for the next dusk.
-let wentHomeTonight = false;
+const DAWN_TICK = 23458; // same boundary checkSleep uses for "no longer night"
+let nightStartedAt = 0; // wall-clock start of the current dusk-to-dawn phase, 0 during the day
+
+function isNightPhase() {
+  const t = bot.time?.timeOfDay;
+  return t !== undefined && t >= DUSK_START_TICK && t < DAWN_TICK;
+}
+
+// goalTick's night rule: goals are paused from dusk to dawn, except one a real player set during
+// this same night (they asked for it knowing it's dark) -- Mayor assignments wait for morning.
+function goalPausedForNight(goal) {
+  if (!isNightPhase()) return false;
+  const playerSetTonight = goal && goal.setBy && !isAnotherBot(goal.setBy) &&
+    nightStartedAt && goal.createdAt >= nightStartedAt;
+  return !playerSetTonight;
+}
 
 async function checkDusk() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping || !bot.time) return;
-  const t = bot.time.timeOfDay;
-  if (t < DUSK_START_TICK) {
-    wentHomeTonight = false;
+  if (!bot.time) return;
+  if (!isNightPhase()) {
+    if (nightStartedAt && currentGoal) console.log(`[${USERNAME}] morning -- resuming goal: ${currentGoal.description}`);
+    nightStartedAt = 0;
+    homeTonight = nightStep();
     return;
   }
-  if (wentHomeTonight) return;
-  wentHomeTonight = true;
-
-  // Whatever her standing goal assumed, getting home before dark takes priority -- same
-  // reasoning as death/respawn/stuck: she can always pick something new up tomorrow.
-  if (currentGoal) {
-    await broadcastGoalState("abandoned", currentGoal.description);
-    recordGoalOutcome(currentGoal.description, "gave up", "heading home before dark");
-    currentGoal = null;
-    await clearGoal(PERSONA_NAME);
+  if (!nightStartedAt) {
+    nightStartedAt = Date.now();
+    if (currentGoal) console.log(`[${USERNAME}] dusk -- pausing goal until morning: ${currentGoal.description}`);
   }
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
+  if (!nightStepDue(homeTonight)) return;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
+  homeTonight.attempts += 1;
+  homeTonight.lastAt = Date.now();
   try {
-    bot.chat(await narrateAction("sun's getting low -- heading home before dark."));
+    if (homeTonight.attempts === 1) bot.chat(await narrateAction("sun's getting low -- heading home before dark."));
     const result = await performAction(bot, { type: "gohome" }, USERNAME, handle);
-    console.log(`[${USERNAME}] heading home: ${result.text} (ok=${result.ok})`);
+    console.log(`[${USERNAME}] heading home (attempt ${homeTonight.attempts}): ${result.text} (ok=${result.ok})`);
+    if (result.ok) homeTonight.done = true;
   } catch (err) {
     console.error(`[${USERNAME}] heading home failed:`, err.message);
   } finally {
@@ -4401,12 +4584,23 @@ async function respondToSquadCall(payload) {
 const HUNGER_CHECK_MS = parseInt(process.env.MC_HUNGER_CHECK_MS || "15000", 10);
 const HUNGER_THRESHOLD = 18; // out of a max of 20
 
+// Review MB-15, 2026-09-24: hunger used to wait politely behind any model call or same-tier work,
+// with no escalation -- a bot doing back-to-back goal steps could starve. At or below this food
+// level it preempts goal steps and chores (HUNGER_CRITICAL tier) instead of waiting for idle.
+const CRITICAL_FOOD_LEVEL = 6; // vanilla: sprinting stops at 6, starvation damage at 0
+
 async function checkHunger() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || bot.isSleeping) return;
   if (bot.food >= HUNGER_THRESHOLD) return;
+  // Only escalate when there is something to act on -- preempting a goal every check just to
+  // report "nothing to eat" would thrash it for nothing.
+  const canFeed = bot.inventory.items().some((i) => FOOD_NAMES.includes(i.name) || i.name === "fishing_rod");
+  const critical = bot.food <= CRITICAL_FOOD_LEVEL && canFeed;
+  if (!critical && (busy || arbiter.isBusy())) return;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  const handle = await arbiter.requestControl(bot,
+    critical ? arbiter.OWNERS.HUNGER_CRITICAL : arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
     const result = await performAction(bot, { type: "eat" }, USERNAME, handle);
@@ -4441,23 +4635,26 @@ setInterval(() => {
 const GIVE_CHECK_MS = parseInt(process.env.MC_GIVE_CHECK_MS || "10000", 10);
 
 async function checkPendingGiveRequests() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping || !pendingGiveRequest) return;
-  const { forPlayer, item, count } = pendingGiveRequest;
-  pendingGiveRequest = null;
-
-  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note. Restores the
-  // popped request on a failed acquisition (coherence arbiter Phase 4, 2026-09-10) -- unlike
-  // checkSleep/checkDusk's own one-shot-per-night flags, silently dropping a promise already
-  // made to a specific player is a real regression, not a harmless "try again next tick."
-  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
-  if (!handle) {
-    pendingGiveRequest = { forPlayer, item, count };
-    return;
+  settleGiveClaims();
+  if (pendingGiveRequest && Date.now() > pendingGiveRequest.expiresAt) {
+    console.log(`[${USERNAME}] give request expired: ${pendingGiveRequest.count} ${pendingGiveRequest.item} for ${pendingGiveRequest.forPlayer}`);
+    pendingGiveRequest = null;
   }
+  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping || !pendingGiveRequest) return;
+  const pending = pendingGiveRequest;
+  const { forPlayer, item, count } = pending;
+
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note. A failed
+  // acquisition leaves the request pending (retried each check until GIVE_REQUEST_TTL_MS) --
+  // silently dropping a promise already made to a specific player is a real regression.
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return; // still pending -- retried next check until it expires
+  pendingGiveRequest = null;
   try {
     console.log(`[${USERNAME}] fulfilling request: giving ${count} ${item} to ${forPlayer}`);
     const result = await performAction(bot, { type: "give", player: forPlayer, item, count }, USERNAME, handle);
     console.log(`[${USERNAME}] give result: ${result.text} (ok=${result.ok})`);
+    if (result.cancelled) pendingGiveRequest = pending; // interrupted, not failed -- deliver later
     if (result.ok) bot.chat(await narrateAction(`brought you some ${item}, ${forPlayer}.`));
   } catch (err) {
     console.error(`[${USERNAME}] give check failed:`, err.message);
@@ -5211,12 +5408,16 @@ bot.once("spawn", () => {
         return; // not a real coordination payload -- ignore rather than crash on it
       }
       if (payload.type === "goal") {
+        const unchangedHeartbeat = payload.heartbeat && otherBotGoals.get(msg.from_agent) === payload.description;
         if (payload.status === "active") {
           otherBotGoals.set(msg.from_agent, payload.description);
           otherBotActivityAt.set(msg.from_agent, Date.now());
+          otherBotGoalSeenAt.set(msg.from_agent, Date.now());
         } else {
           otherBotGoals.delete(msg.from_agent);
+          otherBotGoalSeenAt.delete(msg.from_agent);
         }
+        if (unchangedHeartbeat) return; // lease refresh only -- nothing new to log or act on
         console.log(`[${USERNAME}] heard ${msg.from_agent}'s goal: ${payload.status === "active" ? payload.description : "(idle)"}`);
         // Tech-tree curriculum (2026-09-08): Mayor has no view into another bot's own
         // inventory, so her OWN verified "done" broadcast (parseGoalStep's real, checked
@@ -5226,14 +5427,12 @@ bot.once("spawn", () => {
         if (USERNAME === MAYOR_USERNAME && payload.status === "done" && payload.item &&
             curriculumStageIndex < TECH_TREE_STAGES.length) {
           const stage = TECH_TREE_STAGES[curriculumStageIndex];
-          if (stage.doneItems.includes(payload.item)) {
-            const agentName = [...BOT_USERNAMES].find((name) => `mc-${name.toLowerCase()}` === msg.from_agent);
-            if (agentName) {
-              stageProgress.add(agentName);
-              console.log(`[${USERNAME}] curriculum: ${agentName} cleared "${stage.name}" (${payload.item})`);
-              checkCurriculumAdvance().catch((err) =>
-                console.error(`[${USERNAME}] checkCurriculumAdvance error:`, err.message));
-            }
+          const agentName = [...BOT_USERNAMES].find((name) => `mc-${name.toLowerCase()}` === msg.from_agent);
+          // MB-20: one item is evidence toward a stage, not the whole stage.
+          if (agentName && recordCurriculumEvidence(agentName, payload.item)) {
+            console.log(`[${USERNAME}] curriculum: ${agentName} cleared "${stage.name}" (last item: ${payload.item})`);
+            checkCurriculumAdvance().catch((err) =>
+              console.error(`[${USERNAME}] checkCurriculumAdvance error:`, err.message));
           }
         }
       } else if (payload.type === "threat" && SQUAD_RESPONDER && !squadResponseInFlight) {
@@ -5258,16 +5457,18 @@ bot.once("spawn", () => {
             console.error(`[${USERNAME}] squad response (death) failed:`, err.message));
         }
       } else if (payload.type === "request" && !pendingGiveRequest) {
-        // Only agrees to fulfill one request at a time (first-come-first-served) -- simple and
-        // sufficient at 2-bot scale, avoids overcommitting inventory she doesn't actually have
-        // by the time checkPendingGiveRequests() gets to act on it.
-        const itemDef = bot.registry.itemsByName[payload.item];
-        const have = itemDef ? bot.inventory.count(itemDef.id, null) : 0;
-        if (have >= payload.count) {
-          pendingGiveRequest = { forPlayer: payload.forPlayer, item: payload.item, count: payload.count };
-          console.log(`[${USERNAME}] can fulfill ${msg.from_agent}'s request for ` +
-                      `${payload.count} ${payload.item}`);
+        // Only claims one request at a time, and only with inventory to spare (review MB-13 --
+        // see giveClaims' own header for the single-supplier protocol).
+        if (payload.forPlayer !== USERNAME && canSpareForRequest(payload.item, payload.count)) {
+          const requestId = `${msg.from_agent}:${msg.seq}`;
+          const request = { forPlayer: payload.forPlayer, item: payload.item, count: payload.count };
+          giveClaims.set(requestId, { request, claimants: new Set([USERNAME]), decideAt: Date.now() + GIVE_CLAIM_WINDOW_MS });
+          buzzPublish(AGENT_ID, "minecraft-coordination", JSON.stringify({ type: "claim", requestId, donor: USERNAME }))
+            .catch((err) => console.error(`[${USERNAME}] give claim publish failed:`, err.message));
+          console.log(`[${USERNAME}] claiming ${msg.from_agent}'s request for ${payload.count} ${payload.item}`);
         }
+      } else if (payload.type === "claim") {
+        giveClaims.get(payload.requestId)?.claimants.add(payload.donor);
       } else if (payload.type === "scout") {
         // Direct request, 2026-09-11 ("ask the other bots to look near themselves... they
         // add/update their knowledge of nearby resources into global world memory"). Same

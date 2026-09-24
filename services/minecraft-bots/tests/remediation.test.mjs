@@ -1,9 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
 // Run: node services/minecraft-bots/tests/remediation.test.mjs
 // Revision History: 1.0.0 | 2026-09-24 | Initial checks for MB-01..MB-11 and MB-22 remediations.
+// 1.1.0 | 2026-09-24 | Checks for MB-13, MB-14, MB-16, MB-17, MB-20.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -180,6 +181,7 @@ await check('MB-05 an old goal action does not write into a replacement goal', a
     planNextStep: async () => 'ACTION ATTACK', parseGoalStep: () => ({ type: 'step', action: { type: 'attack' } }),
     performAction: () => new Promise(resolve => { finish = resolve; }),
     logStep: (goal, line) => { goal.log.push(line); goal.steps++; },
+    goalPausedForNight: () => false,
     saveGoal: async () => { saved++; }, clearGoal: async () => { cleared++; } });
   vm.runInContext('var currentGoal = this.currentGoal;' + between(index, 'async function retireGoal(', 'setInterval(() => {\n  goalTick()'), c);
   const pending = c.goalTick();
@@ -188,6 +190,64 @@ await check('MB-05 an old goal action does not write into a replacement goal', a
   finish({ ok: true, text: 'old work result' }); await pending;
   assert.equal(newGoal.steps, 0); assert.equal(newGoal.log.length, 0);
   assert.equal(cleared, 0); assert.equal(saved, 0);
+});
+
+await check('MB-17 chest withdrawal spans mixed item types', async () => {
+  const withdrawn = [];
+  const contents = [{ type: 1, name: 'oak_log', count: 2 }, { type: 2, name: 'birch_log', count: 2 }];
+  let closed = 0;
+  const chest = { containerItems: () => contents, async withdraw(type, _, n) { withdrawn.push([type, n]); }, async close() { closed++; } };
+  const bot = makeBot(); bot.pathfinder.goto = async () => {}; bot.openChest = async () => chest;
+  const c = context(bot, { recordChestSnapshot: async () => {} });
+  vm.runInContext(timeoutFn + between(actions, 'async function tryTakeFromThisChest(', '\n// Direct follow-up'), c);
+  const taken = await c.tryTakeFromThisChest(bot, { cancelled: false }, { position: { x: 0, y: 0, z: 0 } }, ['oak_log', 'birch_log'], 4);
+  assert.deepEqual(withdrawn, [[1, 2], [2, 2]]); assert.equal(taken.count, 4); assert.equal(closed, 1);
+});
+
+await check('MB-20 curriculum stages need every requirement, tier-aware', async () => {
+  const c = vm.createContext({});
+  vm.runInContext(between(index, 'const withTiers', '\nconst CURRICULUM_FILE'), c);
+  const [tools, armor, , iron] = vm.runInContext('TECH_TREE_STAGES', c);
+  assert.equal(c.stageSatisfied(tools, new Set(['wooden_axe'])), false, 'an axe alone is not "pickaxe and axe"');
+  assert.equal(c.stageSatisfied(tools, new Set(['wooden_axe', 'stone_pickaxe'])), true);
+  assert.equal(c.stageSatisfied(iron, new Set(['iron_sword'])), false, 'a sword alone is not "full iron armor and a sword"');
+  assert.equal(c.stageSatisfied(iron, new Set(['iron_helmet', 'diamond_chestplate', 'iron_leggings', 'iron_boots', 'iron_sword'])), true);
+  assert.equal(c.stageSatisfied(armor, new Set(['leather_chestplate'])), false);
+});
+
+await check('MB-16 EXPLORE <feature> parses to scouting; plain EXPLORE still gathers', async () => {
+  const c = vm.createContext({ console: { log() {} }, USERNAME: 'Wade', SCOUT_FEATURE_BLOCKS: { village: ['bell'] } });
+  vm.runInContext(between(index, 'function parseGoalStep(', 'async function planNextStep('), c);
+  assert.deepEqual({ ...c.parseGoalStep('ACTION EXPLORE village').action }, { type: 'explore', feature: 'village' });
+  assert.deepEqual({ ...c.parseGoalStep('ACTION EXPLORE').action }, { type: 'explore' });
+});
+
+await check('MB-14 goals pause at night unless a player set them tonight', async () => {
+  const now = Date.now();
+  const c = vm.createContext({ Date, DUSK_START_TICK: 10000, DAWN_TICK: 23458, bot: { time: { timeOfDay: 15000 } },
+    isAnotherBot: (s) => s === 'Mayor' });
+  vm.runInContext('var nightStartedAt = ' + (now - 1000) + ';' +
+    between(index, 'function isNightPhase(', 'async function checkDusk('), c);
+  assert.equal(c.goalPausedForNight(null), true, 'no self-proposing at night');
+  assert.equal(c.goalPausedForNight({ setBy: 'Steve', createdAt: now - 60_000 }), true, 'daytime goal pauses');
+  assert.equal(c.goalPausedForNight({ setBy: 'Steve', createdAt: now }), false, 'player asked tonight');
+  assert.equal(c.goalPausedForNight({ setBy: 'Mayor', createdAt: now }), true, 'Mayor assignments wait');
+  c.bot.time.timeOfDay = 2000;
+  assert.equal(c.goalPausedForNight({ setBy: 'Steve', createdAt: 0 }), false, 'daytime resumes');
+});
+
+await check('MB-13 exactly one claimant wins a give request', async () => {
+  const winners = [];
+  for (const me of ['Bob', 'Amy', 'Nell']) {
+    const c = vm.createContext({ Date, console: { log() {} }, USERNAME: me, pendingGiveRequest: null,
+      giveClaims: new Map([['mc-babs:7', { request: { forPlayer: 'Babs', item: 'oak_log', count: 2 },
+        claimants: new Set(['Bob', 'Amy', 'Nell']), decideAt: 0 }]]),
+      canSpareForRequest: () => true, GIVE_REQUEST_TTL_MS: 1000 });
+    vm.runInContext('var pendingGiveRequest = null;' + between(index, 'function settleGiveClaims(', '\n// Shared by planNextStep'), c);
+    c.settleGiveClaims();
+    if (vm.runInContext('pendingGiveRequest', c)) winners.push(me);
+  }
+  assert.deepEqual(winners, ['Amy']);
 });
 
 console.log(`${passed} remediation checks passed.`);

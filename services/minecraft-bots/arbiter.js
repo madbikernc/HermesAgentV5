@@ -1,4 +1,7 @@
-// Version: 1.3.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-09-24) -- review MB-15: new HUNGER_CRITICAL tier (5) between routine work and
+// player commands, for a near-starving bot that has food or a fishing rod on hand.
 //
 // 1.3.0 (2026-09-24) -- remediation of docs/reviews/2026-09-24-minecraft-bots-review.md MB-02/03.
 // New cancelAndClear(): teleportToSpawn's cancel-only escalation used cancelAndRotate(), which
@@ -101,6 +104,8 @@ export const OWNERS = Object.freeze({
                                              // them, and this preserves that rather than
                                              // inventing a distinction the current code never
                                              // needed)
+  HUNGER_CRITICAL: owner("HUNGER_CRITICAL", 5), // review MB-15: near-starving eat/fish outranks
+                                             // goal steps and chores (0), never a player command
   DIRECT_COMMAND: owner("DIRECT_COMMAND", 10), // runAction() -- a live player asked for this by
                                              // name; "a live player command always wins
                                              // immediately" per goalTick's own existing comment
