@@ -1,4 +1,14 @@
-// Version: 1.64.0
+// Version: 1.65.0
+//
+// 1.65.0 (2026-09-24) -- review remediation (docs/reviews/2026-09-24-minecraft-bots-review.md).
+// MB-01: "attack" actually starts combat again -- 1.42.0's polling rewrite dropped the
+// bot.pvp.attack() call itself, so every fight since 2026-09-10 only waited out its timer; a kill
+// is now claimed only on this target's entityDead. MB-02: performAction() takes the caller's
+// arbiter handle and refuses a handle that lost control (or a handle-less call while someone else
+// owns the body) instead of borrowing the current owner's token; finally-block cleanup
+// (setGoal(null), refreshGear) only runs while the caller still owns control. MB-04: any result
+// produced after cancellation is reported { ok: false, cancelled: true } rather than ok(...).
+// MB-08: "gohome" joins SKILL_ACTION_VERBS.
 //
 // 1.64.0 (2026-09-21) -- direct request: "re-evaluate the entire defense scheme," root-caused
 // from a live mass-death incident (5 bots died within ~90 seconds). "attack" now accepts an
@@ -894,7 +904,7 @@ import { Vec3 } from "vec3";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipment.js";
-import { cancelAndRotate, isBusy, currentToken, releaseControl } from "./arbiter.js";
+import { cancelAndRotate, isBusy, holdsControl, releaseControl } from "./arbiter.js";
 import { searchMemory } from "./longterm.js";
 
 const { goals } = pathfinderPkg;
@@ -1109,7 +1119,7 @@ export function isEssentialItem(itemName) {
 export const SKILL_ACTION_VERBS = new Set([
   "stop", "goto", "follow", "mine", "craft", "loot", "attack", "flee", "eat", "fish", "give",
   "sleep", "smelt", "place", "build", "store", "trade", "harvest", "breed", "enchant", "explore",
-  "plant_sapling", "light_area", "harvest_hive", "shear", "milk", "build_pen", "herd_to_pen",
+  "plant_sapling", "light_area", "harvest_hive", "shear", "milk", "build_pen", "herd_to_pen", "gohome",
 ]);
 
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
@@ -1372,7 +1382,7 @@ async function gotoRememberedSpot(bot, token, pos) {
     // Couldn't fully reach it (stale note, terrain changed, whatever) -- still worth a local
     // findBlocks from wherever she ended up rather than giving up on the memory hit entirely.
   } finally {
-    bot.pathfinder.setGoal(null);
+    if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
   }
 }
 
@@ -1400,7 +1410,7 @@ async function wanderAndRetryFind(bot, token, findOptions) {
       // Couldn't fully reach this hop's point (cliff, water, whatever's out there) -- still worth
       // checking from wherever she actually ended up rather than giving up on the whole approach.
     } finally {
-      bot.pathfinder.setGoal(null);
+      if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
     }
     if (token.cancelled) return [];
     positions = bot.findBlocks(findOptions);
@@ -1495,7 +1505,7 @@ async function tryLaunchBoat(bot, token, boatItem, launch) {
   } catch {
     return null;
   } finally {
-    bot.pathfinder.setGoal(null);
+    if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
   }
   if (token.cancelled) return null;
   // Real gap found live: GoalNear(..., 1) let pathfinder settle anywhere within 1 block of the
@@ -1764,7 +1774,7 @@ async function tryTakeFromNearbyChest(bot, token, itemNames, wantCount) {
     } catch {
       continue; // couldn't reach the remembered spot -- try the next remembered item name, if any
     } finally {
-      bot.pathfinder.setGoal(null);
+      if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
     }
     if (token.cancelled) return null;
     const chestBlock = bot.blockAt(known.position);
@@ -1788,7 +1798,7 @@ async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount
   } catch {
     return null; // couldn't reach this one -- try the next candidate
   } finally {
-    bot.pathfinder.setGoal(null);
+    if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
   }
   if (token.cancelled) return "cancelled";
 
@@ -2149,12 +2159,35 @@ async function saveClaimedBed(bot, position) {
 // cancel-and-rotate for every NOT-yet-migrated caller (goalTick, runAction, and every routine
 // idle-tick check still call performAction() directly with no prior requestControl()), so this
 // stays zero behavior change for all of them until their own later migration phases.
-function stopCurrent(bot) {
-  if (isBusy()) return currentToken();
-  return cancelAndRotate(bot);
+//
+// 2026-09-24 (review MB-02/MB-04): "reuse whatever token is current" let a PREEMPTED caller's
+// stale continuation borrow the new owner's token and act under it (a goal step starting FOLLOW
+// mid-emergency). Every caller now passes the handle it acquired; a handle that no longer holds
+// control is refused before anything moves, and a handle-less call while someone else owns the
+// body is refused too. Only a handle-less call on an idle arbiter takes the legacy
+// cancel-and-rotate path. performAction() also normalizes outcomes: any result produced after
+// its token was cancelled is reported `{ ok: false, cancelled: true }` -- ~56 branches used to
+// return ok("stopped early") on cancellation, which recovery's retry test, goal failure
+// counters, skill replay, and skill authoring all read as genuine success.
+const LOST_CONTROL = Object.freeze({ ok: false, cancelled: true, text: "something more urgent has control right now." });
+
+export async function performAction(bot, action, speaker, handle = null) {
+  if (handle ? !holdsControl(handle) : isBusy()) return { ...LOST_CONTROL };
+  const alreadyHeld = !!handle;
+  const token = handle ? handle.token : cancelAndRotate(bot);
+  let result;
+  try {
+    result = await performActionAs(bot, action, speaker, token);
+  } finally {
+    // Only release if THIS call acquired (the legacy handle-less path) -- a caller holding a
+    // handle owns its own release via handle.release().
+    if (!alreadyHeld) releaseControl({ token });
+  }
+  return token.cancelled ? { ...result, ok: false, cancelled: true } : result;
 }
 
-export async function performAction(bot, action, speaker) {
+// `token` is the caller's live ownership token; nested sub-actions pass it straight through.
+async function performActionAs(bot, action, speaker, token) {
   // Direct request, 2026-09-10 (Phase 2 of the approved coherence-arbiter plan). Real bug caught
   // live while migrating the first reflex handler: `current` must actually clear once THIS call
   // is done, for a caller that acquired it here (the common, not-yet-migrated case -- goalTick,
@@ -2167,8 +2200,8 @@ export async function performAction(bot, action, speaker) {
   // release via its own handle.release(), not this function. The try/finally wraps the whole
   // switch below WITHOUT re-indenting it, a deliberate, minimal-diff choice over reformatting
   // ~1400 existing lines for a change that doesn't touch any of their own logic.
-  const alreadyHeld = isBusy();
-  const token = stopCurrent(bot);
+  // (2026-09-24: acquisition/release moved to the performAction() wrapper above; this finally
+  // is now a no-op kept only to avoid re-indenting the switch.)
   const ok = (text) => ({ ok: true, text });
   const fail = (text) => ({ ok: false, text });
 
@@ -2187,7 +2220,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way.");
         return fail(`couldn't reach ${speaker}: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       return token.cancelled ? ok("stopped on the way.") : ok(`reached ${speaker}.`);
     }
@@ -2274,7 +2307,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped mining early.");
         return fail(`had trouble mining ${collectedNames}: ${err.message}`);
       } finally {
-        await refreshGear(bot); // may have picked up something worth wearing/wielding
+        if (!token.cancelled) await refreshGear(bot); // may have picked up something worth wearing/wielding
       }
       return token.cancelled ? ok("stopped mining early.") : ok(`collected some ${collectedNames}.`);
     }
@@ -2328,7 +2361,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped exploring early.");
         return fail(`found ${collectedNames} but had trouble gathering it: ${err.message}`);
       } finally {
-        await refreshGear(bot);
+        if (!token.cancelled) await refreshGear(bot);
       }
       return token.cancelled ? ok("stopped exploring early.") : ok(`explored and found some ${collectedNames}.`);
     }
@@ -2400,7 +2433,7 @@ export async function performAction(bot, action, speaker) {
           if (token.cancelled) return ok("stopped on the way to a crafting table.");
           return fail(`couldn't reach a crafting table: ${err.message}`);
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) return ok("stopped on the way to a crafting table.");
       }
@@ -2410,7 +2443,7 @@ export async function performAction(bot, action, speaker) {
       } catch (err) {
         return fail(`couldn't craft ${action.item}: ${err.message}`);
       } finally {
-        await refreshGear(bot); // a freshly-crafted tool/weapon/armor piece should get equipped
+        if (!token.cancelled) await refreshGear(bot); // a freshly-crafted tool/weapon/armor piece should get equipped
         // Direct request, 2026-09-17 ("if they craft armor or weapons or tools, they should
         // equip them"): refreshGear's own equipBestArmor/equipBestWeapon already cover armor and
         // sword/axe-class weapons (this comment's own claim above was only ever half true) -- but
@@ -2510,7 +2543,7 @@ export async function performAction(bot, action, speaker) {
           } catch {
             // couldn't reach the remembered chest -- fall through to the normal failure below
           } finally {
-            bot.pathfinder.setGoal(null);
+            if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
           }
         }
         return fail(sawObstruction
@@ -2537,7 +2570,7 @@ export async function performAction(bot, action, speaker) {
           if (token.cancelled) return ok("stopped on the way to a chest.");
           continue; // couldn't reach this one -- try the next candidate
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) return ok("stopped on the way to a chest.");
 
@@ -2637,18 +2670,41 @@ export async function performAction(bot, action, speaker) {
       // caller give a MUCH shorter leash for exactly this situation (see index.js's own EMERGENCY
       // handler, which now bails to flee if this returns non-ok) -- defaults to the normal
       // ACTION_TIMEOUT_MS for every other caller, unchanged.
+      //
+      // Review MB-01, 2026-09-24: the 1.42.0 rewrite above replaced
+      // `await withTimeout(bot.pvp.attack(target), ...)` with the polling loop below but dropped
+      // the bot.pvp.attack() call itself -- nothing started the chase-and-swing, so every fight
+      // since 2026-09-10 just waited out its timer (the root of 2.86.0-2.88.0's "they just stand
+      // there" reports). attack() is started here, fire-and-forget (it resolves once the chase is
+      // set up), and re-issued if the library drops the target while it still exists. A kill is
+      // now only claimed on the server's own entityDead status for THIS target; the entity merely
+      // unloading (out of range, despawned) is reported as losing track, not a kill.
       const FIGHT_POLL_MS = 250;
       const deadline = Date.now() + (action.maxDurationMs ?? ACTION_TIMEOUT_MS);
+      let killed = false;
+      const onDead = (entity) => { if (entity?.id === target.id) killed = true; };
+      const startAttack = () => {
+        Promise.resolve(bot.pvp.attack(target))
+          .catch((err) => console.error("attack: pvp.attack failed:", err.message));
+      };
+      bot.on("entityDead", onDead);
       try {
-        while (bot.entities[target.id] && !token.cancelled && Date.now() < deadline) {
+        if (!token.cancelled) startAttack();
+        while (!killed && bot.entities[target.id] && !token.cancelled && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, FIGHT_POLL_MS));
+          if (!killed && !token.cancelled && bot.entities[target.id] && bot.pvp.target !== target) startAttack();
         }
       } finally {
-        await refreshGear(bot); // mob drops may include something worth wearing/wielding
+        bot.removeListener("entityDead", onDead);
+        // A preemptor's own cancelPhysical() already stopped PvP; only the owner cleans up.
+        if (!token.cancelled) {
+          if (bot.pvp.target) bot.pvp.stop();
+          await refreshGear(bot); // mob drops may include something worth wearing/wielding
+        }
       }
       if (token.cancelled) return ok("broke off the fight.");
-      if (!bot.entities[target.id]) return ok("took care of it.");
-      bot.pvp.stop();
+      if (killed) return ok("took care of it.");
+      if (!bot.entities[target.id]) return fail("lost track of it.");
       return fail("gave up on the fight -- took too long.");
     }
 
@@ -2696,7 +2752,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped fleeing.");
         return fail(`couldn't get away: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         bot.pathfinder.movements.canDig = canDigBefore;
       }
       if (token.cancelled) return ok("stopped fleeing.");
@@ -2716,7 +2772,7 @@ export async function performAction(bot, action, speaker) {
       } catch (err) {
         return fail(`couldn't eat: ${err.message}`);
       } finally {
-        await refreshGear(bot); // consume() leaves the food item held -- get a real weapon back
+        if (!token.cancelled) await refreshGear(bot); // consume() leaves the food item held -- get a real weapon back
       }
       return ok(`ate some ${foodItem.name}.`);
     }
@@ -2749,7 +2805,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way to the water.");
         return fail(`couldn't reach the water: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("stopped on the way to the water.");
 
@@ -2761,7 +2817,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped fishing.");
         return fail(`fishing didn't pan out: ${err.message}`);
       } finally {
-        await refreshGear(bot); // fish() leaves the rod held -- get a real weapon back
+        if (!token.cancelled) await refreshGear(bot); // fish() leaves the rod held -- get a real weapon back
       }
       return ok("caught something.");
     }
@@ -2831,7 +2887,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way.");
         return fail(`couldn't reach ${action.player}: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("stopped on the way.");
 
@@ -2870,12 +2926,12 @@ export async function performAction(bot, action, speaker) {
           } catch {
             return ok("got most of the way home by boat, on foot from here.");
           } finally {
-            bot.pathfinder.setGoal(null);
+            if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
           }
         }
         return fail(`couldn't make it home: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       return token.cancelled ? ok("stopped heading home.") : ok("made it home before dark.");
     }
@@ -2933,7 +2989,7 @@ export async function performAction(bot, action, speaker) {
           console.log(`[sleep] couldn't reach bed at ${bedBlock.position}: ${err.message}`);
           continue; // couldn't reach this bed -- try the next candidate
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) return ok("stopped on the way to bed.");
 
@@ -3011,7 +3067,7 @@ export async function performAction(bot, action, speaker) {
           console.log(`[smelt] couldn't reach furnace at ${furnaceBlock.position}: ${err.message}`);
           continue; // couldn't reach this furnace -- try the next candidate
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) return ok("stopped on the way to a furnace.");
 
@@ -3180,7 +3236,7 @@ export async function performAction(bot, action, speaker) {
           if (token.cancelled) break;
           continue; // couldn't reach this one -- try the next dark spot
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) break;
 
@@ -3256,7 +3312,7 @@ export async function performAction(bot, action, speaker) {
           if (token.cancelled) break;
           continue; // couldn't get near this spot -- an imperfect shelter beats abandoning it
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) break;
 
@@ -3323,7 +3379,7 @@ export async function performAction(bot, action, speaker) {
         } catch {
           return false; // couldn't reach this one -- skip, matches "build"'s own tolerance for gaps
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) return false;
         const below = bot.blockAt(pos.offset(0, -1, 0));
@@ -3398,7 +3454,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped before reaching the animal.");
         return fail(`couldn't reach the ${action.species}: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("stopped before herding.");
 
@@ -3429,7 +3485,7 @@ export async function performAction(bot, action, speaker) {
           // couldn't complete this one short step -- not necessarily fatal, the animal-distance
           // check at the top of the next iteration is the real judge of whether to keep going
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         steps++;
       }
@@ -3441,7 +3497,7 @@ export async function performAction(bot, action, speaker) {
       } catch {
         // best effort -- the real success check below decides regardless of how this leg went
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
 
       const finalAnimal = bot.entities[animal.id];
@@ -3503,7 +3559,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way to the repair site.");
         return fail(`couldn't reach the spot to repair: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("stopped before repairing.");
 
@@ -3585,7 +3641,7 @@ export async function performAction(bot, action, speaker) {
           console.log(`[store] couldn't reach chest at ${chestBlock.position}: ${err.message}`);
           continue; // couldn't reach this one -- try the next candidate
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) return ok("stopped on the way to a chest.");
 
@@ -3630,7 +3686,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way to the villager.");
         return fail(`couldn't reach the villager: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("stopped on the way to the villager.");
 
@@ -3676,7 +3732,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("gave up heading back.");
         return fail(`couldn't get back to where I died: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("gave up heading back.");
       // Give auto-pickup a moment to actually register nearby items before reporting done.
@@ -3755,7 +3811,7 @@ export async function performAction(bot, action, speaker) {
             if (token.cancelled) break;
             continue; // couldn't reach this one -- try the next candidate
           } finally {
-            bot.pathfinder.setGoal(null);
+            if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
           }
           if (token.cancelled) break;
 
@@ -3808,7 +3864,7 @@ export async function performAction(bot, action, speaker) {
           if (token.cancelled) { stoppedEarly = true; break; }
           continue; // couldn't reach this one -- move on to the next rather than abandon the batch
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) { stoppedEarly = true; break; }
 
@@ -3917,7 +3973,7 @@ export async function performAction(bot, action, speaker) {
           if (token.cancelled) break;
           break; // couldn't reach this one -- don't keep hunting for spots this call
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) break;
 
@@ -3970,7 +4026,7 @@ export async function performAction(bot, action, speaker) {
         } catch (err) {
           console.error(`breed: couldn't feed one ${action.species}:`, err.message);
         } finally {
-          bot.pathfinder.setGoal(null);
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
       }
       if (!fed) return fail(`couldn't get close enough to feed any ${action.species}s.`);
@@ -4016,7 +4072,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way to the hive.");
         return fail(`couldn't reach the hive: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("stopped before collecting.");
 
@@ -4055,7 +4111,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way to the sheep.");
         return fail(`couldn't reach the sheep: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("stopped before shearing.");
 
@@ -4088,7 +4144,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way to the cow.");
         return fail(`couldn't reach the cow: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("stopped before milking.");
 
@@ -4131,7 +4187,7 @@ export async function performAction(bot, action, speaker) {
         if (token.cancelled) return ok("stopped on the way to the enchanting table.");
         return fail(`couldn't reach the enchanting table: ${err.message}`);
       } finally {
-        bot.pathfinder.setGoal(null);
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
       if (token.cancelled) return ok("stopped on the way to the enchanting table.");
 
@@ -4176,9 +4232,6 @@ export async function performAction(bot, action, speaker) {
       return fail("not sure how to do that yet.");
   }
   } finally {
-    // Only release if THIS call is the one that acquired (via stopCurrent()'s own legacy
-    // cancelAndRotate() path) -- a caller that already held a handle before calling in still
-    // owns its own release via handle.release(), unaffected by this.
-    if (!alreadyHeld) releaseControl({ token });
+    // Release moved to the performAction() wrapper (2026-09-24).
   }
 }

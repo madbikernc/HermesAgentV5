@@ -1,4 +1,18 @@
-// Version: 2.88.0
+// Version: 2.89.0
+//
+// 2.89.0 (2026-09-24) -- review remediation (docs/reviews/2026-09-24-minecraft-bots-review.md).
+// Every performAction() call passes its arbiter handle (MB-02); emergency/squad/drowning travel
+// only clears paths it still owns. MB-03: stuck-rescue teleport uses arbiter.cancelAndClear().
+// MB-04: interrupted steps are neither progress nor failures; recovery's retry works again.
+// MB-05: goalTick is pinned to the goal it started with (retireGoal/saveGoalIfCurrent). MB-06:
+// an addressed STOP bypasses the model and busy flag; other messages are queued, not dropped; a
+// newer player command preempts an older one. MB-08: GOHOME in the planner vocabulary. MB-09:
+// post-craft cleanup deferred until no goal is active, never storing tools/infrastructure.
+// MB-10: skill replay no longer completes a goal on its own; zero-step DONE NONE rejected;
+// truncated action records aren't authored into skills. MB-11: recipients accept the fallback
+// coordinator while Mayor is unreachable, measured from process start if he was never seen.
+// MB-22: standing still only counts as stuck while pathfinder is trying to move her; the
+// logged stationary time is computed before the clock resets.
 //
 // 2.88.0 (2026-09-21) -- direct follow-up: "combat is not fixed. they just stand there and get
 // killed." Live investigation found the real story: RCON kill sweeps around one unlit base pulled
@@ -1899,6 +1913,21 @@ let lastActivityAt = Date.now();
 // went quiet a while ago" -- see proposeFallbackDirective's own comment on why a fresh process
 // with no baseline yet doesn't activate the fallback immediately.
 let lastMayorSeenAt = 0;
+// Review MB-11, 2026-09-24: recipients rejected every bot but Mayor, so the fallback coordinator's
+// directives never reached anyone; and "never seen Mayor" (0) blocked the fallback forever for a
+// fleet that booted without him. Liveness is now measured from process start when Mayor has
+// never been heard, and every bot accepts the named fallback coordinator while Mayor is quiet.
+const PROCESS_STARTED_AT = Date.now();
+const FALLBACK_COORDINATOR_USERNAME = process.env.MC_FALLBACK_COORDINATOR_NAME || "Mark";
+function mayorUnreachable() {
+  return Date.now() - (lastMayorSeenAt || PROCESS_STARTED_AT) >= MAYOR_LIVENESS_TIMEOUT_MS;
+}
+function isActingCoordinator(speaker) {
+  if (isMayor(speaker)) return true;
+  return speaker !== USERNAME && mayorUnreachable() &&
+    (speaker === FALLBACK_COORDINATOR_USERNAME ||
+     speaker === `@mc-${FALLBACK_COORDINATOR_USERNAME.toLowerCase()}:spark`);
+}
 // Real gap found live (2026-09-07): with no memory of what she just gave up on, proposeOwnGoal
 // kept re-picking the same goal (e.g. "smelt some copper") immediately after giving up on it for
 // an environmental reason that hadn't changed (no unoccupied furnace nearby) -- an unproductive
@@ -2431,7 +2460,8 @@ async function runAction(action, speaker, message, send) {
   // (self-defense, health, drowning) already in flight -- OWNERS.DIRECT_COMMAND sits above
   // ROUTINE/GOAL_STEP for exactly that "a live player command always wins immediately" reason
   // (goalTick's own long-standing comment), while still ranking below the reflex tiers.
-  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.DIRECT_COMMAND);
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.DIRECT_COMMAND,
+    { preemptEqual: !isAnotherBot(speaker) }); // MB-06: a newer PLAYER command replaces an older one
   if (!handle) {
     console.log(`[${USERNAME}] action '${action.type}' yielded to something more urgent ` +
                 `(${arbiter.currentOwner()})`);
@@ -2454,7 +2484,7 @@ async function runAction(action, speaker, message, send) {
     }[action.type];
     if (startLine) send(await narrateAction(startLine));
 
-    const result = await performAction(bot, action, speaker);
+    const result = await performAction(bot, action, speaker, handle);
     // Direct request, 2026-09-17 ("put any leftovers... in a chest"): a targeted loot that
     // actually withdrew something (action.item set) is just as worth an immediate cleanup pass
     // as a craft/smelt -- new inventory contents that might not all still be needed. A bare,
@@ -2474,10 +2504,7 @@ async function runAction(action, speaker, message, send) {
     send(`something went wrong trying to do that.`);
   } finally {
     handle.release();
-    if (craftedOk) {
-      storeSurplusNearHome("post-craft cleanup").catch((err) =>
-        console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
-    }
+    if (craftedOk) surplusCleanupDueAt = Date.now() + SURPLUS_CLEANUP_QUIET_MS; // MB-09: deferred
   }
 }
 
@@ -2550,6 +2577,8 @@ function parseGoalStep(text) {
       if (verb === "HARVEST") return { type: "step", action: { type: "harvest" } };
       if (verb === "BUILD") return { type: "step", action: { type: "build" } };
       if (verb === "EXPLORE") return { type: "step", action: { type: "explore" } };
+      // Review MB-08: Builder goals say "go home and place X" -- the planner needs the verb for it.
+      if (verb === "GOHOME") return { type: "step", action: { type: "gohome" } };
       if (verb === "BREED") {
         const species = (parts[2] || "").toLowerCase();
         if (species) return { type: "step", action: { type: "breed", species } };
@@ -2681,6 +2710,8 @@ async function planNextStep(goal) {
           `simple intermediate steps herself automatically (logs into planks, planks into sticks ` +
           `or a crafting_table) -- name the FINAL item you actually want, not the raw material; ` +
           `no need to plan out "craft planks, then craft sticks" yourself first.\n` +
+          `ACTION GOHOME - walk back to home (your bed or spawn point). Use it first whenever the ` +
+          `goal says to do something at or near home, before PLACE or BUILD.\n` +
           `ACTION EXPLORE - go looking for any useful raw material (wood, ore) when CRAFT/MINE ` +
           `failed because a needed resource isn't nearby and you don't have a more specific ` +
           `block to try -- gathers whatever's found, worth doing before giving up or asking the ` +
@@ -3144,6 +3175,18 @@ async function proposeOwnGoal() {
 // action finishes. Reuses `busy`/`acting` themselves (rather than a third flag) so there is
 // exactly one place goal-loop-vs-live-command precedence is decided, not two that could drift
 // out of sync.
+// Goal-identity guards for goalTick (review MB-05): clear/persist only if `goal` is still the
+// bot's current goal, so an old tick finishing late can't erase or overwrite its replacement.
+async function retireGoal(goal) {
+  if (currentGoal !== goal) return;
+  currentGoal = null;
+  await clearGoal(PERSONA_NAME);
+}
+
+async function saveGoalIfCurrent(goal) {
+  if (currentGoal === goal) await saveGoal(PERSONA_NAME, goal);
+}
+
 async function goalTick() {
   if (!AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
 
@@ -3167,6 +3210,12 @@ async function goalTick() {
   // an async acquisition can actually happen instead of a synchronous flag read.
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.GOAL_STEP);
   if (!handle) return;
+  // Review MB-05, 2026-09-24: pin this tick to the goal it started with. STOP, dusk, respawn,
+  // teleport, and setNewGoal() can all replace or clear the global currentGoal while this tick is
+  // awaiting a model call or a physical action; every mutation below goes to `goal`, and
+  // retireGoal()/saveGoalIfCurrent() only touch the global/persisted goal if it is still this one.
+  const goal = currentGoal;
+  const replaced = () => currentGoal !== goal;
   // Direct request, 2026-09-09 ("after any crafting activity, surplus materials should be
   // stored in a chest as close to their sleeping home as possible"). Declared at function scope
   // (not inside the try below) so the goalTick's own outer `finally` can fire the cleanup AFTER
@@ -3185,27 +3234,31 @@ async function goalTick() {
     // close match, or every close match already untrusted) costs one cheap search call and
     // falls through to normal planning unchanged. Checked once per goal (servedBySkill), not
     // every tick, once a goal has already gone one way or the other.
-    if (!currentGoal.servedBySkill) {
-      const skill = await findSkill(currentGoal.description);
+    if (!goal.servedBySkill) {
+      const skill = await findSkill(goal.description);
       if (skill) {
-        console.log(`[${USERNAME}] running stored skill "${skill.name}" for goal: ${currentGoal.description}`);
-        const result = await runSkill(performAction, bot, skill, currentGoal.setBy || USERNAME);
+        console.log(`[${USERNAME}] running stored skill "${skill.name}" for goal: ${goal.description}`);
+        const result = await runSkill((b, a, s) => performAction(b, a, s, handle), bot, skill, goal.setBy || USERNAME);
+        // Preempted mid-replay: neither the skill's nor the goal's fault -- don't score either,
+        // and let a later tick retry the skill from the start.
+        if (result.cancelled || replaced()) return;
         await recordSkillOutcome(skill.jsonPath, result.ok);
-        currentGoal.servedBySkill = true;
-        logStep(currentGoal, `skill(${skill.name}): ${result.text}`, result.ok);
+        goal.servedBySkill = true;
+        logStep(goal, `skill(${skill.name}): ${result.text}`, result.ok);
         if (result.ok) {
-          console.log(`[${USERNAME}] goal complete via skill: ${currentGoal.description}`);
-          bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
-          recordGoalOutcome(currentGoal.description, "done", null);
-          await broadcastGoalState("done", currentGoal.description);
-          currentGoal = null;
-          await clearGoal(PERSONA_NAME);
+          // Review MB-10, 2026-09-24: a replayed skill used to complete the goal on the spot,
+          // skipping the DONE inventory and Builder world checks below. It now only records the
+          // progress; the next tick's planner must still claim DONE through the same validation
+          // every other completion goes through.
+          console.log(`[${USERNAME}] stored skill finished for goal: ${goal.description}`);
+          goal.consecutiveFailures = 0;
+          await saveGoalIfCurrent(goal);
         } else {
           // Doesn't duplicate the give-up/consecutiveFailures check here -- one failed skill
           // attempt counts as one failed step, same as any other, and the very next tick's own
           // normal planning already re-checks that threshold on the same shared counter.
-          currentGoal.consecutiveFailures += 1;
-          await saveGoal(PERSONA_NAME, currentGoal);
+          goal.consecutiveFailures += 1;
+          await saveGoalIfCurrent(goal);
         }
         return;
       }
@@ -3227,7 +3280,8 @@ async function goalTick() {
     let stepLine, parsed;
     busy = true;
     try {
-      stepLine = await planNextStep(currentGoal);
+      stepLine = await planNextStep(goal);
+      if (replaced() || !arbiter.holdsControl(handle)) return; // plan is for a goal/turn that's gone
       parsed = parseGoalStep(stepLine);
       console.log(`[${USERNAME}] goal plan: ${stepLine}`);
 
@@ -3242,7 +3296,7 @@ async function goalTick() {
       // SMELT as the primary path for a smelted item, but if she's genuinely stuck (no furnace
       // reachable, out of fuel) LOOT remains a legitimate alternate source worth forcing once.
       if (parsed.type === "blocked" && /smelt|furnace|ingot/i.test(parsed.reason) &&
-          !currentGoal.log.some((l) => l.startsWith("loot:"))) {
+          !goal.log.some((l) => l.startsWith("loot:"))) {
         console.log(`[${USERNAME}] overriding BLOCKED (${parsed.reason}) -- no LOOT attempt yet, forcing one`);
         parsed = { type: "step", action: { type: "loot" } };
       }
@@ -3256,7 +3310,7 @@ async function goalTick() {
       // would no longer be "blocked" once it does) so the two overrides can't fight over which
       // fallback wins -- LOOT for a smelting-specific shortfall, EXPLORE for everything else.
       if (parsed.type === "blocked" && /craft|log|ore|plank|wood|resource|material|ingredient/i.test(parsed.reason) &&
-          !currentGoal.log.some((l) => l.startsWith("explore:"))) {
+          !goal.log.some((l) => l.startsWith("explore:"))) {
         console.log(`[${USERNAME}] overriding BLOCKED (${parsed.reason}) -- no EXPLORE attempt yet, forcing one`);
         parsed = { type: "step", action: { type: "explore" } };
       }
@@ -3271,10 +3325,10 @@ async function goalTick() {
       // refusing the model's own DONE risks a worse failure mode (an endless "are you sure"
       // loop) than the rare cosmetic mislabeling this catches -- visible here for a human, and
       // matched by hermes-minecraft-triage.py's own TRIAGE_PATTERNS for the Firmament to notice.
-      const noEvidenceOfProgress = currentGoal.steps > 0 && !currentGoal.sawSuccess;
+      const noEvidenceOfProgress = goal.steps > 0 && !goal.sawSuccess;
       if (noEvidenceOfProgress) {
         console.log(`[${USERNAME}] SUSPICIOUS DONE (no successful step ever logged for this ` +
-                    `goal): ${currentGoal.description}`);
+                    `goal): ${goal.description}`);
       }
 
       // Direct live report, 2026-09-08 ("Mark and Luke claim they have bows") -- confirmed real:
@@ -3302,25 +3356,25 @@ async function goalTick() {
           [5, 6, 7, 8, 45].some((slot) => bot.inventory.slots[slot]?.name === parsed.item);
         if (!reallyHasIt) {
           console.log(`[${USERNAME}] REJECTED DONE (claimed ${parsed.item}, not actually in ` +
-                      `inventory or equipped): ${currentGoal.description}`);
+                      `inventory or equipped): ${goal.description}`);
           bot.chat(await narrateAction(
-            `giving up on "${currentGoal.description}" -- never actually got a ${parsed.item}.`));
-          recordGoalOutcome(currentGoal.description, "gave up",
+            `giving up on "${goal.description}" -- never actually got a ${parsed.item}.`));
+          recordGoalOutcome(goal.description, "gave up",
             `claimed done but no ${parsed.item} in inventory`);
-          await broadcastGoalState("abandoned", currentGoal.description);
-          currentGoal = null;
-          await clearGoal(PERSONA_NAME);
+          await broadcastGoalState("abandoned", goal.description);
+          await retireGoal(goal);
           return;
         }
-      } else if (noEvidenceOfProgress) {
+      } else if (noEvidenceOfProgress || (goal.steps === 0 && !goal.builderPriorityItem)) {
+        // (Review MB-10: a zero-step DONE NONE has no evidence either; Builder goals get their own
+        // world-state check below instead.)
         console.log(`[${USERNAME}] REJECTED DONE (NONE claimed, but no successful step ever ` +
-                    `logged): ${currentGoal.description}`);
+                    `logged): ${goal.description}`);
         bot.chat(await narrateAction(
-          `giving up on "${currentGoal.description}" -- never actually made any real progress.`));
-        recordGoalOutcome(currentGoal.description, "gave up", "claimed done with no real progress");
-        await broadcastGoalState("abandoned", currentGoal.description);
-        currentGoal = null;
-        await clearGoal(PERSONA_NAME);
+          `giving up on "${goal.description}" -- never actually made any real progress.`));
+        recordGoalOutcome(goal.description, "gave up", "claimed done with no real progress");
+        await broadcastGoalState("abandoned", goal.description);
+        await retireGoal(goal);
         return;
       }
 
@@ -3334,9 +3388,9 @@ async function goalTick() {
       // nextBuilderPriority() itself trusts (a world-placed block, or a real bed/shelter count),
       // not inventory possession, before a compound "craft AND place" directive gets to announce
       // success on the crafting half alone.
-      if (currentGoal.builderPriorityItem && !builderPriorityItemSatisfied(currentGoal.builderPriorityItem)) {
-        console.log(`[${USERNAME}] REJECTED DONE (claimed ${currentGoal.builderPriorityItem} ` +
-                    `done, but it's still not actually near home): ${currentGoal.description}`);
+      if (goal.builderPriorityItem && !builderPriorityItemSatisfied(goal.builderPriorityItem)) {
+        console.log(`[${USERNAME}] REJECTED DONE (claimed ${goal.builderPriorityItem} ` +
+                    `done, but it's still not actually near home): ${goal.description}`);
 
         // Direct report, 2026-09-19 ("I don't think they really know how to use the crafting
         // table or furnace"). Root-caused live: Amy crafted a crafting_table at 01:45, then this
@@ -3351,56 +3405,53 @@ async function goalTick() {
         // and place it herself right now (reusing "gohome"/"place", both already robust), one
         // deterministic shot, before giving up on the whole goal.
         const stillHasItem = bot.inventory.items()
-          .some((i) => i.name === currentGoal.builderPriorityItem);
+          .some((i) => i.name === goal.builderPriorityItem);
         let recovered = false;
         if (stillHasItem) {
-          await performAction(bot, { type: "gohome" }, USERNAME);
+          await performAction(bot, { type: "gohome" }, USERNAME, handle);
           const placeResult = await performAction(bot,
-            { type: "place", item: currentGoal.builderPriorityItem }, USERNAME);
+            { type: "place", item: goal.builderPriorityItem }, USERNAME, handle);
           console.log(`[${USERNAME}] builder-priority recovery: ${placeResult.text} ` +
                       `(ok=${placeResult.ok})`);
-          recovered = placeResult.ok && builderPriorityItemSatisfied(currentGoal.builderPriorityItem);
+          recovered = placeResult.ok && builderPriorityItemSatisfied(goal.builderPriorityItem);
         }
 
         if (recovered) {
-          console.log(`[${USERNAME}] goal complete (recovered): ${currentGoal.description}`);
-          bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
-          recordGoalOutcome(currentGoal.description, "done", null);
-          await broadcastGoalState("done", currentGoal.description, currentGoal.builderPriorityItem);
-          currentGoal = null;
-          await clearGoal(PERSONA_NAME);
+          console.log(`[${USERNAME}] goal complete (recovered): ${goal.description}`);
+          bot.chat(await narrateAction(`goal complete: ${goal.description}.`));
+          recordGoalOutcome(goal.description, "done", null);
+          await broadcastGoalState("done", goal.description, goal.builderPriorityItem);
+          await retireGoal(goal);
           return;
         }
 
         bot.chat(await narrateAction(
-          `not done yet on "${currentGoal.description}" -- it's still not actually there.`));
-        recordGoalOutcome(currentGoal.description, "gave up",
-          `claimed done but ${currentGoal.builderPriorityItem} still not near home`);
-        await broadcastGoalState("abandoned", currentGoal.description);
-        currentGoal = null;
-        await clearGoal(PERSONA_NAME);
+          `not done yet on "${goal.description}" -- it's still not actually there.`));
+        recordGoalOutcome(goal.description, "gave up",
+          `claimed done but ${goal.builderPriorityItem} still not near home`);
+        await broadcastGoalState("abandoned", goal.description);
+        await retireGoal(goal);
         return;
       }
 
-      console.log(`[${USERNAME}] goal complete: ${currentGoal.description}`);
-      bot.chat(await narrateAction(`goal complete: ${currentGoal.description}.`));
-      recordGoalOutcome(currentGoal.description, "done", null);
-      await broadcastGoalState("done", currentGoal.description, parsed.item);
+      console.log(`[${USERNAME}] goal complete: ${goal.description}`);
+      bot.chat(await narrateAction(`goal complete: ${goal.description}.`));
+      recordGoalOutcome(goal.description, "done", null);
+      await broadcastGoalState("done", goal.description, parsed.item);
       // Authoring (MINECRAFT_BOTS_DESIGN.md §14): only for a goal that actually worked its way
       // through from scratch, not one already served by a stored skill (servedBySkill) -- that
       // would just be re-storing an existing skill's own steps back under a new name. An
       // occasional coder call, not a per-tick cost -- see authorSkillFromGoal's own header on
       // why it's safe to await here (rare, not per-tick) and why the LLM only ever names the
       // already-real actionsTaken rather than inventing steps.
-      if (!currentGoal.servedBySkill) {
+      if (!goal.servedBySkill && !goal.actionsTruncated) {
         try {
-          await authorSkillFromGoal(currentGoal.description, currentGoal.actionsTaken);
+          await authorSkillFromGoal(goal.description, goal.actionsTaken);
         } catch (err) {
           console.error(`[${USERNAME}] skill authoring failed:`, err.message);
         }
       }
-      currentGoal = null;
-      await clearGoal(PERSONA_NAME);
+      await retireGoal(goal);
       return;
     }
 
@@ -3417,48 +3468,53 @@ async function goalTick() {
       } catch (err) {
         console.error(`[${USERNAME}] item request publish failed:`, err.message);
       }
-      logStep(currentGoal, `request: asked for ${parsed.count} ${parsed.item}`, false);
-      currentGoal.consecutiveFailures += 1;
-      if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
-        bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- nobody could help with ${parsed.item}.`));
-        recordGoalOutcome(currentGoal.description, "gave up", `needed ${parsed.item}`);
-        await broadcastGoalState("abandoned", currentGoal.description);
-        currentGoal = null;
-        await clearGoal(PERSONA_NAME);
+      logStep(goal, `request: asked for ${parsed.count} ${parsed.item}`, false);
+      goal.consecutiveFailures += 1;
+      if (goal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.log(`[${USERNAME}] giving up on goal: ${goal.description}`);
+        bot.chat(await narrateAction(`giving up on "${goal.description}" -- nobody could help with ${parsed.item}.`));
+        recordGoalOutcome(goal.description, "gave up", `needed ${parsed.item}`);
+        await broadcastGoalState("abandoned", goal.description);
+        await retireGoal(goal);
       } else {
-        await saveGoal(PERSONA_NAME, currentGoal);
+        await saveGoalIfCurrent(goal);
       }
       return;
     }
 
     if (parsed.type === "blocked") {
-      logStep(currentGoal, `blocked: ${parsed.reason}`, false);
-      currentGoal.consecutiveFailures += 1;
-      console.log(`[${USERNAME}] goal blocked (${currentGoal.consecutiveFailures}/` +
+      logStep(goal, `blocked: ${parsed.reason}`, false);
+      goal.consecutiveFailures += 1;
+      console.log(`[${USERNAME}] goal blocked (${goal.consecutiveFailures}/` +
                   `${MAX_CONSECUTIVE_FAILURES}): ${parsed.reason}`);
-      if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
-        bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${parsed.reason}.`));
-        recordGoalOutcome(currentGoal.description, "gave up", parsed.reason);
-        await broadcastGoalState("abandoned", currentGoal.description);
-        currentGoal = null;
-        await clearGoal(PERSONA_NAME);
+      if (goal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.log(`[${USERNAME}] giving up on goal: ${goal.description}`);
+        bot.chat(await narrateAction(`giving up on "${goal.description}" -- ${parsed.reason}.`));
+        recordGoalOutcome(goal.description, "gave up", parsed.reason);
+        await broadcastGoalState("abandoned", goal.description);
+        await retireGoal(goal);
       } else {
-        await saveGoal(PERSONA_NAME, currentGoal);
+        await saveGoalIfCurrent(goal);
       }
       return;
     }
 
-    const result = await performAction(bot, parsed.action, currentGoal.setBy || USERNAME);
+    const result = await performAction(bot, parsed.action, goal.setBy || USERNAME, handle);
+    // Review MB-04/MB-05, 2026-09-24: an interrupted step is neither progress nor a genuine
+    // failure, and a result for a goal that was replaced mid-action belongs to nobody -- drop both
+    // rather than logging them into (or failing) whatever goal is current now.
+    if (result.cancelled || replaced()) {
+      console.log(`[${USERNAME}] goal step: ${parsed.action.type} interrupted -- ${result.text}`);
+      return;
+    }
     // See runAction's own 2026-09-17 note -- a targeted loot that actually withdrew something
     // is worth the same immediate cleanup pass as a craft/smelt.
     craftedOk = result.ok && (parsed.action.type === "craft" || parsed.action.type === "smelt" ||
       (parsed.action.type === "loot" && parsed.action.item));
-    logStep(currentGoal, `${parsed.action.type}: ${result.text}`, result.ok, parsed.action);
-    currentGoal.consecutiveFailures = result.ok ? 0 : currentGoal.consecutiveFailures + 1;
+    logStep(goal, `${parsed.action.type}: ${result.text}`, result.ok, parsed.action);
+    goal.consecutiveFailures = result.ok ? 0 : goal.consecutiveFailures + 1;
     console.log(`[${USERNAME}] goal step: ${parsed.action.type} -> ${result.text} ` +
-                `(ok=${result.ok}, consecutiveFailures=${currentGoal.consecutiveFailures})`);
+                `(ok=${result.ok}, consecutiveFailures=${goal.consecutiveFailures})`);
 
     // Direct request, 2026-09-13 ("extend resource sharing memory... to *any* resource or
     // crafted object"): a successfully PLACED utility block is exactly as worth sharing as a
@@ -3541,30 +3597,26 @@ async function goalTick() {
         console.error(`[${USERNAME}] nearby-resource scan failed:`, err.message));
     }
 
-    if (currentGoal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-      console.log(`[${USERNAME}] giving up on goal: ${currentGoal.description}`);
-      bot.chat(await narrateAction(`giving up on "${currentGoal.description}" -- ${result.text}`));
-      recordGoalOutcome(currentGoal.description, "gave up", result.text);
-      await broadcastGoalState("abandoned", currentGoal.description);
-      currentGoal = null;
-      await clearGoal(PERSONA_NAME);
+    if (goal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      console.log(`[${USERNAME}] giving up on goal: ${goal.description}`);
+      bot.chat(await narrateAction(`giving up on "${goal.description}" -- ${result.text}`));
+      recordGoalOutcome(goal.description, "gave up", result.text);
+      await broadcastGoalState("abandoned", goal.description);
+      await retireGoal(goal);
       return;
     }
 
-    await saveGoal(PERSONA_NAME, currentGoal);
+    await saveGoalIfCurrent(goal);
     // A check-in every few steps, not every step -- otherwise gearing up would spam chat once
     // per GOAL_TICK_MS the whole time she works.
-    if (currentGoal.steps % 3 === 0) {
-      bot.chat(await narrateAction(`still working on ${currentGoal.description}: ${result.text}`));
+    if (goal.steps % 3 === 0) {
+      bot.chat(await narrateAction(`still working on ${goal.description}: ${result.text}`));
     }
   } catch (err) {
     console.error(`[${USERNAME}] goal tick failed:`, err.message);
   } finally {
     handle.release();
-    if (craftedOk) {
-      storeSurplusNearHome("post-craft cleanup").catch((err) =>
-        console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
-    }
+    if (craftedOk) surplusCleanupDueAt = Date.now() + SURPLUS_CLEANUP_QUIET_MS; // MB-09: deferred
   }
 }
 
@@ -3830,7 +3882,7 @@ async function proposeFallbackDirective() {
   // from "he went quiet a while ago" -- a fresh process with no baseline yet doesn't activate the
   // fallback immediately (avoids every bot racing to coordinate on a simultaneous fresh boot
   // before anyone's actually heard Mayor at all).
-  if (lastMayorSeenAt === 0 || Date.now() - lastMayorSeenAt < MAYOR_LIVENESS_TIMEOUT_MS) return;
+  if (!mayorUnreachable()) return;
 
   const idleBots = [...BOT_USERNAMES].filter((name) =>
     name !== USERNAME && name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${name.toLowerCase()}`));
@@ -3917,7 +3969,7 @@ async function checkSleep() {
   if (!handle) return;
   try {
     bot.chat(await narrateAction("getting sleepy -- heading to bed."));
-    const result = await performAction(bot, { type: "sleep" }, USERNAME);
+    const result = await performAction(bot, { type: "sleep" }, USERNAME, handle);
     console.log(`[${USERNAME}] sleep: ${result.text} (ok=${result.ok})`);
     bot.chat(await narrateAction(result.ok ? result.text : `couldn't get to sleep: ${result.text}`));
   } catch (err) {
@@ -3972,7 +4024,7 @@ async function checkDusk() {
   if (!handle) return;
   try {
     bot.chat(await narrateAction("sun's getting low -- heading home before dark."));
-    const result = await performAction(bot, { type: "gohome" }, USERNAME);
+    const result = await performAction(bot, { type: "gohome" }, USERNAME, handle);
     console.log(`[${USERNAME}] heading home: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] heading home failed:`, err.message);
@@ -4054,9 +4106,9 @@ function decideFightType(threatName) {
 // than fighting back, as long as there's actually a weapon to fight with. Deliberately excludes
 // FLEE_ONLY_MOBS -- a flyer or teleport-evader is still unreachable no matter how desperate this
 // gets, the exact doomed-melee shape FLEE_ONLY_MOBS exists to prevent (actions.js).
-async function attackAsLastResort(threat, label) {
+async function attackAsLastResort(threat, label, handle) {
   if (FLEE_ONLY_MOBS.has(threat.name) || !hasWeapon(bot)) return;
-  const result = await performAction(bot, { type: "attack", target: threat }, USERNAME);
+  const result = await performAction(bot, { type: "attack", target: threat }, USERNAME, handle);
   console.log(`[${USERNAME}] ${label}: couldn't get away, fighting instead -- ${result.text} ` +
               `(ok=${result.ok})`);
 }
@@ -4072,10 +4124,10 @@ async function attackAsLastResort(threat, label) {
 // swinging is a second closer to death with no upside. Symmetric with attackAsLastResort: fighting
 // is still the first choice at critical health (unchanged, direct request), this only fires when
 // that first choice has already had a fair, bounded shot and hasn't paid off.
-async function fleeAsLastResort(threat, label) {
+async function fleeAsLastResort(threat, label, handle) {
   if (bot.health <= 0) return;
   const rallyPoint = await nearestRallyPoint(bot);
-  const result = await performAction(bot, { type: "flee", target: threat, rallyPoint }, USERNAME);
+  const result = await performAction(bot, { type: "flee", target: threat, rallyPoint }, USERNAME, handle);
   console.log(`[${USERNAME}] ${label}: fight wasn't working, fleeing instead -- ${result.text} ` +
               `(ok=${result.ok})`);
 }
@@ -4265,9 +4317,9 @@ async function checkSelfDefense() {
     const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
     // action.target: the already-found entity, not re-derived -- see actions.js's own
     // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.
-    const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
+    const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME, handle);
     console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
-    if (type === "flee" && !result.ok) await attackAsLastResort(threat, "self-defense");
+    if (type === "flee" && !result.ok && !result.cancelled) await attackAsLastResort(threat, "self-defense", handle);
   } catch (err) {
     console.error(`[${USERNAME}] self-defense check failed:`, err.message);
   } finally {
@@ -4307,15 +4359,15 @@ async function respondToSquadCall(payload) {
   }
   try {
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; bot.pathfinder.setGoal(null); },
+    const timer = setTimeout(() => { timedOut = true; if (arbiter.holdsControl(handle)) bot.pathfinder.setGoal(null); },
       SQUAD_RESPONSE_TRAVEL_TIMEOUT_MS);
     try {
       await bot.pathfinder.goto(new goals.GoalNear(payload.x, payload.y, payload.z, 4));
     } catch (err) {
-      if (!timedOut) console.error(`[${USERNAME}] squad response travel failed:`, err.message);
+      if (!timedOut && !handle.token.cancelled) console.error(`[${USERNAME}] squad response travel failed:`, err.message);
     } finally {
       clearTimeout(timer);
-      bot.pathfinder.setGoal(null);
+      if (arbiter.holdsControl(handle)) bot.pathfinder.setGoal(null); // MB-02: never clear a preemptor's path
     }
 
     const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
@@ -4333,7 +4385,7 @@ async function respondToSquadCall(payload) {
       // anyway would just hold SQUAD_RESPONSE control for the full 90s for nothing.
       console.log(`[${USERNAME}] squad response: arrived, but no weapon to fight ${threat.name} with.`);
     } else {
-      const result = await performAction(bot, { type: "attack", target: threat }, USERNAME);
+      const result = await performAction(bot, { type: "attack", target: threat }, USERNAME, handle);
       console.log(`[${USERNAME}] squad response result: ${result.text} (ok=${result.ok})`);
     }
   } finally {
@@ -4357,7 +4409,7 @@ async function checkHunger() {
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
-    const result = await performAction(bot, { type: "eat" }, USERNAME);
+    const result = await performAction(bot, { type: "eat" }, USERNAME, handle);
     if (result.ok) {
       console.log(`[${USERNAME}] hunger: ${result.text} (food was ${bot.food})`);
       return;
@@ -4367,7 +4419,7 @@ async function checkHunger() {
     // any. A held fishing rod turns hunger into something she can act on herself: a passive,
     // low-risk food source for when there's nothing to harvest/breed nearby either.
     if (bot.inventory.items().some((i) => i.name === "fishing_rod")) {
-      const fishResult = await performAction(bot, { type: "fish" }, USERNAME);
+      const fishResult = await performAction(bot, { type: "fish" }, USERNAME, handle);
       console.log(`[${USERNAME}] hunger (fishing): ${fishResult.text} (ok=${fishResult.ok})`);
     }
   } catch (err) {
@@ -4404,7 +4456,7 @@ async function checkPendingGiveRequests() {
   }
   try {
     console.log(`[${USERNAME}] fulfilling request: giving ${count} ${item} to ${forPlayer}`);
-    const result = await performAction(bot, { type: "give", player: forPlayer, item, count }, USERNAME);
+    const result = await performAction(bot, { type: "give", player: forPlayer, item, count }, USERNAME, handle);
     console.log(`[${USERNAME}] give result: ${result.text} (ok=${result.ok})`);
     if (result.ok) bot.chat(await narrateAction(`brought you some ${item}, ${forPlayer}.`));
   } catch (err) {
@@ -4446,7 +4498,7 @@ async function storeSurplusValuables(reason) {
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
-    const result = await performAction(bot, { type: "store", item: target.name, count: target.count }, USERNAME);
+    const result = await performAction(bot, { type: "store", item: target.name, count: target.count }, USERNAME, handle);
     console.log(`[${USERNAME}] ${reason}: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] ${reason} failed:`, err.message);
@@ -4468,9 +4520,40 @@ async function storeSurplusValuables(reason) {
 // useful, just not the more specific "near home" behavior this exists for.
 const STORE_NEAR_HOME_BATCH_LIMIT = 5;
 
+// Review MB-09, 2026-09-24: post-craft cleanup ran immediately after every craft/smelt/loot, while
+// the goal that needed the result was still active -- a crafting table made for the next PLACE
+// step went straight into a chest, and freshly looted ingredients went back before the CRAFT.
+// Cleanup is now deferred: a craft only marks it due, and checkDeferredSurplusCleanup() runs it
+// once there's no active goal and nothing has been crafted for SURPLUS_CLEANUP_QUIET_MS.
+// KEEP_ITEM_NAMES / KEEP_ITEM_SUFFIXES are never "surplus": placeable infrastructure and
+// working tools a bot needs on hand regardless of goal.
+const SURPLUS_CLEANUP_QUIET_MS = 2 * 60_000;
+const KEEP_ITEM_NAMES = new Set([
+  "crafting_table", "furnace", "chest", "torch", "shield", "fishing_rod", "shears", "bucket",
+  "water_bucket", "flint_and_steel", "bow", "arrow", "crossbow",
+]);
+const KEEP_ITEM_SUFFIXES = ["_bed", "_boat"];
+let surplusCleanupDueAt = 0;
+
+function isKeptItem(name) {
+  return KEEP_ITEM_NAMES.has(name) || KEEP_ITEM_SUFFIXES.some((suffix) => name.endsWith(suffix));
+}
+
+async function checkDeferredSurplusCleanup() {
+  if (!surplusCleanupDueAt || Date.now() < surplusCleanupDueAt) return;
+  if (!AUTONOMY_ENABLED || currentGoal || busy || arbiter.isBusy() || bot.isSleeping) return;
+  surplusCleanupDueAt = 0;
+  await storeSurplusNearHome("post-craft cleanup");
+}
+
+setInterval(() => {
+  checkDeferredSurplusCleanup().catch((err) =>
+    console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
+}, 30_000);
+
 async function storeSurplusNearHome(reason) {
   const surplusNames = [...new Set(bot.inventory.items()
-    .filter((i) => !isEssentialItem(i.name) && !i.name.endsWith("_sapling"))
+    .filter((i) => !isEssentialItem(i.name) && !isKeptItem(i.name) && !i.name.endsWith("_sapling"))
     .map((i) => i.name))].slice(0, STORE_NEAR_HOME_BATCH_LIMIT);
   if (!surplusNames.length) return;
   const home = await loadClaimedBed(bot);
@@ -4485,8 +4568,9 @@ async function storeSurplusNearHome(reason) {
       // Infinity: "store" already caps at however much she actually has via Math.min() --
       // matches STORE's own existing player-command convention (index.js's classifyIntent,
       // "unlike every other count default (1), this defaults to 'all of it'").
-      const result = await performAction(bot, { type: "store", item: name, count: Infinity, near: home }, USERNAME);
+      const result = await performAction(bot, { type: "store", item: name, count: Infinity, near: home }, USERNAME, handle);
       console.log(`[${USERNAME}] ${reason}: ${result.text} (ok=${result.ok})`);
+      if (result.cancelled) break; // MB-02: lost control -- stop the batch, not just this item
       // Real live gap found 2026-09-09 ("monitor their behavior, look for issues"): a real
       // failure was observed for one item ("can't find dirt in slots..." -- pathfinder's own
       // scaffolding mechanic had consumed it mid-travel between when this item was picked as
@@ -4558,7 +4642,7 @@ async function checkSaplings() {
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
-    const result = await performAction(bot, { type: "plant_sapling", item: sapling.name }, USERNAME);
+    const result = await performAction(bot, { type: "plant_sapling", item: sapling.name }, USERNAME, handle);
     console.log(`[${USERNAME}] sapling planting: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] sapling check failed:`, err.message);
@@ -4594,7 +4678,7 @@ async function checkLighting() {
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
-    const result = await performAction(bot, { type: "place", item: "torch" }, USERNAME);
+    const result = await performAction(bot, { type: "place", item: "torch" }, USERNAME, handle);
     if (result.ok) console.log(`[${USERNAME}] lighting: ${result.text} (light was ${block.light})`);
   } catch (err) {
     console.error(`[${USERNAME}] lighting check failed:`, err.message);
@@ -4660,9 +4744,11 @@ async function checkHomeLighting() {
       // instead of only ever depending on what she happens to be personally carrying; cheaper and
       // far more likely to succeed than crafting from scratch, especially now that the shared base
       // chests can be pre-stocked (tools/minecraft-chests/).
-      const lootResult = await performAction(bot, { type: "loot", item: "torch", count: 4 }, USERNAME);
+      const lootResult = await performAction(bot, { type: "loot", item: "torch", count: 4 }, USERNAME, handle);
       if (lootResult.ok) {
         console.log(`[${USERNAME}] home lighting: grabbed torches from a chest -- ${lootResult.text}`);
+      } else if (lootResult.cancelled) {
+        return;
       } else {
         // Direct live incident, 2026-09-21 (a full nighttime mob swarm -- 21 zombies killed via
         // RCON around one unlit base in a single sweep -- "combat is not fixed, they just stand
@@ -4687,12 +4773,12 @@ async function checkHomeLighting() {
             `${lootResult.text}), and no fuel+wood on hand to craft one -- skipping for now.`);
           return;
         }
-        const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME);
+        const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME, handle);
         console.log(`[${USERNAME}] home lighting: crafted torches first -- ${craftResult.text} (ok=${craftResult.ok})`);
         if (!craftResult.ok) return;
       }
     }
-    const result = await performAction(bot, { type: "light_area", near: home }, USERNAME);
+    const result = await performAction(bot, { type: "light_area", near: home }, USERNAME, handle);
     console.log(`[${USERNAME}] home lighting: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] home lighting check failed:`, err.message);
@@ -4786,7 +4872,7 @@ async function checkTerrainDamage() {
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
-    const result = await performAction(bot, { type: "repair_terrain", position: spot, material }, USERNAME);
+    const result = await performAction(bot, { type: "repair_terrain", position: spot, material }, USERNAME, handle);
     console.log(`[${USERNAME}] terrain repair: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] terrain repair check failed:`, err.message);
@@ -4851,7 +4937,9 @@ async function teleportToSpawn(reason) {
   // primitive actions.js's own stopCurrent() delegates to -- whatever she's doing physically is
   // about to be invalidated by teleporting, so stop it cleanly first rather than leaving it to
   // dangle, and always wins regardless of who currently holds control.
-  arbiter.cancelAndRotate(bot);
+  // Review MB-03, 2026-09-24: cancelAndRotate() left a ROUTINE owner behind that nothing ever
+  // released, freezing goals and chores after every rescue; cancelAndClear() leaves no owner.
+  arbiter.cancelAndClear(bot);
   bot.chat(`/tp ${dest.x.toFixed(2)} ${dest.y.toFixed(2)} ${dest.z.toFixed(2)}`);
   // Whatever her standing goal assumed about her surroundings is now stale, same reasoning as
   // death/respawn.
@@ -4878,7 +4966,16 @@ function checkStuck() {
     stuckNudgeCount = 0; // real movement happened -- whatever the snag was, it's resolved
     return;
   }
-  if (Date.now() - lastMovedAt < STUCK_THRESHOLD_MS) return;
+  // Review MB-22, 2026-09-24: standing still is only "stuck" if something is actually trying to
+  // move her. A guard, an idle bot, or a stationary interaction never touches pathfinder, so it
+  // restarts the clock instead of escalating toward a false-rescue teleport.
+  if (lastMoveAttemptAt < lastMovedAt) {
+    lastMovedAt = Date.now();
+    stuckNudgeCount = 0;
+    return;
+  }
+  const stationaryMs = Date.now() - lastMovedAt;
+  if (stationaryMs < STUCK_THRESHOLD_MS) return;
 
   stuckNudgeCount += 1;
   lastMovedAt = Date.now(); // reset so this doesn't spam-nudge/escalate every 30s while still stuck
@@ -4891,9 +4988,15 @@ function checkStuck() {
   }
 
   console.log(`[${USERNAME}] possibly stuck -- no movement in ` +
-              `${Math.round((Date.now() - lastMovedAt) / 1000)}s, nudging (${stuckNudgeCount}/${MAX_STUCK_NUDGES})`);
+              `${Math.round(stationaryMs / 1000)}s, nudging (${stuckNudgeCount}/${MAX_STUCK_NUDGES})`);
   bot.setControlState("jump", true);
   setTimeout(() => bot.setControlState("jump", false), 500);
+}
+
+// Any pathfinder activity counts as "trying to move" for checkStuck's stationary-vs-stuck test.
+let lastMoveAttemptAt = 0;
+for (const ev of ["goal_updated", "path_update", "path_reset"]) {
+  bot.on(ev, () => { lastMoveAttemptAt = Date.now(); });
 }
 
 setInterval(checkStuck, STUCK_CHECK_MS);
@@ -4914,7 +5017,7 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   // process from ever treating himself as "a player talking to him" (redundant with the
   // bot.username check above in practice, kept explicit since this condition is the one place
   // that check is bypassed).
-  if (isAnotherBot(speaker) && !(isMayor(speaker) && USERNAME !== MAYOR_USERNAME)) return;
+  if (isAnotherBot(speaker) && !(isActingCoordinator(speaker) && USERNAME !== MAYOR_USERNAME)) return;
   // §15.5(d): a real, already-arriving signal that Mayor is alive -- reuses the isMayor()
   // exception above rather than adding a new heartbeat. USERNAME !== MAYOR_USERNAME guards
   // Mayor's own process from tracking his own liveness (moot for him, and this condition is
@@ -4938,8 +5041,16 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   if (!isAnotherBot(speaker)) {
     lastActivityAt = Date.now(); // a real player is here -- the self-propose-a-goal idle clock resets
   }
+  // Review MB-06, 2026-09-24: an addressed STOP never waits on the model or on `busy` -- it
+  // cancels the current physical action (anything up to DIRECT_COMMAND tier; emergencies keep
+  // running) and drops the standing goal immediately.
+  if (!isAnotherBot(speaker) && isAddressedStop(message, alreadyAddressed)) {
+    stopNow(speaker, send).catch((err) => console.error(`[${USERNAME}] stop failed:`, err.message));
+    return;
+  }
+  // ...and anything else that arrives mid-thought is queued, not dropped.
   if (busy) {
-    console.log(`[${USERNAME}] busy, dropping: <${speaker}> ${message}`);
+    queueIncoming(speaker, message, { alreadyAddressed, send });
     return;
   }
   busy = true;
@@ -4960,10 +5071,10 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
           // hierarchy his own persona describes (defer to The President completely). A
           // self-proposed goal, an idle bot, or an earlier Mayor directive all yield to a new
           // one from him -- only a live human instruction doesn't.
-          if (isMayor(speaker) && currentGoal?.source === "user" && currentGoal.setBy &&
-              !isMayor(currentGoal.setBy)) {
+          if (isActingCoordinator(speaker) && currentGoal?.source === "user" && currentGoal.setBy &&
+              !isAnotherBot(currentGoal.setBy)) {
             send(await narrateAction(
-              `already on something for ${currentGoal.setBy}, Mayor -- that comes first.`));
+              `already on something for ${currentGoal.setBy}, ${speaker} -- that comes first.`));
             return;
           }
           await setNewGoal(intent.action.description, speaker);
@@ -4990,9 +5101,52 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
       console.error(`[${USERNAME}] decision loop error:`, err.message);
     } finally {
       busy = false;
+      drainIncoming();
     }
   })();
 }
+
+const STOP_MESSAGE = /^\s*(?:@?[\w-]+[,:]?\s+)?(?:stop|halt|freeze|cancel|stand down)(?:\s+(?:it|that|now|please))*\s*[!.]*\s*$/i;
+function isAddressedStop(message, alreadyAddressed) {
+  if (!STOP_MESSAGE.test(message)) return false;
+  return alreadyAddressed || message.toLowerCase().includes(USERNAME.toLowerCase());
+}
+
+async function stopNow(speaker, send) {
+  const stopped = arbiter.cancelIfAtMost(bot, arbiter.OWNERS.DIRECT_COMMAND.priority, "STOP");
+  if (currentGoal) {
+    await broadcastGoalState("abandoned", currentGoal.description);
+    recordGoalOutcome(currentGoal.description, "gave up", `stopped by ${speaker}`);
+    currentGoal = null;
+    await clearGoal(PERSONA_NAME);
+  }
+  console.log(`[${USERNAME}] STOP from ${speaker} (physical action cancelled: ${stopped})`);
+  send(stopped || !arbiter.isBusy() ? "stopping." : "stopping as soon as I'm out of danger.");
+}
+
+const MAX_QUEUED_INCOMING = 5;
+const QUEUED_INCOMING_MAX_AGE_MS = 60_000;
+const pendingIncoming = [];
+function queueIncoming(speaker, message, opts) {
+  if (pendingIncoming.length >= MAX_QUEUED_INCOMING) {
+    const dropped = pendingIncoming.shift();
+    console.log(`[${USERNAME}] incoming queue full, dropping oldest: <${dropped.speaker}> ${dropped.message}`);
+  }
+  pendingIncoming.push({ speaker, message, opts, at: Date.now() });
+  console.log(`[${USERNAME}] busy, queued: <${speaker}> ${message}`);
+}
+function drainIncoming() {
+  while (!busy && pendingIncoming.length) {
+    const next = pendingIncoming.shift();
+    if (Date.now() - next.at > QUEUED_INCOMING_MAX_AGE_MS) {
+      console.log(`[${USERNAME}] queued message expired: <${next.speaker}> ${next.message}`);
+      continue;
+    }
+    handleIncoming(next.speaker, next.message, next.opts);
+  }
+}
+// busy is also released by goalTick/proposeOwnGoal/etc., none of which know about the queue.
+setInterval(drainIncoming, 1000);
 
 bot.on("chat", (speaker, message) => {
   handleIncoming(speaker, message, { alreadyAddressed: false, send: (reply) => bot.chat(reply) });
@@ -5260,7 +5414,7 @@ bot.on("spawn", () => {
             break;
           }
           try {
-            result = await performAction(bot, { type: "recover", position: recoverAt }, USERNAME);
+            result = await performAction(bot, { type: "recover", position: recoverAt }, USERNAME, handle);
             console.log(`[${USERNAME}] recovery: ${result.text} (ok=${result.ok})`);
             if (result.ok || !handle.token.preempted) break;
           } finally {
@@ -5351,10 +5505,10 @@ bot.on("health", () => {
       // gets one short, bounded shot, not a 90-second commitment with no way to reconsider.
       const maxDurationMs = type === "attack" ? EMERGENCY_ATTACK_TIMEOUT_MS : undefined;
       const result = await performAction(bot, { type, target: threat, rallyPoint, maxDurationMs },
-        USERNAME);
+        USERNAME, handle);
       console.log(`[${USERNAME}] emergency ${type}: ${result.text} (ok=${result.ok})`);
-      if (type === "flee" && !result.ok) await attackAsLastResort(threat, "emergency");
-      if (type === "attack" && !result.ok) await fleeAsLastResort(threat, "emergency");
+      if (type === "flee" && !result.ok && !result.cancelled) await attackAsLastResort(threat, "emergency", handle);
+      if (type === "attack" && !result.ok && !result.cancelled) await fleeAsLastResort(threat, "emergency", handle);
     } catch (err) {
       console.error(`[${USERNAME}] emergency ${type} failed:`, err.message);
     } finally {
@@ -5459,21 +5613,21 @@ bot.on("breath", () => {
 
       // Surviving the dunk isn't the same as being somewhere sensible -- head for the nearest
       // real dry land now that the pathfinder can actually generate a route out of water.
-      if (bot.entity.isInWater) {
+      if (bot.entity.isInWater && arbiter.holdsControl(handle)) { // MB-02: a higher tier may own her now
         const shore = findNearestShore(bot, SHORE_SEARCH_DISTANCE);
         if (!shore) {
           console.log(`[${USERNAME}] surfaced but couldn't find dry land within ${SHORE_SEARCH_DISTANCE} blocks`);
         } else {
           console.log(`[${USERNAME}] heading for dry land at`, shore);
           let timedOut = false;
-          const timer = setTimeout(() => { timedOut = true; bot.pathfinder.setGoal(null); }, SHORE_TRAVEL_TIMEOUT_MS);
+          const timer = setTimeout(() => { timedOut = true; if (arbiter.holdsControl(handle)) bot.pathfinder.setGoal(null); }, SHORE_TRAVEL_TIMEOUT_MS);
           try {
             await bot.pathfinder.goto(new goals.GoalNear(shore.x, shore.y, shore.z, 1));
           } catch (err) {
-            if (!timedOut) console.error(`[${USERNAME}] couldn't reach shore:`, err.message);
+            if (!timedOut && !handle.token.cancelled) console.error(`[${USERNAME}] couldn't reach shore:`, err.message);
           } finally {
             clearTimeout(timer);
-            bot.pathfinder.setGoal(null);
+            if (arbiter.holdsControl(handle)) bot.pathfinder.setGoal(null);
           }
           console.log(`[${USERNAME}] reached shore attempt finished (isInWater=${bot.entity.isInWater})`);
         }
@@ -5532,9 +5686,9 @@ async function checkSleepingThreat() {
     // neither is anything else when she has no weapon to fight it with.
     const type = decideFightType(threat.name);
     const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
-    const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME);
+    const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME, handle);
     console.log(`[${USERNAME}] post-wake defense: ${type} -> ${result.text} (ok=${result.ok})`);
-    if (type === "flee" && !result.ok) await attackAsLastResort(threat, "post-wake defense");
+    if (type === "flee" && !result.ok && !result.cancelled) await attackAsLastResort(threat, "post-wake defense", handle);
   } catch (err) {
     console.error(`[${USERNAME}] post-wake defense failed:`, err.message);
   } finally {

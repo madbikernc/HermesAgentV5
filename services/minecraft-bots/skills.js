@@ -1,4 +1,7 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-09-24) -- review MB-04/MB-10: runSkill() stops and reports cancelled on an
+// interrupted step; authorSkillFromGoal() refuses to truncate a longer solve into a skill.
 //
 // 1.2.0 (2026-09-24) -- the two dedicated -skills RAG scripts were absorbed into
 // hermes-rag-{ingest,search}-minecraft.py (2.0.0), which now take --corpus; this file passes
@@ -131,6 +134,9 @@ export async function runSkill(performActionFn, bot, skill, speaker) {
   for (const step of skill.steps) {
     const { type, ...args } = step;
     const result = await performActionFn(bot, { type, ...args }, speaker);
+    if (result.cancelled) {
+      return { ok: false, cancelled: true, text: `skill "${skill.name}" interrupted on ${type}: ${result.text}` };
+    }
     if (!result.ok) {
       return { ok: false, text: `skill "${skill.name}" stalled on ${type}: ${result.text}` };
     }
@@ -184,7 +190,10 @@ export async function writeSkill({ name, description, steps }) {
 // actionsTaken array -- it never invents or re-derives the steps themselves.
 export async function authorSkillFromGoal(goalDescription, actionsTaken) {
   if (!Array.isArray(actionsTaken) || actionsTaken.length < MIN_STEPS_TO_AUTHOR) return false;
-  const steps = actionsTaken.slice(0, MAX_SKILL_STEPS);
+  // Review MB-10, 2026-09-24: never truncate a solution into a "skill" -- the first N actions of a
+  // longer solve can omit the step that actually finished the goal (e.g. the final placement).
+  if (actionsTaken.length > MAX_SKILL_STEPS) return false;
+  const steps = actionsTaken;
   if (!isValidSkill({ steps })) return false; // a verb outside SKILL_ACTION_VERBS slipped in somehow -- don't store it
 
   const stepsSummary = steps.map((s) => s.type).join(" -> ");
