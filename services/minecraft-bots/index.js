@@ -807,7 +807,8 @@
 // the REAL {type, ...args} objects each successful step actually ran with, never re-derived
 // from text by an LLM. This is the retrieval+authoring half of §14's plan (steps 3-4 of its own
 // "build sequence, if greenlit"); the skill-runner and hermes-rag corpus (steps 1-2) are new
-// skills.js and tools/hermes-rag-{ingest,search}-minecraft-skills.py.
+// skills.js and tools/hermes-rag-{ingest,search}-minecraft.py, which serve the minecraft-skills
+// corpus via --corpus (they had their own dedicated -skills copies until 2026-09-24).
 //
 // 2.31.0 (2026-09-07) -- direct request "do 1,2,4,5" on a web-research gap analysis (see
 // actions.js 1.21.0's own changelog for the real detail on all four). This file's own share:

@@ -1,4 +1,8 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-09-24) -- the two dedicated -skills RAG scripts were absorbed into
+// hermes-rag-{ingest,search}-minecraft.py (2.0.0), which now take --corpus; this file passes
+// CORPUS_ARGS at both call sites. No behavior change here.
 //
 // 1.1.0 (2026-09-08) -- direct follow-up to a "what other autonomous behaviors are solvable"
 // survey ("fix all the above"): MATCH_DISTANCE_THRESHOLD re-calibrated 0.7 -> 0.78 against the
@@ -35,8 +39,12 @@ const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const PYTHON = "/opt/hermes/venvs/rag/bin/python3";
-const SEARCH_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-search-minecraft-skills.py");
-const INGEST_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-ingest-minecraft-skills.py");
+const SEARCH_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-search-minecraft.py");
+const INGEST_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-ingest-minecraft.py");
+// Both scripts serve every Minecraft corpus and default to "minecraft" -- skills must always
+// pass --corpus explicitly (tools/hermes-rag-ingest-minecraft.py 2.0.0, which absorbed the
+// former -skills duplicates).
+const CORPUS_ARGS = ["--corpus", "minecraft-skills"];
 const SKILLS_DIR = "/mnt/hermes-data/minecraft-memory/skills";
 
 // Re-calibrated live 2026-09-08 against the REAL, organically-grown corpus (20 skills authored
@@ -72,7 +80,7 @@ function slugify(text) {
 
 async function searchSkillCandidates(description, topK = 3) {
   try {
-    const { stdout } = await execFileAsync(PYTHON, [SEARCH_SCRIPT, description, "--top-k", String(topK)]);
+    const { stdout } = await execFileAsync(PYTHON, [SEARCH_SCRIPT, description, "--top-k", String(topK), ...CORPUS_ARGS]);
     const results = JSON.parse(stdout);
     return Array.isArray(results) ? results : [];
   } catch (err) {
@@ -161,7 +169,7 @@ export async function writeSkill({ name, description, steps }) {
   await writeFile(path.join(SKILLS_DIR, `${filename}.json`),
     JSON.stringify({ name, steps, consecutiveFailures: 0 }, null, 2), "utf8");
   try {
-    await execFileAsync(PYTHON, [INGEST_SCRIPT]);
+    await execFileAsync(PYTHON, [INGEST_SCRIPT, ...CORPUS_ARGS]);
   } catch (err) {
     console.error("[skills] reindex failed after writing skill:", err.message);
   }
