@@ -1,4 +1,4 @@
-// Version: 1.0.0
+// Version: 1.0.1
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -14,6 +14,8 @@
 // Every behavior fix that is observable in-world should add a scenario here (see tests/README.md).
 //
 // Revision History: 1.0.0 | 2026-09-24 | Initial scenarios for MB-01, MB-02/04, MB-07, MB-15.
+// 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
+//   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -80,8 +82,10 @@ async function resetTester() {
   arbiter.cancelAndClear(bot);
 }
 
-async function summonHusk(dx) {
-  await rcon(`summon minecraft:husk ${x + dx} ${y + 1} ${z} {PersistenceRequired:1b,Tags:["${TAG}"]}`);
+// `tanky`: 1000 health, so it can't die before a slow (~8s) RCON step lands.
+async function summonHusk(dx, { tanky = false } = {}) {
+  const hp = tanky ? ',Health:1000f,attributes:[{id:"minecraft:max_health",base:1000}]' : "";
+  await rcon(`summon minecraft:husk ${x + dx} ${y + 1} ${z} {PersistenceRequired:1b,Tags:["${TAG}"]${hp}}`);
   return waitFor(() => Object.values(bot.entities).find((e) => e.name === "husk" &&
     e.position.distanceTo(bot.entity.position) < 12), 10_000, "husk to appear");
 }
@@ -97,14 +101,15 @@ scenario("MB-01 combat: attack actually fights and kills a real mob", async () =
   const result = await performAction(bot, { type: "attack", target: husk, maxDurationMs: 45_000 }, TESTER);
   assert.equal(result.ok, true, `attack result: ${result.text}`);
   assert.match(result.text, /took care of it/);
-  assert.equal(bot.entities[husk.id], undefined, "husk is gone");
+  // A dead mob lingers briefly (death animation) before the server removes it.
+  await waitFor(() => !bot.entities[husk.id], 5000, "dead husk to be removed");
 });
 
 scenario("MB-01 combat: a target that leaves is 'lost track', not a kill", async () => {
   await rcon(`give ${TESTER} minecraft:wooden_sword`);
-  const husk = await summonHusk(6);
-  const pending = performAction(bot, { type: "attack", target: husk, maxDurationMs: 30_000 }, TESTER);
-  await sleep(800);
+  const husk = await summonHusk(6, { tanky: true });
+  const pending = performAction(bot, { type: "attack", target: husk, maxDurationMs: 60_000 }, TESTER);
+  await sleep(2000);
   await rcon(`tp @e[tag=${TAG}] ${x} ${y + 1} ${z + 600}`);
   const result = await pending;
   assert.equal(result.ok, false, `attack result: ${result.text}`);
@@ -144,8 +149,9 @@ scenario("MB-07 armor: better worn armor is kept, and a better carried piece is 
     await sleep(300);
     assert.equal(head(), "netherite_helmet", `refresh ${i + 1} kept the netherite helmet`);
   }
-  await rcon(`item replace entity ${TESTER} armor.head with minecraft:leather_helmet`,
-    `clear ${TESTER} minecraft:leather_helmet`, `give ${TESTER} minecraft:iron_helmet`);
+  // clear first: `clear` also strips worn armor, so it must run before the new helmet goes on.
+  await rcon(`clear ${TESTER} minecraft:leather_helmet`,
+    `item replace entity ${TESTER} armor.head with minecraft:leather_helmet`, `give ${TESTER} minecraft:iron_helmet`);
   await waitFor(() => head() === "leather_helmet" && bot.inventory.items().some((i) => i.name === "iron_helmet"),
     5000, "leather worn, iron carried");
   await equipBestArmor(bot);
