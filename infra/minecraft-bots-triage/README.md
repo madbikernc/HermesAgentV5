@@ -1,12 +1,12 @@
 # minecraft-bots-triage — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Standing fleet infrastructure for the Minecraft bots' own log triage (direct request,
 2026-09-07: "I want the Firmament to do this monitoring, and engage coder/coder2 loop to do
 initial triage"), replacing what had been a human manually tailing both bots' journals for
 hours during live debugging. `tools/hermes-minecraft-triage.py` (see its own header for the
-full design) tails `minecraft-bot-babs.service`/`minecraft-bot-amy.service`, and on a
+full design) tails every `minecraft-bot-*.service` unit on its host, and on a
 triage-worthy line (a crash, a repeated stuck pathfinding loop, an abandoned goal, a model
 backend failure) fires `coder` and `coder2` (hermes-router.py) **in parallel, independently** —
 the operator's own explicit choice over a draft/review pipeline — and surfaces a disagreement
@@ -52,3 +52,4 @@ match (wrong unit), but a real bot restart into a bad state will.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-09-07 | Initial version. |
+| 1.1.0 | 2026-09-24 | Corrected the unit list from the original two (Babs/Amy) to every `minecraft-bot-*` unit on the host. |

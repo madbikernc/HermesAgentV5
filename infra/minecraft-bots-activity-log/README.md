@@ -1,8 +1,8 @@
 # minecraft-bots-activity-log — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
-Standing fleet infrastructure for a full, raw, durable activity trail across all five Minecraft
+Standing fleet infrastructure for a full, raw, durable activity trail across all nine Minecraft
 bots (direct request, 2026-09-08: "setup a log of their activities that would be sufficient for
 review later, to look for misbehaviors and broken behaviors").
 
@@ -16,7 +16,7 @@ box, not bot-specific -- a noisy unrelated service could evict bot history befor
 review it. This service exists purely to give the bots' own activity a durable, bot-scoped copy
 that doesn't compete with anything else for retention.
 
-Deliberately dumb: a single `journalctl -f` across all five bot units, piped straight to a file
+Deliberately dumb: a single `journalctl -f` across every bot unit on the host, piped straight to a file
 via systemd's own `StandardOutput=append:` (no wrapping shell script needed, confirmed supported
 on this box's systemd 255). `-o short-iso` gives full date+time+timezone on every line -- the
 default format omits the year, which stops being enough once a log is meant to be reviewed days
@@ -46,3 +46,4 @@ sudo logrotate -d /etc/logrotate.d/minecraft-bots-activity-log   # dry run, chec
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-09-08 | Initial version. |
+| 1.1.0 | 2026-09-24 | Corrected bot count from five to nine and made the unit list host-relative. |
