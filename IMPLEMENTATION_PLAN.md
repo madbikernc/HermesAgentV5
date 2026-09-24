@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 1.17.0
+**Version:** 2.2.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -1529,6 +1529,294 @@ ingest-kb.py` 1.3.0→1.4.0 (`--ocr`, per-page OCR fallback). Real eval history 
 `~/.hermes/state/rag-eval-history.jsonl` on Watch — baseline and with-reranker runs both recorded,
 not just the final number.
 
+### S18 — RoCE fabric: clear the gate S1 set
+
+> **Executed and closed 2026-09-24 — read S18a's blocks before this section's framing.**
+> Two findings, in order. **(1)** The stage was scoped as lossless-fabric (PFC/ECN) work on S1's
+> hypothesis. That hypothesis was wrong: the fault was `balance-rr` bonding being structurally
+> incompatible with RoCE. Fixed by moving RDMA onto the previously unused, unbonded `f1` ports —
+> RoCE went from total failure to **13.0 GB/s**, persistent. S18b was never needed and is superseded.
+> **(2) The exit gate was still missed.** NCCL all-reduce runs clean over the fixed fabric but
+> delivers only ~1.4 GB/s, below S1's 2.0 GB/s socket baseline, because GPUDirect RDMA is
+> unavailable on GB10 (`GDR 0`, `nvidia_peermem` won't load). **`TP=2` remains non-viable and MiMo
+> does not proceed** — the blocker moved from the wire to the GPU-to-NIC path.
+
+**Stage number skips S17** — that number is already taken by `infra/hermes-node-baseline/`, built
+2026-09-05 from its own approved plan rather than a section here.
+
+Make NCCL RDMA work reliably under real traffic across `bond-fabric0`, so tensor-parallel inference
+across both Sparks becomes possible. This is the "new scope" S1 named and declined, and S12
+re-confirmed as still unmet ("no RoCE/PFC/ECN work was done, so the gate S1 set has not been
+cleared"). Nothing downstream of it can proceed until it has a real number.
+
+**Why now: the driving consumer.** Replacing `omni` (Nemotron-3-Nano-Omni-30B-A3B) with
+MiMo-V2.5 Omni — 310B total / 15B active MoE, ~125GB at NVFP4-experts — as a persistent, always-on
+multimodal backend. At ~125GB it cannot fit one 128GB node alongside anything else, so it requires
+`TP=2` sharded across both nodes. **This is not a persistence-only requirement**: an on-demand MiMo
+needs the same `TP=2` fabric. The interconnect gates every MiMo variant, not just the resident one.
+
+**Why the existing socket path is not good enough.** Tensor parallelism issues an all-reduce on
+every layer, for every token. S1's socket-mode figure (~2.0 GB/s, `NCCL_IB_DISABLE=1`) sits in the
+critical path of every forward pass — unlike bulk weight staging, where 2.0 GB/s is merely slow.
+The fabric's own raw capacity is not the problem: S1 measured ~117 Gbit/s sustained TCP over the
+same link. The gap between 117 Gbit/s raw and ~16 Gbit/s realized is what this stage exists to close.
+
+**Accepted consequence, recorded here rather than discovered at cutover.** A persistent `TP=2` MiMo
+occupies both nodes, so `coder2` (`spark-2`, on-demand, port 8099) can never wake — which retires
+`tools/hermes-dualcoder.py` and `skills/dual-coder-review/` as a side effect, live since 2026-09-05.
+It also removes the only non-abliterated model from the coding path, leaving no stock-alignment
+baseline in a loop whose output is a security verdict. Operator-accepted deliberately, not a
+discovered casualty. If S18 fails its exit gate, this cost is never paid.
+
+#### S18a — diagnose before configuring
+
+S1 recorded the failure precisely: NCCL commits to real RoCE (`NET/IB : Using [0]rocep1s0f0:1/RoCE
+[1]roceP2p1s0f0:1/RoCE`), negotiates the full 16-channel topology, then throws
+`IBV_WC_RETRY_EXC_ERR(12)` on `IBV_WC_SEND` during actual data movement. **Successful negotiation
+followed by failure on first real traffic** is a narrow signature, and PFC/ECN is only one of the
+things that produces it. Eliminate the free explanations first — the same "cheap measurement before
+new scope" discipline S1 itself applied.
+
+Three hypotheses, cheapest first. Do not start S18b until H1 and H2 are ruled out.
+
+- **H1 — wrong GID index (costs nothing to test).** RoCEv2 requires the v2 GID; a RoCEv1 or
+  link-local GID negotiates fine and then fails to move data across an IP-routed path. Enumerate
+  with `show_gids` on both nodes, identify the RoCEv2 IPv4 entry for each device, and pin it
+  explicitly via `NCCL_IB_GID_INDEX` before re-running. Also confirm `cma_roce_mode` reports v2 for
+  both devices. If this clears it, the stage is already done.
+- **H2 — the bond mode.** `bond-fabric0` is `balance-rr` across two ConnectX-7 (MT2910), one port
+  each. Round-robin striping sprays a single queue pair's packets across both physical ports, and
+  RoCEv2's go-back-N retransmit degrades badly on out-of-order delivery — a textbook producer of
+  retry exhaustion under load while leaving connection setup untouched. Round-robin is also not
+  among the bonding modes RoCE LAG supports; **confirm the supported list against the installed
+  DOCA/OFED version live rather than taking that from this document.** Test by taking RDMA off the
+  bond entirely — a single ConnectX-7 port, direct, is 200 Gb/s and almost certainly sufficient on
+  its own. If a single port clears it, the two follow-on options are (a) keep the bond for TCP and
+  address both CX-7s as independent RDMA HCAs via `NCCL_IB_HCA` (standard multi-rail HPC practice,
+  and NCCL already enumerates both devices separately today), or (b) move the bond to a RoCE-LAG-
+  supported mode. Prefer (a): it leaves `bond-fabric0` and its SSH/rsync behavior untouched.
+- **H3 — genuinely needs lossless-fabric configuration.** Only if H1 and H2 both fail to clear it.
+
+#### S18a — executed 2026-09-24
+
+**Result: H1 eliminated, H2 confirmed as root cause, H3 is the wrong diagnosis.** S18b as originally
+scoped (PFC/ECN lossless fabric) would not have fixed this. Run read-only from the operator's
+machine over the tailnet; no configuration was changed on either node.
+
+**H1 eliminated.** `show_gids` on both nodes shows the RoCEv2 IPv4 GID at **index 3** for the fabric
+devices (`10.129.9.1` / `10.129.9.2`). A single-HCA `ib_write_bw` with `-x 3` pinned exchanges those
+exact GIDs correctly in both directions and still fails. GID selection was never the problem.
+
+**The failure reproduces outside NCCL, in seconds, with one HCA.** `ib_write_bw -d rocep1s0f0 -x 3`,
+spark → spark-2 (out-of-band handshake tunnelled over SSH, since the S4 firewall permits only
+`22/tcp` on the `/30`; the RoCE data path is hardware-offloaded and never traverses netfilter):
+
+```
+Failed status 12: wr_id 0 syndrom 0x81
+scnt=128, ccnt=0
+```
+
+Status 12 is `IBV_WC_RETRY_EXC_ERR` — the same error S1 recorded from NCCL. **`ccnt=0` is the
+important part: of 128 posted writes, zero completed.** Not degradation under load — no RDMA write
+ever succeeded, from the very first burst.
+
+**Root cause: `balance-rr` bonding is structurally incompatible with RoCE.** Confirmed by reading
+the MAC assignment on both nodes:
+
+| | `enp1s0f0np0` | `enP2p1s0f0np0` | bond |
+|---|---|---|---|
+| spark, permanent | `4c:bb:47:7d:17:95` | `4c:bb:47:7d:17:99` | — |
+| spark, **current** | `3a:f6:06:94:b8:63` | `3a:f6:06:94:b8:63` | `3a:f6:06:94:b8:63` |
+| spark-2, **current** | `d6:78:63:75:9b:c5` | `d6:78:63:75:9b:c5` | `d6:78:63:75:9b:c5` |
+
+Enslavement overwrote both ports' distinct permanent MACs with the bond's, so both RDMA devices
+derive the same link-local GID and advertise the same fabric IP. An RDMA queue pair is bound to one
+specific HCA, but `balance-rr` round-robins every other packet onto the *other* card's wire. Those
+packets arrive at the peer's *other* HCA, which holds no matching QP context, and are dropped at the
+RDMA layer without generating an ACK. The requester then waits, retries, and exhausts.
+
+Every previously recorded observation fits this and only this:
+
+- TCP reaches ~117 Gbit/s because the bond reassembles striped traffic at the netdev layer; RDMA has
+  no equivalent path across two HCAs.
+- Persisted hw_counters on spark (node has not rebooted since 2026-08-27, so these are S1's own
+  forensics) show `local_ack_timeout_err` 48/96 and `req_transport_retries_exceeded` 8/16, while
+  **`packet_seq_err` and `out_of_sequence` are zero** — packets are not arriving out of order at the
+  QP, they are not arriving at all.
+- `mlnx_qos` confirms PFC is disabled on all 8 priorities and trust state is `pcp`. That is the
+  expected state, but it is not what is breaking this: **PFC prevents congestion loss, and this path
+  drops 100% of packets at zero load.**
+
+**The fabric is direct-attached, confirmed** — `lldpctl` reports spark-2 itself as the neighbour on
+every fabric port, no switch (the `eero` neighbour is the home LAN router on `enP7s7`). So there is
+no switch-side PFC to configure, which was the one thing S18b's scope was counting as the easy part.
+
+**Unexpected asset found: two more cabled links, already free.** Each ConnectX-7 is dual-port and
+**all four ports on both nodes report `carrier=1`**. Only the `f0` pair is bonded; `enp1s0f1np1` and
+`enP2p1s0f1np1` are cabled, up, unbonded, and carry no IP on either node. That is a ready-made
+dedicated RDMA path requiring no change whatsoever to `bond-fabric0`.
+
+**Revised fix options, cheapest first** — all are bonding/topology changes, none need PFC:
+
+1. **Use the free `f1` pair for RDMA** (recommended). Assign a `/30`, point `NCCL_IB_HCA` at the
+   `f1` devices, leave `bond-fabric0` and its SSH/rsync behavior completely untouched. Each QP then
+   lives on a coherent point-to-point path. Zero blast radius on anything live.
+2. **Unbond the `f0` ports**, give each its own `/30`, and run NCCL multi-rail across both HCAs —
+   standard HPC practice and the highest-bandwidth option, but it dismantles `bond-fabric0` and the
+   `spark2-fabric` SSH aliases that ride on it.
+3. **Change the bond to a RoCE-LAG-supported mode.** `active-backup` works but halves bandwidth;
+   `802.3ad` back-to-back without a switch is possible but is the fiddliest of the three for the
+   least gain here.
+
+**Option 1 confirmed working, same day.** Operator approved the interface change. `10.129.10.1/30`
+and `10.129.10.2/30` assigned to `enp1s0f1np1` on spark and spark-2 respectively, MTU raised to 9000,
+`bond-fabric0` untouched throughout. Jumbo ping (`-M do -s 8972`) passes with 0% loss at ~1.2ms, and
+`show_gids` shows `rocep1s0f1` carrying a RoCEv2 IPv4 GID at index 3 — derived from the port's **own**
+permanent MAC (`4c:bb:47:7d:17:96`), not a shared bond MAC. Distinct device identity is exactly what
+the bonded path destroyed.
+
+Same `ib_write_bw` invocation that returned `ccnt=0` on the bond, now over `rocep1s0f1`, 10s sustained:
+
+```
+#bytes     #iterations    BW average[MB/sec]
+65536      1247465        12994.34
+```
+
+| Path | Sustained | Note |
+|---|---|---|
+| `bond-fabric0` (RoCE) | **0** | `status 12`, `ccnt=0` — never worked |
+| `bond-fabric0` (NCCL sockets, S1) | ~2.0 GB/s | the baseline every merged-mode plan was held to |
+| **unbonded `f1` (RoCE)** | **~13.0 GB/s** | **6.5x the socket baseline, on one of two ports** |
+
+~13.0 GB/s is ~104 Gbit/s on a single 200Gb/s port, clean exit, 1.25M iterations. The second `f1`
+port remains free for a multi-rail configuration if more is needed.
+
+**Persisted and firewalled, 2026-09-24.** Operator approved both. Each node's existing NM profile for
+`enp1s0f1np1` was converted to a static profile named `roce-f1` (`ipv4.method manual`, MTU 9000,
+`autoconnect yes`, IPv6 disabled) — the nodes render netplan from NetworkManager, so this is the
+right layer, not hand-edited YAML. Both devices now report `connected:roce-f1` rather than
+`connected (externally)`. Re-running `ib_write_bw` under the NM-managed config returns **13,007
+MB/s**, functionally identical to the runtime-configured result, so persistence costs nothing.
+
+ufw, following S4's exception-list rule rather than a blanket re-open — one peer-scoped rule per
+node on the new link (`allow from 10.129.10.2` on spark, `allow from 10.129.10.1` on spark-2).
+Host-scoped is the right granularity here because NCCL's bootstrap uses dynamic ports, and
+`10.129.10.0/30` is a direct cable between exactly these two trusted nodes with nothing else on it.
+The `10.129.9.0/30` bond keeps its `22/tcp`-only posture, unchanged.
+
+#### S18 — exit gate MISSED. `TP=2` is still not viable, for a different reason.
+
+**NCCL all-reduce now runs clean but delivers ~1.4 GB/s — below S1's own 2.0 GB/s socket baseline.**
+The crash is genuinely fixed: no `IBV_WC_RETRY_EXC_ERR`, no watchdog teardown, and
+`NCCL_DEBUG=INFO` confirms real RoCE rather than a silent socket fallback (`NET/IB : Using
+[0]rocep1s0f1:1/RoCE [RO]`, `Using network IB`, all 8 channels `via NET/IB/0`). It simply is not fast.
+
+| Payload | algbw | busbw |
+|---|---|---|
+| 16 MB | 1.54 GB/s | 1.54 GB/s |
+| 64 MB | 1.44 GB/s | 1.44 GB/s |
+| 256 MB | 1.45 GB/s | 1.45 GB/s |
+
+**Cause: no GPUDirect RDMA on this platform.** The same INFO log ends `Connected all rings, use ring
+PXN 0 GDR 0`, and reports `cuMemGdrSupport 0`. `nvidia_peermem` is present on disk
+(`nvidia-580-open/nvidia-peermem.ko`, 580.173.02) but **fails to load with `EINVAL` on both nodes,
+logging nothing to dmesg** — consistent with GB10 Grace Blackwell using coherent unified memory over
+NVLink-C2C, where the legacy peer-memory path built for discrete GPUs with BAR-exposed VRAM does not
+apply. Every collective therefore stages GPU → host → NIC and back.
+
+Tuning was tried and made no difference: `NCCL_BUFFSIZE=8M`, `NCCL_IB_QPS_PER_CONNECTION=4`,
+`NCCL_IB_SPLIT_DATA_ON_QPS=1`, `NCCL_MIN_NCHANNELS=4` all land within noise of 1.4 GB/s. The
+bottleneck is structural, not configuration.
+
+**What this means.** The wire is no longer the constraint — `ib_write_bw` sustains 13.0 GB/s
+host-to-host over the same link, ~9x what NCCL achieves. The GPU-to-NIC path is the constraint.
+`TP=2` all-reduce runs per layer per token, so at 1.4 GB/s a two-node MiMo would be slower than the
+socket path S1 already rejected. **MiMo does not proceed, and the `coder2`/dual-coder retirement
+cost is not paid** — exactly the discipline the exit gate exists to enforce.
+
+**What was nonetheless gained, and is worth keeping.** A working 13.0 GB/s host-memory RDMA path,
+6.5x the socket baseline, persistent across reboot. That is directly useful for the bulk weight
+staging `infra/network-planes.md` reserved the fabric for in the first place — S1's own ~46.6 GB
+`muse`+`omni` migration ran at ~110 MB/s over GigE and later ~481 MB/s over SSH-on-bond. It also
+removes RoCE brokenness as a confound from any future multi-node work.
+
+**Open question for whoever picks this up.** Whether GPUDirect RDMA is achievable on GB10 at all
+with ConnectX-7 — via DMA-BUF registration rather than `nvidia_peermem`, a newer driver/DOCA stack,
+or not at all. That answer, not more fabric work, is what gates `TP=2` on this hardware. Until it is
+answered, treat any multi-node tensor-parallel plan as blocked on the GPU-to-NIC path, not the wire.
+
+#### S18b — the lossless configuration itself
+
+**Superseded by S18a's executed findings — do not start this.** Retained for the record only. PFC/ECN
+addresses congestion-induced loss on a working path; S18a showed a path that completes zero transfers
+at zero load, for a structural reason that lossless configuration does not touch. Revisit only if a
+bonding fix lands and throughput is then limited by loss under real load.
+
+Only reached if S18a lands on H3.
+
+**The usual hardest part of RoCE does not apply here.** This is a direct-attached, switchless pair
+(`10.129.9.0/30`, two cables, no fabric in between), so there is no switch to configure PFC on and
+no multi-hop ECN domain to get consistent. Configuration is symmetric NIC-side work on both ends
+only: trust mode, the PFC-enabled priority, the DSCP/traffic-class mapping NCCL emits on
+(`NCCL_IB_TC`), and ECN marking. `mlnx_qos` is the tool; ECN toggles live under
+`/sys/class/net/<dev>/ecn/roce_np/` and `roce_rp/`.
+
+Two live-verification requirements, both learned from how the S1 failure presented:
+
+- **Confirm the MTU 9000 interaction explicitly.** Jumbo frames and PFC both work, but the
+  headroom/buffer calculation changes with frame size, and an under-provisioned headroom buffer
+  reproduces exactly the symptom being fixed.
+- **Settings must be made persistent and reproducible.** `mlnx_qos` and sysfs ECN toggles do not
+  survive reboot on their own. Capture the whole configuration as `infra/roce-fabric/README.md`, in
+  the same recreate-checklist shape every other `infra/*/README.md` here uses — a fabric that works
+  until the next reboot is not a cleared gate.
+
+#### S18c — firewall, per S4's own extension rule
+
+`infra/network-planes.md` already prescribes the mechanism: "add an explicit, narrowly-scoped `ufw`
+rule for that port when it's actually built and needed ... not by reverting to a blanket allow." The
+fabric currently permits `22/tcp` only, and that posture is deliberate — S4 established it after
+confirming live that the fabric had previously reached control-plane backends unauthenticated.
+
+RoCEv2 rides **UDP 4791**; NCCL additionally needs its own TCP bootstrap/out-of-band path, and vLLM's
+`torch.distributed` init needs a master port. Enumerate what is actually required from a real run
+under `NCCL_DEBUG=INFO` and open exactly that, scoped to `10.129.9.0/30`, both directions. Update
+`network-planes.md`'s "Current state" verification table with the new allowed rows and re-run the
+existing blocked-path checks to prove the control-plane backends are *still* blocked over the fabric.
+
+#### S18d — validate against the recorded baseline
+
+The harness already exists on both nodes — `/opt/benchmark-venv` (PyTorch 2.13.0+cu13.0, NCCL
+2.29.7), the same one S1 used, so results are directly comparable to the recorded numbers rather
+than to a fresh unrelated run.
+
+- Compare against S1's two recorded figures: socket-mode all-reduce ~2.0 GB/s (16MB+: 1.87–2.03
+  GB/s) and ~117 Gbit/s raw TCP.
+- **Run sustained, not a single pass.** The S1 failure appeared during data movement after clean
+  negotiation, so a short run that completes proves very little. Hold real traffic long enough to
+  clear the watchdog timeouts that tore the process group down last time.
+- Record the result in the same place and shape S1 did, including a failure — a documented
+  "still broken after PFC work" is a real outcome of this stage, not a non-result.
+
+**Exit gate — set the threshold before measuring, not after.** S18 succeeds only if sustained
+all-reduce is fast enough that per-layer, per-token collectives are not the binding constraint on
+`TP=2` inference. Decide that number up front and write it down here before the first post-fix run,
+so the stage cannot be retroactively graded against whatever it happened to produce. If the gate is
+missed, MiMo does not proceed and `coder2`/dual-coder review stays exactly as it is.
+
+**Headroom, for the stage that follows — real numbers, not the integration plan's.** S1 measured
+`spark-2` at 53 GiB used / **67 GiB available** with `muse` + `omni` both resident; `omni` is ~24 GB
+of that. Retiring `omni` therefore frees roughly 24 GB, not the "60GB+" the MiMo integration plan
+claims — that figure double-counts `coder2`, which is on-demand and already idle-sleeps at 900s, so
+it contributes nothing to the always-on footprint. Against a ~62.5 GB half-shard plus KV cache and
+the vision/audio encoders, the fit is plausible but genuinely tight, and `tts` also lives on this
+node now. **Measure it with `omni` actually stopped**, per V4 §4a's warning that `free -h`
+"available" overstates real headroom.
+
+**Explicitly not in this stage.** MiMo checkpoint acquisition, quantization, vLLM deployment, and
+the `omni` role cutover are all downstream of the exit gate. So is S12's merged mode, which this
+stage would also unblock but does not itself deliver.
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -1543,6 +1831,12 @@ not just the final number.
   node already at 80 GB of 105 GB resident is how V4 got its memory-overcommit crash (§9 risk 1).
 - S16a (eval harness) **before** S16b (reranker) — nothing to measure "helped" against otherwise.
   S16c (optional OCR) is independent of both.
+- S18 (RoCE fabric) **before** any tensor-parallel model deployment — `TP=2` all-reduce runs per
+  layer per token, so the ~2.0 GB/s socket path is a hard ceiling on inference, not just on staging.
+  This gates every MiMo variant, on-demand as much as persistent.
+- S18a (diagnose: GID index, bond mode) **before** S18b (PFC/ECN) — the recorded failure signature
+  has cheaper explanations than lossless-fabric config, and S18b is real new scope. **Resolved
+  2026-09-24: this ordering paid for itself — S18a found the bond, and S18b was never needed.**
 
 ---
 
@@ -1658,3 +1952,7 @@ reference chain across two retired repos settles it in favour of forking.
 | 1.15.0 | 2026-08-30 | Repo-level consolidation, separate from the S1-S15 code work above: `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` copied into this repo (~230 files) with every `REPO_DIR`/`ExecStart`/identity path repointed from `HermesAgentV4` to `HermesAgentV5`, while every dated changelog/Revision-History entry narrating a real past event was left untouched (an initial blanket find-replace corrupted several of these — e.g. rewrote "HermesAgentV4 rewrite of HermesAgentRedo's..." to say V5 — caught and redone surgically before anything was committed). Found and captured 16 systemd unit files that were live on spark/spark-2 but had never been committed to either repo's git history (canary health/probe-report, fleet-health, nfs-backup, wiki-sync, and both identities' fabrication-guard/session-cap-guard/session-guardian/remediate-worker). Found and preserved 3 live-only unit customizations a blind copy would have silently dropped (`VAULT_NODE=sintra`/`amy` on each node's router, `BROKER_QUIET_TYPES=embed,wake` on the broker, `MALLOC_ARENA_MAX=1` on the embed server). Found and fixed a genuine regression this same migration introduced: the Windows-side `cp -r` (both repos checked out on the same machine) silently dropped the executable bit on 103 script files, caught live when homed13's render/embed workers crash-looped on first restart — fixed via `git update-index --chmod=+x` and repulled everywhere before it could hit spark-2 or spark. All three nodes (`homed13` → `spark-2` → `spark`, lowest-criticality first) cut over one service at a time, catching and recovering from a Vaultwarden rate-limit incident on spark-2 (two services sharing the `amy` identity restarted within 10s) without losing any in-flight work. `HermesAgentV4` marked superseded to match. |
 | 1.16.0 | 2026-08-31 | S16 planned (not executed): closes the RAG stack's remaining real gaps — an eval harness (recall@k against a hand-curated per-corpus question set, built before the reranker so "it helped" is a measured claim, not an assumption), a reranker (Qwen3-Reranker candidate, port `8093` already reserved for it and unused), and optional OCR for `personal-kb`'s scanned/image-only PDFs (`tesseract`, off by default, triggered only on near-zero native text extraction). This section's own first draft proposed a fourth item — a new retriever agent — before discovering, immediately before committing, that `hermes-retrieve.py` already exists and is already live (built independently since the S15 checkpoint, alongside the broader V4→V5 consolidation in 1.15.0): real per-chunk screening, `dispatch` for synthesis with better reasoning than this draft's own first guess (`super`) would have had, a `NO_ANSWER_FOUND`/`no-match` path feeding a real web-search fallback. Rewritten to document what's actually there instead of proposing a duplicate, and to correct this draft's own mistaken reading of non-negotiable #1 along the way. |
 | 1.17.0 | 2026-08-31 | S16 executed and closed out live on the fleet. Eval harness (`hermes-rag-eval.py`) generated 78 real questions from real indexed chunks (not hand-invented) and measured a real baseline: recall@5 = 0.538, no reranker. Reranker deployment found two real bugs before it worked: a third-party Qwen3-Reranker GGUF conversion producing backwards relevance scores (missing `cls.output.weight` — a known llama.cpp issue, `ggml-org/llama.cpp#16407` — fixed by switching to `ggml-org`'s own correctly-converted upload), then a wide-candidate-pool request 500ing past `llama-server`'s default `--ubatch-size` on 50 of 78 real eval questions (fixed, `--ubatch-size 4096`). With both fixed: recall@5 = 0.705, a measured +16.7pp, `ops` (the weakest corpus) improving the most (0.318→0.636). Both existing RAG callers get reranking automatically via `hermes_rag_common.search()`, no changes needed on either. Optional per-page OCR (`--ocr`, off by default, `tesseract` + `pdftoppm`) added to `hermes-rag-ingest-kb.py`, verified against a real, naturally-occurring image-only page found while testing (not a staged/manufactured case) — recovered real text automatically, logged explicitly, the daily scheduled ingest timer unaffected since it never passes the flag. |
+| 1.18.0 | 2026-09-24 | S18 planned (not executed): RoCE lossless fabric, to clear the gate S1 set and S12 re-confirmed unmet. Driven by replacing `omni` (Nemotron-3-Nano-Omni-30B-A3B, 13th-percentile multimodal — underperforming at its own designated job) with a persistent `TP=2` MiMo-V2.5 Omni, which cannot fit one node at ~125GB NVFP4-experts. Established that the fabric gates **every** MiMo variant, not just the resident one — `TP=2` all-reduce runs per layer per token, so S1's socket-mode ~2.0 GB/s is an inference ceiling, not a staging cost. Staged diagnose-before-configure (S18a: GID index, then the `balance-rr` bond mode as a RoCE-LAG/out-of-order suspect, both free to test) ahead of real PFC/ECN scope (S18b), on the same "cheap measurement before new scope" reasoning S1 used. Recorded two corrections to the MiMo integration plan's own arithmetic: retiring `omni` frees ~24 GB against S1's measured 67 GiB available, not the claimed "60GB+", which double-counts on-demand `coder2`. Also recorded the accepted consequence up front rather than at cutover — a persistent both-node MiMo means `coder2` can never wake, retiring `tools/hermes-dualcoder.py`/`skills/dual-coder-review/` and leaving no stock-alignment baseline in the coding path. Exit gate must be numbered before the first post-fix run; if missed, MiMo does not proceed and that cost is never paid. |
+| 2.0.0 | 2026-09-24 | S18a executed live (read-only diagnostics over the tailnet; no node configuration changed). **Major bump — S18b is a reversal of prior guidance, not just an addition.** S1's long-standing hypothesis that the RoCE failure needs PFC/ECN lossless-fabric work is **wrong**, and S18 as scoped this morning would have solved the wrong problem. Root cause: `balance-rr` bonding is structurally incompatible with RoCE. Enslavement overwrote both ConnectX-7 ports' distinct permanent MACs with the bond's on each node, so both RDMA devices derive one GID and one IP, while round-robin puts every other packet of a QP onto the other card's wire, where no matching QP context exists to ACK it. Reproduced outside NCCL in seconds with a single HCA (`ib_write_bw -x 3`): `status 12 syndrom 0x81, scnt=128 ccnt=0` — zero completions at zero load, which PFC cannot explain or fix. H1 (GID index) eliminated: RoCEv2 GID is index 3 on both nodes, pinned, exchanged correctly, still fails. Supporting evidence: S1's own persisted hw_counters (node up since 2026-08-27) show `local_ack_timeout_err` 48/96 with `packet_seq_err`/`out_of_sequence` at **zero** — packets never arrive rather than arriving reordered; `lldpctl` confirms direct attach with no switch. Also found two already-cabled, unbonded, unconfigured `f1` ports per node (`carrier=1` on all four ports both sides) — a ready-made dedicated RDMA path needing no change to `bond-fabric0`, now the recommended fix. End-to-end confirmation is blocked pending operator approval for `ip addr add` on those two interfaces. |
+| 2.1.0 | 2026-09-24 | S18a's fix confirmed working on the fleet, same day as the diagnosis. Operator approved the interface change; `10.129.10.1/30`+`10.129.10.2/30` assigned to the previously unused, unbonded `enp1s0f1np1` on each node at MTU 9000, with `bond-fabric0` and its `spark2-fabric` SSH aliases untouched throughout. Jumbo ping clean at 0% loss; `rocep1s0f1` now carries a RoCEv2 GID derived from the port's own permanent MAC rather than the shared bond MAC. The identical `ib_write_bw` that returned `ccnt=0` on the bond now sustains **12,994 MB/s (~13.0 GB/s) over 10s, 1.25M iterations, clean exit** — **6.5x S1's 2.0 GB/s socket baseline**, on one of two available ports, with the second `f1` port still free for multi-rail. Root cause and fix both confirmed empirically; PFC/ECN was never needed. Two items remain before S18's exit gate can be called: NCCL all-reduce validation (needs the narrow ufw rule on the new `10.129.10.0/30` that S18c anticipated — not yet applied, operator approval pending), and persistence (addressing is runtime-only `ip addr add` and reverts on reboot; needs writing into node network config and capturing as `infra/roce-fabric/README.md`). |
+| 2.2.0 | 2026-09-24 | S18 executed and closed out live on the fleet. Resolves the two items 2.1.0 left open, and the second one changes the outcome. **Persistence + firewall done:** each node's `enp1s0f1np1` NM profile converted to a static `roce-f1` (manual IPv4, MTU 9000, autoconnect; NM is the right layer since these nodes render netplan from it), re-verified at **13,007 MB/s** under the persistent config; one peer-scoped ufw rule per node on `10.129.10.0/30` per S4's exception-list rule, with the `10.129.9.0/30` bond keeping its `22/tcp`-only posture. **Exit gate MISSED.** NCCL all-reduce now runs clean over the fixed fabric — no retry-exhaustion, and `NCCL_DEBUG=INFO` confirms genuine RoCE (`NET/IB : Using [0]rocep1s0f1:1/RoCE`, `Using network IB`) rather than socket fallback — but delivers only **~1.4 GB/s busbw**, *below* S1's 2.0 GB/s socket baseline. Cause is **no GPUDirect RDMA on GB10**: `GDR 0`, `cuMemGdrSupport 0`, and `nvidia_peermem` present on disk but failing to load with `EINVAL` on both nodes while logging nothing — consistent with Grace Blackwell's coherent unified memory making the legacy discrete-GPU peer-memory path inapplicable, so every collective stages GPU→host→NIC. Tuning (`NCCL_BUFFSIZE=8M`, `IB_QPS_PER_CONNECTION=4`, `IB_SPLIT_DATA_ON_QPS=1`, `MIN_NCHANNELS=4`) moved nothing — structural, not configuration. **Consequence: `TP=2` stays non-viable, MiMo does not proceed, and the `coder2`/dual-coder retirement cost is not paid** — the gate working as designed. Kept regardless: a persistent 13.0 GB/s host-memory RDMA path, 6.5x the socket baseline, directly useful for the bulk weight staging the fabric was reserved for (S1's 46.6 GB migration ran at ~110 MB/s over GigE). The open question is now whether GPUDirect RDMA is reachable on GB10 at all — via DMA-BUF rather than `nvidia_peermem`, a newer driver/DOCA stack, or not at all — and that, not more fabric work, is what gates multi-node tensor parallelism on this hardware. |

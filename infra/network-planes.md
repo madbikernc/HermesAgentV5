@@ -1,14 +1,15 @@
 # Network plane separation — `spark` ↔ `spark-2`
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
-HermesAgentV5's S4 (`../../HermesAgentV5/IMPLEMENTATION_PLAN.md`). Two physically separate links exist
-between the Spark nodes, and they carry different kinds of traffic on purpose:
+HermesAgentV5's S4 and S18 (`../../HermesAgentV5/IMPLEMENTATION_PLAN.md`). Three physically separate
+links exist between the Spark nodes, and they carry different kinds of traffic on purpose:
 
 | Plane | Subnet | Interface | Carries |
 |---|---|---|---|
 | **Control** | `10.129.1.0/24` | GigE | Every control-plane service: router, broker, Buzz, memory, Continuwuity, model backend proxying (nano/super/coder/muse/omni), SSH for interactive/admin work |
-| **Data** | `10.129.9.0/30` | `bond-fabric0` (2× ConnectX-7, `balance-rr`, MTU 9000, 400 Gb/s aggregate) | **SSH only, today** — reserved for model weight staging, bulk memory/context pulls, fine-tune datasets, and merged-mode NCCL if S12 ever happens |
+| **Data** | `10.129.9.0/30` | `bond-fabric0` (2× ConnectX-7 `f0` ports, `balance-rr`, MTU 9000, 400 Gb/s aggregate) | **SSH only** — model weight staging, bulk memory/context pulls, fine-tune datasets. **Cannot carry RoCE** (see RDMA plane below) |
+| **RDMA** | `10.129.10.0/30` | `enp1s0f1np1` (one ConnectX-7 `f1` port per node, **unbonded**, MTU 9000, 200 Gb/s) | RoCEv2 and NCCL collectives. Added S18, 2026-09-24 |
 
 ## Why this needed writing down
 
@@ -79,6 +80,46 @@ actually needing this; day-to-day cross-node calls in this codebase are small co
 or plain HTTP API calls, neither of which benefit meaningfully from the fabric's throughput
 advantage over its own connection/negotiation overhead.
 
+## The RDMA plane (S18, 2026-09-24) — and why RoCE cannot ride the bond
+
+`bond-fabric0` carries TCP beautifully (~117 Gbit/s measured) but **cannot carry RoCE at all.**
+Enslaving both ConnectX-7 `f0` ports overwrites their distinct permanent MACs with the bond's, so
+both RDMA devices derive one GID and advertise one IP — while `balance-rr` puts every other packet
+of a queue pair onto the *other* card's wire, where no matching QP context exists to acknowledge it.
+RDMA has no equivalent of the netdev-layer reassembly that lets TCP tolerate this. The observable
+result was total failure, not degradation: `ib_write_bw` returned `status 12` with `scnt=128,
+ccnt=0` — 128 writes posted, zero completed, at zero load. This is what S1 recorded from NCCL in
+2026-08-29 and attributed to missing PFC/ECN; that attribution was wrong, and no lossless-fabric
+work was needed to fix it.
+
+**The fix used hardware that was already cabled and idle.** Each ConnectX-7 is dual-port and all
+four ports on both nodes report `carrier=1`; only the `f0` pair was ever bonded. The `f1` pair is
+now a dedicated, unbonded, point-to-point RDMA link — each port keeps its own permanent MAC and
+therefore its own GID, which is exactly what the bond destroyed. **`bond-fabric0` was not modified**,
+so the SSH aliases above and every existing bulk-transfer path behave identically.
+
+| | Sustained | |
+|---|---|---|
+| `bond-fabric0`, RoCE | **0** | `ccnt=0` — never worked |
+| `bond-fabric0`, NCCL sockets | ~2.0 GB/s | S1's baseline |
+| **`10.129.10.0/30` unbonded, RoCE** | **~13.0 GB/s** | 6.5x, one of two free `f1` ports |
+
+Persisted as a NetworkManager profile named `roce-f1` on each node (`ipv4.method manual`, MTU 9000,
+`autoconnect yes`) — **not** hand-edited netplan, because these nodes render netplan *from*
+NetworkManager and a hand-edit would be overwritten.
+
+**Firewall:** one peer-scoped rule per node (`allow from 10.129.10.2` on spark, `allow from
+10.129.10.1` on spark-2) rather than a port list, because NCCL's bootstrap uses dynamic ports.
+Host-scoped is defensible here in a way it would not be on the LAN: this `/30` is a direct cable
+between exactly these two nodes with nothing else on the segment. The `10.129.9.0/30` bond keeps its
+`22/tcp`-only posture, unchanged.
+
+**Known ceiling, recorded so nobody re-measures it by accident.** NCCL all-reduce over this plane
+runs clean and genuinely uses RoCE, but reaches only ~1.4 GB/s because GPUDirect RDMA is unavailable
+on GB10 (`GDR 0`, `cuMemGdrSupport 0`, `nvidia_peermem` fails to load with `EINVAL`). Collectives
+stage GPU → host → NIC. **This plane is therefore excellent for host-memory bulk transfer and
+currently unsuitable for tensor-parallel inference** — see `IMPLEMENTATION_PLAN.md` S18.
+
 ## Extending this later
 
 If a future stage needs the fabric for something beyond SSH-based transfer (S12's merged-mode NCCL is the
@@ -93,3 +134,4 @@ deliberate, auditable exception list.
 |---|---|---|
 | 1.0.0 | 2026-08-29 | Initial version — S4 executed: narrowed both nodes' `10.129.9.0/30` ufw rule from blanket-allow to `22/tcp` only, confirmed the prior cross-plane exposure live before fixing it, verified the fix both directions plus SSH continuity, documented why bind-address changes were rejected in favor of a firewall fix. |
 | 1.1.0 | 2026-09-01 | Direct request: benchmarked the fabric for the first time since S4 (real ~4.4x SSH-throughput speedup over the LAN) and added `spark2-fabric`/`spark-fabric` SSH config aliases on each node so the already-existing, already-working S1 keys can actually be used over `bond-fabric0` without remembering the raw `10.129.9.x` addresses. No script uses them yet. |
+| 1.2.0 | 2026-09-24 | S18: new **RDMA plane** (`10.129.10.0/30`, the previously unused unbonded ConnectX-7 `f1` port on each node, MTU 9000). Documents why RoCE cannot ride `bond-fabric0` at all — bond enslavement collapses both ports' MACs/GIDs into one while `balance-rr` sprays a queue pair across both wires, giving `ccnt=0` (zero completions at zero load), which is what S1 saw from NCCL in 2026-08-29 and misattributed to missing PFC/ECN. Fixed with hardware already cabled and idle; `bond-fabric0` untouched, so every existing SSH/rsync path is unaffected. RoCE went 0 → ~13.0 GB/s, persisted as a NetworkManager `roce-f1` profile (not hand-edited netplan — these nodes render netplan from NM). One peer-scoped ufw rule per node rather than a port list, since NCCL bootstrap uses dynamic ports and this `/30` is a direct two-node cable. Records the known ceiling: NCCL collectives reach only ~1.4 GB/s on this plane because GPUDirect RDMA is unavailable on GB10, so it suits bulk host-memory transfer but not tensor-parallel inference. |
