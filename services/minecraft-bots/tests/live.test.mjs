@@ -1,4 +1,4 @@
-// Version: 1.1.0
+// Version: 1.2.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -10,11 +10,14 @@
 //   node tests/live.test.mjs                 run every scenario
 //   node tests/live.test.mjs combat armor    run only scenarios whose name contains a filter
 //
-// Scenarios never touch chests: chest snapshots go into the fleet's shared known_chests.json.
+// Chest snapshots, beds and other memory files go to MC_MEMORY_ROOT (default: a fresh temp dir),
+// never the fleet's /mnt/hermes-data/minecraft-memory, and the RAG corpora are disabled.
 // Every behavior fix that is observable in-world should add a scenario here (see tests/README.md).
 //
 // Revision History: 1.0.0 | 2026-09-24 | Initial scenarios for MB-01, MB-02/04, MB-07, MB-15.
 // 1.1.0 | 2026-09-24 | Scenarios for MB-02 (takeover closes an open window) and MB-08 (place_home).
+// 1.2.0 | 2026-09-25 | Chest scenarios (MB-17 mixed stacks, MB-16 stocked chest vs village scouting),
+//   safe now that MC_MEMORY_ROOT keeps chest snapshots out of the fleet's known_chests.json.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -24,9 +27,17 @@ import { fileURLToPath } from "node:url";
 import mineflayer from "mineflayer";
 import pathfinderPkg from "mineflayer-pathfinder";
 import { Vec3 } from "vec3";
-import { loadActionPlugins, performAction } from "../actions.js";
-import * as arbiter from "../arbiter.js";
-import { equipBestArmor } from "../equipment.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// Isolation BEFORE the bot modules load: their memory paths are read at import time.
+const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
+process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
+process.env.MC_RAG_DISABLED = "true";
+const { loadActionPlugins, performAction } = await import("../actions.js");
+const arbiter = await import("../arbiter.js");
+const { equipBestArmor } = await import("../equipment.js");
 
 const { pathfinder, Movements, goals } = pathfinderPkg;
 const execFileAsync = promisify(execFile);
@@ -73,6 +84,9 @@ async function buildArena() {
 async function resetTester() {
   await rcon(
     `kill @e[tag=${TAG}]`,
+    // Clear the arena interior (chests/blocks from the last scenario), then any items that spilled.
+    `fill ${x - r + 1} ${y + 1} ${z - r + 1} ${x + r - 1} ${y + 4} ${z + r - 1} minecraft:air`,
+    `kill @e[type=minecraft:item,x=${x - r},y=${y},z=${z - r},dx=${2 * r},dy=6,dz=${2 * r}]`,
     `gamemode survival ${TESTER}`,
     `clear ${TESTER}`,
     `effect clear ${TESTER}`,
@@ -205,6 +219,30 @@ scenario("MB-08 place_home walks to the spawn point and places the item there", 
   assert(placed, "a crafting table stands within 4 blocks of home");
 });
 
+const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);
+async function placeChest(dx, dz, items) {
+  const nbt = items.map(([id, count], slot) => `{Slot:${slot}b,id:"minecraft:${id}",count:${count}}`).join(",");
+  await rcon(`setblock ${x + dx} ${y + 1} ${z + dz} minecraft:chest{Items:[${nbt}]}`);
+  await waitFor(() => bot.blockAt(new Vec3(x + dx, y + 1, z + dz))?.name === "chest", 5000, "chest placed");
+}
+
+scenario("MB-17 chest: a mixed-species stack is withdrawn across types", async () => {
+  await placeChest(3, 0, [["oak_log", 2], ["birch_log", 2]]);
+  const result = await performAction(bot, { type: "mine", block: "oak_log", count: 4 }, TESTER);
+  assert.equal(result.ok, true, `mine result: ${result.text}`);
+  assert.match(result.text, /already in a chest/);
+  assert.equal(logCount(), 4, "2 oak + 2 birch taken");
+  assert.equal(bot.currentWindow, null, "chest closed afterwards");
+});
+
+scenario("MB-16 explore: a stocked chest doesn't satisfy scouting for a village", async () => {
+  await placeChest(-3, 0, [["oak_log", 16]]);
+  const result = await performAction(bot, { type: "explore", feature: "village" }, TESTER);
+  assert.equal(result.ok, false, `explore result: ${result.text}`);
+  assert.match(result.text, /no sign of a village/);
+  assert.equal(logCount(), 0, "nothing withdrawn from the chest");
+});
+
 // ---- runner -------------------------------------------------------------------------------------
 const bot = mineflayer.createBot({ host: HOST, port: PORT, username: TESTER, auth: "offline" });
 bot.loadPlugin(pathfinder);
@@ -249,6 +287,7 @@ try {
     console.log(`cleanup failed: ${err.message}`);
   }
   bot.quit();
+  if (ownMemoryRoot) rmSync(process.env.MC_MEMORY_ROOT, { recursive: true, force: true });
 }
 console.log(`${ran - failed}/${ran} live scenarios passed.`);
 process.exit(failed ? 1 : 0);

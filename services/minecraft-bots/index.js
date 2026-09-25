@@ -1,4 +1,9 @@
-// Version: 2.93.0
+// Version: 2.94.0
+//
+// 2.94.0 (2026-09-25) -- test support for the full-bot live harness (tests/live-bot.test.mjs):
+// MC_MEMORY_ROOT for the curriculum file, MC_HOME_POS pins a test bot's home, MC_TEST_USERNAMES
+// (default MBTester,MBProbe) are ignored as chat speakers, and the goal heartbeat is a named
+// function (goalHeartbeatTick) so it can be unit-tested.
 //
 // 2.93.0 (2026-09-24) -- review follow-up, closing the remaining gaps. MB-08: a Builder
 // item already in hand is placed via runBuilderPlacement (place_home + verify), no planner call.
@@ -1572,6 +1577,13 @@ loadActionPlugins(bot);
 
 bot.once("spawn", async () => {
   console.log(`[${USERNAME}] spawned at`, bot.entity.position);
+  // MC_HOME_POS="x,y,z" (test bots only, tests/live-bot.test.mjs): "home" is normally the world
+  // spawn; a test bot's home is pinned to its arena so go-home behavior never walks it to the base.
+  if (process.env.MC_HOME_POS) {
+    const [hx, hy, hz] = process.env.MC_HOME_POS.split(",").map(Number);
+    bot.spawnPoint = new Vec3(hx, hy, hz);
+    console.log(`[${USERNAME}] home pinned to`, bot.spawnPoint);
+  }
   // Tech-tree curriculum (2026-09-08): only Mayor's own process ever reads curriculumStageIndex,
   // but loading it is cheap and harmless for every other bot too -- one code path, not a
   // separate Mayor-only startup branch.
@@ -2067,15 +2079,15 @@ const GOAL_HEARTBEAT_MS = 2 * 60_000;
 const GOAL_LEASE_MS = GOAL_HEARTBEAT_MS * 3 + 30_000;
 const otherBotGoalSeenAt = new Map(); // from_agent -> Date.now() of their last "active" broadcast
 
-setInterval(() => {
+function goalHeartbeatTick(now = Date.now()) {
   if (currentGoal) broadcastGoalState("active", currentGoal.description, null, true);
-  const now = Date.now();
   for (const [agent, at] of otherBotGoalSeenAt) {
     if (now - at <= GOAL_LEASE_MS) continue;
     otherBotGoalSeenAt.delete(agent);
     if (otherBotGoals.delete(agent)) console.log(`[${USERNAME}] ${agent}'s goal lease expired -- treating as idle`);
   }
-}, GOAL_HEARTBEAT_MS);
+}
+setInterval(goalHeartbeatTick, GOAL_HEARTBEAT_MS);
 
 // Item #6 of "fix all the above" (squad response for Mark/Luke). Same best-effort broadcast
 // pattern as broadcastGoalState -- see checkSelfDefense's own call site for the cooldown that
@@ -3967,7 +3979,8 @@ function isCurriculumItem(name) {
 // not per-bot within-stage progress -- a Mayor restart mid-stage just re-observes completions as
 // they're (re-)broadcast or re-checked, an acceptable, low-cost simplification given stages take
 // a while regardless.
-const CURRICULUM_FILE = "/mnt/hermes-data/minecraft-memory/mayor-curriculum.json";
+const MEMORY_ROOT = (process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory"); // MC_MEMORY_ROOT: test isolation
+const CURRICULUM_FILE = `${MEMORY_ROOT}/mayor-curriculum.json`;
 let curriculumStageIndex = 0;
 // Bot names (plain, e.g. "Mark") who've provably cleared the CURRENT stage -- reset on advance.
 let stageProgress = new Set();
@@ -3991,7 +4004,7 @@ async function loadCurriculumStage() {
 
 async function saveCurriculumStage() {
   try {
-    await mkdir("/mnt/hermes-data/minecraft-memory", { recursive: true });
+    await mkdir(MEMORY_ROOT, { recursive: true });
     await writeFile(CURRICULUM_FILE, JSON.stringify({
       stageIndex: curriculumStageIndex,
       stageProgress: [...stageProgress],
@@ -5483,7 +5496,8 @@ async function setNewGoal(description, speaker) {
 // from "Rcon"/"Server" (found by the behavior baseline, 2026-09-24 -- a live-test run flooded all
 // nine bots' model classifier and message queues). The live-test bot (tests/live.test.mjs) is
 // ignored too.
-const NON_PLAYER_SPEAKERS = new Set(["Rcon", "Server", process.env.MC_TEST_USERNAME || "MBTester"]);
+const NON_PLAYER_SPEAKERS = new Set(["Rcon", "Server",
+  ...(process.env.MC_TEST_USERNAMES ?? "MBTester,MBProbe").split(",").map((s) => s.trim()).filter(Boolean)]);
 
 function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   if (speaker === bot.username || speaker === MATRIX_USER_ID) return;

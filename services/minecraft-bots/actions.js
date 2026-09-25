@@ -1,4 +1,6 @@
-// Version: 1.67.0
+// Version: 1.68.0
+//
+// 1.68.0 (2026-09-25) -- test isolation: beds/pen/known-chests paths honor MC_MEMORY_ROOT.
 //
 // 1.67.0 (2026-09-24) -- review follow-up, closing the remaining gaps. MB-02: flee runs on
 // its own Movements copy and restores the shared one only if its copy is still active. MB-08: new
@@ -2078,7 +2080,7 @@ function findPlantableSpotNear(bot, center, radius) {
 // why. One small file per bot, same hermes-data-mount-backed pattern skills.js's SKILLS_DIR
 // already uses for exactly this "small, durable, per-process state that must survive a restart"
 // need.
-const BEDS_DIR = "/mnt/hermes-data/minecraft-memory/beds";
+const BEDS_DIR = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/beds`; // MC_MEMORY_ROOT: test isolation
 
 // Hoisted to module scope 2026-09-11 (direct request "fix the pen herding") so both "breed" and
 // the new "herd_to_pen" case below can share one definition -- it used to live only inside
@@ -2101,7 +2103,7 @@ const BREEDING_FOOD = {
 // per-bot: unlike a bed (personal, claimed), a pen is fleet infrastructure -- the same "shared,
 // not per-bot" reasoning MINECRAFT_BOTS_DESIGN.md §15.6 already gives for the crafting
 // table/furnace/chest.
-const PEN_FILE = "/mnt/hermes-data/minecraft-memory/pen.json";
+const PEN_FILE = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/pen.json`;
 
 async function loadPenLocation() {
   try {
@@ -2136,7 +2138,7 @@ async function savePenLocation(center, gate) {
 // SwimMovements-style fuzziness). Recording a FULL snapshot on every real interaction means
 // "redaction" is a side effect of always writing the current truth, never a separate
 // delete-this-one-item operation that could drift from reality.
-const KNOWN_CHESTS_FILE = "/mnt/hermes-data/minecraft-memory/known_chests.json";
+const KNOWN_CHESTS_FILE = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/known_chests.json`;
 
 function chestKey(position) {
   return `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}`;

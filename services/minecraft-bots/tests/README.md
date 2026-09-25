@@ -1,18 +1,20 @@
 # Minecraft bot tests
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
-Three layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.json`).
+Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.json`).
 
 | Suite | What it proves | Where it runs |
 |---|---|---|
-| `unit` — `unit.test.mjs` | The fixed logic, extracted from the real source and run against controlled stubs | Anywhere with Node (no server, no `npm install`) |
+| `unit` — `unit.test.mjs` + `test_triage.py` | The fixed logic, extracted from the real source and run against controlled stubs; triage classification and per-bot dedupe | Anywhere with Node and Python (no server, no `npm install`) |
 | `live` — `live.test.mjs` | The real `actions.js`/`arbiter.js`/`equipment.js` against the real server, mobs and items | Spark nodes (needs `node_modules`, the bot server, and `live/rcon.py`'s vault/SSH access) |
-| `baseline` — `baseline.mjs` | What the deployed fleet on this host actually did over the last 24h, vs the committed baseline | Each Spark node, over its own `minecraft-bot-*` journals |
+| `livebot` — `live-bot.test.mjs` | A whole bot process (`index.js` as `MBProbe`) driven by whispers, restarts and injected coordination messages: STOP, goal identity, resume, night pause, storing during a goal, Mayor curriculum persistence | Spark nodes |
+| `baseline` — `baseline.mjs` + `monitoring.mjs` | What the deployed fleet on this host actually did over the last 24h vs the committed baseline; every bot unit mirrored into the activity log and visible to triage | Each Spark node, over its own `minecraft-bot-*` journals |
 
 ```bash
 tests/run.sh unit            # offline
 tests/run.sh live [filter]   # e.g. tests/run.sh live combat
+tests/run.sh livebot [filter]
 tests/run.sh baseline        # add --hours 6, --update, --save <file>
 tests/run.sh all             # everything this host can run
 ```
@@ -23,7 +25,13 @@ tests/run.sh all             # everything this host can run
 sea-lantern platform at (2000, 200, 2000) over RCON. The platform is far from the fleet's base,
 lit so nothing spawns, and fenced with glass. Before each scenario the tester is cleared, made
 immune to damage and teleported onto the platform. Test mobs are tagged `mbtest` and removed at the end.
-Scenarios must not open chests: chest snapshots go into the fleet's shared `known_chests.json`.
+Both live harnesses set `MC_MEMORY_ROOT` to a temp directory and `MC_RAG_DISABLED=true`, so chest
+snapshots, goals, beds and curriculum files never touch the fleet's `/mnt/hermes-data/minecraft-memory`.
+
+`live-bot.test.mjs` also runs a fake Buzz + hermes-memory server in-process (`BUZZ_URL`/`MEMORY_URL`),
+so the probe's coordination traffic never reaches the fleet. `MC_HOME_POS` pins its home to the
+arena. The real bots ignore `MBTester`/`MBProbe` chat (`MC_TEST_USERNAMES`). Model calls are real,
+so its whisper-driven steps use generous timeouts.
 
 RCON goes through `live/rcon.py`. It reuses `tools/hermes-minecraft-admin.py`'s SSH connection
 and runs the server box's own `mcrcon`, reading the RCON password on the box itself. No secrets
@@ -58,3 +66,4 @@ When a change fixes or adds bot behavior:
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-09-24 | Initial unit/live/baseline test system and maintenance rule. |
+| 1.1.0 | 2026-09-25 | Triage unit checks, the full-bot `livebot` suite, chest scenarios under an isolated memory root, and the monitoring coverage check. |

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-09-25) — per-line classification split out of watch_loop into process_message() so
+# services/minecraft-bots/tests/test_triage.py can test MB-19's per-bot dedupe without journalctl.
 #
 # 1.5.0 (2026-09-24) — review MB-18 follow-up: the action-failure catch-all now matches the bots'
 # structured OUTCOME lines (ok=false, not cancelled, not refused) instead of each action's prose
@@ -414,31 +417,37 @@ def watch_loop(buzz_token):
                 message = bytes(message).decode("utf-8", "replace")
             except (TypeError, ValueError):
                 message = str(message)
-        unit = entry.get("_SYSTEMD_UNIT")
+        process_message(message, entry.get("_SYSTEMD_UNIT"), incidents, jobs)
 
-        for category, pattern, label in TRIAGE_PATTERNS:
-            if not pattern.search(message):
-                continue
-            signature = normalize_signature(message)
-            stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-            record_event({"at": stamp, "unit": unit, "category": category,
-                          "signature": signature, "message": message.strip()[:500]})
-            key = (unit, category, signature)
-            stats = incidents.setdefault(key, {"count": 0, "first": stamp, "last": stamp, "triaged_at": None})
-            stats["count"] += 1
-            stats["last"] = stamp
-            now = time.monotonic()
-            if category not in DIAGNOSE_CATEGORIES:
-                break
-            if stats["triaged_at"] is not None and now - stats["triaged_at"] < COOLDOWN_S:
-                break  # this bot's same failure is still in cooldown -- counted, not re-diagnosed
-            stats["triaged_at"] = now
-            log(f"triage-worthy: [{category}] {unit} {message.strip()[:150]}")
-            try:
-                jobs.put_nowait((category, label, message, unit, dict(stats)))
-            except queue.Full:
-                log(f"diagnosis queue full, recorded without diagnosis: [{category}] {unit}")
-            break  # one category match per line is enough
+
+def process_message(message, unit, incidents, jobs, now=None):
+    """Classify one journal line: record it, count it per (unit, category, signature), and queue a
+    diagnosis unless that bot's same failure is in cooldown. Returns the category, or None.
+    Split out of watch_loop (1.6.0) so tests/test_triage.py can drive it without journalctl."""
+    for category, pattern, label in TRIAGE_PATTERNS:
+        if not pattern.search(message):
+            continue
+        signature = normalize_signature(message)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+        record_event({"at": stamp, "unit": unit, "category": category,
+                      "signature": signature, "message": message.strip()[:500]})
+        key = (unit, category, signature)
+        stats = incidents.setdefault(key, {"count": 0, "first": stamp, "last": stamp, "triaged_at": None})
+        stats["count"] += 1
+        stats["last"] = stamp
+        now = time.monotonic() if now is None else now
+        if category not in DIAGNOSE_CATEGORIES:
+            return category
+        if stats["triaged_at"] is not None and now - stats["triaged_at"] < COOLDOWN_S:
+            return category  # this bot's same failure is still in cooldown -- counted, not re-diagnosed
+        stats["triaged_at"] = now
+        log(f"triage-worthy: [{category}] {unit} {message.strip()[:150]}")
+        try:
+            jobs.put_nowait((category, label, message, unit, dict(stats)))
+        except queue.Full:
+            log(f"diagnosis queue full, recorded without diagnosis: [{category}] {unit}")
+        return category  # one category match per line is enough
+    return None
 
 
 def main():

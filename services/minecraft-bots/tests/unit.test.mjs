@@ -1,4 +1,4 @@
-// Version: 1.4.0
+// Version: 1.5.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -10,6 +10,9 @@
 // 1.4.0 | 2026-09-24 | Review follow-up checks: open window closed on takeover, flee movements scoping,
 //   place_home, bare stop from the active commander, goal-reserved items, delivery retry/ack,
 //   OUTCOME lines, chest-miss cache, gear-refresh skip, note dedupe, Soldier armor, routine skips.
+// 1.5.0 | 2026-09-25 | Review acceptance checks: MB-03 rejected /tp, MB-05 replacement during skill
+//   lookup and planning, MB-10 cancelled replay + 13-step authoring, MB-12 heartbeat/lease, MB-20
+//   restart persistence, MB-21 router/RAG timeouts, MB-22 stationary vs wedged.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -214,7 +217,7 @@ await check('MB-17 chest withdrawal spans mixed item types', async () => {
 
 await check('MB-20 curriculum stages need every requirement, tier-aware', async () => {
   const c = vm.createContext({});
-  vm.runInContext(between(index, 'const withTiers', '\nconst CURRICULUM_FILE'), c);
+  vm.runInContext(between(index, 'const withTiers', '\nconst MEMORY_ROOT'), c);
   const [tools, armor, , iron] = vm.runInContext('TECH_TREE_STAGES', c);
   assert.equal(c.stageSatisfied(tools, new Set(['wooden_axe'])), false, 'an axe alone is not "pickaxe and axe"');
   assert.equal(c.stageSatisfied(tools, new Set(['wooden_axe', 'stone_pickaxe'])), true);
@@ -444,7 +447,7 @@ await check('EFF a repeated memory note skips the duplicate-search process', asy
   let searches = 0; let writes = 0;
   const c = vm.createContext({ Date, Map, console: { log() {} }, MEMORY_DIR: '/m', path: { join: (...p) => p.join('/') },
     mkdir: async () => {}, writeFile: async () => { writes++; }, slugify: (t) => t, runIngestCoalesced: async () => {},
-    DUPLICATE_DISTANCE_THRESHOLD: 0.1, searchMemory: async () => { searches++; return []; } });
+    DUPLICATE_DISTANCE_THRESHOLD: 0.1, RAG_DISABLED: false, searchMemory: async () => { searches++; return []; } });
   vm.runInContext(between(longterm, 'const RECENT_NOTE_TTL_MS', 'export async function searchMemory('), c);
   await c.writeMemoryNote({ scope: 'world', persona: 'amy', text: 'Found oak_log near (1, 2, 3)' });
   await c.writeMemoryNote({ scope: 'world', persona: 'amy', text: 'Found oak_log near (4, 5, 6)' });
@@ -473,6 +476,150 @@ await check('Fairness: routine checks that lose their turn are counted', async (
   vm.runInContext('busy = false', c);
   assert.equal(c.routineBlocked('checkSaplings'), false);
   assert.deepEqual({ ...vm.runInContext('routineSkips', c) }, { checkHunger: 2 });
+});
+
+// ---- 2026-09-25: acceptance checks from the review that had no test yet -----------------------
+const skillsSrc = skills;
+const router = await readFile(root + 'router.js', 'utf8');
+const goalTickSrc = () => between(index, 'async function retireGoal(', 'setInterval(() => {\n  goalTick()');
+function goalTickContext(bot, extras) {
+  const c = vm.createContext({ console: { log() {}, error() {} }, bot, arbiter, busy: false, Date, Promise,
+    AUTONOMY_ENABLED: true, USERNAME: 'Amy', PERSONA_NAME: 'amy', MAX_CONSECUTIVE_FAILURES: 3,
+    goalPausedForNight: () => false, routineBlocked: () => false, parseGoalStep: () => ({ type: 'step', action: { type: 'mine' } }),
+    logStep: (goal, line) => { goal.log.push(line); goal.steps++; }, saveGoal: async () => {}, clearGoal: async () => {},
+    recordSkillOutcome: async () => {}, runSkill: async () => ({ ok: true, text: 'ran' }), ...extras });
+  vm.runInContext('var currentGoal = this.currentGoal;' + goalTickSrc(), c);
+  return c;
+}
+
+await check('MB-03 a rejected /tp still leaves no control owner behind', async () => {
+  const bot = makeBot(); bot.spawnPoint = { x: 5, y: 64, z: 5 };
+  let said = null; bot.chat = (m) => { said = m; }; // the server ignores it: a rejected /tp
+  const held = await arbiter.requestControl(bot, arbiter.OWNERS.GOAL_STEP);
+  const c = vm.createContext({ bot, arbiter, console: { log() {}, error() {} }, USERNAME: 'Amy', PERSONA_NAME: 'amy',
+    broadcastGoalState: async () => {}, recordGoalOutcome() {}, clearGoal: async () => {} });
+  vm.runInContext('var currentGoal = null;' + between(index, 'async function teleportToSpawn(', 'function checkStuck('), c);
+  await c.teleportToSpawn('test');
+  assert.match(said, /^\/tp 5\.00 64\.00 5\.00/);
+  assert.equal(arbiter.isBusy(), false, 'no owner left whether or not the /tp worked');
+  assert.equal(held.token.preempted, true);
+});
+
+await check('MB-05 a goal replaced during skill lookup gets no skill run and no writes', async () => {
+  const bot = makeBot(); let resolveSkill; let ran = 0;
+  const oldGoal = { description: 'old', servedBySkill: false, log: [], steps: 0 };
+  const c = goalTickContext(bot, { currentGoal: oldGoal,
+    findSkill: () => new Promise((r) => { resolveSkill = r; }), runSkill: async () => { ran++; return { ok: true, text: 'x' }; } });
+  const pending = c.goalTick();
+  while (!resolveSkill) await sleep(1);
+  vm.runInContext('currentGoal = { description: "new", servedBySkill: false, log: [], steps: 0 }', c);
+  resolveSkill({ name: 'skill', jsonPath: 'x.json', steps: [] }); await pending;
+  assert.equal(ran, 0); assert.equal(oldGoal.servedBySkill, false); assert.equal(oldGoal.steps, 0);
+});
+
+await check('MB-05/MB-21 planning holds no control, and a goal replaced mid-plan is not acted on', async () => {
+  const bot = makeBot(); let resolvePlan; let acted = 0;
+  const oldGoal = { description: 'old', servedBySkill: true, log: [], steps: 0 };
+  const c = goalTickContext(bot, { currentGoal: oldGoal, findSkill: async () => null,
+    planNextStep: () => new Promise((r) => { resolvePlan = r; }), performAction: async () => { acted++; return { ok: true, text: 'x' }; } });
+  const pending = c.goalTick();
+  while (!resolvePlan) await sleep(1);
+  assert.equal(arbiter.isBusy(), false, 'the body is free while the model plans');
+  vm.runInContext('currentGoal = null', c);
+  resolvePlan('ACTION MINE oak_log 4'); await pending;
+  assert.equal(acted, 0); assert.equal(oldGoal.steps, 0);
+});
+
+await check('MB-10 an interrupted skill replay is not scored and can run again', async () => {
+  const bot = makeBot(); let scored = 0;
+  const goal = { description: 'g', servedBySkill: false, log: [], steps: 0, consecutiveFailures: 0 };
+  const c = goalTickContext(bot, { currentGoal: goal, findSkill: async () => ({ name: 's', jsonPath: 's.json', steps: [] }),
+    runSkill: async () => ({ ok: false, cancelled: true, text: 'interrupted' }), recordSkillOutcome: async () => { scored++; } });
+  await c.goalTick();
+  assert.equal(scored, 0); assert.equal(goal.servedBySkill, false); assert.equal(goal.consecutiveFailures, 0);
+});
+
+await check('MB-10 a 13-step solve is not truncated into a 12-step skill', async () => {
+  let asked = 0;
+  const c = vm.createContext({ MIN_STEPS_TO_AUTHOR: 2, MAX_SKILL_STEPS: 12, isValidSkill: () => true,
+    callRole: async () => { asked++; return 'NAME: x\nDESCRIPTION: y'; }, writeSkill: async () => true, console });
+  vm.runInContext(between(skillsSrc, 'export async function authorSkillFromGoal('), c);
+  const steps = Array.from({ length: 13 }, (_, i) => ({ type: i === 12 ? 'place' : 'mine' }));
+  assert.equal(await c.authorSkillFromGoal('build a thing', steps), false);
+  assert.equal(asked, 0, 'no model call for a solve that would be truncated');
+  assert.equal(await c.authorSkillFromGoal('build a thing', steps.slice(0, 12)), true);
+});
+
+await check('MB-12 heartbeat re-announces the goal and expires silent peers', async () => {
+  const sent = []; const otherBotGoals = new Map([['mc-bob', 'mine'], ['mc-nell', 'farm']]);
+  const c = vm.createContext({ console: { log() {} }, USERNAME: 'Mayor', Date, otherBotGoals, setInterval() {},
+    currentGoal: { description: 'coordinate' }, broadcastGoalState: (...a) => { sent.push(a); } });
+  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, '// goal every GOAL_HEARTBEAT_MS', 'setInterval(goalHeartbeatTick'), c);
+  const now = 10_000_000;
+  vm.runInContext(`otherBotGoalSeenAt.set("mc-bob", ${now - 60_000}); otherBotGoalSeenAt.set("mc-nell", ${now - 3_600_000});`, c);
+  c.goalHeartbeatTick(now);
+  assert.deepEqual(sent[0], ['active', 'coordinate', null, true]);
+  assert.equal(otherBotGoals.has('mc-bob'), true, 'recently heard peer kept');
+  assert.equal(otherBotGoals.has('mc-nell'), false, 'silent peer expired');
+});
+
+await check('MB-20 curriculum progress and evidence survive a Mayor restart', async () => {
+  const disk = {};
+  const fsStub = { readFile: async (p) => { if (!(p in disk)) throw new Error('ENOENT'); return disk[p]; },
+    writeFile: async (p, d) => { disk[p] = d; }, mkdir: async () => {} };
+  const src = between(index, 'const withTiers', '\nconst MEMORY_ROOT') + '\nconst MEMORY_ROOT = "/mem";' +
+    between(index, 'const CURRICULUM_FILE', 'async function checkCurriculumAdvance(');
+  const boot = () => {
+    const c = vm.createContext({ ...fsStub, JSON, Object, Map, Set, console: { error() {} }, USERNAME: 'Mayor',
+      BOT_ROLES: {}, ROLES: { SOLDIER: {} }, bot: { inventory: { items: () => [], slots: [] } } });
+    vm.runInContext(src, c); return c;
+  };
+  const first = boot();
+  first.recordCurriculumEvidence('Babs', 'wooden_axe');
+  assert.equal(first.recordCurriculumEvidence('Babs', 'stone_pickaxe'), true, 'Babs clears basic tools');
+  await sleep(5);
+  const second = boot();
+  await second.loadCurriculumStage();
+  assert.equal(vm.runInContext('stageProgress.has("Babs")', second), true);
+  assert.deepEqual([...vm.runInContext('stageEvidence.get("Babs")', second)].sort(), ['stone_pickaxe', 'wooden_axe']);
+});
+
+await check('MB-21 a stalled router call times out instead of hanging', async () => {
+  const c = vm.createContext({ process: { env: { HERMES_ROUTER_TIMEOUT_MS: '50' } }, AbortSignal, JSON,
+    fetch: (_, opts) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))) });
+  vm.runInContext(between(router, 'const ROUTER_URL').replace(/export /g, ''), c);
+  const started = Date.now();
+  const keepAlive = setTimeout(() => {}, 5000); // AbortSignal.timeout's timer doesn't hold the process open
+  try {
+    await assert.rejects(c.callRole('dispatch', []), (err) => err.name === 'TimeoutError');
+  } finally {
+    clearTimeout(keepAlive);
+  }
+  assert(Date.now() - started < 2000);
+});
+
+await check('MB-21 RAG subprocesses carry a timeout', async () => {
+  const calls = [];
+  const c = vm.createContext({ RAG_DISABLED: false, PYTHON: 'py', SEARCH_SCRIPT: 's.py', RAG_SEARCH_TIMEOUT_MS: 30000, JSON, console,
+    execFileAsync: async (cmd, args, opts) => { calls.push(opts); return { stdout: '[]' }; } });
+  vm.runInContext(between(longterm, 'export async function searchMemory(').replace(/export /g, ''), c);
+  await c.searchMemory('q');
+  assert.equal(calls[0]?.timeout, 30000);
+});
+
+await check('MB-22 a stationary bot nobody is moving never escalates; a wedged one does', async () => {
+  let t = 0; const events = [];
+  const pos = { x: 0, y: 64, z: 0, distanceTo: () => 0, clone() { return this; } };
+  const c = vm.createContext({ AUTONOMY_ENABLED: true, bot: { isSleeping: false, entity: { position: pos } },
+    Date: { now: () => t }, Math, console: { log() {}, error() {} }, USERNAME: 'Mark', PERSONA_NAME: 'mark',
+    saveStuckState: async () => {}, STUCK_THRESHOLD_MS: 300_000, MAX_STUCK_NUDGES: 2,
+    teleportToSpawn: async () => { events.push('teleport'); }, nudgeUnstuck: async () => { events.push('nudge'); } });
+  vm.runInContext('var currentSameSpotCount = 0, lastPosition = null, lastMovedAt = 0, stuckNudgeCount = 0, lastMoveAttemptAt = 0;' +
+    between(index, 'function checkStuck(', '\n// Review MB-22 follow-up'), c);
+  for (let i = 0; i < 40; i++) { t += 30_000; c.checkStuck(); }
+  assert.deepEqual(events, [], 'a guard standing still for 20 min is left alone');
+  for (let i = 0; i < 40; i++) { t += 30_000; vm.runInContext(`lastMoveAttemptAt = ${t}`, c); c.checkStuck(); }
+  assert.deepEqual(events.slice(0, 3), ['nudge', 'nudge', 'teleport'], 'trying to move but not moving escalates');
 });
 
 console.log(`${passed} unit checks passed.`);

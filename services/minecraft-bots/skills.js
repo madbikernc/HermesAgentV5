@@ -1,4 +1,7 @@
-// Version: 1.4.0
+// Version: 1.5.0
+//
+// 1.5.0 (2026-09-25) -- test isolation: SKILLS_DIR honors MC_MEMORY_ROOT; MC_RAG_DISABLED=true skips skill
+// lookup and authoring.
 //
 // 1.4.0 (2026-09-24) -- review MB-21: skill search/ingest subprocesses have timeouts.
 //
@@ -52,7 +55,8 @@ const INGEST_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-ingest-minecraft
 // pass --corpus explicitly (tools/hermes-rag-ingest-minecraft.py 2.0.0, which absorbed the
 // former -skills duplicates).
 const CORPUS_ARGS = ["--corpus", "minecraft-skills"];
-const SKILLS_DIR = "/mnt/hermes-data/minecraft-memory/skills";
+const SKILLS_DIR = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/skills`; // MC_MEMORY_ROOT: test isolation
+const RAG_DISABLED = process.env.MC_RAG_DISABLED === "true"; // test bots: no shared skill corpus
 
 // Re-calibrated live 2026-09-08 against the REAL, organically-grown corpus (20 skills authored
 // by authorSkillFromGoal() over the course of one night, not a single seeded test skill) after
@@ -111,6 +115,7 @@ function isValidSkill(skill) {
 // still trusted (hasn't crossed MAX_SKILL_FAILURES) wins -- an untrusted near-match doesn't block
 // a genuinely different, farther-but-still-relevant candidate from being tried instead.
 export async function findSkill(description) {
+  if (RAG_DISABLED) return null;
   const candidates = await searchSkillCandidates(description, 3);
   for (const candidate of candidates) {
     if (candidate.distance > MATCH_DISTANCE_THRESHOLD) continue;
@@ -170,6 +175,7 @@ export async function recordSkillOutcome(jsonPath, success) {
 // silently discards (returns false) anything that doesn't pass isValidSkill(), matching
 // writeMemoryNote()'s own "never store something broken" discipline.
 export async function writeSkill({ name, description, steps }) {
+  if (RAG_DISABLED) return false;
   if (!isValidSkill({ steps })) {
     console.log(`[skills] discarding invalid skill "${name}" -- steps failed validation`);
     return false;

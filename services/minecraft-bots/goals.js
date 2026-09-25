@@ -1,4 +1,6 @@
-// Version: 1.4.0
+// Version: 1.5.0
+//
+// 1.5.0 (2026-09-25) -- test isolation: MEMORY_DIR honors MC_MEMORY_ROOT.
 //
 // 1.4.0 (2026-09-24) -- review MB-10: logStep() flags actionsTruncated when the action
 // record overflows, so index.js won't author an incomplete skill from it.
@@ -34,7 +36,7 @@
 import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
 
-const MEMORY_DIR = "/mnt/hermes-data/minecraft-memory";
+const MEMORY_DIR = (process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory"); // MC_MEMORY_ROOT: test isolation
 const MAX_LOG_LINES = 12;
 
 function goalPath(persona) {

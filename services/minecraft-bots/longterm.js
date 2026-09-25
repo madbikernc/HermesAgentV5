@@ -1,4 +1,7 @@
-// Version: 1.3.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-09-25) -- test isolation: MEMORY_DIR honors MC_MEMORY_ROOT; MC_RAG_DISABLED=true skips all
+// RAG reads/writes (test bots never touch the fleet's corpora).
 //
 // 1.3.0 (2026-09-24) -- redundancy note: a note repeated within 30 min (same text, numbers
 // normalized) skips the duplicate-check search process entirely.
@@ -56,7 +59,9 @@ const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const PYTHON = "/opt/hermes/venvs/rag/bin/python3";
 const INGEST_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-ingest-minecraft.py");
 const SEARCH_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-search-minecraft.py");
-const MEMORY_DIR = "/mnt/hermes-data/minecraft-memory";
+const MEMORY_DIR = (process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory"); // MC_MEMORY_ROOT: test isolation
+// MC_RAG_DISABLED=true (test bots): never read or write the fleet's shared RAG corpora.
+const RAG_DISABLED = process.env.MC_RAG_DISABLED === "true";
 
 function slugify(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "note";
@@ -83,6 +88,7 @@ const recentNotes = new Map(); // normalized text -> Date.now()
 const normalizeNote = (text) => text.toLowerCase().replace(/\d+(\.\d+)?/g, "#").replace(/\s+/g, " ").trim();
 
 export async function writeMemoryNote({ scope, persona, text }) {
+  if (RAG_DISABLED) return;
   const key = `${scope}:${persona}:${normalizeNote(text)}`;
   const now = Date.now();
   for (const [k, at] of recentNotes) if (now - at > RECENT_NOTE_TTL_MS) recentNotes.delete(k);
@@ -112,6 +118,7 @@ export async function writeMemoryNote({ scope, persona, text }) {
 }
 
 export async function searchMemory(query, { topK = 3 } = {}) {
+  if (RAG_DISABLED) return [];
   try {
     const { stdout } = await execFileAsync(PYTHON, [SEARCH_SCRIPT, query, "--top-k", String(topK)],
       { timeout: RAG_SEARCH_TIMEOUT_MS });
