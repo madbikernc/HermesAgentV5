@@ -1,6 +1,6 @@
 # Minecraft bot behavior review and remediation register
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 Review date: 2026-09-24. Source baseline: `9091ea8` on `master`.
 
@@ -145,8 +145,16 @@ metric still reads high because of pre-fix hours and a test-induced RCON flood i
 
 **Still to do:** re-record each host's baseline after a full day on `master`
 (`tests/run.sh baseline --update`), and treat any metric that doesn't improve as a reopened finding.
-The fight-or-flee policy (armed bots at critical health fight first; target is the nearest mob)
-is an operator decision the review deferred until combat worked; it now works.
+**Fight-or-flee, decided 2026-09-25 (`4baa0a7`):** an armed bot still fights one melee or ranged
+mob, but flees when outnumbered at critical health (2+ within 8 blocks, any role), from 3+ hostiles
+(non-Soldiers) and from a close creeper; the threat is the mob that just hurt it. Verified by unit
+checks and live (the probe flees two mobs and fights one at critical health). The same data exposed
+a lethal stuck-rescue bug -- `/tp` to the spawn block's corner suffocated bots in the shelter walls
+(every post-teleport death in the server log) -- fixed with `/spreadplayers`, verified live.
+
+**spark2 RAG, fixed 2026-09-25 (`4baa0a7`):** spark2's bots now use spark's shared RAG through
+`hermes-minecraft-rag` (LAN-only, token auth, ufw open to spark-2 only); first live evidence was Bob
+loading and running a shared stored skill two minutes after the restart.
 
 ## Accumulated remediation register
 
@@ -528,3 +536,4 @@ damage against a live Minecraft server.
 | 1.0.0 | 2026-09-24 | Initial source review, effective priority analysis, 22 open findings, and nine focused reproductions. |
 | 1.1.0 | 2026-09-25 | Remediation status: all 22 findings fixed and deployed, with fix commits, tests, live verification and baseline metric per finding. |
 | 1.2.0 | 2026-09-25 | Acceptance checks run: 15 findings verified live (action and full-bot harnesses, monitoring), 7 by unit tests; early fleet numbers; the deferred fight-or-flee decision. |
+| 1.3.0 | 2026-09-25 | Fight-or-flee policy decided and verified; stuck-rescue suffocation fixed; spark2 RAG restored via spark. |
