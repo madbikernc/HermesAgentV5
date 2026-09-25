@@ -1,4 +1,7 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-09-24) -- redundancy note: a note repeated within 30 min (same text, numbers
+// normalized) skips the duplicate-check search process entirely.
 //
 // 1.2.0 (2026-09-24) -- review MB-21 + redundancy notes: RAG search/ingest subprocesses have
 // timeouts, and ingest is coalesced -- a burst of notes (a resource scan writes one per block
@@ -72,7 +75,19 @@ const DUPLICATE_DISTANCE_THRESHOLD = 0.15;
 // scope: "world" -> shared corpus note; "bot" -> this bot's own personal note (source_path
 // under bots/<persona>/, not the speaker's name -- the persona owns the memory, the speaker
 // is just recorded inside the note text for context).
+// Redundancy note (review, 2026-09-24; 671 near-duplicate skips a day on spark alone, each one a
+// full RAG search process): a note whose normalized text was already written or found to be a
+// duplicate in the last RECENT_NOTE_TTL_MS is skipped without spawning the search.
+const RECENT_NOTE_TTL_MS = 30 * 60_000;
+const recentNotes = new Map(); // normalized text -> Date.now()
+const normalizeNote = (text) => text.toLowerCase().replace(/\d+(\.\d+)?/g, "#").replace(/\s+/g, " ").trim();
+
 export async function writeMemoryNote({ scope, persona, text }) {
+  const key = `${scope}:${persona}:${normalizeNote(text)}`;
+  const now = Date.now();
+  for (const [k, at] of recentNotes) if (now - at > RECENT_NOTE_TTL_MS) recentNotes.delete(k);
+  if (recentNotes.has(key)) return;
+  recentNotes.set(key, now);
   const existing = await searchMemory(text, { topK: 1 });
   if (existing.length && existing[0].distance <= DUPLICATE_DISTANCE_THRESHOLD) {
     console.log(`[longterm] skipping near-duplicate note (distance=${existing[0].distance.toFixed(3)}): ` +

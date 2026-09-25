@@ -1,4 +1,12 @@
-// Version: 2.92.0
+// Version: 2.93.0
+//
+// 2.93.0 (2026-09-24) -- review follow-up, closing the remaining gaps. MB-08: a Builder
+// item already in hand is placed via runBuilderPlacement (place_home + verify), no planner call.
+// MB-06: a bare "stop" from the player whose direct command is running stops it. MB-09: inventory-
+// full/insurance storing skips goalReservedItems() (the goal's items and their recipe inputs).
+// MB-13: a failed delivery retries once; successes send a "delivered" ack. MB-22: the stuck nudge
+// goes through the arbiter. Soldiers: weapon, monster, then missing armor (rate-limited), then guard.
+// Fairness: routineBlocked() counts lost turns, logged as ROUTINE_SKIPS every 10 min.
 //
 // 2.92.0 (2026-09-24) -- found by the new behavior baseline on its first post-deploy run: every
 // bot is an op, so the server echoes each RCON/console command to it as chat from "Rcon"; the
@@ -2016,7 +2024,7 @@ function settleGiveClaims() {
     const winner = [...claim.claimants].sort()[0];
     if (winner !== USERNAME || pendingGiveRequest) continue;
     if (!canSpareForRequest(claim.request.item, claim.request.count)) continue;
-    pendingGiveRequest = { ...claim.request, expiresAt: now + GIVE_REQUEST_TTL_MS };
+    pendingGiveRequest = { ...claim.request, requestId, attempts: 0, expiresAt: now + GIVE_REQUEST_TTL_MS };
     console.log(`[${USERNAME}] won the claim for ${requestId} (${claim.claimants.size} claimant(s))`);
   }
 }
@@ -2556,6 +2564,7 @@ async function runAction(action, speaker, message, send) {
   }
   // Same post-craft-cleanup trigger as goalTick's own -- see storeSurplusNearHome's header.
   let craftedOk = false;
+  activeDirectSpeaker = speaker;
   try {
     const startLine = {
       goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
@@ -2597,6 +2606,7 @@ async function runAction(action, speaker, message, send) {
     send(`something went wrong trying to do that.`);
   } finally {
     handle.release();
+    if (activeDirectSpeaker === speaker) activeDirectSpeaker = null;
     if (craftedOk) surplusCleanupDueAt = Date.now() + SURPLUS_CLEANUP_QUIET_MS; // MB-09: deferred
   }
 }
@@ -3147,8 +3157,19 @@ function nextSoldierPriority() {
   // done, but a Soldier's job was never meant to have a "checklist complete" state to graduate
   // out of (§21) -- standing guard is supposed to be ongoing, never "done." A Soldier-primary
   // bot now never reaches the unrestricted freeform path at all.
+  // Review contradiction note (2026-09-24): roles.js told Soldiers "full armor" but this path never
+  // checked armor. Missing pieces now come before guard duty, retried at most every
+  // SOLDIER_ARMOR_RETRY_MS so an unobtainable set doesn't churn goals.
+  const wornPieces = [5, 6, 7, 8].filter((slot) => bot.inventory.slots[slot]).length;
+  if (wornPieces < 4 && Date.now() >= soldierArmorRetryAt) {
+    soldierArmorRetryAt = Date.now() + SOLDIER_ARMOR_RETRY_MS;
+    return { name: "armor", directive: `you're only wearing ${wornPieces} of 4 armor pieces -- get a full set, any ` +
+      "tier: check nearby chests, ask the fleet for spares, or gather materials and craft them." };
+  }
   return { name: "guard", directive: "stand guard near home and keep watch for anything hostile." };
 }
+const SOLDIER_ARMOR_RETRY_MS = 30 * 60_000;
+let soldierArmorRetryAt = 0;
 
 async function proposeOwnGoal() {
   // §15.6: for a Builder-primary bot, the infrastructure checklist runs AHEAD of freeform
@@ -3300,6 +3321,23 @@ async function proposeOwnGoal() {
 // action finishes. Reuses `busy`/`acting` themselves (rather than a third flag) so there is
 // exactly one place goal-loop-vs-live-command precedence is decided, not two that could drift
 // out of sync.
+// Fairness instrumentation (review redundancy note, 2026-09-24): every periodic check that loses
+// its turn because the bot is busy (a model call in flight, or someone holding the arbiter) is
+// counted here, and the counts are logged every ROUTINE_SKIP_REPORT_MS as one ROUTINE_SKIPS line
+// that tests/baseline.mjs sums -- so "does work starve behind other work" is measured, not guessed.
+const ROUTINE_SKIP_REPORT_MS = 10 * 60_000;
+const routineSkips = {};
+function routineBlocked(name) {
+  const blocked = busy || arbiter.isBusy();
+  if (blocked) routineSkips[name] = (routineSkips[name] ?? 0) + 1;
+  return blocked;
+}
+setInterval(() => {
+  if (!Object.keys(routineSkips).length) return;
+  console.log(`[${USERNAME}] ROUTINE_SKIPS ${JSON.stringify(routineSkips)}`);
+  for (const k of Object.keys(routineSkips)) delete routineSkips[k];
+}, ROUTINE_SKIP_REPORT_MS);
+
 // Goal-identity guards for goalTick (review MB-05): clear/persist only if `goal` is still the
 // bot's current goal, so an old tick finishing late can't erase or overwrite its replacement.
 async function retireGoal(goal) {
@@ -3334,13 +3372,42 @@ async function guardTick(goal, takeControl, getHandle) {
   console.log(`[${USERNAME}] guard duty: back to post -- ${result.text} (ok=${result.ok})`);
 }
 
+const HOME_PLACEABLE = new Set(["crafting_table", "furnace", "chest", "beehive"]);
+
+async function runBuilderPlacement(goal, takeControl, getHandle, replaced) {
+  const item = goal.builderPriorityItem;
+  if (replaced() || !(await takeControl())) return;
+  const result = await performAction(bot, { type: "place_home", item }, USERNAME, getHandle());
+  getHandle().release();
+  if (result.cancelled || replaced()) return;
+  logStep(goal, `place_home: ${result.text}`, result.ok, { type: "place_home", item });
+  if (result.ok && builderPriorityItemSatisfied(item)) {
+    console.log(`[${USERNAME}] goal complete (placed ${item} at home): ${goal.description}`);
+    bot.chat(await narrateAction(`goal complete: ${goal.description}.`));
+    recordGoalOutcome(goal.description, "done", null);
+    await broadcastGoalState("done", goal.description, item);
+    await retireGoal(goal);
+    return;
+  }
+  goal.consecutiveFailures += 1;
+  console.log(`[${USERNAME}] builder placement of ${item} didn't stick (${result.text}); ` +
+              `consecutiveFailures=${goal.consecutiveFailures}`);
+  if (goal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    recordGoalOutcome(goal.description, "gave up", `couldn't place ${item} at home`);
+    await broadcastGoalState("abandoned", goal.description);
+    await retireGoal(goal);
+    return;
+  }
+  await saveGoalIfCurrent(goal);
+}
+
 function holdsItem(name) {
   return bot.inventory.items().some((i) => i.name === name) ||
     [5, 6, 7, 8, 45].some((slot) => bot.inventory.slots[slot]?.name === name);
 }
 
 async function goalTick() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("goalTick")) return;
   // Review MB-14: no new work or goal steps from dusk to dawn (the goal is paused, not dropped).
   if (goalPausedForNight(currentGoal)) return;
 
@@ -3390,6 +3457,13 @@ async function goalTick() {
   try {
     if (goal.standing === "guard") {
       await guardTick(goal, takeControl, () => handle);
+      return;
+    }
+    // Review MB-08 follow-up (2026-09-24): a Builder checklist item she's already carrying is
+    // placed deterministically -- walk home, place, verify near home -- with no planner call.
+    if (goal.builderPriorityItem && HOME_PLACEABLE.has(goal.builderPriorityItem) &&
+        holdsItem(goal.builderPriorityItem)) {
+      await runBuilderPlacement(goal, takeControl, () => handle, replaced);
       return;
     }
     // Efficiency pass, 2026-09-24: a goal whose target item is already in hand is done -- no
@@ -4027,7 +4101,7 @@ const SOLDIER_DIRECTIVE_NOTE =
   "exploring task.";
 
 async function proposeDirectiveForOthers() {
-  if (USERNAME !== MAYOR_USERNAME || !AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
+  if (USERNAME !== MAYOR_USERNAME || !AUTONOMY_ENABLED || routineBlocked("proposeDirectiveForOthers")) return;
   await checkCurriculumAdvance();
   const idleBots = [...BOT_USERNAMES].filter((name) =>
     name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${name.toLowerCase()}`));
@@ -4125,7 +4199,7 @@ const FALLBACK_COORDINATOR = process.env.MC_FALLBACK_COORDINATOR === "true";
 
 async function proposeFallbackDirective() {
   if (USERNAME === MAYOR_USERNAME || !FALLBACK_COORDINATOR) return;
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy()) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("proposeFallbackDirective")) return;
   // lastMayorSeenAt === 0 means "never heard from Mayor this process," deliberately distinct
   // from "he went quiet a while ago" -- a fresh process with no baseline yet doesn't activate the
   // fallback immediately (avoids every bot racing to coordinate on a simultaneous fresh boot
@@ -4210,7 +4284,7 @@ function nightStepDue(step) {
 }
 
 async function checkSleep() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkSleep") || bot.isSleeping) return;
 
   const thunderstorm = bot.isRaining && bot.thunderState > 0;
   const isNight = thunderstorm || (bot.time.timeOfDay >= 12541 && bot.time.timeOfDay <= 23458);
@@ -4288,7 +4362,7 @@ async function checkDusk() {
     nightStartedAt = Date.now();
     if (currentGoal) console.log(`[${USERNAME}] dusk -- pausing goal until morning: ${currentGoal.description}`);
   }
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkDusk") || bot.isSleeping) return;
   if (!nightStepDue(homeTonight)) return;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
@@ -4688,7 +4762,7 @@ async function checkHunger() {
   // report "nothing to eat" would thrash it for nothing.
   const canFeed = bot.inventory.items().some((i) => FOOD_NAMES.includes(i.name) || i.name === "fishing_rod");
   const critical = bot.food <= CRITICAL_FOOD_LEVEL && canFeed;
-  if (!critical && (busy || arbiter.isBusy())) return;
+  if (!critical && routineBlocked("checkHunger")) return;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   const handle = await arbiter.requestControl(bot,
@@ -4732,7 +4806,7 @@ async function checkPendingGiveRequests() {
     console.log(`[${USERNAME}] give request expired: ${pendingGiveRequest.count} ${pendingGiveRequest.item} for ${pendingGiveRequest.forPlayer}`);
     pendingGiveRequest = null;
   }
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping || !pendingGiveRequest) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkPendingGiveRequests") || bot.isSleeping || !pendingGiveRequest) return;
   const pending = pendingGiveRequest;
   const { forPlayer, item, count } = pending;
 
@@ -4747,6 +4821,14 @@ async function checkPendingGiveRequests() {
     const result = await performAction(bot, { type: "give", player: forPlayer, item, count }, USERNAME, handle);
     console.log(`[${USERNAME}] give result: ${result.text} (ok=${result.ok})`);
     if (result.cancelled) pendingGiveRequest = pending; // interrupted, not failed -- deliver later
+    // Review MB-13 follow-up (2026-09-24): a genuine failure gets one retry before the promise is
+    // dropped, and a success is acknowledged to the requester with the real count.
+    else if (!result.ok && (pending.attempts ?? 0) < 1) pendingGiveRequest = { ...pending, attempts: (pending.attempts ?? 0) + 1 };
+    if (result.ok) {
+      buzzPublish(AGENT_ID, "minecraft-coordination", JSON.stringify({ type: "delivered",
+        requestId: pending.requestId, forPlayer, item, count, donor: USERNAME }))
+        .catch((err) => console.error(`[${USERNAME}] delivery ack publish failed:`, err.message));
+    }
     if (result.ok) bot.chat(await narrateAction(`brought you some ${item}, ${forPlayer}.`));
   } catch (err) {
     console.error(`[${USERNAME}] give check failed:`, err.message);
@@ -4786,6 +4868,44 @@ function noteStoreResult(result) {
   }
 }
 
+// Review MB-09 follow-up (2026-09-24): inventory-full and insurance storing run DURING goals, so
+// they skip whatever the active goal is using: its target and Builder item, every item/block its
+// steps have named, items its description names, and the recipe inputs for all of those.
+function goalReservedItems() {
+  const reserved = new Set();
+  const goal = currentGoal;
+  if (!goal) return reserved;
+  const named = [goal.targetItem, goal.builderPriorityItem];
+  for (const step of goal.actionsTaken ?? []) named.push(step.item, step.block);
+  const text = goal.description.toLowerCase();
+  for (const i of bot.inventory.items()) {
+    if (text.includes(i.name) || text.includes(i.name.replace(/_/g, " "))) named.push(i.name);
+  }
+  // Items the goal names but doesn't hold yet ("craft a furnace", "some iron ingots"): 1-3 word
+  // runs of the description checked against real item ids, so their recipe inputs are kept too.
+  const words = text.split(/[^a-z]+/).filter(Boolean);
+  for (let i = 0; i < words.length; i++) {
+    for (let n = 1; n <= 3 && i + n <= words.length; n++) {
+      const id = words.slice(i, i + n).join("_");
+      if (bot.registry.itemsByName[id]) named.push(id);
+      else if (bot.registry.itemsByName[id.replace(/s$/, "")]) named.push(id.replace(/s$/, ""));
+    }
+  }
+  for (const name of named.filter(Boolean)) {
+    reserved.add(name);
+    const itemDef = bot.registry.itemsByName[name];
+    if (!itemDef) continue;
+    try {
+      for (const recipe of bot.recipesAll(itemDef.id, null, true)) {
+        for (const d of recipe.delta ?? []) {
+          if (d.count < 0 && bot.registry.items[d.id]) reserved.add(bot.registry.items[d.id].name);
+        }
+      }
+    } catch { /* no recipe data for this item -- the name itself is still reserved */ }
+  }
+  return reserved;
+}
+
 async function storeSurplusValuables(reason) {
   // Saplings excluded, 2026-09-09: checkSaplings() (below) exists specifically to plant them,
   // not warehouse them -- without this, a bot with a near-full inventory would chest away her
@@ -4793,7 +4913,9 @@ async function storeSurplusValuables(reason) {
   // just as "non-essential" as any other raw material by isEssentialItem()'s own gear/fuel/food
   // definition.
   if (Date.now() < storageBlockedUntil) return;
-  const surplus = bot.inventory.items().filter((i) => !isEssentialItem(i.name) && !isKeptItem(i.name) && !i.name.endsWith("_sapling"));
+  const reserved = goalReservedItems();
+  const surplus = bot.inventory.items().filter((i) => !isEssentialItem(i.name) && !isKeptItem(i.name) &&
+    !reserved.has(i.name) && !i.name.endsWith("_sapling"));
   if (!surplus.length) return; // genuinely nothing spare to store this tick
   surplus.sort((a, b) => b.count - a.count);
   const target = surplus[0];
@@ -4846,7 +4968,7 @@ function isKeptItem(name) {
 
 async function checkDeferredSurplusCleanup() {
   if (!surplusCleanupDueAt || Date.now() < surplusCleanupDueAt) return;
-  if (!AUTONOMY_ENABLED || currentGoal || busy || arbiter.isBusy() || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || currentGoal || routineBlocked("checkDeferredSurplusCleanup") || bot.isSleeping) return;
   surplusCleanupDueAt = 0;
   await storeSurplusNearHome("post-craft cleanup");
 }
@@ -4895,7 +5017,7 @@ async function storeSurplusNearHome(reason) {
 }
 
 async function checkInventoryFull() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkInventoryFull") || bot.isSleeping) return;
   const emptySlots = INVENTORY_MAIN_HOTBAR_SLOTS - bot.inventory.items().length;
   if (emptySlots > INVENTORY_FULL_SLOTS) return;
   await storeSurplusValuables("inventory management");
@@ -4921,7 +5043,7 @@ const INSURANCE_COOLDOWN_MS = 120_000;
 let lastInsuranceAttemptAt = 0;
 
 async function checkInventoryInsurance() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkInventoryInsurance") || bot.isSleeping) return;
   if (bot.health > INSURANCE_HEALTH_THRESHOLD) return;
   if (Date.now() - lastInsuranceAttemptAt < INSURANCE_COOLDOWN_MS) return;
   lastInsuranceAttemptAt = Date.now();
@@ -4942,7 +5064,7 @@ setInterval(() => {
 const SAPLING_CHECK_MS = parseInt(process.env.MC_SAPLING_CHECK_MS || "30000", 10);
 
 async function checkSaplings() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkSaplings") || bot.isSleeping) return;
   const sapling = bot.inventory.items().find((i) => i.name.endsWith("_sapling"));
   if (!sapling) return;
 
@@ -4977,7 +5099,7 @@ const LIGHTING_CHECK_MS = parseInt(process.env.MC_LIGHTING_CHECK_MS || "20000", 
 // below rather than kept as a second, driftable copy here.
 
 async function checkLighting() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping || !bot.entity) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkLighting") || bot.isSleeping || !bot.entity) return;
   if (!bot.inventory.items().some((i) => i.name === "torch")) return;
   const block = bot.blockAt(bot.entity.position);
   if (!block || block.light >= DARK_LIGHT_LEVEL) return;
@@ -5036,7 +5158,7 @@ let homeLightingNextAt = 0;
 
 async function checkHomeLighting() {
   if (!HOME_LIGHTING_MAINTAINER || Date.now() < homeLightingNextAt) return;
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || bot.isSleeping) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkHomeLighting") || bot.isSleeping) return;
   let succeeded = false;
   try {
     succeeded = await lightHomeOnce();
@@ -5197,7 +5319,7 @@ function hasTerrainRepairRole() {
 }
 
 async function checkTerrainDamage() {
-  if (!AUTONOMY_ENABLED || busy || arbiter.isBusy() || !hasTerrainRepairRole()) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkTerrainDamage") || !hasTerrainRepairRole()) return;
   const spot = findTerrainDamage();
   if (!spot) return;
   const material = terrainRepairMaterial(spot);
@@ -5324,8 +5446,19 @@ function checkStuck() {
 
   console.log(`[${USERNAME}] possibly stuck -- no movement in ` +
               `${Math.round(stationaryMs / 1000)}s, nudging (${stuckNudgeCount}/${MAX_STUCK_NUDGES})`);
+  nudgeUnstuck().catch((err) => console.error(`[${USERNAME}] stuck nudge failed:`, err.message));
+}
+
+// Review MB-22 follow-up (2026-09-24): the jump nudge used to write control state outside the
+// arbiter. It now helps whoever is trying to move her (only fires while pathfinder is active, see
+// checkStuck), or, if nobody holds control, takes a brief ROUTINE turn of its own.
+async function nudgeUnstuck() {
+  const handle = arbiter.isBusy() ? null : await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE, { waitMs: 0 });
+  if (!handle && !arbiter.isBusy()) return;
   bot.setControlState("jump", true);
-  setTimeout(() => bot.setControlState("jump", false), 500);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  bot.setControlState("jump", false);
+  handle?.release();
 }
 
 // Any pathfinder activity counts as "trying to move" for checkStuck's stationary-vs-stuck test.
@@ -5386,7 +5519,7 @@ function handleIncoming(speaker, message, { alreadyAddressed, send }) {
   // Review MB-06, 2026-09-24: an addressed STOP never waits on the model or on `busy` -- it
   // cancels the current physical action (anything up to DIRECT_COMMAND tier; emergencies keep
   // running) and drops the standing goal immediately.
-  if (!isAnotherBot(speaker) && isAddressedStop(message, alreadyAddressed)) {
+  if (!isAnotherBot(speaker) && (isAddressedStop(message, alreadyAddressed) || isStopFromActiveCommander(speaker, message))) {
     stopNow(speaker, send).catch((err) => console.error(`[${USERNAME}] stop failed:`, err.message));
     return;
   }
@@ -5452,6 +5585,14 @@ const STOP_MESSAGE = /^\s*(?:@?[\w-]+[,:]?\s+)?(?:stop|halt|freeze|cancel|stand 
 function isAddressedStop(message, alreadyAddressed) {
   if (!STOP_MESSAGE.test(message)) return false;
   return alreadyAddressed || message.toLowerCase().includes(USERNAME.toLowerCase());
+}
+
+// Review MB-06 follow-up (2026-09-24): an unaddressed bare "stop" in shared chat still goes to
+// the model -- unless it comes from the player whose direct command this bot is running right
+// now, who clearly means this bot.
+let activeDirectSpeaker = null;
+function isStopFromActiveCommander(speaker, message) {
+  return !!activeDirectSpeaker && speaker === activeDirectSpeaker && STOP_MESSAGE.test(message);
 }
 
 async function stopNow(speaker, send) {
@@ -5616,6 +5757,8 @@ bot.once("spawn", () => {
         }
       } else if (payload.type === "claim") {
         giveClaims.get(payload.requestId)?.claimants.add(payload.donor);
+      } else if (payload.type === "delivered" && payload.forPlayer === USERNAME) {
+        console.log(`[${USERNAME}] delivery confirmed: ${payload.count} ${payload.item} from ${payload.donor}`);
       } else if (payload.type === "scout") {
         // Direct request, 2026-09-11 ("ask the other bots to look near themselves... they
         // add/update their knowledge of nearby resources into global world memory"). Same

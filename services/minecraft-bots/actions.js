@@ -1,4 +1,10 @@
-// Version: 1.66.0
+// Version: 1.67.0
+//
+// 1.67.0 (2026-09-24) -- review follow-up, closing the remaining gaps. MB-02: flee runs on
+// its own Movements copy and restores the shared one only if its copy is still active. MB-08: new
+// "place_home" action (gohome, then place, one token). MB-18: performAction logs one structured
+// OUTCOME line per action. Redundancy: an empty chest search isn't repeated from the same spot
+// within 60s, and refreshGear skips when no gear-relevant state changed.
 //
 // 1.66.0 (2026-09-24) -- review remediation, tier 4 (docs/reviews/2026-09-24-minecraft-bots-review.md).
 // MB-15: raw fish/meat are edible (ranked after cooked food; golden apples last) and SMELT_RECIPES
@@ -1632,10 +1638,26 @@ export function loadActionPlugins(bot) {
 // Best-effort, deliberately swallows its own errors: called after any action that might have
 // changed the inventory (mine, attack, loot) so gear stays current without a separate request
 // -- a failure here should never turn a successful action into a reported failure.
+// Redundancy note (review, 2026-09-24): refreshGear runs after almost every action. When nothing
+// gear-relevant changed since the last refresh (same armor/weapon candidates and durability, same
+// worn pieces, same held item) there is nothing to re-equip, so it returns without touching the
+// inventory.
+const lastGearSignature = new WeakMap();
+const GEAR_NAME = /_(helmet|chestplate|leggings|boots|sword|axe)$/;
+function gearSignature(bot) {
+  const carried = bot.inventory.items().filter((i) => GEAR_NAME.test(i.name))
+    .map((i) => `${i.name}:${i.durabilityUsed ?? 0}`).sort();
+  const worn = [5, 6, 7, 8].map((slot) => bot.inventory.slots[slot]?.name ?? "-");
+  return JSON.stringify([carried, worn, bot.heldItem?.name ?? "-"]);
+}
+
 async function refreshGear(bot) {
+  const signature = gearSignature(bot);
+  if (lastGearSignature.get(bot) === signature) return;
   try {
     await equipBestArmor(bot);
     await equipBestWeapon(bot);
+    lastGearSignature.set(bot, gearSignature(bot));
   } catch (err) {
     console.error("refreshGear failed:", err.message);
   }
@@ -1763,7 +1785,27 @@ function chestObstructed(bot, chestBlock) {
 // (a chest already has enough), not optimize every partial one.
 const CHEST_CHECK_MAX_CANDIDATES = 3;
 
+// Redundancy note (review, 2026-09-24): MINE/CRAFT/EXPLORE all check chests first, often right
+// after a LOOT or another action already searched the same chests for the same items. A search
+// that came up empty is remembered for CHEST_MISS_TTL_MS, and repeating it from roughly the same
+// spot is skipped.
+const CHEST_MISS_TTL_MS = 60_000;
+const CHEST_MISS_RADIUS = 16;
+const chestMisses = new Map(); // sorted item names -> { at, pos }
+
 async function tryTakeFromNearbyChest(bot, token, itemNames, wantCount) {
+  const missKey = [...itemNames].sort().join(",");
+  const miss = chestMisses.get(missKey);
+  if (miss && Date.now() - miss.at < CHEST_MISS_TTL_MS && bot.entity?.position.distanceTo(miss.pos) <= CHEST_MISS_RADIUS) {
+    return null;
+  }
+  const found = await searchChestsFor(bot, token, itemNames, wantCount);
+  if (found) chestMisses.delete(missKey);
+  else if (!token.cancelled && bot.entity) chestMisses.set(missKey, { at: Date.now(), pos: bot.entity.position.clone() });
+  return found;
+}
+
+async function searchChestsFor(bot, token, itemNames, wantCount) {
   const chestType = bot.registry.blocksByName.chest;
   const trappedType = bot.registry.blocksByName.trapped_chest;
   const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
@@ -2213,7 +2255,8 @@ async function saveClaimedBed(bot, position) {
 const LOST_CONTROL = Object.freeze({ ok: false, cancelled: true, text: "something more urgent has control right now." });
 
 export async function performAction(bot, action, speaker, handle = null) {
-  if (handle ? !holdsControl(handle) : isBusy()) return { ...LOST_CONTROL };
+  const startedAt = Date.now();
+  if (handle ? !holdsControl(handle) : isBusy()) return logOutcome(bot, action, startedAt, { ...LOST_CONTROL }, true);
   const alreadyHeld = !!handle;
   const token = handle ? handle.token : cancelAndRotate(bot);
   let result;
@@ -2224,7 +2267,15 @@ export async function performAction(bot, action, speaker, handle = null) {
     // handle owns its own release via handle.release().
     if (!alreadyHeld) releaseControl({ token });
   }
-  return token.cancelled ? { ...result, ok: false, cancelled: true } : result;
+  return logOutcome(bot, action, startedAt, token.cancelled ? { ...result, ok: false, cancelled: true } : result);
+}
+
+// Review MB-18 follow-up (2026-09-24): one structured line per action outcome, so triage and
+// tests/baseline.mjs count outcomes from data instead of pattern-matching each action's prose.
+function logOutcome(bot, action, startedAt, result, refused = false) {
+  console.log(`[${bot.username}] OUTCOME ${JSON.stringify({ type: action.type, ok: !!result.ok,
+    cancelled: !!result.cancelled, refused, ms: Date.now() - startedAt })}`);
+  return result;
 }
 
 // `token` is the caller's live ownership token; nested sub-actions pass it straight through.
@@ -2790,8 +2841,14 @@ async function performActionAs(bot, action, speaker, token) {
       // either. Disabling digging for just this one pathfind forces pathfinder to either find a
       // real walkable escape route or fail cleanly and fast, instead of spinning on an
       // impossible one until death.
-      const canDigBefore = bot.pathfinder.movements.canDig;
-      bot.pathfinder.movements.canDig = false;
+      // Review MB-02 follow-up (2026-09-24): flee used to flip canDig on the ONE Movements object
+      // every owner shares and restore it in finally -- after a preemption that restore landed in
+      // the middle of the new owner's route. Flee now runs on its own shallow copy and only puts
+      // the original back if its copy is still the active one.
+      const sharedMovements = bot.pathfinder.movements;
+      const fleeMovements = Object.assign(Object.create(Object.getPrototypeOf(sharedMovements)), sharedMovements);
+      fleeMovements.canDig = false;
+      bot.pathfinder.setMovements(fleeMovements);
       try {
         const goal = rally
           ? new goals.GoalNear(rally.x, rally.y, rally.z, 3)
@@ -2802,7 +2859,7 @@ async function performActionAs(bot, action, speaker, token) {
         return fail(`couldn't get away: ${err.message}`);
       } finally {
         if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        bot.pathfinder.movements.canDig = canDigBefore;
+        if (bot.pathfinder.movements === fleeMovements) bot.pathfinder.setMovements(sharedMovements);
       }
       if (token.cancelled) return ok("stopped fleeing.");
       return ok(rally ? "made it to safety." : "got some distance from it.");
@@ -3242,6 +3299,21 @@ async function performActionAs(bot, action, speaker, token) {
         return fail(`couldn't place the ${action.item}: ${err.message}`);
       }
       return ok(`placed a ${action.item}.`);
+    }
+
+    // Review MB-08 follow-up (2026-09-24): the Builder's checklist items ("go home and place a
+    // furnace there") as one deterministic action -- walk home, then place -- instead of hoping
+    // the planner sequences GOHOME and PLACE correctly. goalTick uses it directly (see
+    // runBuilderPlacement); "gohome"/"place" do the actual work, sharing this call's token.
+    case "place_home": {
+      if (!bot.inventory.items().some((i) => i.name === action.item)) {
+        return fail(`don't have a ${action.item} to place.`);
+      }
+      const home = await performActionAs(bot, { type: "gohome" }, speaker, token);
+      if (token.cancelled) return home;
+      if (!home.ok) return fail(`couldn't get home to place the ${action.item}: ${home.text}`);
+      const placed = await performActionAs(bot, { type: "place", item: action.item }, speaker, token);
+      return placed.ok ? ok(`placed a ${action.item} at home.`) : placed;
     }
 
     case "light_area": {

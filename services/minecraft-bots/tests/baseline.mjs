@@ -1,4 +1,4 @@
-// Version: 1.0.0
+// Version: 1.1.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -16,6 +16,7 @@
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
 // Revision History: 1.0.0 | 2026-09-24 | Initial metrics from the 2026-09-23 fleet measurement.
+// 1.1.0 | 2026-09-24 | action_failure_rate (OUTCOME lines) and routine_skips_per_bot_day (ROUTINE_SKIPS).
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import os from "node:os";
@@ -108,6 +109,19 @@ const METRICS = {
     better: "lower", tolerance: 0.5, floor: 3,
     value: (c, ctx) => perBotDay(c(/REJECTED DONE|SUSPICIOUS DONE/), ctx),
   },
+  action_failure_rate: {
+    about: "actions that genuinely failed (not interrupted, not refused), from OUTCOME lines (MB-18)",
+    better: "lower", tolerance: 0.25, floor: 0.05,
+    value: (c) => {
+      const all = c(/\] OUTCOME \{/);
+      return all ? c(/\] OUTCOME \{.*"ok":false,"cancelled":false,"refused":false/) / all : null;
+    },
+  },
+  routine_skips_per_bot_day: {
+    about: "periodic checks that lost their turn to other work (fairness), from ROUTINE_SKIPS lines",
+    better: "lower", tolerance: 0.5, floor: 50,
+    value: (c, ctx) => { const n = c.sumJson(/\] ROUTINE_SKIPS (\{.*\})/); return n ? perBotDay(n, ctx) : null; },
+  },
   crashes_per_bot_day: {
     about: "JS runtime errors and OOMs",
     better: "lower", tolerance: 0.5, floor: 0.5,
@@ -123,6 +137,16 @@ export function measure(lines, hours) {
   }
   const ctx = { bots: bots.size, hours };
   const count = (re) => { let n = 0; for (const l of lines) if (re.test(l)) n++; return n; };
+  // Sums every number in the JSON object captured by `re`'s first group (ROUTINE_SKIPS lines).
+  count.sumJson = (re) => {
+    let total = 0;
+    for (const l of lines) {
+      const m = l.match(re);
+      if (!m) continue;
+      try { for (const v of Object.values(JSON.parse(m[1]))) total += Number(v) || 0; } catch { /* malformed line */ }
+    }
+    return total;
+  };
   const values = {};
   for (const [name, metric] of Object.entries(METRICS)) {
     const v = metric.value(count, ctx);

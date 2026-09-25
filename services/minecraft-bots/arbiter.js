@@ -1,4 +1,8 @@
-// Version: 1.4.0
+// Version: 1.5.0
+//
+// 1.5.0 (2026-09-24) -- review MB-02 follow-up: cancelPhysical() closes the interrupted
+// action's open window (chest/furnace/crafting/enchanting). OWNERS comments corrected:
+// HEALTH_CRITICAL is a fight-or-flee decision, not an unconditional flee.
 //
 // 1.4.0 (2026-09-24) -- review MB-15: new HUNGER_CRITICAL tier (5) between routine work and
 // player commands, for a near-starving bot that has food or a fishing rod on hand.
@@ -117,7 +121,8 @@ export const OWNERS = Object.freeze({
                                              // a different trigger (asleep+threat vs.
                                              // awake+idle-tick)
   DROWNING: owner("DROWNING", 40),          // bot.on("breath") emergency surface
-  HEALTH_CRITICAL: owner("HEALTH_CRITICAL", 50), // bot.on("health") emergency flee
+  HEALTH_CRITICAL: owner("HEALTH_CRITICAL", 50), // bot.on("health") critical-health fight-or-flee
+                                             // (decideFightType: armed bots usually fight first)
   TELEPORT_HOME: owner("TELEPORT_HOME", 60), // checkStuck's teleport escalation -- cancel-only,
                                              // never blocks or waits
 });
@@ -147,6 +152,12 @@ function cancelPhysical(bot) {
   // missing before migrating to this shared function.
   bot.collectBlock.cancelTask();
   bot.stopDigging();
+  // Review MB-02 follow-up (2026-09-24): an open chest/furnace/crafting/enchanting window belongs
+  // to the action being interrupted -- close it, so that action's pending window operation fails
+  // fast instead of finishing its transaction during the new owner's turn.
+  if (bot.currentWindow) {
+    try { bot.closeWindow(bot.currentWindow); } catch (err) { console.error("arbiter: closeWindow failed:", err.message); }
+  }
   if (bot.isSleeping) bot.wake().catch((err) => console.error("arbiter: wake failed:", err.message));
 }
 

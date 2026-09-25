@@ -1,4 +1,4 @@
-// Version: 1.3.0
+// Version: 1.4.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -7,6 +7,9 @@
 // 1.1.0 | 2026-09-24 | Checks for MB-13, MB-14, MB-16, MB-17, MB-20.
 // 1.2.0 | 2026-09-24 | Efficiency checks: standing guard, home-lighting backoff, storage backoff.
 // 1.3.0 | 2026-09-24 | MB-11 check also asserts server echoes (Rcon) and the live-test bot are ignored.
+// 1.4.0 | 2026-09-24 | Review follow-up checks: open window closed on takeover, flee movements scoping,
+//   place_home, bare stop from the active commander, goal-reserved items, delivery retry/ack,
+//   OUTCOME lines, chest-miss cache, gear-refresh skip, note dedupe, Soldier armor, routine skips.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -42,7 +45,8 @@ function makeBot() {
   return bot;
 }
 function context(bot, extras = {}) {
-  return vm.createContext({ bot, console, setTimeout, clearTimeout, Promise, ...arbiter,
+  const quiet = { ...console, log: (l, ...r) => { if (!String(l).includes(' OUTCOME ')) console.log(l, ...r); } };
+  return vm.createContext({ bot, console: quiet, setTimeout, clearTimeout, Promise, ...arbiter,
     ACTION_TIMEOUT_MS: 400, equipBestWeapon: async () => {}, refreshGear: async () => {},
     goals: { GoalNear: class {}, GoalFollow: class {} }, ...extras });
 }
@@ -185,7 +189,7 @@ await check('MB-05 an old goal action does not write into a replacement goal', a
     planNextStep: async () => 'ACTION ATTACK', parseGoalStep: () => ({ type: 'step', action: { type: 'attack' } }),
     performAction: () => new Promise(resolve => { finish = resolve; }),
     logStep: (goal, line) => { goal.log.push(line); goal.steps++; },
-    goalPausedForNight: () => false,
+    goalPausedForNight: () => false, routineBlocked: () => false,
     saveGoal: async () => { saved++; }, clearGoal: async () => { cleared++; } });
   vm.runInContext('var currentGoal = this.currentGoal;' + between(index, 'async function retireGoal(', 'setInterval(() => {\n  goalTick()'), c);
   const pending = c.goalTick();
@@ -279,7 +283,7 @@ await check('EFF home lighting backs off exponentially and only runs on the main
   let attempts = 0; let outcome = false;
   const src = between(index, 'const HOME_LIGHTING_MAX_BACKOFF_MS', 'async function lightHomeOnce(');
   const c = vm.createContext({ Date, Math, HOME_LIGHTING_MAINTAINER: true, HOME_LIGHTING_CHECK_MS: 90_000,
-    AUTONOMY_ENABLED: true, busy: false, arbiter: { isBusy: () => false }, bot: { isSleeping: false },
+    AUTONOMY_ENABLED: true, busy: false, arbiter: { isBusy: () => false }, bot: { isSleeping: false }, routineBlocked: () => false,
     lightHomeOnce: async () => { attempts++; return outcome; } });
   vm.runInContext(src, c);
   await c.checkHomeLighting(); await c.checkHomeLighting();
@@ -303,6 +307,172 @@ await check('EFF storage pauses after only full/obstructed chests, resumes on su
   assert.equal(vm.runInContext('storageBlockedUntil', c), 0);
   c.noteStoreResult({ ok: false, text: "can't find dirt in slots" });
   assert.equal(vm.runInContext('storageBlockedUntil', c), 0, 'item-specific failures do not pause storage');
+});
+
+// ---- 2026-09-24 follow-up: remaining gaps from the review ----------------------------------------
+const longterm = await readFile(root + 'longterm.js', 'utf8');
+
+await check('MB-02 a takeover closes the interrupted action\'s open window', async () => {
+  const bot = makeBot(); let closed = 0;
+  bot.currentWindow = { id: 3 }; bot.closeWindow = (w) => { closed++; bot.currentWindow = null; };
+  const old = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  const emergency = await arbiter.requestControl(bot, arbiter.OWNERS.HEALTH_CRITICAL);
+  assert.equal(closed, 1); assert.equal(bot.currentWindow, null); assert.equal(old.token.preempted, true);
+  emergency.release();
+});
+
+await check('MB-02 flee restores shared movements only if its own copy is still active', async () => {
+  const bot = makeBot(); let rejectGoto;
+  const shared = bot.pathfinder.movements;
+  bot.pathfinder.setMovements = (m) => { bot.pathfinder.movements = m; };
+  bot.pathfinder.goto = () => new Promise((_, reject) => { rejectGoto = reject; });
+  const flee = await arbiter.requestControl(bot, arbiter.OWNERS.SELF_DEFENSE);
+  const c = context(bot, { goals: { GoalNear: class {}, GoalFollow: class {}, GoalInvert: class {} } });
+  vm.runInContext(timeoutFn + actionFn, c);
+  const pending = c.performAction(bot, { type: 'flee', target: { id: 9 } }, 'test', flee);
+  await sleep(10);
+  assert.equal(bot.pathfinder.movements.canDig, false, 'flee runs with digging off');
+  assert.equal(shared.canDig, true, 'the shared Movements object was not mutated');
+  const emergency = await arbiter.requestControl(bot, arbiter.OWNERS.HEALTH_CRITICAL);
+  const emergencyMovements = { canDig: true, owner: 'emergency' };
+  bot.pathfinder.setMovements(emergencyMovements);
+  rejectGoto(new Error('The goal was changed'));
+  await pending;
+  assert.equal(bot.pathfinder.movements, emergencyMovements, 'the preemptor\'s movements survived flee cleanup');
+  emergency.release();
+});
+
+await check('MB-08 place_home walks home, then places the item', async () => {
+  const bot = makeBot(); const steps = [];
+  const pos = { x: 0, y: 64, z: 0, floored() { return this; }, offset(dx, dy, dz) { return { dx, dy, dz }; } };
+  bot.spawnPoint = { x: 10, y: 64, z: 10 };
+  bot.entity = { position: pos };
+  bot.inventory.items = () => [{ name: 'furnace' }];
+  bot.pathfinder.goto = async () => { steps.push('goto-home'); };
+  bot.equip = async () => {};
+  bot.blockAt = (p) => (p.dy === -1 ? { boundingBox: 'block' } : { boundingBox: 'empty' });
+  bot.placeBlock = async () => { steps.push('place'); };
+  const c = context(bot, { Vec3: class {}, attemptBoatCrossing: async () => false });
+  vm.runInContext(timeoutFn + actionFn, c);
+  const result = await c.performAction(bot, { type: 'place_home', item: 'furnace' }, 'test');
+  assert.equal(result.ok, true, result.text); assert.deepEqual(steps, ['goto-home', 'place']);
+  bot.inventory.items = () => [];
+  const none = await c.performAction(bot, { type: 'place_home', item: 'furnace' }, 'test');
+  assert.equal(none.ok, false);
+});
+
+await check('MB-06 a bare "stop" from the player whose command is running stops the bot', async () => {
+  const c = vm.createContext({ USERNAME: 'Amy', setInterval() {} });
+  vm.runInContext(between(index, 'const STOP_MESSAGE', 'async function stopNow('), c);
+  assert.equal(c.isStopFromActiveCommander('Steve', 'stop'), false, 'no command running');
+  vm.runInContext('activeDirectSpeaker = "Steve"', c);
+  assert.equal(c.isStopFromActiveCommander('Steve', 'stop!'), true);
+  assert.equal(c.isStopFromActiveCommander('Alex', 'stop'), false, 'a different player');
+});
+
+await check('MB-09 inventory storing keeps the active goal\'s items and recipe inputs', async () => {
+  const items = { 1: { name: 'furnace' }, 2: { name: 'cobblestone' } };
+  const bot = { inventory: { items: () => [{ name: 'cobblestone' }, { name: 'iron_ingot' }, { name: 'dirt' }] },
+    registry: { itemsByName: { furnace: { id: 1 }, cobblestone: { id: 2 } }, items },
+    recipesAll: (id) => (id === 1 ? [{ delta: [{ id: 2, count: -8 }, { id: 1, count: 1 }] }] : []) };
+  const c = vm.createContext({ bot, currentGoal: { description: 'craft a furnace and some iron ingot', actionsTaken: [{ type: 'mine', block: 'stone' }] } });
+  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, 'function goalReservedItems(', 'async function storeSurplusValuables('), c);
+  const reserved = c.goalReservedItems();
+  for (const name of ['furnace', 'cobblestone', 'iron_ingot', 'stone']) assert(reserved.has(name), `${name} reserved`);
+  assert(!reserved.has('dirt'), 'unrelated items are still storable');
+});
+
+await check('MB-13 a failed delivery is retried once; a success is acknowledged', async () => {
+  const published = []; let outcome = { ok: false, text: 'nope' };
+  const c = vm.createContext({ Date, console: { log() {}, error() {} }, USERNAME: 'Bob', AUTONOMY_ENABLED: true,
+    bot: { isSleeping: false }, AGENT_ID: 'mc-bob', settleGiveClaims() {}, routineBlocked: () => false,
+    arbiter: { requestControl: async () => ({ release() {} }), OWNERS: { ROUTINE: {} } },
+    performAction: async () => outcome, narrateAction: async (t) => t,
+    buzzPublish: async (_, __, body) => { published.push(JSON.parse(body)); } });
+  vm.runInContext('var pendingGiveRequest = { forPlayer: "Amy", item: "oak_log", count: 2, requestId: "r1", attempts: 0, expiresAt: Date.now() + 60000 };' +
+    between(index, 'async function checkPendingGiveRequests(', 'setInterval(() => {\n  checkPendingGiveRequests'), c);
+  await c.checkPendingGiveRequests();
+  assert.equal(vm.runInContext('pendingGiveRequest?.attempts', c), 1, 'queued for one retry');
+  await c.checkPendingGiveRequests();
+  assert.equal(vm.runInContext('pendingGiveRequest', c), null, 'dropped after the retry');
+  vm.runInContext('pendingGiveRequest = { forPlayer: "Amy", item: "oak_log", count: 2, requestId: "r2", attempts: 0, expiresAt: Date.now() + 60000 }', c);
+  outcome = { ok: true, text: 'gave' };
+  await c.checkPendingGiveRequests();
+  assert.deepEqual(published.map((p) => [p.type, p.requestId, p.count]), [['delivered', 'r2', 2]]);
+});
+
+await check('MB-18 every action outcome is logged as one structured OUTCOME line', async () => {
+  const lines = [];
+  const bot = makeBot(); bot.username = 'Amy';
+  const c = context(bot, { console: { log: (l) => lines.push(l), error() {} } });
+  vm.runInContext(timeoutFn + actionFn, c);
+  await c.performAction(bot, { type: 'stop' }, 'test');
+  const held = await arbiter.requestControl(bot, arbiter.OWNERS.HEALTH_CRITICAL);
+  await c.performAction(bot, { type: 'stop' }, 'test');
+  held.release();
+  const outcomes = lines.filter((l) => l.startsWith('[Amy] OUTCOME ')).map((l) => JSON.parse(l.slice(14)));
+  assert.equal(outcomes.length, 2);
+  assert.equal(outcomes[0].ok, true); assert.equal(outcomes[1].refused, true);
+});
+
+await check('EFF a chest search that just came up empty is not repeated from the same spot', async () => {
+  let searches = 0;
+  const bot = makeBot(); const here = { x: 0, y: 64, z: 0, distanceTo: () => 2, clone() { return this; } };
+  bot.entity = { position: here };
+  const c = context(bot, { searchChestsFor: async () => { searches++; return null; } });
+  vm.runInContext(between(actions, 'const CHEST_MISS_TTL_MS', 'async function searchChestsFor('), c);
+  await c.tryTakeFromNearbyChest(bot, { cancelled: false }, ['oak_log'], 4);
+  await c.tryTakeFromNearbyChest(bot, { cancelled: false }, ['oak_log'], 4);
+  assert.equal(searches, 1);
+  await c.tryTakeFromNearbyChest(bot, { cancelled: false }, ['iron_ingot'], 1);
+  assert.equal(searches, 2, 'a different item list still searches');
+});
+
+await check('EFF gear refresh does nothing when no gear changed', async () => {
+  let equips = 0;
+  const bot = { inventory: { items: () => [{ name: 'iron_sword', durabilityUsed: 3 }], slots: [] }, heldItem: { name: 'iron_sword' } };
+  const c = vm.createContext({ console, WeakMap, JSON, equipBestArmor: async () => { equips++; }, equipBestWeapon: async () => {} });
+  vm.runInContext(between(actions, 'const lastGearSignature', '\n// Rejects after `ms`'), c);
+  await c.refreshGear(bot); await c.refreshGear(bot);
+  assert.equal(equips, 1);
+  bot.heldItem = { name: 'cod' };
+  await c.refreshGear(bot);
+  assert.equal(equips, 2, 'holding food again triggers a refresh');
+});
+
+await check('EFF a repeated memory note skips the duplicate-search process', async () => {
+  let searches = 0; let writes = 0;
+  const c = vm.createContext({ Date, Map, console: { log() {} }, MEMORY_DIR: '/m', path: { join: (...p) => p.join('/') },
+    mkdir: async () => {}, writeFile: async () => { writes++; }, slugify: (t) => t, runIngestCoalesced: async () => {},
+    DUPLICATE_DISTANCE_THRESHOLD: 0.1, searchMemory: async () => { searches++; return []; } });
+  vm.runInContext(between(longterm, 'const RECENT_NOTE_TTL_MS', 'export async function searchMemory('), c);
+  await c.writeMemoryNote({ scope: 'world', persona: 'amy', text: 'Found oak_log near (1, 2, 3)' });
+  await c.writeMemoryNote({ scope: 'world', persona: 'amy', text: 'Found oak_log near (4, 5, 6)' });
+  assert.equal(searches, 1); assert.equal(writes, 1);
+});
+
+await check('Soldier priorities: weapon, then monster, then missing armor (rate-limited), then guard', async () => {
+  const slots = []; let weapon = true; let threat = null;
+  const c = vm.createContext({ Date, bot: { inventory: { slots } }, hasWeapon: () => weapon,
+    nearestHostile: () => threat, FLEE_ONLY_MOBS: new Set(), SOLDIER_PATROL_RANGE: 32 });
+  vm.runInContext(between(index, 'function nextSoldierPriority(', 'async function proposeOwnGoal('), c);
+  weapon = false; assert.equal(c.nextSoldierPriority().name, 'weapon'); weapon = true;
+  threat = { name: 'zombie' }; assert.equal(c.nextSoldierPriority().name, 'monster'); threat = null;
+  assert.equal(c.nextSoldierPriority().name, 'armor');
+  assert.equal(c.nextSoldierPriority().name, 'guard', 'armor retried at most every 30 min');
+  vm.runInContext('soldierArmorRetryAt = 0', c);
+  for (const s of [5, 6, 7, 8]) slots[s] = { name: 'iron_helmet' };
+  assert.equal(c.nextSoldierPriority().name, 'guard', 'fully armored');
+});
+
+await check('Fairness: routine checks that lose their turn are counted', async () => {
+  const c = vm.createContext({ busy: true, arbiter: { isBusy: () => false }, setInterval() {}, console, USERNAME: 'Amy', JSON, Object });
+  vm.runInContext('var busy = this.busy;' + between(index, 'const ROUTINE_SKIP_REPORT_MS', '\n// Goal-identity guards'), c);
+  assert.equal(c.routineBlocked('checkHunger'), true);
+  assert.equal(c.routineBlocked('checkHunger'), true);
+  vm.runInContext('busy = false', c);
+  assert.equal(c.routineBlocked('checkSaplings'), false);
+  assert.deepEqual({ ...vm.runInContext('routineSkips', c) }, { checkHunger: 2 });
 });
 
 console.log(`${passed} unit checks passed.`);

@@ -1,4 +1,7 @@
-// Version: 1.4.0
+// Version: 1.5.0
+//
+// 1.5.0 (2026-09-24) -- Soldier priorities reordered to weapon, then armor, then guard --
+// matching index.js's nextSoldierPriority(), which now checks armor too.
 //
 // 1.4.0 (2026-09-13) -- direct request ("rebalance the bots so they each have exactly one role...
 // create [more] so every role has at least one bot"): every BOT_ROLES entry's `secondary` set to
@@ -52,8 +55,8 @@ export const ROLES = Object.freeze({
   SOLDIER:  Object.freeze({
     name: "Soldier", domain: "fights, defends itself and others, responds to alarm calls",
     priorities: [
-      "get a full set of armor, any tier",
       "get a real weapon (sword or axe), not bare hands",
+      "get a full set of armor, any tier",
       "stand guard near the shared spawn point and respond to threats -- ongoing, never \"done\"",
     ],
   }),

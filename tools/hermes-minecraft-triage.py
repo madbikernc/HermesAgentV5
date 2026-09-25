@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-09-24) — review MB-18 follow-up: the action-failure catch-all now matches the bots'
+# structured OUTCOME lines (ok=false, not cancelled, not refused) instead of each action's prose
+# "(ok=false" suffix, so interruptions and refused stale calls are no longer counted as failures.
 #
 # 1.4.0 (2026-09-24) — docs/reviews/2026-09-24-minecraft-bots-review.md MB-18/MB-19.
 # (1) MC_BOT_UNITS now defaults to the journalctl glob "minecraft-bot-*.service", so every bot
@@ -173,7 +177,10 @@ TRIAGE_PATTERNS = [
     ("rejected-done", re.compile(r"REJECTED DONE"), "a goal's completion claim failed validation"),
     ("combat-timeout", re.compile(r"gave up on the fight|lost track of it"), "a fight ended without a kill"),
     # Catch-all for ordinary action failures -- must stay LAST so specific categories win.
-    ("action-not-ok", re.compile(r"\(ok=false"), "an action reported failure"),
+    # Structured OUTCOME lines (services/minecraft-bots/actions.js, review MB-18): a real failure,
+    # not an interruption or a refused stale call.
+    ("action-not-ok", re.compile(r'OUTCOME \{.*"ok":false,"cancelled":false,"refused":false'),
+     "an action reported failure"),
 ]
 
 # Categories worth a coder/coder2 diagnosis per new signature; the rest are only recorded and

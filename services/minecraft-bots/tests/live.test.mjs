@@ -1,4 +1,4 @@
-// Version: 1.0.1
+// Version: 1.1.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -14,6 +14,7 @@
 // Every behavior fix that is observable in-world should add a scenario here (see tests/README.md).
 //
 // Revision History: 1.0.0 | 2026-09-24 | Initial scenarios for MB-01, MB-02/04, MB-07, MB-15.
+// 1.1.0 | 2026-09-24 | Scenarios for MB-02 (takeover closes an open window) and MB-08 (place_home).
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -22,6 +23,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import mineflayer from "mineflayer";
 import pathfinderPkg from "mineflayer-pathfinder";
+import { Vec3 } from "vec3";
 import { loadActionPlugins, performAction } from "../actions.js";
 import * as arbiter from "../arbiter.js";
 import { equipBestArmor } from "../equipment.js";
@@ -92,6 +94,7 @@ async function summonHusk(dx, { tanky = false } = {}) {
 
 // ---- scenarios -----------------------------------------------------------------------------
 const scenarios = [];
+const scenarioCleanup = []; // undo steps a scenario registers; run after it, pass or fail
 const scenario = (name, fn) => scenarios.push({ name, fn });
 
 scenario("MB-01 combat: attack actually fights and kills a real mob", async () => {
@@ -170,6 +173,38 @@ scenario("MB-15 food: a hungry bot eats raw fish", async () => {
   await waitFor(() => bot.food > before, 5000, "food to go up");
 });
 
+scenario("MB-02 takeover closes the interrupted action's open window", async () => {
+  await rcon(`setblock ${x + 2} ${y + 1} ${z} minecraft:crafting_table`);
+  const table = await waitFor(() => { const b = bot.blockAt(new Vec3(x + 2, y + 1, z)); return b?.name === "crafting_table" && b; },
+    5000, "crafting table");
+  const routine = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  await bot.openBlock(table);
+  await waitFor(() => bot.currentWindow, 5000, "window open");
+  const emergency = await arbiter.requestControl(bot, arbiter.OWNERS.HEALTH_CRITICAL);
+  try {
+    await waitFor(() => !bot.currentWindow, 3000, "window closed by the takeover");
+    assert.equal(routine.token.preempted, true);
+  } finally {
+    emergency.release();
+  }
+});
+
+scenario("MB-08 place_home walks to the spawn point and places the item there", async () => {
+  // "home" is bot.spawnPoint -- the WORLD spawn (mineflayer's spawn_position packet), not a
+  // player's /spawnpoint. Moving the world spawn would move the real fleet's home, so the tester's
+  // own copy is pointed at the arena instead.
+  const home = new Vec3(x + 7, y + 1, z + 7);
+  const worldSpawn = bot.spawnPoint;
+  bot.spawnPoint = home;
+  scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
+  await rcon(`give ${TESTER} minecraft:crafting_table`);
+  await waitFor(() => bot.inventory.items().some((i) => i.name === "crafting_table"), 5000, "crafting table in inventory");
+  const result = await performAction(bot, { type: "place_home", item: "crafting_table" }, TESTER);
+  assert.equal(result.ok, true, `place_home result: ${result.text}`);
+  const placed = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, point: new Vec3(home.x, home.y, home.z), maxDistance: 4 });
+  assert(placed, "a crafting table stands within 4 blocks of home");
+});
+
 // ---- runner -------------------------------------------------------------------------------------
 const bot = mineflayer.createBot({ host: HOST, port: PORT, username: TESTER, auth: "offline" });
 bot.loadPlugin(pathfinder);
@@ -200,6 +235,8 @@ try {
     } catch (err) {
       failed++;
       console.log(`FAIL: ${s.name}\n      ${err.message}`);
+    } finally {
+      while (scenarioCleanup.length) scenarioCleanup.pop()();
     }
   }
 } catch (err) {
