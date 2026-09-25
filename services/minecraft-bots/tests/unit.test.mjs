@@ -1,4 +1,4 @@
-// Version: 1.6.0
+// Version: 1.7.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -15,6 +15,8 @@
 //   restart persistence, MB-21 router/RAG timeouts, MB-22 stationary vs wedged.
 // 1.6.0 | 2026-09-25 | Fight-or-flee policy and attacker tracking, /spreadplayers rescue, rag-backend
 //   local timeouts and remote mode (spark2 RAG).
+// 1.7.0 | 2026-09-25 | Beds: a destroyed claim moves to the nearest unclaimed bed, claim conflicts,
+//   sleep tries unclaimed beds first (one candidate per bed) and never claims another bot's.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -706,6 +708,108 @@ await check('Fight-or-flee: the mob that just hurt the bot is the threat, not me
   zombie.position.d = 8; // the zombie backs off; an arrow lands
   bot.health = 17; bot.emit('health');
   assert.equal(c.pickThreat(24), skeleton, 'the archer that just hit it');
+});
+
+// Beds (2026-09-25): a fake world of bed blocks plus a temp claims directory, with the real claim
+// helpers and the real "sleep" action.
+class V3 {
+  constructor(x, y, z) { Object.assign(this, { x, y, z }); }
+  offset(dx, dy, dz) { return new V3(this.x + dx, this.y + dy, this.z + dz); }
+  equals(o) { return o.x === this.x && o.y === this.y && o.z === this.z; }
+  distanceTo(o) { return Math.hypot(this.x - o.x, this.y - o.y, this.z - o.z); }
+  toString() { return `(${this.x}, ${this.y}, ${this.z})`; }
+}
+async function bedWorld(username, { claims = {}, standAt = new V3(0, 64, 0) } = {}) {
+  const fs = await import('node:fs/promises');
+  const pathMod = (await import('node:path')).default;
+  const dir = await fs.mkdtemp(pathMod.join((await import('node:os')).tmpdir(), 'mbtest-beds-'));
+  for (const [name, [bx, by, bz]] of Object.entries(claims)) {
+    await fs.writeFile(pathMod.join(dir, `${name}.json`), JSON.stringify({ x: bx, y: by, z: bz }));
+  }
+  const blocks = new Map();
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  // A bed facing east: foot at (bx, by, bz), head at (bx + 1, by, bz).
+  const addBed = (bx, by, bz) => {
+    for (const [dx, part] of [[0, 'foot'], [1, 'head']]) {
+      const position = new V3(bx + dx, by, bz);
+      blocks.set(key(position), { name: 'red_bed', position, getProperties: () => ({ facing: 'east', part }) });
+    }
+  };
+  const bot = makeBot();
+  const tried = [];
+  Object.assign(bot, {
+    username, entity: { position: standAt }, isSleeping: false,
+    blockAt: (p) => blocks.get(key(p)) || { name: 'air', position: p, getProperties: () => ({}) },
+    isABed: (b) => !!b?.name?.endsWith('_bed'),
+    findBlocks: ({ matching, count }) => [...blocks.values()].filter(matching)
+      .sort((a, b) => a.position.distanceTo(standAt) - b.position.distanceTo(standAt))
+      .slice(0, count).map((b) => b.position),
+    sleep: async (b) => { tried.push(key(b.position)); setTimeout(() => bot.emit('wake'), 5); },
+  });
+  bot.pathfinder.goto = async () => {};
+  const c = context(bot, { BEDS_DIR: dir, Vec3: V3, path: pathMod, readFile: fs.readFile,
+    writeFile: fs.writeFile, mkdir: fs.mkdir, readdir: fs.readdir, unlink: fs.unlink, SLEEP_TIMEOUT_MS: 1000 });
+  vm.runInContext(between(actions, 'function bedNearHazard(', '\n// Direct request, 2026-09-09') +
+    between(actions, 'async function loadClaimedBed(', '\n// Direct request, 2026-09-10') + timeoutFn + actionFn, c);
+  const claimOf = async (name) => {
+    try { return JSON.parse(await fs.readFile(pathMod.join(dir, `${name}.json`), 'utf8')); } catch { return null; }
+  };
+  return { bot, c, addBed, blocks, tried, claimOf, destroy: (p) => { blocks.delete(key(p)); blocks.delete(`${p.x + 1},${p.y},${p.z}`); } };
+}
+
+await check('Beds: a destroyed claimed bed is replaced by the nearest bed no other bot claimed', async () => {
+  // Amy's bed at x=0 is gone; x=4 is nearer but Babs claimed it by its FOOT half; x=10 is free.
+  const w = await bedWorld('Amy', { claims: { Amy: [1, 64, 0], Babs: [4, 64, 0] } });
+  w.addBed(4, 64, 0); w.addBed(10, 64, 0);
+  const result = await w.c.checkClaimedBed(w.bot);
+  assert.equal(result.status, 'replaced');
+  assert.deepEqual(await w.claimOf('Amy'), { x: 11, y: 64, z: 0 }, 'the free bed, by its head');
+  assert.deepEqual(await w.claimOf('Babs'), { x: 4, y: 64, z: 0 }, "Babs's claim is untouched");
+});
+
+await check('Beds: no unclaimed bed left clears the dead claim; a live or unloaded claim is kept', async () => {
+  const w = await bedWorld('Amy', { claims: { Amy: [1, 64, 0], Babs: [5, 64, 0] } });
+  w.addBed(4, 64, 0);
+  assert.equal((await w.c.checkClaimedBed(w.bot)).status, 'lost');
+  assert.equal(await w.claimOf('Amy'), null);
+  const live = await bedWorld('Amy', { claims: { Amy: [4, 64, 0] } });
+  live.addBed(4, 64, 0);
+  assert.equal((await live.c.checkClaimedBed(live.bot)).status, 'ok');
+  const unloaded = await bedWorld('Amy', { claims: { Amy: [900, 64, 0] } });
+  unloaded.bot.blockAt = () => null;
+  assert.equal((await unloaded.c.checkClaimedBed(unloaded.bot)).status, 'unloaded');
+  assert.deepEqual(await unloaded.claimOf('Amy'), { x: 900, y: 64, z: 0 });
+});
+
+await check('Beds: two bots on one bed -- the lower-sorted name keeps it, the other moves', async () => {
+  const claims = { Amy: [4, 64, 0], Babs: [5, 64, 0] }; // same bed, different halves
+  const babs = await bedWorld('Babs', { claims });
+  babs.addBed(4, 64, 0); babs.addBed(10, 64, 0);
+  assert.equal((await babs.c.checkClaimedBed(babs.bot)).status, 'replaced');
+  assert.deepEqual(await babs.claimOf('Babs'), { x: 11, y: 64, z: 0 });
+  const amy = await bedWorld('Amy', { claims });
+  amy.addBed(4, 64, 0); amy.addBed(10, 64, 0);
+  assert.equal((await amy.c.checkClaimedBed(amy.bot)).status, 'ok');
+});
+
+await check('Beds: sleep after the bed is destroyed goes to an unclaimed bed and claims it', async () => {
+  // Nearest beds: x=2 (Babs's), x=6 (Cal's), x=12 (free). The old code tried the 3 nearest
+  // bed BLOCKS -- both halves of x=2 and one of x=6 -- and never reached the free bed.
+  const w = await bedWorld('Amy', { claims: { Amy: [0, 64, 5], Babs: [2, 64, 0], Cal: [6, 64, 0] } });
+  w.addBed(2, 64, 0); w.addBed(6, 64, 0); w.addBed(12, 64, 0);
+  const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(w.tried, ['13,64,0'], 'the free bed first, by its head');
+  assert.deepEqual(await w.claimOf('Amy'), { x: 13, y: 64, z: 0 });
+});
+
+await check("Beds: sleeping in another bot's bed as a last resort doesn't claim it", async () => {
+  const w = await bedWorld('Amy', { claims: { Babs: [3, 64, 0] } });
+  w.addBed(2, 64, 0);
+  const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(w.tried, ['3,64,0']);
+  assert.equal(await w.claimOf('Amy'), null);
 });
 
 console.log(`${passed} unit checks passed.`);

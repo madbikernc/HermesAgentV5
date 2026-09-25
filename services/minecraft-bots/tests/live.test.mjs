@@ -1,4 +1,4 @@
-// Version: 1.2.0
+// Version: 1.3.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -18,6 +18,7 @@
 // 1.1.0 | 2026-09-24 | Scenarios for MB-02 (takeover closes an open window) and MB-08 (place_home).
 // 1.2.0 | 2026-09-25 | Chest scenarios (MB-17 mixed stacks, MB-16 stocked chest vs village scouting),
 //   safe now that MC_MEMORY_ROOT keeps chest snapshots out of the fleet's known_chests.json.
+// 1.3.0 | 2026-09-25 | Beds scenario: a destroyed claimed bed is replaced by the nearest unclaimed one.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -27,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import mineflayer from "mineflayer";
 import pathfinderPkg from "mineflayer-pathfinder";
 import { Vec3 } from "vec3";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -35,7 +36,7 @@ import path from "node:path";
 const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
 process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
 process.env.MC_RAG_DISABLED = "true";
-const { loadActionPlugins, performAction } = await import("../actions.js");
+const { loadActionPlugins, performAction, checkClaimedBed } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor } = await import("../equipment.js");
 
@@ -217,6 +218,30 @@ scenario("MB-08 place_home walks to the spawn point and places the item there", 
   assert.equal(result.ok, true, `place_home result: ${result.text}`);
   const placed = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, point: new Vec3(home.x, home.y, home.z), maxDistance: 4 });
   assert(placed, "a crafting table stands within 4 blocks of home");
+});
+
+// A bed facing east: foot at (dx, dz), head one block east.
+async function placeBed(dx, dz) {
+  await rcon(`setblock ${x + dx} ${y + 1} ${z + dz} minecraft:red_bed[facing=east,part=foot]`,
+    `setblock ${x + dx + 1} ${y + 1} ${z + dz} minecraft:red_bed[facing=east,part=head]`);
+  await waitFor(() => bot.isABed(bot.blockAt(new Vec3(x + dx + 1, y + 1, z + dz))), 5000, "bed placed");
+}
+
+scenario("Beds: a destroyed claimed bed is replaced by the nearest unclaimed one", async () => {
+  const bedsDir = path.join(process.env.MC_MEMORY_ROOT, "beds");
+  const claim = (name, dx, dz) => writeFileSync(path.join(bedsDir, `${name}.json`),
+    JSON.stringify({ x: x + dx, y: y + 1, z: z + dz }));
+  mkdirSync(bedsDir, { recursive: true });
+  scenarioCleanup.push(() => rmSync(bedsDir, { recursive: true, force: true }));
+  await placeBed(2, 3); await placeBed(-3, 3); await placeBed(-6, -5);
+  claim(TESTER, 2, 3);     // the tester's own bed, by its foot half
+  claim("MBRival", -3, 3); // the nearest other bed belongs to someone else
+  await rcon(`setblock ${x + 2} ${y + 1} ${z + 3} minecraft:air`, `setblock ${x + 3} ${y + 1} ${z + 3} minecraft:air`);
+  await waitFor(() => !bot.isABed(bot.blockAt(new Vec3(x + 3, y + 1, z + 3))), 5000, "bed destroyed");
+  const result = await checkClaimedBed(bot);
+  assert.equal(result.status, "replaced", JSON.stringify(result));
+  const now = JSON.parse(readFileSync(path.join(bedsDir, `${TESTER}.json`), "utf8"));
+  assert.deepEqual(now, { x: x - 5, y: y + 1, z: z - 5 }, "claimed the free bed's head, not MBRival's");
 });
 
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);

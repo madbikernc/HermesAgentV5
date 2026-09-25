@@ -1,4 +1,8 @@
-// Version: 1.69.0
+// Version: 1.70.0
+//
+// 1.70.0 (2026-09-25) -- beds: a destroyed claimed bed is replaced with the nearest unclaimed bed
+// (new exported checkClaimedBed, also settling two bots on one bed by name order). Sleep tries one
+// candidate per bed (not per half), unclaimed before other bots' beds, and never claims another's.
 //
 // 1.69.0 (2026-09-25) -- HOSTILE_MOBS exported for index.js's fight-or-flee policy.
 //
@@ -918,7 +922,7 @@ import pathfinderPkg from "mineflayer-pathfinder";
 import collectBlockPkg from "mineflayer-collectblock";
 import pvpPkg from "mineflayer-pvp";
 import { Vec3 } from "vec3";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipment.js";
 import { cancelAndRotate, isBusy, holdsControl, releaseControl } from "./arbiter.js";
@@ -2229,6 +2233,92 @@ async function saveClaimedBed(bot, position) {
   }
 }
 
+async function clearClaimedBed(bot) {
+  await unlink(path.join(BEDS_DIR, `${bot.username}.json`)).catch(() => {});
+}
+
+// Direct request, 2026-09-25: "if a bot's bed is destroyed, it should just claim another
+// unclaimed bed." A bed is two blocks and a claim may name either half (sleep saved whichever
+// block findBlocks returned), so claims are compared against both halves. Vanilla places the head
+// one block along `facing` from the foot.
+const BED_FACING_STEP = { north: [0, -1], south: [0, 1], west: [-1, 0], east: [1, 0] };
+function bedHalves(block) {
+  const props = block.getProperties?.() || {};
+  const [dx, dz] = BED_FACING_STEP[props.facing] || [0, 0];
+  if (!dx && !dz) return [block.position];
+  const head = props.part === "foot" ? block.position.offset(dx, 0, dz) : block.position;
+  return [head, head.offset(-dx, 0, -dz)];
+}
+
+// Every OTHER bot's claim on this host, { username, position }.
+async function loadOtherBedClaims(bot) {
+  let files;
+  try {
+    files = await readdir(BEDS_DIR);
+  } catch {
+    return [];
+  }
+  const claims = [];
+  for (const file of files) {
+    const username = file.replace(/\.json$/, "");
+    if (!file.endsWith(".json") || username === bot.username) continue;
+    try {
+      const data = JSON.parse(await readFile(path.join(BEDS_DIR, file), "utf8"));
+      claims.push({ username, position: new Vec3(data.x, data.y, data.z) });
+    } catch {} // a half-written or corrupt claim just doesn't count
+  }
+  return claims;
+}
+
+function bedClaimant(block, claims) {
+  const halves = bedHalves(block);
+  return claims.find((c) => halves.some((h) => h.equals(c.position)))?.username || null;
+}
+
+// Nearby usable beds, one entry per bed (its head block), nearest to `near` first, each tagged
+// with the other bot that has already claimed it (null = unclaimed).
+function nearbyBeds(bot, claims, near) {
+  const seen = [];
+  for (const pos of bot.findBlocks({ matching: (block) => bot.isABed(block), maxDistance: 32, count: 64 })) {
+    const block = bot.blockAt(pos);
+    if (!block) continue;
+    const head = bedHalves(block)[0];
+    if (seen.some((b) => b.position.equals(head)) || bedNearHazard(bot, head)) continue;
+    seen.push({ position: head, claimant: bedClaimant(block, claims) });
+  }
+  const origin = near || bot.entity.position;
+  return seen.sort((a, b) => a.position.distanceTo(origin) - b.position.distanceTo(origin));
+}
+
+// Checked periodically by index.js. A claimed bed that's loaded but no longer a bed was destroyed:
+// claim the nearest unclaimed bed right away instead of waiting for bedtime, so "home" (lighting,
+// surplus storage) moves too. Two bots claiming one bed (a claim race, or legacy claims from
+// before this check) is settled deterministically: the lower-sorted name keeps it.
+export async function checkClaimedBed(bot) {
+  const claimed = await loadClaimedBed(bot);
+  if (!claimed) return { status: "none" };
+  const block = bot.blockAt(claimed);
+  if (!block) return { status: "unloaded" }; // can't see it from here -- don't guess
+  const claims = await loadOtherBedClaims(bot);
+  let reason;
+  if (!bot.isABed(block)) {
+    reason = "destroyed";
+  } else {
+    const rival = bedClaimant(block, claims);
+    if (!rival || rival > bot.username) return { status: "ok", position: claimed };
+    reason = `also claimed by ${rival}`;
+  }
+  const next = nearbyBeds(bot, claims, claimed).find((b) => !b.claimant);
+  if (!next) {
+    await clearClaimedBed(bot);
+    console.log(`[beds] ${bot.username}'s bed at ${claimed} is ${reason}; no unclaimed bed nearby, claim cleared.`);
+    return { status: "lost", from: claimed, reason };
+  }
+  await saveClaimedBed(bot, next.position);
+  console.log(`[beds] ${bot.username}'s bed at ${claimed} is ${reason}; claimed the bed at ${next.position}.`);
+  return { status: "replaced", from: claimed, to: next.position, reason };
+}
+
 // Direct request, 2026-09-10 ("write up a plan for that single arbiter..." -> the approved
 // per-bot coherence arbiter plan). This function's own real body (the 4 cancel primitives +
 // token rotation + sleep-interrupt) now lives in arbiter.js's own cancelAndRotate() -- moved, not
@@ -3071,17 +3161,21 @@ async function performActionAs(bot, action, speaker, token) {
       // SPECIFIC position FIRST, ahead of the normal broad search -- a bot that already has a
       // working bed stops competing for "nearest" every night and just goes home, only falling
       // back to the broad candidate list if her own bed is gone, occupied, or unreachable.
+      // 2026-09-25: a destroyed claim is replaced with an unclaimed bed first (checkClaimedBed),
+      // then candidates are one per bed (both halves used to fill two of the 3 slots): her own,
+      // then unclaimed beds, and other bots' claimed beds only as a last resort, never re-claimed.
+      await checkClaimedBed(bot);
       const claimed = await loadClaimedBed(bot);
       const claimedBlock = claimed && bot.blockAt(claimed);
-      const positions = claimedBlock && bot.isABed(claimedBlock) && !bedNearHazard(bot, claimed)
-        ? [claimed] : [];
-      for (const pos of bot.findBlocks({ matching: (block) => bot.isABed(block), maxDistance: 32,
-                                          count: MAX_CANDIDATES })) {
-        if (!positions.some((p) => p.equals(pos))) positions.push(pos);
-      }
-      if (!positions.length) return fail("couldn't find a bed nearby.");
+      const candidates = claimedBlock && bot.isABed(claimedBlock) && !bedNearHazard(bot, claimed)
+        ? [{ position: bedHalves(claimedBlock)[0], claimant: null }] : [];
+      const beds = nearbyBeds(bot, await loadOtherBedClaims(bot), null)
+        .filter((b) => !candidates.some((c) => c.position.equals(b.position)));
+      candidates.push(...beds.filter((b) => !b.claimant), ...beds.filter((b) => b.claimant));
+      candidates.length = Math.min(candidates.length, MAX_CANDIDATES);
+      if (!candidates.length) return fail("couldn't find a bed nearby.");
 
-      for (const pos of positions) {
+      for (const { position: pos, claimant } of candidates) {
         if (token.cancelled) return ok("stopped on the way to bed.");
         const bedBlock = bot.blockAt(pos);
         if (!bedBlock) continue;
@@ -3113,7 +3207,8 @@ async function performActionAs(bot, action, speaker, token) {
           console.log(`[sleep] couldn't use bed at ${bedBlock.position}: ${err.message}`);
           continue; // this bed didn't work (occupied, monsters nearby, too far, etc) -- try next
         }
-        await saveClaimedBed(bot, bedBlock.position); // this bed worked -- go straight back to it next time
+        // This bed worked -- go straight back to it next time, unless it's another bot's.
+        if (!claimant) await saveClaimedBed(bot, bedHalves(bedBlock)[0]);
 
         // Asleep now. Wait for the real 'wake' event (fires when day comes, or when everyone
         // sleeping lets the server skip the night) rather than guessing a duration -- a plain

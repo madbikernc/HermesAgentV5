@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.3.0
+**Version:** 2.4.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -162,6 +162,12 @@ home lighting, terrain repair, stuck detection, self-defense, sleeping-threat. H
 HUNGER_CRITICAL at food ≤ 6 when there's food or a rod on hand. Home lighting runs on one
 maintainer (the Builder, or `MC_HOME_LIGHTING`) with exponential backoff. Every check that loses
 its turn to other work is counted and logged as `ROUTINE_SKIPS` every 10 minutes.
+
+**Bed claims.** Each bot claims one bed in `beds/<name>.json`; it is also her "home" for lighting
+and surplus storage. Every 60s (`MC_BED_CHECK_MS`, no movement) a claim whose bed is loaded but gone
+moves to the nearest bed no other bot on the host has claimed, or is cleared if none is left; two
+bots on one bed resolve by name order. `sleep` tries her own bed, then unclaimed beds, then other
+bots' beds as a last resort without claiming them, one candidate per bed rather than per half.
 
 ## 5. Model routing
 

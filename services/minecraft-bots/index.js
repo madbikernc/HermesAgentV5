@@ -1,4 +1,7 @@
-// Version: 2.95.0
+// Version: 2.96.0
+//
+// 2.96.0 (2026-09-25) -- every MC_BED_CHECK_MS (60s) the bot checks its claimed bed; a destroyed one
+// is replaced with the nearest unclaimed bed at once (actions.js checkClaimedBed), so home moves too.
 //
 // 2.95.0 (2026-09-25) -- fight-or-flee policy (decided from live data): an armed bot fights a single
 // melee or ranged threat, but flees when outnumbered at critical health (2+ within 8 blocks, any
@@ -1405,7 +1408,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -5052,6 +5055,15 @@ setInterval(() => {
   checkDeferredSurplusCleanup().catch((err) =>
     console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
 }, 30_000);
+
+// Direct request, 2026-09-25: a bot whose bed was destroyed claims another unclaimed bed right
+// away (actions.js checkClaimedBed), not only when she next tries to sleep -- her claimed bed is
+// also "home" for lighting and surplus storage. Reads and writes claim files only; no movement.
+const BED_CHECK_MS = parseInt(process.env.MC_BED_CHECK_MS || "60000", 10);
+setInterval(() => {
+  if (!bot.entity) return;
+  checkClaimedBed(bot).catch((err) => console.error(`[${USERNAME}] bed check failed:`, err.message));
+}, BED_CHECK_MS);
 
 async function storeSurplusNearHome(reason) {
   if (Date.now() < storageBlockedUntil) return;
