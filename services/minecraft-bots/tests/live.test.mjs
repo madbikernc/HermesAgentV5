@@ -1,4 +1,4 @@
-// Version: 1.3.0
+// Version: 1.3.1
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -19,6 +19,7 @@
 // 1.2.0 | 2026-09-25 | Chest scenarios (MB-17 mixed stacks, MB-16 stocked chest vs village scouting),
 //   safe now that MC_MEMORY_ROOT keeps chest snapshots out of the fleet's known_chests.json.
 // 1.3.0 | 2026-09-25 | Beds scenario: a destroyed claimed bed is replaced by the nearest unclaimed one.
+// 1.3.1 | 2026-09-25 | MC_BED_CLAIMS_SHARED=false: test bed claims stay out of the shared hermes-memory store.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -36,6 +37,7 @@ import path from "node:path";
 const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
 process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
 process.env.MC_RAG_DISABLED = "true";
+process.env.MC_BED_CLAIMS_SHARED = "false"; // never write test claims into the fleet's hermes-memory
 const { loadActionPlugins, performAction, checkClaimedBed } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor } = await import("../equipment.js");

@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-09-25) -- listState/setState for shared agent_state (bed claims across hosts).
 //
 // Thin client for hermes-memory.py -- persistent per-bot conversation memory (the design doc's
 // "per-bot working state", see ../../MINECRAFT_BOTS_DESIGN.md §7). Bearer-token authenticated
@@ -18,9 +20,10 @@
 const MEMORY_URL = process.env.MEMORY_URL || "http://10.129.1.15:8102";
 const MEMORY_TOKEN = process.env.MEMORY_TOKEN || "";
 
-async function request(method, path, body) {
+async function request(method, path, body, timeoutMs) {
   const res = await fetch(`${MEMORY_URL}${path}`, {
     method,
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
     headers: {
       "Content-Type": "application/json",
       ...(MEMORY_TOKEN ? { Authorization: `Bearer ${MEMORY_TOKEN}` } : {}),
@@ -42,4 +45,14 @@ export async function recentTurns({ agent, convId, limit = 10 }) {
   const qs = new URLSearchParams({ agent, conv_id: convId, limit: String(limit) });
   const data = await request("GET", `/turns?${qs.toString()}`);
   return data.turns ?? [];
+}
+
+// agent_state key/value, shared by every host (hermes-memory runs once, on spark). Unlike the
+// turn calls above, these throw on failure so a caller can fall back to its local copy.
+export async function listState(agent, timeoutMs) {
+  return (await request("GET", `/state/${encodeURIComponent(agent)}`, undefined, timeoutMs)).state ?? [];
+}
+
+export async function setState(agent, key, value, timeoutMs) {
+  return request("POST", "/state", { agent, key, value }, timeoutMs);
 }

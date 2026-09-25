@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.4.0
+**Version:** 2.5.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -163,9 +163,12 @@ HUNGER_CRITICAL at food ≤ 6 when there's food or a rod on hand. Home lighting 
 maintainer (the Builder, or `MC_HOME_LIGHTING`) with exponential backoff. Every check that loses
 its turn to other work is counted and logged as `ROUTINE_SKIPS` every 10 minutes.
 
-**Bed claims.** Each bot claims one bed in `beds/<name>.json`; it is also her "home" for lighting
-and surplus storage. Every 60s (`MC_BED_CHECK_MS`, no movement) a claim whose bed is loaded but gone
-moves to the nearest bed no other bot on the host has claimed, or is cleared if none is left; two
+**Bed claims.** Each bot claims one bed; it is also her "home" for lighting and surplus storage.
+Claims are shared by both hosts in hermes-memory `agent_state` (agent `minecraft-beds`, key = bot
+name, `{}` = no claim); `beds/<name>.json` is the per-host fallback when hermes-memory is down, and a
+host's existing claim is published on the bot's first read. Every 60s (`MC_BED_CHECK_MS`, no
+movement) a claim whose bed is loaded but gone moves to the nearest bed no other bot has claimed,
+or is cleared if none is left; two
 bots on one bed resolve by name order. `sleep` tries her own bed, then unclaimed beds, then other
 bots' beds as a last resort without claiming them, one candidate per bed rather than per half.
 
@@ -199,7 +202,8 @@ routing decision is still open (§12).
 | `minecraft-world` RAG corpus | Shared world facts: resource and feature locations | Any bot writes, all read |
 | `minecraft-skills` RAG corpus | Reusable skills, indexed on description | Same two scripts, `--corpus minecraft-skills` |
 | `known_chests.json` | Chest contents, position-keyed | Structured JSON, overwritten on every open |
-| `beds/`, `pen.json`, `mayor-curriculum.json`, `skills/` | Claimed beds, pen gate, curriculum stage, skill store | Files under `/mnt/hermes-data/minecraft-memory/` |
+| hermes-memory `agent_state`, agent `minecraft-beds` | Claimed beds, both hosts | Key = bot name; `beds/` files are the per-host fallback |
+| `pen.json`, `mayor-curriculum.json`, `skills/` | Pen gate, curriculum stage, skill store | Files under `/mnt/hermes-data/minecraft-memory/` |
 
 Chest contents are deliberately **not** in RAG: they change on every open and need real
 point-in-time overwrites, which RAG's append-with-dedup shape can't give. One store per mutable
@@ -408,9 +412,9 @@ the original incident number, still cited throughout the code. Narrative is in g
   nothing has implicated it — the first suspect if "can't cross water" ever appears (§47).
 - **Herding** places a pen and can lure a single animal with food, but there is no reliable
   round-up of an existing herd.
-- **spark2 keeps its own copies of non-RAG shared state** — `known_chests.json`, `beds/`, `pen.json`
-  and per-bot goal files live on spark2's local `/mnt/hermes-data`, so its four bots don't share the
-  chest registry or bed claims with spark's five. RAG memory and skills are shared via
+- **spark2 keeps its own copies of non-RAG shared state** — `known_chests.json`, `pen.json` and
+  per-bot goal files live on spark2's local `/mnt/hermes-data`, so its four bots don't share the
+  chest registry with spark's five. Bed claims are shared through hermes-memory since 2026-09-25. RAG memory and skills are shared via
   `hermes-minecraft-rag` since 2026-09-25; spark2's ~91k never-indexed local world notes were left
   in place, not imported.
 

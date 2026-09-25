@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -86,6 +86,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.2.0 | 2026-09-25 | Brought in line with the 2026-09-24 review remediation (`docs/reviews/2026-09-24-minecraft-bots-review.md`): the goal-loop rules (goal pinning, planning without holding the body, TARGET items, night pause, standing guard, `place_home`), the ownership contract and new HUNGER_CRITICAL tier in §4, conjunctive persisted curriculum and the Soldier armor step in §8, `place_home`/`explore <feature>` in §9, the test system and daily test timer in §10, two new rules in §11 (`attack` must call `pvp.attack`; cancellation is never success), and §12's insurance-storing item replaced by spark2's missing RAG venv. |
 | 2.3.0 | 2026-09-25 | Fight-or-flee policy decided and documented in §11 (outnumbered/creeper overrides, attacker-first threat choice), the `/spreadplayers` stuck-rescue rule, `hermes-minecraft-rag` in §10, and §12's spark2 RAG item replaced by the remaining split of non-RAG shared state between hosts. |
 | 2.4.0 | 2026-09-25 | Bed claims documented in §4: a destroyed claimed bed moves to the nearest unclaimed bed within 60s, claim conflicts resolve by name, and `sleep` prefers unclaimed beds and never claims another bot's. |
+| 2.5.0 | 2026-09-25 | Bed claims shared between spark and spark2 through hermes-memory `agent_state` (`minecraft-beds`), with `beds/` as the per-host fallback; memory table and §12's spark2 item updated. |
 
 ## services/minecraft-bots/README.md
 
@@ -170,3 +171,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.1.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.2.0 row and this table. |
 | 1.2.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.3.0 row. |
 | 1.3.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.4.0 row. |
+| 1.4.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.5.0 row. |

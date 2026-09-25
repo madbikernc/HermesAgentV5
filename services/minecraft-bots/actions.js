@@ -1,4 +1,8 @@
-// Version: 1.70.0
+// Version: 1.71.0
+//
+// 1.71.0 (2026-09-25) -- bed claims are shared between hosts through hermes-memory agent_state
+// ("minecraft-beds"); BEDS_DIR is the per-host fallback, and a host's existing claim is published
+// on its first read. MC_BED_CLAIMS_SHARED=false keeps claims per host.
 //
 // 1.70.0 (2026-09-25) -- beds: a destroyed claimed bed is replaced with the nearest unclaimed bed
 // (new exported checkClaimedBed, also settling two bots on one bed by name order). Sleep tries one
@@ -927,6 +931,7 @@ import path from "node:path";
 import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipment.js";
 import { cancelAndRotate, isBusy, holdsControl, releaseControl } from "./arbiter.js";
 import { searchMemory } from "./longterm.js";
+import { listState, setState } from "./memory.js";
 
 const { goals } = pathfinderPkg;
 
@@ -2215,26 +2220,95 @@ async function findKnownChestWithItem(bot, itemName, wantCount) {
 // can read the same real claimed-bed position "sleep" itself already tries first every night,
 // rather than a second, drifting notion of "home."
 export async function loadClaimedBed(bot) {
+  return (await readBedClaims(bot))[bot.username] || null; // null: no claim -- fresh search
+}
+
+// Direct request, 2026-09-25: bed assignments shared between hosts. Claims live in hermes-memory's
+// agent_state (agent "minecraft-beds", key = bot name), which every bot on spark and spark2 already
+// reaches, so a spark2 bot sees spark's claims and vice versa. The service has no delete, so {} is
+// "no claim". BEDS_DIR stays as this host's fallback copy for when hermes-memory is unreachable,
+// and a local claim the shared store has never seen is published on the owner's first read.
+const BED_CLAIMS_AGENT = "minecraft-beds";
+const BED_CLAIMS_SHARED = (process.env.MC_BED_CLAIMS_SHARED ?? "true") !== "false";
+const BED_CLAIMS_TIMEOUT_MS = 5000;
+let bedClaimsSharedDown = false; // log the fallback once per outage, not every read
+
+const toBedPos = (v) => (Number.isFinite(v?.x) && Number.isFinite(v?.y) && Number.isFinite(v?.z)
+  ? new Vec3(v.x, v.y, v.z) : null);
+
+async function readLocalBedClaims() {
+  const claims = {};
+  let files = [];
   try {
-    const data = JSON.parse(await readFile(path.join(BEDS_DIR, `${bot.username}.json`), "utf8"));
-    return new Vec3(data.x, data.y, data.z);
-  } catch {
-    return null; // no claim yet, or the file's gone/corrupt -- fall back to a fresh search
+    files = await readdir(BEDS_DIR);
+  } catch {}
+  for (const file of files.filter((f) => f.endsWith(".json"))) {
+    try {
+      const pos = toBedPos(JSON.parse(await readFile(path.join(BEDS_DIR, file), "utf8")));
+      if (pos) claims[file.slice(0, -5)] = pos;
+    } catch {} // a half-written or corrupt claim just doesn't count
   }
+  return claims;
+}
+
+async function writeLocalBedClaim(username, position) {
+  const file = path.join(BEDS_DIR, `${username}.json`);
+  try {
+    if (!position) return await unlink(file).catch(() => {});
+    await mkdir(BEDS_DIR, { recursive: true });
+    await writeFile(file, JSON.stringify({ x: position.x, y: position.y, z: position.z }), "utf8");
+  } catch (err) {
+    console.error("beds: failed to write local claim:", err.message);
+  }
+}
+
+// Every bot's claim, { username: Vec3 } -- the shared store when reachable, else this host's copy.
+async function readBedClaims(bot) {
+  const local = await readLocalBedClaims();
+  if (!BED_CLAIMS_SHARED) return local;
+  let rows;
+  try {
+    rows = await listState(BED_CLAIMS_AGENT, BED_CLAIMS_TIMEOUT_MS);
+  } catch (err) {
+    if (!bedClaimsSharedDown) console.log(`[beds] shared claims unreachable, using this host's: ${err.message}`);
+    bedClaimsSharedDown = true;
+    return local;
+  }
+  if (bedClaimsSharedDown) console.log("[beds] shared claims reachable again.");
+  bedClaimsSharedDown = false;
+  const claims = {};
+  for (const row of rows) {
+    const pos = toBedPos(row.value);
+    if (pos) claims[row.key] = pos;
+  }
+  const mine = local[bot.username];
+  if (!rows.some((r) => r.key === bot.username)) {
+    if (mine) { // first read since sharing began: publish this host's claim
+      await setState(BED_CLAIMS_AGENT, bot.username, { x: mine.x, y: mine.y, z: mine.z }, BED_CLAIMS_TIMEOUT_MS)
+        .catch((err) => console.error("beds: failed to publish claim:", err.message));
+      claims[bot.username] = mine;
+    }
+  } else {
+    const shared = claims[bot.username] || null; // keep the fallback copy in step with the store
+    if (!(mine && shared ? mine.equals(shared) : !mine && !shared)) await writeLocalBedClaim(bot.username, shared);
+  }
+  return claims;
+}
+
+async function writeBedClaim(bot, position) {
+  await writeLocalBedClaim(bot.username, position);
+  if (!BED_CLAIMS_SHARED) return;
+  const value = position ? { x: position.x, y: position.y, z: position.z } : {};
+  await setState(BED_CLAIMS_AGENT, bot.username, value, BED_CLAIMS_TIMEOUT_MS)
+    .catch((err) => console.error("beds: failed to share claim:", err.message));
 }
 
 async function saveClaimedBed(bot, position) {
-  try {
-    await mkdir(BEDS_DIR, { recursive: true });
-    await writeFile(path.join(BEDS_DIR, `${bot.username}.json`),
-      JSON.stringify({ x: position.x, y: position.y, z: position.z }), "utf8");
-  } catch (err) {
-    console.error("sleep: failed to persist claimed bed:", err.message);
-  }
+  await writeBedClaim(bot, position);
 }
 
 async function clearClaimedBed(bot) {
-  await unlink(path.join(BEDS_DIR, `${bot.username}.json`)).catch(() => {});
+  await writeBedClaim(bot, null);
 }
 
 // Direct request, 2026-09-25: "if a bot's bed is destroyed, it should just claim another
@@ -2250,24 +2324,11 @@ function bedHalves(block) {
   return [head, head.offset(-dx, 0, -dz)];
 }
 
-// Every OTHER bot's claim on this host, { username, position }.
+// Every OTHER bot's claim, { username, position }.
 async function loadOtherBedClaims(bot) {
-  let files;
-  try {
-    files = await readdir(BEDS_DIR);
-  } catch {
-    return [];
-  }
-  const claims = [];
-  for (const file of files) {
-    const username = file.replace(/\.json$/, "");
-    if (!file.endsWith(".json") || username === bot.username) continue;
-    try {
-      const data = JSON.parse(await readFile(path.join(BEDS_DIR, file), "utf8"));
-      claims.push({ username, position: new Vec3(data.x, data.y, data.z) });
-    } catch {} // a half-written or corrupt claim just doesn't count
-  }
-  return claims;
+  return Object.entries(await readBedClaims(bot))
+    .filter(([username]) => username !== bot.username)
+    .map(([username, position]) => ({ username, position }));
 }
 
 function bedClaimant(block, claims) {

@@ -1,4 +1,4 @@
-// Version: 1.7.0
+// Version: 1.8.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -17,6 +17,8 @@
 //   local timeouts and remote mode (spark2 RAG).
 // 1.7.0 | 2026-09-25 | Beds: a destroyed claim moves to the nearest unclaimed bed, claim conflicts,
 //   sleep tries unclaimed beds first (one candidate per bed) and never claims another bot's.
+// 1.8.0 | 2026-09-25 | Shared bed claims: cross-host conflicts, migration of a host's claim, store
+//   clears, sleep skipping another host's bed; the older bed checks now cover the local fallback.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -719,7 +721,9 @@ class V3 {
   distanceTo(o) { return Math.hypot(this.x - o.x, this.y - o.y, this.z - o.z); }
   toString() { return `(${this.x}, ${this.y}, ${this.z})`; }
 }
-async function bedWorld(username, { claims = {}, standAt = new V3(0, 64, 0) } = {}) {
+// `shared`: hermes-memory's minecraft-beds rows as { name: value } (mutated by writes); omitted =
+// hermes-memory unreachable, so claims fall back to this host's files.
+async function bedWorld(username, { claims = {}, standAt = new V3(0, 64, 0), shared } = {}) {
   const fs = await import('node:fs/promises');
   const pathMod = (await import('node:path')).default;
   const dir = await fs.mkdtemp(pathMod.join((await import('node:os')).tmpdir(), 'mbtest-beds-'));
@@ -747,7 +751,16 @@ async function bedWorld(username, { claims = {}, standAt = new V3(0, 64, 0) } = 
     sleep: async (b) => { tried.push(key(b.position)); setTimeout(() => bot.emit('wake'), 5); },
   });
   bot.pathfinder.goto = async () => {};
-  const c = context(bot, { BEDS_DIR: dir, Vec3: V3, path: pathMod, readFile: fs.readFile,
+  const listState = async (agent) => {
+    if (!shared) throw new Error('connect ECONNREFUSED');
+    assert.equal(agent, 'minecraft-beds');
+    return Object.entries(shared).map(([key, value]) => ({ key, value }));
+  };
+  const setState = async (agent, k, value) => {
+    if (!shared) throw new Error('connect ECONNREFUSED');
+    shared[k] = value;
+  };
+  const c = context(bot, { BEDS_DIR: dir, Vec3: V3, path: pathMod, readFile: fs.readFile, listState, setState, process: { env: {} },
     writeFile: fs.writeFile, mkdir: fs.mkdir, readdir: fs.readdir, unlink: fs.unlink, SLEEP_TIMEOUT_MS: 1000 });
   vm.runInContext(between(actions, 'function bedNearHazard(', '\n// Direct request, 2026-09-09') +
     between(actions, 'async function loadClaimedBed(', '\n// Direct request, 2026-09-10') + timeoutFn + actionFn, c);
@@ -810,6 +823,46 @@ await check("Beds: sleeping in another bot's bed as a last resort doesn't claim 
   assert.equal(result.ok, true, result.text);
   assert.deepEqual(w.tried, ['3,64,0']);
   assert.equal(await w.claimOf('Amy'), null);
+});
+
+await check('Shared beds: a claim made on the other host is seen, and the later name moves', async () => {
+  // Amy (spark) claimed the bed at x=4 in the shared store; Wade (spark2) has the same bed only in
+  // his own host's file. Amy sorts first, so Wade moves to the free bed.
+  const shared = { Amy: { x: 5, y: 64, z: 0 } };
+  const w = await bedWorld('Wade', { claims: { Wade: [4, 64, 0] }, shared });
+  w.addBed(4, 64, 0); w.addBed(10, 64, 0);
+  assert.equal((await w.c.checkClaimedBed(w.bot)).status, 'replaced');
+  assert.deepEqual({ ...shared.Wade }, { x: 11, y: 64, z: 0 }, 'published to the shared store');
+  assert.deepEqual(await w.claimOf('Wade'), { x: 11, y: 64, z: 0 }, 'and kept as the local fallback');
+});
+
+await check("Shared beds: a host's existing claim is published on first read; the store then wins", async () => {
+  const shared = {};
+  const w = await bedWorld('Nell', { claims: { Nell: [4, 64, 0] }, shared });
+  w.addBed(4, 64, 0);
+  assert.deepEqual(await w.c.loadClaimedBed(w.bot), new V3(4, 64, 0));
+  assert.deepEqual({ ...shared.Nell }, { x: 4, y: 64, z: 0 }, 'migrated');
+  shared.Nell = {}; // cleared elsewhere (e.g. by the same bot on a restart elsewhere)
+  assert.equal(await w.c.loadClaimedBed(w.bot), null, 'the store is authoritative once it knows the bot');
+  assert.equal(await w.claimOf('Nell'), null, 'local fallback follows the store');
+});
+
+await check('Shared beds: losing the bed with nothing free clears the claim in the store', async () => {
+  const shared = { Dale: { x: 1, y: 64, z: 0 }, Bob: { x: 4, y: 64, z: 0 } };
+  const w = await bedWorld('Dale', { shared });
+  w.addBed(4, 64, 0);
+  assert.equal((await w.c.checkClaimedBed(w.bot)).status, 'lost');
+  assert.deepEqual({ ...shared.Dale }, {});
+});
+
+await check('Shared beds: sleep skips a bed claimed on the other host', async () => {
+  const shared = { Amy: { x: 3, y: 64, z: 0 } };
+  const w = await bedWorld('Wade', { shared });
+  w.addBed(2, 64, 0); w.addBed(8, 64, 0);
+  const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(w.tried, ['9,64,0']);
+  assert.deepEqual({ ...shared.Wade }, { x: 9, y: 64, z: 0 });
 });
 
 console.log(`${passed} unit checks passed.`);
