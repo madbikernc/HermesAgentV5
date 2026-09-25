@@ -1,4 +1,9 @@
-// Version: 1.2.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-09-24) -- review MB-21: skill search/ingest subprocesses have timeouts.
+//
+// 1.3.0 (2026-09-24) -- review MB-04/MB-10: runSkill() stops and reports cancelled on an
+// interrupted step; authorSkillFromGoal() refuses to truncate a longer solve into a skill.
 //
 // 1.2.0 (2026-09-24) -- the two dedicated -skills RAG scripts were absorbed into
 // hermes-rag-{ingest,search}-minecraft.py (2.0.0), which now take --corpus; this file passes
@@ -35,6 +40,8 @@ import { SKILL_ACTION_VERBS } from "./actions.js";
 import { callRole } from "./router.js";
 
 const execFileAsync = promisify(execFile);
+const RAG_SEARCH_TIMEOUT_MS = 30_000;
+const RAG_INGEST_TIMEOUT_MS = 180_000;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
@@ -80,7 +87,8 @@ function slugify(text) {
 
 async function searchSkillCandidates(description, topK = 3) {
   try {
-    const { stdout } = await execFileAsync(PYTHON, [SEARCH_SCRIPT, description, "--top-k", String(topK), ...CORPUS_ARGS]);
+    const { stdout } = await execFileAsync(PYTHON, [SEARCH_SCRIPT, description, "--top-k", String(topK), ...CORPUS_ARGS],
+      { timeout: RAG_SEARCH_TIMEOUT_MS }); // MB-21: never hang a goal tick on a stuck search
     const results = JSON.parse(stdout);
     return Array.isArray(results) ? results : [];
   } catch (err) {
@@ -131,6 +139,9 @@ export async function runSkill(performActionFn, bot, skill, speaker) {
   for (const step of skill.steps) {
     const { type, ...args } = step;
     const result = await performActionFn(bot, { type, ...args }, speaker);
+    if (result.cancelled) {
+      return { ok: false, cancelled: true, text: `skill "${skill.name}" interrupted on ${type}: ${result.text}` };
+    }
     if (!result.ok) {
       return { ok: false, text: `skill "${skill.name}" stalled on ${type}: ${result.text}` };
     }
@@ -169,7 +180,7 @@ export async function writeSkill({ name, description, steps }) {
   await writeFile(path.join(SKILLS_DIR, `${filename}.json`),
     JSON.stringify({ name, steps, consecutiveFailures: 0 }, null, 2), "utf8");
   try {
-    await execFileAsync(PYTHON, [INGEST_SCRIPT, ...CORPUS_ARGS]);
+    await execFileAsync(PYTHON, [INGEST_SCRIPT, ...CORPUS_ARGS], { timeout: RAG_INGEST_TIMEOUT_MS });
   } catch (err) {
     console.error("[skills] reindex failed after writing skill:", err.message);
   }
@@ -184,7 +195,10 @@ export async function writeSkill({ name, description, steps }) {
 // actionsTaken array -- it never invents or re-derives the steps themselves.
 export async function authorSkillFromGoal(goalDescription, actionsTaken) {
   if (!Array.isArray(actionsTaken) || actionsTaken.length < MIN_STEPS_TO_AUTHOR) return false;
-  const steps = actionsTaken.slice(0, MAX_SKILL_STEPS);
+  // Review MB-10, 2026-09-24: never truncate a solution into a "skill" -- the first N actions of a
+  // longer solve can omit the step that actually finished the goal (e.g. the final placement).
+  if (actionsTaken.length > MAX_SKILL_STEPS) return false;
+  const steps = actionsTaken;
   if (!isValidSkill({ steps })) return false; // a verb outside SKILL_ACTION_VERBS slipped in somehow -- don't store it
 
   const stepsSummary = steps.map((s) => s.type).join(" -> ");

@@ -1,6 +1,6 @@
 # HermesAgentV5 — Project Instructions
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 These instructions extend the global Claude Code instructions for work specifically within this project.
 This project is the successor to `../HermesAgentV4`, which is itself the successor to `../HermesAgentRedo`.
@@ -20,7 +20,17 @@ semantic version (`MAJOR.MINOR.PATCH`), independent of every other file's versio
 - **Major**: a restructuring, a reversal/replacement of prior guidance, or any rewrite that changes a
   document's meaning or scope.
 
-**Record every bump** in a `## Revision History` table at the bottom of the file
+**Record every bump** in a `## Minecraft bots — every behavior fix ships with a test
+
+`services/minecraft-bots/tests/` is the bots' test system (see its `README.md`): offline unit checks, live
+scenarios run on the Spark nodes against the bot-sandbox server, and a per-host behavior baseline
+measured from the bots' own journals. Any change that fixes or adds bot behavior must, in the same change:
+add a `unit.test.mjs` check that fails on the old code; add a `live.test.mjs` scenario when the behavior is
+observable in-world; add or adjust a `baseline.mjs` metric when it should move a fleet-level number. After
+it has run live for about a day, re-record `tests/baselines/<host>.json` with `tests/run.sh baseline --update`
+and commit it. Run `tests/run.sh all` on spark before calling a bot change done.
+
+## Revision History` table at the bottom of the file
 (`| Version | Date | Change |`) — append a row, never rewrite prior rows. Dates are absolute (`YYYY-MM-DD`).
 
 **Exception: any file loaded into a live agent's context on every request carries a `**Version:**` line and
@@ -42,3 +52,4 @@ in full and are not re-derived.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-08-29 | Initial versioned baseline — versioning convention inherited from `HermesAgentV4`. |
+| 1.1.0 | 2026-09-24 | Added the Minecraft-bots rule: every behavior fix ships with unit/live/baseline tests. |

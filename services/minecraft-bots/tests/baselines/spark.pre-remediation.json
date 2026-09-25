@@ -1,0 +1,27 @@
+{
+  "bots": [
+    "Amy",
+    "Babs",
+    "Luke",
+    "Mark",
+    "Mayor"
+  ],
+  "hours": 24,
+  "values": {
+    "deaths_per_bot_day": 1000.8,
+    "attack_win_rate": 0.846,
+    "planner_action_ratio": 0.143,
+    "planner_calls_per_bot_day": 245,
+    "guard_goals_per_bot_day": 68.6,
+    "home_lighting_attempts_per_bot_day": 412.4,
+    "home_lighting_success_rate": 0,
+    "store_failure_rate": 0.781,
+    "dropped_messages_per_bot_day": 54.4,
+    "stuck_teleports_per_bot_day": 5.8,
+    "rejected_done_per_bot_day": 81.2,
+    "crashes_per_bot_day": 0
+  },
+  "host": "spark",
+  "recorded_at": "2026-09-24T20:53:41.676Z",
+  "commit": "9091ea8"
+}

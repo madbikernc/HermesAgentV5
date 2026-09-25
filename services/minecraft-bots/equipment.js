@@ -1,4 +1,7 @@
-// Version: 1.3.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-09-24) -- review MB-07: equipBestArmor() now compares against the worn piece and
+// only swaps for a strictly better one, ending the worn-vs-carried downgrade/oscillation loop.
 //
 // 1.3.0 (2026-09-13) -- direct request ("soldier personas need to... prioritize a) getting a
 // weapon"): WEAPON_SUFFIXES and a new hasWeapon(bot) exported so index.js's new
@@ -88,15 +91,19 @@ export function loadEquipmentPlugins(bot) {
   bot.loadPlugin(toolPkg.plugin);
 }
 
-// Always picks the single best candidate already in inventory and equips it -- simpler and
-// just as correct as comparing against what's currently worn (equip()ing an already-worn item
-// is a harmless near-no-op), and avoids relying on raw equipment-slot indices, which are easy
-// to get wrong.
+// Picks the best carried candidate for each slot and equips it only if it genuinely beats what's
+// already worn. Review MB-07, 2026-09-24: this used to skip the comparison on the theory that
+// re-equipping a worn item is a no-op -- but bot.inventory.items() never includes worn slots, so
+// a netherite helmet worn + a leather helmet carried equipped the leather one, then swapped back
+// on the next refresh, forever. The worn slot index comes from mineflayer's own
+// getEquipmentDestSlot(), not a hand-maintained table.
 export async function equipBestArmor(bot) {
   for (const { suffix, slot } of ARMOR_SLOTS) {
     const candidates = bot.inventory.items().filter((i) => i.name.endsWith(suffix));
     if (!candidates.length) continue;
     candidates.sort((a, b) => effectiveTier(b) - effectiveTier(a));
+    const worn = bot.inventory.slots[bot.getEquipmentDestSlot(slot)];
+    if (worn && effectiveTier(worn) >= effectiveTier(candidates[0])) continue;
     try {
       await bot.equip(candidates[0], slot);
     } catch (err) {

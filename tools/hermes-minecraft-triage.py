@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-09-24) — docs/reviews/2026-09-24-minecraft-bots-review.md MB-18/MB-19.
+# (1) MC_BOT_UNITS now defaults to the journalctl glob "minecraft-bot-*.service", so every bot
+#     unit on the host is watched (spark2's Bob/Nell/Wade/Dale were outside the old five-name
+#     list) and a new bot needs no edit here.
+# (2) New patterns for ordinary failures the old list never matched: any "(ok=false" outcome,
+#     combat timeouts, and every REJECTED DONE. High-volume categories are recorded and counted
+#     but not sent for model diagnosis (DIAGNOSE_CATEGORIES).
+# (3) Every match is appended to TRIAGE_EVENTS_PATH (JSONL) before anything else, and cooldown is
+#     keyed by (unit, category, normalized signature) instead of category alone -- two bots
+#     crashing within five minutes are two incidents, and suppressed repeats are counted
+#     (count/first/last are carried into the next diagnosis for that key).
+# (4) Diagnosis runs on a worker thread fed by a bounded queue, so a slow coder/coder2 call no
+#     longer stops the journal reader.
 #
 # 1.3.0 (2026-09-08) — MC_BOT_UNITS default extended for the new fifth bot, Mayor (direct
 # request: "add another bot, Mayor, whose personality is to be a leader"), same real gap
@@ -102,10 +116,10 @@
 #   HERMES_ROUTER_URL   default http://127.0.0.1:8080/v1/chat/completions
 #   BUZZ_URL            default http://10.129.1.15:8101
 #   TRIAGE_LOG_PATH     default /mnt/hermes-data/minecraft-memory/triage.log
-#   TRIAGE_COOLDOWN_S   default 300 (5 minutes per incident category)
-#   MC_BOT_UNITS        default minecraft-bot-babs.service,minecraft-bot-amy.service,
-#                               minecraft-bot-mark.service,minecraft-bot-luke.service,
-#                               minecraft-bot-mayor.service
+#   TRIAGE_EVENTS_PATH  default /mnt/hermes-data/minecraft-memory/triage-events.jsonl
+#   TRIAGE_COOLDOWN_S   default 300 (5 minutes per bot + incident signature)
+#   TRIAGE_QUEUE_MAX    default 20 pending diagnoses
+#   MC_BOT_UNITS        default minecraft-bot-*.service (journalctl glob: every bot on this host)
 #   MC_HEAPDUMP_ROOT    default /mnt/hermes-data/minecraft-memory/heapdumps (must match
 #                               run-bot.sh's own --diagnostic-dir, one subfolder per bot)
 #
@@ -114,6 +128,7 @@
 
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -128,13 +143,10 @@ VAULT_GET = str(REPO_DIR / "tools" / "vault-get-secret.sh")
 ROUTER_URL = os.environ.get("HERMES_ROUTER_URL", "http://127.0.0.1:8080/v1/chat/completions")
 BUZZ_URL = os.environ.get("BUZZ_URL", "http://10.129.1.15:8101")
 LOG_PATH = Path(os.environ.get("TRIAGE_LOG_PATH", "/mnt/hermes-data/minecraft-memory/triage.log"))
+EVENTS_PATH = Path(os.environ.get("TRIAGE_EVENTS_PATH", "/mnt/hermes-data/minecraft-memory/triage-events.jsonl"))
+DIAGNOSIS_QUEUE_MAX = int(os.environ.get("TRIAGE_QUEUE_MAX", "20"))
 COOLDOWN_S = int(os.environ.get("TRIAGE_COOLDOWN_S", "300"))
-BOT_UNITS = os.environ.get(
-    "MC_BOT_UNITS",
-    "minecraft-bot-babs.service,minecraft-bot-amy.service,"
-    "minecraft-bot-mark.service,minecraft-bot-luke.service,"
-    "minecraft-bot-mayor.service",
-).split(",")
+BOT_UNITS = os.environ.get("MC_BOT_UNITS", "minecraft-bot-*.service").split(",")
 HEAPDUMP_ROOT = Path(os.environ.get("MC_HEAPDUMP_ROOT", "/mnt/hermes-data/minecraft-memory/heapdumps"))
 
 AGENT_ID = "minecraft-triage"
@@ -158,7 +170,16 @@ TRIAGE_PATTERNS = [
     # successful step ever logged behind it -- fifth of the same "what other logic enhancements
     # are available" pass this triage service itself came from.
     ("suspicious-done", re.compile(r"SUSPICIOUS DONE"), "a goal claimed complete with no real success behind it"),
+    ("rejected-done", re.compile(r"REJECTED DONE"), "a goal's completion claim failed validation"),
+    ("combat-timeout", re.compile(r"gave up on the fight|lost track of it"), "a fight ended without a kill"),
+    # Catch-all for ordinary action failures -- must stay LAST so specific categories win.
+    ("action-not-ok", re.compile(r"\(ok=false"), "an action reported failure"),
 ]
+
+# Categories worth a coder/coder2 diagnosis per new signature; the rest are only recorded and
+# counted (high-volume, usually self-explanatory from the line itself).
+DIAGNOSE_CATEGORIES = {"crash", "oom", "process-exit", "stuck-path", "goal-abandoned",
+                       "router-failure", "action-failed", "suspicious-done", "rejected-done"}
 
 
 def unit_to_persona(unit):
@@ -323,6 +344,37 @@ def append_log(text):
         log(f"local log write failed: {exc}")
 
 
+def normalize_signature(message):
+    """Stable per-incident key: numbers/coordinates collapsed so repeats of one failure match."""
+    text = re.sub(r"\d+(\.\d+)?", "N", message.strip())
+    return re.sub(r"\s+", " ", text)[:160]
+
+
+def record_event(event):
+    try:
+        EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(EVENTS_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event) + "\n")
+    except Exception as exc:
+        log(f"event record failed: {exc}")
+
+
+def diagnosis_worker(jobs, buzz_token):
+    while True:
+        category, label, message, unit, stats = jobs.get()
+        try:
+            result = triage_incident(category, label, message, unit)
+            if result:
+                result += (f"\n\n(occurrences for this bot+signature: {stats['count']}, "
+                           f"first {stats['first']}, last {stats['last']})")
+                append_log(result)
+                publish_buzz(result, buzz_token)
+        except Exception as exc:
+            log(f"diagnosis failed: {exc}")
+        finally:
+            jobs.task_done()
+
+
 def watch_loop(buzz_token):
     # -o json + --output-fields, not the plain default format: real evidence (2026-09-07) --
     # journalctl's own _SYSTEMD_UNIT field correctly names the originating bot unit on every
@@ -338,7 +390,11 @@ def watch_loop(buzz_token):
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              bufsize=1)
 
-    last_triaged = {}  # category -> monotonic timestamp of last triage, for cooldown
+    # (unit, category, signature) -> {"count", "first", "last", "triaged_at"}; cooldown and
+    # recurrence counting are per bot and per distinct failure, never per category alone.
+    incidents = {}
+    jobs = queue.Queue(maxsize=DIAGNOSIS_QUEUE_MAX)
+    threading.Thread(target=diagnosis_worker, args=(jobs, buzz_token), daemon=True).start()
     for raw_json in proc.stdout:
         try:
             entry = json.loads(raw_json)
@@ -356,15 +412,25 @@ def watch_loop(buzz_token):
         for category, pattern, label in TRIAGE_PATTERNS:
             if not pattern.search(message):
                 continue
+            signature = normalize_signature(message)
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+            record_event({"at": stamp, "unit": unit, "category": category,
+                          "signature": signature, "message": message.strip()[:500]})
+            key = (unit, category, signature)
+            stats = incidents.setdefault(key, {"count": 0, "first": stamp, "last": stamp, "triaged_at": None})
+            stats["count"] += 1
+            stats["last"] = stamp
             now = time.monotonic()
-            if now - last_triaged.get(category, 0) < COOLDOWN_S:
-                break  # same incident category still in cooldown -- don't re-triage every line
-            last_triaged[category] = now
-            log(f"triage-worthy: [{category}] {message.strip()[:150]}")
-            result = triage_incident(category, label, message, unit)
-            if result:
-                append_log(result)
-                publish_buzz(result, buzz_token)
+            if category not in DIAGNOSE_CATEGORIES:
+                break
+            if stats["triaged_at"] is not None and now - stats["triaged_at"] < COOLDOWN_S:
+                break  # this bot's same failure is still in cooldown -- counted, not re-diagnosed
+            stats["triaged_at"] = now
+            log(f"triage-worthy: [{category}] {unit} {message.strip()[:150]}")
+            try:
+                jobs.put_nowait((category, label, message, unit, dict(stats)))
+            except queue.Full:
+                log(f"diagnosis queue full, recorded without diagnosis: [{category}] {unit}")
             break  # one category match per line is enough
 
 

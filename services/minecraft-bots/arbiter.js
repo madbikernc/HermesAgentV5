@@ -1,4 +1,17 @@
-// Version: 1.2.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-09-24) -- review MB-15: new HUNGER_CRITICAL tier (5) between routine work and
+// player commands, for a near-starving bot that has food or a fishing rod on hand.
+//
+// 1.3.0 (2026-09-24) -- remediation of docs/reviews/2026-09-24-minecraft-bots-review.md MB-02/03.
+// New cancelAndClear(): teleportToSpawn's cancel-only escalation used cancelAndRotate(), which
+// installs a fresh ROUTINE owner nobody ever released -- every GOAL_STEP/ROUTINE request after a
+// stuck-rescue teleport was refused until something higher-tier acquired and released. It now
+// cancels (and marks preempted) whoever holds control and leaves no owner behind. New
+// holdsControl(handle): the single "is this caller still the owner?" test performAction() and
+// multi-step callers use to fence off a preempted caller's stale continuation. MB-06:
+// requestControl() opts.preemptEqual (a newer player command replaces an older one) and
+// cancelIfAtMost() (player STOP ends anything up to DIRECT_COMMAND, never an emergency).
 //
 // 1.2.0 (2026-09-10) -- Phase 3/4: migrated runAction, goalTick's physical-action span,
 // teleportToSpawn (cancel-only, via cancelAndRotate -- never acquires/holds), the post-death
@@ -91,6 +104,8 @@ export const OWNERS = Object.freeze({
                                              // them, and this preserves that rather than
                                              // inventing a distinction the current code never
                                              // needed)
+  HUNGER_CRITICAL: owner("HUNGER_CRITICAL", 5), // review MB-15: near-starving eat/fish outranks
+                                             // goal steps and chores (0), never a player command
   DIRECT_COMMAND: owner("DIRECT_COMMAND", 10), // runAction() -- a live player asked for this by
                                              // name; "a live player command always wins
                                              // immediately" per goalTick's own existing comment
@@ -150,6 +165,28 @@ export function cancelAndRotate(bot) {
   return token;
 }
 
+// Cancel-only escalation (teleportToSpawn): physically interrupt whoever holds control, mark them
+// preempted so their continuations stop, and leave NO owner behind -- unlike cancelAndRotate(),
+// which installs a ROUTINE owner its caller must release.
+export function cancelAndClear(bot, preemptedBy = OWNERS.TELEPORT_HOME.name) {
+  cancelPhysical(bot);
+  if (current) {
+    current.token.cancelled = true;
+    current.token.preempted = true;
+    current.token.preemptedBy = preemptedBy;
+  }
+  current = null;
+}
+
+// Player STOP (review MB-06): cancel-and-clear only if the current holder is at or below
+// `maxPriority` -- a STOP must end a direct command or goal step, but not a drowning or
+// critical-health response. Returns true if nothing is left running.
+export function cancelIfAtMost(bot, maxPriority, preemptedBy) {
+  if (current && current.owner.priority > maxPriority) return false;
+  cancelAndClear(bot, preemptedBy);
+  return true;
+}
+
 /**
  * Requests control of the bot's physical actions. `ownerDescriptor` is one of the OWNERS values
  * above (a {name, priority} pair -- pass it as-is, e.g. `arbiter.OWNERS.SELF_DEFENSE`). Force-
@@ -180,11 +217,16 @@ export function cancelAndRotate(bot) {
 export async function requestControl(bot, ownerDescriptor, opts = {}) {
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
   const deadline = Date.now() + waitMs;
-  while (current && current.owner.priority >= ownerDescriptor.priority && Date.now() < deadline) {
+  // opts.preemptEqual (review MB-06): a newer player command replaces an older one at the same
+  // tier immediately, instead of waiting 3s and then being refused behind a long-running action.
+  const blocks = () => current && (opts.preemptEqual
+    ? current.owner.priority > ownerDescriptor.priority
+    : current.owner.priority >= ownerDescriptor.priority);
+  while (blocks() && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
   // still held by something equally or more urgent
-  if (current && current.owner.priority >= ownerDescriptor.priority) return null;
+  if (blocks()) return null;
 
   if (current) {
     current.token.cancelled = true;
@@ -217,6 +259,14 @@ export function currentToken() {
 /** Releases a handle acquired via requestControl(). No-op if already released/superseded. */
 export function releaseControl(handle) {
   if (current && handle && current.token === handle.token) current = null;
+}
+
+/**
+ * True only while `handle` (a requestControl() handle, or any `{ token }` carrying the token it
+ * was issued) is still the live owner -- false once preempted, released, or cleared.
+ */
+export function holdsControl(handle) {
+  return !!handle && !!current && current.token === handle.token && !handle.token.cancelled;
 }
 
 /** True if anything currently holds control. Replaces `busy || acting` reads. */

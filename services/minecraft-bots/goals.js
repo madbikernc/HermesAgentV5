@@ -1,4 +1,7 @@
-// Version: 1.3.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-09-24) -- review MB-10: logStep() flags actionsTruncated when the action
+// record overflows, so index.js won't author an incomplete skill from it.
 //
 // 1.3.0 (2026-09-08) -- direct request "start on #6" (MINECRAFT_BOTS_DESIGN.md §14, the
 // Voyager-style dynamic skill library plan). New `actionsTaken`/`servedBySkill` fields and
@@ -140,6 +143,9 @@ export function logStep(goal, line, ok, action = null) {
     goal.sawSuccess = true;
     if (action && goal.actionsTaken.length < MAX_ACTIONS_TAKEN) {
       goal.actionsTaken.push(action);
+    } else if (action) {
+      // Review MB-10: an incomplete record must not be authored into a skill (skills.js checks).
+      goal.actionsTruncated = true;
     }
   }
 }

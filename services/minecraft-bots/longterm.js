@@ -1,4 +1,8 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-09-24) -- review MB-21 + redundancy notes: RAG search/ingest subprocesses have
+// timeouts, and ingest is coalesced -- a burst of notes (a resource scan writes one per block
+// type) now runs at most one ingest at a time plus one follow-up, instead of one process per note.
 //
 // 1.1.0 (2026-09-07) -- direct request: "what other behavior rules have any other sources
 // published or suggested" -> note deduplication. writeMemoryNote() now checks for a
@@ -20,6 +24,29 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
+const RAG_SEARCH_TIMEOUT_MS = 30_000;
+const RAG_INGEST_TIMEOUT_MS = 180_000;
+
+let ingestRunning = null; // the in-flight ingest's promise, or null
+let ingestAgain = false;  // a note arrived while one was running -- run once more after it
+
+function runIngestCoalesced() {
+  if (ingestRunning) {
+    ingestAgain = true;
+    return ingestRunning;
+  }
+  ingestRunning = (async () => {
+    try {
+      do {
+        ingestAgain = false;
+        await execFileAsync(PYTHON, [INGEST_SCRIPT], { timeout: RAG_INGEST_TIMEOUT_MS });
+      } while (ingestAgain);
+    } finally {
+      ingestRunning = null;
+    }
+  })();
+  return ingestRunning;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
@@ -63,7 +90,7 @@ export async function writeMemoryNote({ scope, persona, text }) {
   // practice, not a growing cost -- and it happens after the reply already went out (see
   // index.js's use of this function), so it never adds latency the player would feel.
   try {
-    await execFileAsync(PYTHON, [INGEST_SCRIPT]);
+    await runIngestCoalesced();
   } catch (err) {
     console.error(`[longterm] reindex failed after writing note:`, err.message);
   }
@@ -71,7 +98,8 @@ export async function writeMemoryNote({ scope, persona, text }) {
 
 export async function searchMemory(query, { topK = 3 } = {}) {
   try {
-    const { stdout } = await execFileAsync(PYTHON, [SEARCH_SCRIPT, query, "--top-k", String(topK)]);
+    const { stdout } = await execFileAsync(PYTHON, [SEARCH_SCRIPT, query, "--top-k", String(topK)],
+      { timeout: RAG_SEARCH_TIMEOUT_MS });
     const results = JSON.parse(stdout);
     return Array.isArray(results) ? results : [];
   } catch (err) {
