@@ -9,6 +9,8 @@ Type=simple
 User=pmoney
 WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
 Environment=MC_BOT_USERNAME=Wade
+# spark2 has no RAG index or embedder: search/notes/skills go to spark's hermes-minecraft-rag (8105)
+Environment=MC_RAG_URL=http://10.129.1.15:8105
 # 2026-09-19 ("expand their search capabilities... especially the miner and explorer roles"):
 # Wade is the fleet's one Explorer -- searches up to 40 blocks locally (same OOM-safe ceiling as
 # Babs's own bump) and ranges out to 260 blocks (vs. the shared 150-block default) when nothing's

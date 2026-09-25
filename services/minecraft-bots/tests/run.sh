@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.1.0
+# Version: 1.2.0
 #
 # Minecraft bot test runner -- see tests/README.md.
 #   tests/run.sh unit        offline fix-validation checks (runs anywhere with node)
@@ -14,6 +14,7 @@
 #
 # Revision History: 1.0.0 | 2026-09-24 | Initial runner.
 # 1.1.0 | 2026-09-25 | triage unit checks, livebot suite, monitoring coverage in baseline.
+# 1.2.0 | 2026-09-25 | RAG server checks in the unit suite.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,13 +37,14 @@ run() {
 }
 
 case "$suite" in
-  unit)     run unit node tests/unit.test.mjs "$@"; run triage python3 tests/test_triage.py ;;
+  unit)     run unit node tests/unit.test.mjs "$@"; run triage python3 tests/test_triage.py; run ragserver python3 tests/test_rag_server.py ;;
   live)     run live node tests/live.test.mjs "$@" ;;
   livebot)  run livebot node tests/live-bot.test.mjs "$@" ;;
   baseline) run baseline node tests/baseline.mjs "$@"; run monitoring node tests/monitoring.mjs ;;
   all)
     run unit node tests/unit.test.mjs
     run triage python3 tests/test_triage.py
+    run ragserver python3 tests/test_rag_server.py
     if [ -d node_modules/mineflayer ] && timeout 3 bash -c "</dev/tcp/${MC_HOST:-192.168.1.221}/${MC_PORT:-25580}" 2>/dev/null; then
       run live node tests/live.test.mjs
       run livebot node tests/live-bot.test.mjs

@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.2.0
+**Version:** 2.3.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -295,6 +295,7 @@ Behaviour worth knowing before touching a caller:
 | `hermes-minecraft-backup-pull.timer` | Pulls those tarballs off the game host |
 | `hermes-minecraft-triage.service` | Tails bot journals, fires `coder`+`coder2` in parallel on triage-worthy lines; diagnosis only, never acts |
 | `minecraft-bots-activity-log.service` | Raw durable journal mirror, bot-scoped, for later review — on both hosts, every `minecraft-bot-*` unit |
+| `hermes-minecraft-rag.service` (spark only) | RAG search, indexing and note/skill files for bots off spark (`MC_RAG_URL`, set on spark2's units); the index, embedder and shared memory directory live only on spark |
 | `minecraft-bots-tests.timer` | Daily test run: unit + live + baseline on spark, baseline on spark2 (`services/minecraft-bots/tests/`) |
 
 **Tests** (`services/minecraft-bots/tests/README.md`): offline unit checks, live scenarios run as
@@ -356,6 +357,8 @@ the original incident number, still cited throughout the code. Narrative is in g
 | `FLEE_ONLY_MOBS` = phantom, ghast, enderman. All three are doomed melee, and an enderman fight monopolizes SELF_DEFENSE tier while another mob attacks unopposed | 36 |
 | No weapon → flee. Bare-handed fights can't finish inside the timeout, and a permanent SELF_DEFENSE hold prevents ever *getting* a weapon | 27 |
 | `decideFightType()`: Soldiers always fight; others fight below `HALF_HEALTH` (10); 3 consecutive flees escalate to a fight; a failed flee escalates immediately; an EMERGENCY attack is capped at 8s, then falls back to flee | 43, 46, 53 |
+| Fight-or-flee overrides (2026-09-25, from live data once combat worked): outnumbered at critical health (2+ hostiles within 8) → flee, any role; 3+ hostiles → flee unless a Soldier; a creeper within 5 → flee. A single melee or ranged mob is still fought — closing on an archer beats running from arrows. The threat is the mob that just hurt the bot (`pickThreat`), not merely the nearest | policy |
+| Stuck rescue uses `/spreadplayers` near spawn, never `/tp` to the spawn block: the shelter is built around spawn, and a corner teleport suffocated bots in its walls. A clean stop (SIGTERM) doesn't count toward the cross-restart wedge streak | 2026-09-25 |
 | Flee needs a destination — golem → nearby Soldier → home, and home only when it is >20 blocks away, or it routes deeper into the building the threat is already in | 37, 52 |
 | `attack` equips the best weapon first; the bot may be holding a freshly-crafted pickaxe | 31 |
 | `attack` must actually call `bot.pvp.attack()` — the 1.42.0 rewrite dropped it and no fight landed a hit for two weeks. Only the target's `entityDead` is a kill; a target that unloads is "lost track" | MB-01 |
@@ -399,9 +402,11 @@ the original incident number, still cited throughout the code. Narrative is in g
   nothing has implicated it — the first suspect if "can't cross water" ever appears (§47).
 - **Herding** places a pen and can lure a single animal with food, but there is no reliable
   round-up of an existing herd.
-- **spark2 has no RAG venv** (`/opt/hermes/venvs/rag`), so memory and skill search fail for Bob,
-  Nell, Wade and Dale — tens of thousands of `[longterm] search failed` lines a day since before
-  2026-09-24.
+- **spark2 keeps its own copies of non-RAG shared state** — `known_chests.json`, `beds/`, `pen.json`
+  and per-bot goal files live on spark2's local `/mnt/hermes-data`, so its four bots don't share the
+  chest registry or bed claims with spark's five. RAG memory and skills are shared via
+  `hermes-minecraft-rag` since 2026-09-25; spark2's ~91k never-indexed local world notes were left
+  in place, not imported.
 
 ## Change history
 

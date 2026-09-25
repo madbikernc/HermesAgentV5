@@ -1,4 +1,7 @@
-// Version: 1.4.0
+// Version: 1.5.0
+//
+// 1.5.0 (2026-09-25) -- RAG and note files go through rag-backend.js: local on spark, spark's
+// hermes-minecraft-rag server when MC_RAG_URL is set (spark2, which has no index or embedder).
 //
 // 1.4.0 (2026-09-25) -- test isolation: MEMORY_DIR honors MC_MEMORY_ROOT; MC_RAG_DISABLED=true skips all
 // RAG reads/writes (test bots never touch the fleet's corpora).
@@ -23,43 +26,8 @@
 // reimplementing vector search in JS. Every call is best-effort: a failure here degrades a
 // bot to short-term memory only (hermes-memory's turns, see memory.js), never a crash.
 
-import { execFile } from "node:child_process";
-import { writeFile, mkdir } from "node:fs/promises";
-import { promisify } from "node:util";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { ragSearch, ragIngest, memWrite } from "./rag-backend.js";
 
-const execFileAsync = promisify(execFile);
-const RAG_SEARCH_TIMEOUT_MS = 30_000;
-const RAG_INGEST_TIMEOUT_MS = 180_000;
-
-let ingestRunning = null; // the in-flight ingest's promise, or null
-let ingestAgain = false;  // a note arrived while one was running -- run once more after it
-
-function runIngestCoalesced() {
-  if (ingestRunning) {
-    ingestAgain = true;
-    return ingestRunning;
-  }
-  ingestRunning = (async () => {
-    try {
-      do {
-        ingestAgain = false;
-        await execFileAsync(PYTHON, [INGEST_SCRIPT], { timeout: RAG_INGEST_TIMEOUT_MS });
-      } while (ingestAgain);
-    } finally {
-      ingestRunning = null;
-    }
-  })();
-  return ingestRunning;
-}
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, "..", "..");
-const PYTHON = "/opt/hermes/venvs/rag/bin/python3";
-const INGEST_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-ingest-minecraft.py");
-const SEARCH_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-search-minecraft.py");
-const MEMORY_DIR = (process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory"); // MC_MEMORY_ROOT: test isolation
 // MC_RAG_DISABLED=true (test bots): never read or write the fleet's shared RAG corpora.
 const RAG_DISABLED = process.env.MC_RAG_DISABLED === "true";
 
@@ -101,17 +69,14 @@ export async function writeMemoryNote({ scope, persona, text }) {
     return;
   }
 
-  const dir = scope === "world" ? path.join(MEMORY_DIR, "world")
-                                 : path.join(MEMORY_DIR, "bots", persona);
-  await mkdir(dir, { recursive: true });
-  const filename = `${Date.now()}-${slugify(text)}.md`;
-  await writeFile(path.join(dir, filename), text.trim() + "\n", "utf8");
+  const dir = scope === "world" ? "world" : `bots/${persona}`;
+  await memWrite(`${dir}/${Date.now()}-${slugify(text)}.md`, text.trim() + "\n");
   // Fire-and-forget: reindexing embeds only new/changed files (content-hash dedup, see the
   // ingest script's own docstring), so running it after every single note is cheap in
   // practice, not a growing cost -- and it happens after the reply already went out (see
   // index.js's use of this function), so it never adds latency the player would feel.
   try {
-    await runIngestCoalesced();
+    await ragIngest("minecraft");
   } catch (err) {
     console.error(`[longterm] reindex failed after writing note:`, err.message);
   }
@@ -120,10 +85,7 @@ export async function writeMemoryNote({ scope, persona, text }) {
 export async function searchMemory(query, { topK = 3 } = {}) {
   if (RAG_DISABLED) return [];
   try {
-    const { stdout } = await execFileAsync(PYTHON, [SEARCH_SCRIPT, query, "--top-k", String(topK)],
-      { timeout: RAG_SEARCH_TIMEOUT_MS });
-    const results = JSON.parse(stdout);
-    return Array.isArray(results) ? results : [];
+    return await ragSearch(query, { corpus: "minecraft", topK });
   } catch (err) {
     console.error(`[longterm] search failed:`, err.message);
     return [];

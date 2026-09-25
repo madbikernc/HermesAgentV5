@@ -1,4 +1,7 @@
-// Version: 1.5.0
+// Version: 1.6.0
+//
+// 1.6.0 (2026-09-25) -- skill search/read/write/ingest go through rag-backend.js (spark2 uses
+// spark's shared skill corpus via MC_RAG_URL instead of failing on a missing local venv).
 //
 // 1.5.0 (2026-09-25) -- test isolation: SKILLS_DIR honors MC_MEMORY_ROOT; MC_RAG_DISABLED=true skips skill
 // lookup and authoring.
@@ -34,28 +37,10 @@
 // below uses that directly. The only LLM call in this whole file is a cheap one asking for a
 // short name/description to file the already-real steps under.
 
-import { execFile } from "node:child_process";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { promisify } from "node:util";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { SKILL_ACTION_VERBS } from "./actions.js";
+import { ragSearch, ragIngest, memRead, memWrite } from "./rag-backend.js";
 import { callRole } from "./router.js";
 
-const execFileAsync = promisify(execFile);
-const RAG_SEARCH_TIMEOUT_MS = 30_000;
-const RAG_INGEST_TIMEOUT_MS = 180_000;
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, "..", "..");
-const PYTHON = "/opt/hermes/venvs/rag/bin/python3";
-const SEARCH_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-search-minecraft.py");
-const INGEST_SCRIPT = path.join(REPO_ROOT, "tools", "hermes-rag-ingest-minecraft.py");
-// Both scripts serve every Minecraft corpus and default to "minecraft" -- skills must always
-// pass --corpus explicitly (tools/hermes-rag-ingest-minecraft.py 2.0.0, which absorbed the
-// former -skills duplicates).
-const CORPUS_ARGS = ["--corpus", "minecraft-skills"];
-const SKILLS_DIR = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/skills`; // MC_MEMORY_ROOT: test isolation
 const RAG_DISABLED = process.env.MC_RAG_DISABLED === "true"; // test bots: no shared skill corpus
 
 // Re-calibrated live 2026-09-08 against the REAL, organically-grown corpus (20 skills authored
@@ -91,10 +76,7 @@ function slugify(text) {
 
 async function searchSkillCandidates(description, topK = 3) {
   try {
-    const { stdout } = await execFileAsync(PYTHON, [SEARCH_SCRIPT, description, "--top-k", String(topK), ...CORPUS_ARGS],
-      { timeout: RAG_SEARCH_TIMEOUT_MS }); // MB-21: never hang a goal tick on a stuck search
-    const results = JSON.parse(stdout);
-    return Array.isArray(results) ? results : [];
+    return await ragSearch(description, { corpus: "minecraft-skills", topK }); // timeouts: rag-backend.js
   } catch (err) {
     console.error("[skills] search failed:", err.message);
     return [];
@@ -122,7 +104,7 @@ export async function findSkill(description) {
     const jsonPath = candidate.source_path.replace(/\.md$/, ".json");
     let skill;
     try {
-      skill = JSON.parse(await readFile(path.join(SKILLS_DIR, jsonPath), "utf8"));
+      skill = JSON.parse(await memRead(`skills/${jsonPath}`));
     } catch (err) {
       console.error(`[skills] failed to load ${jsonPath}:`, err.message);
       continue;
@@ -160,11 +142,10 @@ export async function runSkill(performActionFn, bot, skill, speaker) {
 // that fails in one biome/situation may still be right in another, and deletion risks losing
 // something a future fix could revalidate.
 export async function recordSkillOutcome(jsonPath, success) {
-  const filePath = path.join(SKILLS_DIR, jsonPath);
   try {
-    const skill = JSON.parse(await readFile(filePath, "utf8"));
+    const skill = JSON.parse(await memRead(`skills/${jsonPath}`));
     skill.consecutiveFailures = success ? 0 : (skill.consecutiveFailures || 0) + 1;
-    await writeFile(filePath, JSON.stringify(skill, null, 2), "utf8");
+    await memWrite(`skills/${jsonPath}`, JSON.stringify(skill, null, 2));
   } catch (err) {
     console.error(`[skills] failed to record outcome for ${jsonPath}:`, err.message);
   }
@@ -181,12 +162,10 @@ export async function writeSkill({ name, description, steps }) {
     return false;
   }
   const filename = slugify(name || description);
-  await mkdir(SKILLS_DIR, { recursive: true });
-  await writeFile(path.join(SKILLS_DIR, `${filename}.md`), description.trim() + "\n", "utf8");
-  await writeFile(path.join(SKILLS_DIR, `${filename}.json`),
-    JSON.stringify({ name, steps, consecutiveFailures: 0 }, null, 2), "utf8");
+  await memWrite(`skills/${filename}.md`, description.trim() + "\n");
+  await memWrite(`skills/${filename}.json`, JSON.stringify({ name, steps, consecutiveFailures: 0 }, null, 2));
   try {
-    await execFileAsync(PYTHON, [INGEST_SCRIPT, ...CORPUS_ARGS], { timeout: RAG_INGEST_TIMEOUT_MS });
+    await ragIngest("minecraft-skills");
   } catch (err) {
     console.error("[skills] reindex failed after writing skill:", err.message);
   }

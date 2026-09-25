@@ -1,12 +1,12 @@
 # Minecraft bot tests
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.json`).
 
 | Suite | What it proves | Where it runs |
 |---|---|---|
-| `unit` — `unit.test.mjs` + `test_triage.py` | The fixed logic, extracted from the real source and run against controlled stubs; triage classification and per-bot dedupe | Anywhere with Node and Python (no server, no `npm install`) |
+| `unit` — `unit.test.mjs` + `test_triage.py` + `test_rag_server.py` | The fixed logic, extracted from the real source and run against controlled stubs; triage classification and per-bot dedupe; the spark RAG server spark2 uses | Anywhere with Node and Python (no server, no `npm install`) |
 | `live` — `live.test.mjs` | The real `actions.js`/`arbiter.js`/`equipment.js` against the real server, mobs and items | Spark nodes (needs `node_modules`, the bot server, and `live/rcon.py`'s vault/SSH access) |
 | `livebot` — `live-bot.test.mjs` | A whole bot process (`index.js` as `MBProbe`) driven by whispers, restarts and injected coordination messages: STOP, goal identity, resume, night pause, storing during a goal, Mayor curriculum persistence | Spark nodes |
 | `baseline` — `baseline.mjs` + `monitoring.mjs` | What the deployed fleet on this host actually did over the last 24h vs the committed baseline; every bot unit mirrored into the activity log and visible to triage | Each Spark node, over its own `minecraft-bot-*` journals |
@@ -67,3 +67,4 @@ When a change fixes or adds bot behavior:
 |---|---|---|
 | 1.0.0 | 2026-09-24 | Initial unit/live/baseline test system and maintenance rule. |
 | 1.1.0 | 2026-09-25 | Triage unit checks, the full-bot `livebot` suite, chest scenarios under an isolated memory root, and the monitoring coverage check. |
+| 1.2.0 | 2026-09-25 | RAG server checks in the unit suite. |

@@ -9,6 +9,8 @@ Type=simple
 User=pmoney
 WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
 Environment=MC_BOT_USERNAME=Bob
+# spark2 has no RAG index or embedder: search/notes/skills go to spark's hermes-minecraft-rag (8105)
+Environment=MC_RAG_URL=http://10.129.1.15:8105
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

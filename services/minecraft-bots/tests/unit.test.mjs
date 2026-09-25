@@ -1,4 +1,4 @@
-// Version: 1.5.0
+// Version: 1.6.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -13,6 +13,8 @@
 // 1.5.0 | 2026-09-25 | Review acceptance checks: MB-03 rejected /tp, MB-05 replacement during skill
 //   lookup and planning, MB-10 cancelled replay + 13-step authoring, MB-12 heartbeat/lease, MB-20
 //   restart persistence, MB-21 router/RAG timeouts, MB-22 stationary vs wedged.
+// 1.6.0 | 2026-09-25 | Fight-or-flee policy and attacker tracking, /spreadplayers rescue, rag-backend
+//   local timeouts and remote mode (spark2 RAG).
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -445,8 +447,8 @@ await check('EFF gear refresh does nothing when no gear changed', async () => {
 
 await check('EFF a repeated memory note skips the duplicate-search process', async () => {
   let searches = 0; let writes = 0;
-  const c = vm.createContext({ Date, Map, console: { log() {} }, MEMORY_DIR: '/m', path: { join: (...p) => p.join('/') },
-    mkdir: async () => {}, writeFile: async () => { writes++; }, slugify: (t) => t, runIngestCoalesced: async () => {},
+  const c = vm.createContext({ Date, Map, console: { log() {} },
+    memWrite: async () => { writes++; }, slugify: (t) => t, ragIngest: async () => {},
     DUPLICATE_DISTANCE_THRESHOLD: 0.1, RAG_DISABLED: false, searchMemory: async () => { searches++; return []; } });
   vm.runInContext(between(longterm, 'const RECENT_NOTE_TTL_MS', 'export async function searchMemory('), c);
   await c.writeMemoryNote({ scope: 'world', persona: 'amy', text: 'Found oak_log near (1, 2, 3)' });
@@ -497,10 +499,11 @@ await check('MB-03 a rejected /tp still leaves no control owner behind', async (
   let said = null; bot.chat = (m) => { said = m; }; // the server ignores it: a rejected /tp
   const held = await arbiter.requestControl(bot, arbiter.OWNERS.GOAL_STEP);
   const c = vm.createContext({ bot, arbiter, console: { log() {}, error() {} }, USERNAME: 'Amy', PERSONA_NAME: 'amy',
-    broadcastGoalState: async () => {}, recordGoalOutcome() {}, clearGoal: async () => {} });
+    broadcastGoalState: async () => {}, recordGoalOutcome() {}, clearGoal: async () => {}, TELEPORT_SAFE_RANGE: 4 });
   vm.runInContext('var currentGoal = null;' + between(index, 'async function teleportToSpawn(', 'function checkStuck('), c);
   await c.teleportToSpawn('test');
-  assert.match(said, /^\/tp 5\.00 64\.00 5\.00/);
+  // A safe landing spot near spawn, never the spawn block's corner (that suffocated bots in walls).
+  assert.equal(said, '/spreadplayers 5.5 5.5 0 4 false Amy');
   assert.equal(arbiter.isBusy(), false, 'no owner left whether or not the /tp worked');
   assert.equal(held.token.preempted, true);
 });
@@ -598,13 +601,39 @@ await check('MB-21 a stalled router call times out instead of hanging', async ()
   assert(Date.now() - started < 2000);
 });
 
-await check('MB-21 RAG subprocesses carry a timeout', async () => {
+const ragBackend = await readFile(root + 'rag-backend.js', 'utf8');
+const ragContext = (extras) => {
+  const c = vm.createContext({ JSON, Map, AbortSignal, PYTHON: 'py', SEARCH_SCRIPT: 's.py', INGEST_SCRIPT: 'i.py',
+    SEARCH_TIMEOUT_MS: 30000, INGEST_TIMEOUT_MS: 180000, REMOTE_TIMEOUT_MS: 35000, RAG_TOKEN: 'tok',
+    MEMORY_DIR: '/m', path: { join: (...p) => p.join('/'), dirname: (p) => p.split('/').slice(0, -1).join('/') }, ...extras });
+  vm.runInContext(between(ragBackend, 'export const isRemote').replace(/export /g, ''), c);
+  return c;
+};
+
+await check('MB-21 RAG subprocesses carry a timeout (local mode)', async () => {
   const calls = [];
-  const c = vm.createContext({ RAG_DISABLED: false, PYTHON: 'py', SEARCH_SCRIPT: 's.py', RAG_SEARCH_TIMEOUT_MS: 30000, JSON, console,
-    execFileAsync: async (cmd, args, opts) => { calls.push(opts); return { stdout: '[]' }; } });
-  vm.runInContext(between(longterm, 'export async function searchMemory(').replace(/export /g, ''), c);
-  await c.searchMemory('q');
-  assert.equal(calls[0]?.timeout, 30000);
+  const c = ragContext({ RAG_URL: '', execFileAsync: async (cmd, args, opts) => { calls.push([args, opts]); return { stdout: '[]' }; } });
+  await c.ragSearch('q', { corpus: 'minecraft-skills', topK: 2 });
+  assert.equal(calls[0][1].timeout, 30000);
+  assert.deepEqual([...calls[0][0]], ['s.py', 'q', '--top-k', '2', '--corpus', 'minecraft-skills']);
+});
+
+await check('spark2 RAG: remote mode sends search/read/write/ingest to spark with the bot token', async () => {
+  const sent = [];
+  const c = ragContext({ RAG_URL: 'http://spark:8105', execFileAsync: async () => { throw new Error('must not run locally'); },
+    fetch: async (url, opts) => {
+      sent.push([url, JSON.parse(opts.body), opts.headers.Authorization]);
+      const reply = url.endsWith('/search') ? { results: [{ text: 't', source_path: 'a.md', distance: 0.1 }] }
+        : url.endsWith('/read') ? { content: '{"name":"x"}' } : { ok: true };
+      return { ok: true, json: async () => reply };
+    } });
+  assert.equal((await c.ragSearch('oak', { corpus: 'minecraft', topK: 1 }))[0].source_path, 'a.md');
+  assert.equal(await c.memRead('skills/x.json'), '{"name":"x"}');
+  await c.memWrite('world/1-note.md', 'hi\n');
+  await c.ragIngest('minecraft');
+  assert.deepEqual(sent.map(([u, b, a]) => [u.split('/').pop(), a]),
+    [['search', 'Bearer tok'], ['read', 'Bearer tok'], ['write', 'Bearer tok'], ['ingest', 'Bearer tok']]);
+  assert.deepEqual({ ...sent[2][1] }, { path: 'world/1-note.md', content: 'hi\n' });
 });
 
 await check('MB-22 a stationary bot nobody is moving never escalates; a wedged one does', async () => {
@@ -620,6 +649,63 @@ await check('MB-22 a stationary bot nobody is moving never escalates; a wedged o
   assert.deepEqual(events, [], 'a guard standing still for 20 min is left alone');
   for (let i = 0; i < 40; i++) { t += 30_000; vm.runInContext(`lastMoveAttemptAt = ${t}`, c); c.checkStuck(); }
   assert.deepEqual(events.slice(0, 3), ['nudge', 'nudge', 'teleport'], 'trying to move but not moving escalates');
+});
+
+// ---- 2026-09-25: fight-or-flee policy -------------------------------------------------------------
+function policyContext({ health = 20, soldier = false, armed = true, mobs = [] }) {
+  const entities = {};
+  mobs.forEach(([name, dist], i) => { entities[i + 1] = { id: i + 1, name, position: { distanceTo: () => dist } }; });
+  const bot = { health, entity: { position: {} }, entities };
+  const c = vm.createContext({ bot, Date, Object, hasWeapon: () => armed, FLEE_ONLY_MOBS: new Set(['phantom', 'ghast', 'enderman']),
+    HOSTILE_MOBS: new Set(['zombie', 'husk', 'creeper', 'skeleton', 'pillager', 'spider']),
+    EMERGENCY_HEALTH_THRESHOLD: 6, HALF_HEALTH: 10, ROLES: { SOLDIER: 'S' }, myRole: soldier ? { primary: 'S' } : null,
+    CONSECUTIVE_FLEE_ESCALATE_AFTER: 3, CONSECUTIVE_FLEE_RESET_MS: 15000 });
+  vm.runInContext('var consecutiveFleeCount = 0, lastFleeDecisionAt = 0;' +
+    between(index, 'const OUTNUMBERED_RADIUS', 'async function attackAsLastResort('), c);
+  return { c, threat: entities[1] };
+}
+
+await check('Fight-or-flee: armed bot at critical health fights a single melee or ranged mob', async () => {
+  for (const mob of ['zombie', 'pillager']) {
+    const { c, threat } = policyContext({ health: 5, mobs: [[mob, 3]] });
+    assert.equal(c.decideFightType(threat), 'attack', mob);
+  }
+});
+
+await check('Fight-or-flee: outnumbered at critical health flees, even a Soldier', async () => {
+  const { c, threat } = policyContext({ health: 5, soldier: true, mobs: [['zombie', 2], ['zombie', 6]] });
+  assert.equal(c.decideFightType(threat), 'flee');
+  const healthy = policyContext({ health: 18, soldier: true, mobs: [['zombie', 2], ['zombie', 6]] });
+  assert.equal(healthy.c.decideFightType(healthy.threat), 'attack', 'a healthy Soldier holds against two');
+});
+
+await check('Fight-or-flee: 3+ hostiles send a non-Soldier running at any health; a close creeper always does', async () => {
+  const crowd = policyContext({ health: 20, mobs: [['zombie', 2], ['spider', 4], ['skeleton', 7]] });
+  assert.equal(crowd.c.decideFightType(crowd.threat), 'flee');
+  const soldier = policyContext({ health: 20, soldier: true, mobs: [['zombie', 2], ['spider', 4], ['skeleton', 7]] });
+  assert.equal(soldier.c.decideFightType(soldier.threat), 'attack');
+  const creeper = policyContext({ health: 20, soldier: true, mobs: [['creeper', 3]] });
+  assert.equal(creeper.c.decideFightType(creeper.threat), 'flee');
+  const unarmed = policyContext({ health: 20, armed: false, mobs: [['zombie', 3]] });
+  assert.equal(unarmed.c.decideFightType(unarmed.threat), 'flee');
+});
+
+await check('Fight-or-flee: the mob that just hurt the bot is the threat, not merely the nearest', async () => {
+  const { EventEmitter } = await import('node:events');
+  const bot = new EventEmitter();
+  const here = {};
+  const at = (d) => ({ d, distanceTo() { return this.d; } });
+  const zombie = { id: 1, name: 'zombie', position: at(2) };
+  const skeleton = { id: 2, name: 'skeleton', position: at(15) };
+  Object.assign(bot, { health: 20, entity: { position: here }, entities: { 1: zombie, 2: skeleton },
+    nearestEntity: (pred) => [zombie, skeleton].filter(pred).sort((a, b) => a.position.d - b.position.d)[0] });
+  const c = vm.createContext({ bot, Date, HOSTILE_MOBS: new Set(['zombie', 'skeleton']),
+    nearestHostile: () => zombie });
+  vm.runInContext(between(index, 'const RANGED_MOBS', 'async function checkSelfDefense('), c);
+  assert.equal(c.pickThreat(24), zombie, 'nothing has hit it yet: nearest');
+  zombie.position.d = 8; // the zombie backs off; an arrow lands
+  bot.health = 17; bot.emit('health');
+  assert.equal(c.pickThreat(24), skeleton, 'the archer that just hit it');
 });
 
 console.log(`${passed} unit checks passed.`);

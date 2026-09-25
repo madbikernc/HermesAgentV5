@@ -1,4 +1,12 @@
-// Version: 2.94.0
+// Version: 2.95.0
+//
+// 2.95.0 (2026-09-25) -- fight-or-flee policy (decided from live data): an armed bot fights a single
+// melee or ranged threat, but flees when outnumbered at critical health (2+ within 8 blocks, any
+// role), when 3+ hostiles are near (non-Soldiers), or from a creeper within 5 blocks; the threat is
+// the mob that just hurt it (pickThreat) rather than merely the nearest. Stuck-rescue teleport uses
+// /spreadplayers -- "/tp" to the spawn block's corner suffocated bots in the shelter walls around
+// spawn (every post-teleport death in the server log). A clean stop (SIGTERM/SIGINT) is recorded, so
+// deploy restarts no longer count toward the cross-restart wedge streak that triggered it.
 //
 // 2.94.0 (2026-09-25) -- test support for the full-bot live harness (tests/live-bot.test.mjs):
 // MC_MEMORY_ROOT for the curriculum file, MC_HOME_POS pins a test bot's home, MC_TEST_USERNAMES
@@ -1397,7 +1405,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -1903,7 +1911,9 @@ bot.once("spawn", async () => {
     const prior = await loadStuckState(PERSONA_NAME);
     const pos = bot.entity.position;
     let closeToLast = false;
-    if (prior) {
+    // 2026-09-25: a clean stop (deploy, systemctl restart) is not evidence of being wedged -- deploy
+    // restarts had been adding to the streak and triggering the (then lethal) rescue teleport.
+    if (prior && !prior.cleanShutdown) {
       const dx = pos.x - prior.x, dy = pos.y - prior.y, dz = pos.z - prior.z;
       closeToLast = Math.sqrt(dx * dx + dy * dy + dz * dz) < RESTART_STUCK_RADIUS;
     }
@@ -4444,8 +4454,34 @@ const CONSECUTIVE_FLEE_ESCALATE_AFTER = 3;
 const CONSECUTIVE_FLEE_RESET_MS = 15_000;
 let consecutiveFleeCount = 0;
 let lastFleeDecisionAt = 0;
-function decideFightType(threatName) {
+// Fight-or-flee policy, decided 2026-09-25 (the review deferred it until combat worked). Live data
+// from the first ~8h with working combat: deaths fell from ~1,700 to 18 per 8h on spark,
+// emergency attacks mostly win, and the remaining mob deaths are pillagers/zombies. So an armed bot
+// still fights a single melee or ranged threat (closing on an archer beats running from arrows in
+// the open), but:
+//   - outnumbered at critical health (2+ hostiles within OUTNUMBERED_RADIUS) -> flee, any role
+//   - outnumbered by 3+ at any health -> flee, unless a Soldier
+//   - a creeper within CREEPER_FLEE_RANGE -> flee (meleeing it means eating the blast)
+// The threat itself is the mob that just hurt this bot when known (pickThreat), not merely the
+// nearest one. Measured by tests/baseline.mjs's deaths_per_bot_day and attack_win_rate.
+const OUTNUMBERED_RADIUS = 8;
+const CREEPER_FLEE_RANGE = 5;
+
+function hostilesWithin(radius) {
+  const here = bot.entity?.position;
+  if (!here) return 0;
+  return Object.values(bot.entities).filter((e) => HOSTILE_MOBS.has(e.name) &&
+    e.position.distanceTo(here) <= radius).length;
+}
+
+function decideFightType(threat) {
+  const threatName = threat.name;
   if (FLEE_ONLY_MOBS.has(threatName) || !hasWeapon(bot)) return "flee";
+  if (threatName === "creeper" && bot.entity &&
+      threat.position.distanceTo(bot.entity.position) <= CREEPER_FLEE_RANGE) return "flee";
+  const nearby = hostilesWithin(OUTNUMBERED_RADIUS);
+  if (nearby >= 2 && bot.health <= EMERGENCY_HEALTH_THRESHOLD) return "flee";
+  if (nearby >= 3 && myRole?.primary !== ROLES.SOLDIER) return "flee";
   if (myRole?.primary === ROLES.SOLDIER || bot.health < HALF_HEALTH) {
     consecutiveFleeCount = 0;
     return "attack";
@@ -4631,9 +4667,35 @@ let lastFleeMobResponseAt = 0;
 // per-bot coherence arbiter plan, Phase 2 of its migration). The old inline 4-primitive cancel +
 // busy||acting poll loop is now arbiter.requestControl() -- see arbiter.js's own header for why
 // this specific handler was one of the 4 duplicated, drifted copies this phase closes.
+// Attacker tracking (fight-or-flee policy, 2026-09-25): when this bot loses health, the hostile
+// in melee reach (else the nearest ranged mob with a shot) is remembered as the attacker for
+// ATTACKER_MEMORY_MS, and pickThreat() answers it instead of whatever mob happens to be nearest.
+// prependListener: this must run before the critical-health handler reads it for the same hit.
+const RANGED_MOBS = new Set(["skeleton", "stray", "pillager", "witch", "blaze", "ghast"]);
+const ATTACKER_MEMORY_MS = 6_000;
+let lastAttacker = null; // { id, at }
+let lastHealthSeen = 20;
+bot.prependListener("health", () => {
+  if (bot.entity && bot.health < lastHealthSeen) {
+    const here = bot.entity.position;
+    const near = (names, radius) => bot.nearestEntity((e) => names(e.name) && e.position.distanceTo(here) <= radius);
+    const attacker = near((n) => HOSTILE_MOBS.has(n), 3.5) || near((n) => RANGED_MOBS.has(n), 24);
+    if (attacker) lastAttacker = { id: attacker.id, at: Date.now() };
+  }
+  lastHealthSeen = bot.health;
+});
+
+function pickThreat(range) {
+  if (lastAttacker && Date.now() - lastAttacker.at <= ATTACKER_MEMORY_MS && bot.entity) {
+    const attacker = bot.entities[lastAttacker.id];
+    if (attacker && attacker.position.distanceTo(bot.entity.position) <= range) return attacker;
+  }
+  return nearestHostile(bot, range);
+}
+
 async function checkSelfDefense() {
   if (!AUTONOMY_ENABLED || selfDefenseInFlight || bot.isSleeping) return;
-  const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
+  const threat = pickThreat(SELF_DEFENSE_RANGE);
   if (!threat) return;
   if (FLEE_ONLY_MOBS.has(threat.name) &&
       Date.now() - lastFleeMobResponseAt < FLEE_MOB_RESPONSE_COOLDOWN_MS) {
@@ -4673,7 +4735,7 @@ async function checkSelfDefense() {
     // checked alongside the other two flee conditions: no weapon means flee, regardless of mob
     // type or health, breaking the cycle by actually surviving long enough between encounters to
     // get equipped. See decideFightType()'s own header for the current role/health rule.
-    const type = decideFightType(threat.name);
+    const type = decideFightType(threat);
     if (FLEE_ONLY_MOBS.has(threat.name)) lastFleeMobResponseAt = Date.now();
     console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
     const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
@@ -4732,7 +4794,7 @@ async function respondToSquadCall(payload) {
       if (arbiter.holdsControl(handle)) bot.pathfinder.setGoal(null); // MB-02: never clear a preemptor's path
     }
 
-    const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
+    const threat = pickThreat(SELF_DEFENSE_RANGE);
     if (!threat) {
       console.log(`[${USERNAME}] squad response: arrived, nothing left to fight.`);
     } else if (FLEE_ONLY_MOBS.has(threat.name)) {
@@ -5393,6 +5455,8 @@ let currentSameSpotCount = 0;
 // than her own physical position, specifically because it's NOT corrupted by whatever bad spot
 // she's currently wedged in. Requires /tp permission -- Babs/Amy/Mark/Luke were added to
 // ops.json at level 2 (command access, not full admin) for exactly this.
+const TELEPORT_SAFE_RANGE = 4;
+
 async function teleportToSpawn(reason) {
   const dest = bot.spawnPoint;
   if (!dest || (dest.x === 0 && dest.y === 0 && dest.z === 0)) {
@@ -5410,7 +5474,10 @@ async function teleportToSpawn(reason) {
   // Review MB-03, 2026-09-24: cancelAndRotate() left a ROUTINE owner behind that nothing ever
   // released, freezing goals and chores after every rescue; cancelAndClear() leaves no owner.
   arbiter.cancelAndClear(bot);
-  bot.chat(`/tp ${dest.x.toFixed(2)} ${dest.y.toFixed(2)} ${dest.z.toFixed(2)}`);
+  // 2026-09-25: "/tp <spawn block corner>" suffocated bots in the shelter walls built around the
+  // world spawn (server log: every post-teleport death was "suffocated in a wall"). /spreadplayers
+  // makes the server pick a safe standing spot on the surface within a few blocks instead.
+  bot.chat(`/spreadplayers ${(dest.x + 0.5).toFixed(1)} ${(dest.z + 0.5).toFixed(1)} 0 ${TELEPORT_SAFE_RANGE} false ${USERNAME}`);
   // Whatever her standing goal assumed about her surroundings is now stale, same reasoning as
   // death/respawn.
   if (currentGoal) {
@@ -5965,7 +6032,7 @@ const EMERGENCY_ATTACK_TIMEOUT_MS = 8_000;
 bot.on("health", () => {
   if (!AUTONOMY_ENABLED || emergencyInFlight) return;
   if (bot.health <= 0 || bot.health > EMERGENCY_HEALTH_THRESHOLD) return;
-  const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
+  const threat = pickThreat(SELF_DEFENSE_RANGE);
   if (!threat) return;
 
   emergencyInFlight = true;
@@ -5975,7 +6042,7 @@ bot.on("health", () => {
   // role, the one place decideFightType()'s own rule wasn't actually applied. Now it is: a
   // Soldier fights here too, and so does anyone else, since being this hurt is exactly the
   // "under half health" condition that rule fights on. FLEE_ONLY_MOBS/no-weapon still flee.
-  const type = decideFightType(threat.name);
+  const type = decideFightType(threat);
   console.log(`[${USERNAME}] EMERGENCY: health critical (${bot.health}) with ${threat.name} ` +
               `nearby -- force-cancelling current action to ${type}`);
   noteThreatSeen(threat.name);
@@ -6162,7 +6229,7 @@ const SLEEPING_THREAT_CHECK_MS = parseInt(process.env.MC_SLEEPING_THREAT_CHECK_M
 
 async function checkSleepingThreat() {
   if (!AUTONOMY_ENABLED || !bot.isSleeping) return;
-  const threat = nearestHostile(bot, SELF_DEFENSE_RANGE);
+  const threat = pickThreat(SELF_DEFENSE_RANGE);
   if (!threat) return;
 
   console.log(`[${USERNAME}] threat while sleeping (${threat.name}) -- waking up to respond`);
@@ -6189,7 +6256,7 @@ async function checkSleepingThreat() {
     // See checkSelfDefense's own 2026-09-10/2026-09-15 notes and decideFightType()'s own header
     // (actions.js's FLEE_ONLY_MOBS) -- a flyer is never worth attacking regardless of health, and
     // neither is anything else when she has no weapon to fight it with.
-    const type = decideFightType(threat.name);
+    const type = decideFightType(threat);
     const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
     const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME, handle);
     console.log(`[${USERNAME}] post-wake defense: ${type} -> ${result.text} (ok=${result.ok})`);
@@ -6223,6 +6290,18 @@ bot.on("error", (err) => console.log(`[${USERNAME}] error:`, err));
 // keepalive timeout, a kick, the game server itself restarting) hands recovery to the exact same
 // systemd machinery already relied on, giving a fresh process a real, clean reconnect instead of
 // a stale one pretending to keep working.
+// Record a clean shutdown so the next start doesn't count this stop toward the cross-restart
+// wedge streak (see bot.once("spawn")).
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.once(signal, () => {
+    const pos = bot.entity?.position;
+    const save = pos
+      ? saveStuckState(PERSONA_NAME, { x: pos.x, y: pos.y, z: pos.z, sameSpotCount: 0, cleanShutdown: true })
+      : Promise.resolve();
+    Promise.race([save, new Promise((r) => setTimeout(r, 2000))]).finally(() => process.exit(0));
+  });
+}
+
 bot.on("end", (reason) => {
   console.log(`[${USERNAME}] disconnected:`, reason);
   process.exit(1);

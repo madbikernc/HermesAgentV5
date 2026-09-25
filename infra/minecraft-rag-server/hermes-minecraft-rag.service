@@ -1,0 +1,18 @@
+[Unit]
+Description=Firmament Minecraft RAG server (shared RAG search/notes/skills for bots off spark)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/minecraft-rag-server/README.md
+After=network-online.target hermes-embed.service
+Wants=network-online.target
+RequiresMountsFor=/mnt/hermes-data
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+WorkingDirectory=/home/pmoney/HermesAgentV5/tools
+ExecStart=/opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-minecraft-rag-server.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

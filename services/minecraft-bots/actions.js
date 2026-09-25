@@ -1,4 +1,6 @@
-// Version: 1.68.0
+// Version: 1.69.0
+//
+// 1.69.0 (2026-09-25) -- HOSTILE_MOBS exported for index.js's fight-or-flee policy.
 //
 // 1.68.0 (2026-09-25) -- test isolation: beds/pen/known-chests paths honor MC_MEMORY_ROOT.
 //
@@ -957,7 +959,7 @@ const SMELT_TIMEOUT_MS = 3 * 60_000;
 // signal exposed directly.
 export const DARK_LIGHT_LEVEL = 8;
 
-const HOSTILE_MOBS = new Set([
+export const HOSTILE_MOBS = new Set([
   "zombie", "husk", "drowned", "zombie_villager", "skeleton", "stray", "spider", "cave_spider",
   "creeper", "enderman", "witch", "phantom", "slime", "magma_cube", "silverfish", "blaze",
   "ghast", "guardian", "elder_guardian", "shulker", "vex", "vindicator", "evoker", "pillager",

@@ -1,4 +1,4 @@
-// Version: 1.0.2
+// Version: 1.1.1
 //
 // Full-bot live tests: runs a REAL bot process (index.js, as "MBProbe") against the bot-sandbox
 // server and drives it the way a player would -- whispers from the MBTester bot, restarts, injected
@@ -23,6 +23,10 @@
 // 1.0.2 | 2026-09-25 | The probe's server inventory is cleared at every boot (it persists between
 //   runs), and the STOP scenario uses reachable floor-level logs and checks the action is still
 //   running when STOP is sent.
+// 1.1.0 | 2026-09-25 | Fight-or-flee at critical health (flee two, fight one), safe stuck rescue
+//   after crash-restarts, clean restarts not counted as wedged (stuck state no longer cleared).
+// 1.1.1 | 2026-09-25 | Fight-or-flee: arm the probe first, then summon the mobs beside it and damage it
+//   in one RCON call (it used to flee unarmed out of range before the hit).
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import http from "node:http";
@@ -119,15 +123,18 @@ function startProbe(memoryRoot, env = {}) {
     lines,
     since: (t, re) => lines.find((l) => l.at >= t && re.test(l.text)),
     waitLine: (re, ms, t = 0) => waitFor(() => lines.find((l) => l.at >= t && re.test(l.text)), ms, `probe line ${re}`),
-    async stop() { child.kill("SIGTERM"); await Promise.race([exited, sleep(10_000)]); child.kill("SIGKILL"); await sleep(3000); },
+    // SIGTERM is a clean stop (the bot records it, so it doesn't count toward the cross-restart
+    // wedge streak); { crash: true } kills it outright, like a crash would.
+    async stop({ crash = false } = {}) {
+      child.kill(crash ? "SIGKILL" : "SIGTERM");
+      await Promise.race([exited, sleep(10_000)]);
+      child.kill("SIGKILL");
+      await sleep(3000);
+    },
   };
   return probe;
 }
 async function bootProbe(memoryRoot, env) {
-  // Repeated test restarts at the same pinned spot would trip the bot's real "reconnected in the
-  // same place 3 times -- wedged" rescue (a teleport that drops the goal). Those reconnects are
-  // artificial, so the probe's cross-restart stuck state is cleared before every boot.
-  rmSync(path.join(memoryRoot, "bots", "mbprobe", "stuck_state.json"), { force: true });
   startProbe(memoryRoot, env);
   await probe.waitLine(/\[MBProbe\] spawned at/, 60_000);
   // The server keeps MBProbe's inventory between runs; every scenario starts empty-handed.
@@ -161,6 +168,7 @@ async function arena() {
 
 // ---- scenarios -------------------------------------------------------------------------------------
 const scenarios = [];
+const scenarioCleanup = []; // undo steps a scenario registers; run after it, pass or fail
 const scenario = (name, fn) => scenarios.push({ name, fn });
 
 scenario("MB-06 STOP ends a long direct action within seconds", async () => {
@@ -262,6 +270,59 @@ scenario("MB-20 Mayor keeps curriculum evidence across a restart", async () => {
   assert(after.stageProgress.includes("Babs"));
 });
 
+scenario("Stuck rescue: clean restarts aren't 'wedged'; a crash-loop rescue lands safely", async () => {
+  const root = newRoot();
+  for (let i = 0; i < 3; i++) { await bootProbe(root); await probe.stop(); }
+  const t0 = Date.now();
+  await bootProbe(root);
+  await sleep(5000);
+  assert(!probe.since(t0, /likely wedged across restarts/), "three clean restarts in one spot are not a wedge");
+  await probe.stop({ crash: true });
+  // Crash-restarts in one spot ARE the wedge signal: the rescue fires, and must land safely.
+  // /spreadplayers needs op; the real bots are ops, the probe only for this scenario.
+  await rcon(`op ${PROBE}`);
+  scenarioCleanup.push(() => rcon(`deop ${PROBE}`));
+  let rescuedAt = 0;
+  for (let i = 0; i < 4 && !rescuedAt; i++) {
+    const t = Date.now();
+    await bootProbe(root);
+    await sleep(6000);
+    if (probe.since(t, /TELEPORT: reconnected at the same spot/)) rescuedAt = Date.now();
+    else await probe.stop({ crash: true });
+  }
+  assert(rescuedAt, "crash-restarts in one spot trigger the wedge rescue");
+  await sleep(8000);
+  assert(!probe.since(rescuedAt - 6000, /\] died at /), "the rescue teleport didn't kill it (no suffocation)");
+  const pos = await rcon(`data get entity ${PROBE} Pos`);
+  const [px, , pz] = (pos.match(/\[([^\]]+)\]/)?.[1] ?? "").split(",").map((v) => parseFloat(v));
+  assert(Math.abs(px - HOME[0]) <= 6 && Math.abs(pz - HOME[2]) <= 6, `landed near home (${pos.trim()})`);
+});
+
+scenario("Fight-or-flee: at critical health the probe flees two mobs but fights one", async () => {
+  // Summoned right beside the probe, wherever it is, in the same RCON call as the damage -- so it
+  // can't have wandered or fled out of range first.
+  const husk = (dx) => `execute at ${PROBE} run summon minecraft:husk ~${dx} ~ ~ ` +
+    `{NoAI:1b,PersistenceRequired:1b,Health:1000f,attributes:[{id:"minecraft:max_health",base:1000}],Tags:["mbtest"]}`;
+  // Each check gets a fresh probe: a flee/fight against a 1000-HP mob can hold the emergency
+  // tier for a long time, and a second critical hit would be ignored while it's in flight.
+  const critical = async (count) => {
+    if (probe) await probe.stop();
+    await bootProbe(newRoot());
+    // Armed first (an unarmed bot always flees, which isn't what this checks).
+    await rcon(`kill @e[tag=mbtest]`, `give ${PROBE} minecraft:iron_sword`, `effect clear ${PROBE}`,
+      `effect give ${PROBE} minecraft:instant_health 1 5 true`);
+    await sleep(4000);
+    const t = Date.now();
+    await rcon(...Array.from({ length: count }, (_, i) => husk(1 + i)), `damage ${PROBE} 15 minecraft:generic`);
+    const line = await probe.waitLine(/EMERGENCY: health critical .* force-cancelling current action to (flee|attack)/, 15_000, t);
+    await rcon(`effect give ${PROBE} minecraft:instant_health 1 5 true`, `effect give ${PROBE} minecraft:resistance 900 4 true`);
+    return line.text.match(/to (flee|attack)$/)[1];
+  };
+  assert.equal(await critical(2), "flee", "outnumbered at critical health");
+  assert.equal(await critical(1), "attack", "one melee mob at critical health");
+  await rcon(`kill @e[tag=mbtest]`);
+});
+
 // ---- runner -------------------------------------------------------------------------------------
 let failed = 0;
 let ran = 0;
@@ -286,6 +347,7 @@ try {
       if (probe) console.log(probe.lines.slice(-15).map((l) => `      | ${l.text.slice(0, 160)}`).join("\n"));
     } finally {
       if (probe) await probe.stop();
+      while (scenarioCleanup.length) await scenarioCleanup.pop()();
       probe = null;
     }
   }
