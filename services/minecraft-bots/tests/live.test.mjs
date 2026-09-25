@@ -1,4 +1,4 @@
-// Version: 1.3.1
+// Version: 1.4.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -20,6 +20,8 @@
 //   safe now that MC_MEMORY_ROOT keeps chest snapshots out of the fleet's known_chests.json.
 // 1.3.0 | 2026-09-25 | Beds scenario: a destroyed claimed bed is replaced by the nearest unclaimed one.
 // 1.3.1 | 2026-09-25 | MC_BED_CLAIMS_SHARED=false: test bed claims stay out of the shared hermes-memory store.
+// 1.4.0 | 2026-09-25 | Door scenarios: out of a sealed room through a closed/open door and an open/closed
+//   fence gate, and into one through an open door, on the bots' real movement setup.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -41,6 +43,8 @@ process.env.MC_BED_CLAIMS_SHARED = "false"; // never write test claims into the 
 const { loadActionPlugins, performAction, checkClaimedBed } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor } = await import("../equipment.js");
+const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
+const { isProtectedBlockName } = await import("../actions.js");
 
 const { pathfinder, Movements, goals } = pathfinderPkg;
 const execFileAsync = promisify(execFile);
@@ -246,6 +250,74 @@ scenario("Beds: a destroyed claimed bed is replaced by the nearest unclaimed one
   assert.deepEqual(now, { x: x - 5, y: y + 1, z: z - 5 }, "claimed the free bed's head, not MBRival's");
 });
 
+// Doors (2026-09-25): a glass room around the arena centre whose only opening is one door or gate
+// on its south wall, and the bot's real movement setup (index.js: SwimMovements, canOpenDoors,
+// doors in blocksCantBreak) with digging off, so a pass means it went through the opening.
+async function doorRoom(block, { gapAbove = false } = {}) {
+  const wall = [];
+  for (const [x1, z1, x2, z2] of [[-2, -2, 2, -2], [-2, 2, 2, 2], [-2, -2, -2, 2], [2, -2, 2, 2]]) {
+    wall.push(`fill ${x + x1} ${y + 1} ${z + z1} ${x + x2} ${y + 3} ${z + z2} minecraft:glass`);
+  }
+  await rcon(...wall, `fill ${x - 2} ${y + 4} ${z - 2} ${x + 2} ${y + 4} ${z + 2} minecraft:glass`);
+  const door = block.endsWith("_door");
+  const lower = door ? `${block}[facing=south,half=lower,hinge=left,${"OPEN"}]` : `${block}[facing=south,${"OPEN"}]`;
+  return {
+    door,
+    async place(open) {
+      const state = (b) => b.replace("OPEN", `open=${open}`);
+      const cmds = [`setblock ${x} ${y + 1} ${z + 2} minecraft:${state(lower)}`];
+      if (door) cmds.push(`setblock ${x} ${y + 2} ${z + 2} minecraft:${state(`${block}[facing=south,half=upper,hinge=left,OPEN]`)}`);
+      else if (gapAbove) cmds.push(`setblock ${x} ${y + 2} ${z + 2} minecraft:air`);
+      await rcon(...cmds);
+      await waitFor(() => bot.blockAt(new Vec3(x, y + 1, z + 2))?.name === block &&
+        bot.blockAt(new Vec3(x, y + 1, z + 2)).getProperties().open === open, 5000, `${block} open=${open}`);
+    },
+  };
+}
+function useBotMovements() {
+  const movements = new SwimMovements(bot);
+  movements.canOpenDoors = true;
+  movements.canDig = false;
+  for (const block of bot.registry.blocksArray) {
+    if (isProtectedBlockName(block.name)) movements.blocksCantBreak.add(block.id);
+  }
+  const previous = bot.pathfinder.movements;
+  bot.pathfinder.setMovements(movements);
+  scenarioCleanup.push(() => bot.pathfinder.setMovements(previous));
+}
+async function walkTo(tx, tz) {
+  await withTimeoutMs(bot.pathfinder.goto(new goals.GoalBlock(tx, y + 1, tz)), 30_000, () => bot.pathfinder.setGoal(null));
+  assert(bot.entity.position.distanceTo(new Vec3(tx + 0.5, y + 1, tz + 0.5)) < 1.5, `ended at ${bot.entity.position}`);
+}
+function withTimeoutMs(promise, ms, onTimeout) {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => {
+    timer = setTimeout(() => { onTimeout(); reject(new Error(`no route after ${ms}ms`)); }, ms);
+  })]).finally(() => clearTimeout(timer));
+}
+for (const [label, block, open, gapAbove] of [
+  ["a closed door", "oak_door", false], ["an open door", "oak_door", true],
+  ["an open fence gate", "oak_fence_gate", true, true], ["a closed fence gate", "oak_fence_gate", false, true],
+]) {
+  scenario(`Doors: walks out of a room through ${label}`, async () => {
+    useBotMovements();
+    const room = await doorRoom(block, { gapAbove });
+    await room.place(open);
+    await walkTo(x, z + 5);
+    const after = bot.blockAt(new Vec3(x, y + 1, z + 2));
+    assert.equal(after?.name, block, "the door/gate is still there (not dug)");
+    if (open) assert.equal(after.getProperties().open, true, "an open one isn't shut on the way through");
+  });
+}
+scenario("Doors: walks into a room through an open door", async () => {
+  useBotMovements();
+  const room = await doorRoom("spruce_door");
+  await rcon(`tp ${TESTER} ${x} ${y + 1} ${z + 5}`);
+  await waitFor(() => bot.entity.position.distanceTo(new Vec3(x, y + 1, z + 5)) < 2, 10_000, "tester outside");
+  await room.place(true);
+  await walkTo(x, z);
+});
+
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);
 async function placeChest(dx, dz, items) {
   const nbt = items.map(([id, count], slot) => `{Slot:${slot}b,id:"minecraft:${id}",count:${count}}`).join(",");
@@ -287,6 +359,7 @@ try {
   const movements = new Movements(bot);
   movements.canDig = false;
   bot.pathfinder.setMovements(movements);
+  installDoorSupport(bot); // as index.js does
   console.log(`connected as ${TESTER} to ${HOST}:${PORT} (${bot.version})`);
   await buildArena();
 

@@ -1,4 +1,7 @@
-// Version: 2.96.0
+// Version: 2.97.0
+//
+// 2.97.0 (2026-09-25) -- doors: installDoorSupport (swim-movements.js 1.2.0) keeps doorway waypoints
+// on the floor and never shuts an already-open door while pathfinding.
 //
 // 2.96.0 (2026-09-25) -- every MC_BED_CHECK_MS (60s) the bot checks its claimed bed; a destroyed one
 // is replaced with the nearest unclaimed bed at once (actions.js checkClaimedBed), so home moves too.
@@ -1412,7 +1415,7 @@ import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOS
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
-import { SwimMovements } from "./swim-movements.js";
+import { SwimMovements, installDoorSupport } from "./swim-movements.js";
 import { findSkill, runSkill, recordSkillOutcome, authorSkillFromGoal } from "./skills.js";
 import { ROLES, BOT_ROLES } from "./roles.js";
 import { Vec3 } from "vec3";
@@ -1727,6 +1730,7 @@ bot.once("spawn", async () => {
     }
   }
   bot.pathfinder.setMovements(movements);
+  installDoorSupport(bot); // swim-movements.js: doorway waypoints, never shut an open door
   // Real bug found live 2026-09-11 (direct report: "what's wrong with the bots now" -> repeated
   // "self-defense result: gave up on the fight -- took too long" against drowned specifically).
   // Confirmed by reading mineflayer-pvp's own source (lib/PVP.js, already read in full for the

@@ -1,4 +1,9 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-09-25) -- direct report: bots can't get in or out of a building through its doors,
+// "even when the doors are open." Doors and fence gates are now judged by their current state
+// (applyDoorState): open = walkable, a closed wooden door or gate = opened on the way through.
+// installDoorSupport keeps doorway waypoints on the floor and never shuts an already-open door.
 //
 // 1.0.0 (2026-09-07) -- direct request: "build the water crossing mechanic," following the
 // anti-drowning reflex (index.js 2.29.0), which fixes SURVIVAL but not CAPABILITY: stock
@@ -25,6 +30,7 @@
 import pathfinderPkg from "mineflayer-pathfinder";
 import Move from "mineflayer-pathfinder/lib/move.js";
 import nbt from "prismarine-nbt";
+import { Vec3 } from "vec3";
 
 const { Movements } = pathfinderPkg;
 
@@ -53,9 +59,78 @@ function isWater(block) {
 // Flagged: a route needing 3+ digs in one path could still approach the budget even capped
 // (3 * 20 = 60) -- not addressed here since no live report has ever shown more than one dig
 // being the actual blocker, matching liquidCost's own still-open flag from §47.
+// mineflayer-pathfinder 2.4.5 decides passability from the block TYPE's boundingBox, which is
+// "block" for every door and fence gate whether open or closed, and only treats names containing
+// "gate" as openable. So an open door or open gate was a solid wall (and doors are in
+// blocksCantBreak, so no route at all), and a closed door was never opened. Judge them by state
+// instead: open = walkable; a closed wooden door or gate = openable, which getMoveForward turns
+// into a "use this block" step (the executor right-clicks it, then walks through). Opening a
+// door's lower half opens both, so a closed upper half counts as passable. Iron doors only open by
+// redstone. A door is never something to stand on.
+export function applyDoorState(b) {
+  const name = b?.name;
+  const door = !!name?.endsWith("_door");
+  if (!door && !name?.endsWith("_fence_gate")) return b;
+  if (door) b.physical = false;
+  const props = b.getProperties?.() || {};
+  if (props.open) {
+    b.safe = true;
+    b.openable = false;
+  } else if (name !== "iron_door") {
+    if (door && props.half === "upper") {
+      b.safe = true;
+      b.openable = false;
+    } else {
+      b.openable = true;
+    }
+  }
+  return b;
+}
+
+export function isOpenDoorOrGate(block) {
+  const name = block?.name;
+  return !!(name?.endsWith("_door") || name?.endsWith("_fence_gate")) && block.getProperties?.().open === true;
+}
+
+// Pathfinder's path clean-up (postProcessPath) lifts each waypoint onto the top of whatever shape
+// fills its block -- right for a slab or carpet, but in a doorway that block is the door, so the
+// waypoint landed ON the door's lower half, one block up, and the bot tried to climb it forever
+// (live, 2026-09-25). Clean-up also stops at the first "use a block" step, leaving a closed door's
+// waypoint on the block's corner, exactly where the opened door's panel swings to. Any waypoint in
+// or lifted over a doorway goes back to the centre of the door block, at floor level.
+export function fixDoorWaypoints(bot, path) {
+  for (const point of path) {
+    const fx = Math.floor(point.x), fz = Math.floor(point.z);
+    for (const dy of [0, -1]) {
+      const block = bot.blockAt(new Vec3(fx, Math.floor(point.y) + dy, fz));
+      if (!block?.name?.endsWith("_door") || block.getProperties?.().half !== "lower") continue;
+      point.x = fx + 0.5;
+      point.y = block.position.y;
+      point.z = fz + 0.5;
+      break;
+    }
+  }
+}
+
+// Called once per bot after the pathfinder plugin loads (index.js, and the live tests). path_update
+// fires synchronously before pathfinder adopts results.path, so fixing the points there is enough.
+// Pathfinder's executor also "uses" a door on the route even if someone opened it after the path
+// was planned, which would shut it in the bot's face -- skipped, but only while pathfinding, so
+// herd_to_pen still closes its gate deliberately after she has stopped.
+export function installDoorSupport(bot) {
+  bot.on("path_update", (results) => fixDoorWaypoints(bot, results.path));
+  const activateBlock = bot.activateBlock.bind(bot);
+  bot.activateBlock = (block, ...rest) => (bot.pathfinder.isMoving() && isOpenDoorOrGate(block)
+    ? Promise.resolve() : activateBlock(block, ...rest));
+}
+
 const MAX_DIG_LABOR_COST = 20;
 
 export class SwimMovements extends Movements {
+  getBlock(pos, dx, dy, dz) {
+    return applyDoorState(super.getBlock(pos, dx, dy, dz));
+  }
+
   getMoveDown(node, neighbors) {
     const current = this.getBlock(node, 0, 0, 0);
     if (!isWater(current)) return super.getMoveDown(node, neighbors);

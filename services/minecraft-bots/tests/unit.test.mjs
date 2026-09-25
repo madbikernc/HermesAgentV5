@@ -1,4 +1,4 @@
-// Version: 1.8.0
+// Version: 1.9.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -19,6 +19,8 @@
 //   sleep tries unclaimed beds first (one candidate per bed) and never claims another bot's.
 // 1.8.0 | 2026-09-25 | Shared bed claims: cross-host conflicts, migration of a host's claim, store
 //   clears, sleep skipping another host's bed; the older bed checks now cover the local fallback.
+// 1.9.0 | 2026-09-25 | Doors: open doors/gates walkable, closed wooden ones openable, iron closed a wall,
+//   doorway waypoints put back on the floor, and the guard that never re-toggles an open door.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -30,6 +32,7 @@ const actions = await readFile(root + 'actions.js', 'utf8');
 const index = await readFile(root + 'index.js', 'utf8');
 const equipment = await readFile(root + 'equipment.js', 'utf8');
 const skills = await readFile(root + 'skills.js', 'utf8');
+const swim = await readFile(root + 'swim-movements.js', 'utf8');
 const arbiter = await import(pathToFileURL(root + 'arbiter.js').href);
 
 function between(source, start, end) {
@@ -863,6 +866,79 @@ await check('Shared beds: sleep skips a bed claimed on the other host', async ()
   assert.equal(result.ok, true, result.text);
   assert.deepEqual(w.tried, ['9,64,0']);
   assert.deepEqual({ ...shared.Wade }, { x: 9, y: 64, z: 0 });
+});
+
+// Doors (2026-09-25): pathfinder's own getBlock() marks every door and gate unsafe and physical from
+// the block type, and never openable for doors; applyDoorState must correct that from the state.
+function doorBlock(name, props) {
+  return { name, safe: false, physical: !name.endsWith('_fence_gate'), openable: name.endsWith('_fence_gate'),
+    getProperties: () => props };
+}
+const doorFns = () => {
+  const c = vm.createContext({});
+  vm.runInContext(between(swim, 'function applyDoorState(', 'const MAX_DIG_LABOR_COST'), c);
+  return c;
+};
+
+await check('Doors: an open door or gate is walkable, never a floor', async () => {
+  const { applyDoorState } = doorFns();
+  for (const half of ['lower', 'upper']) {
+    const b = applyDoorState(doorBlock('oak_door', { half, open: true }));
+    assert.equal(b.safe, true, `open door ${half}`); assert.equal(b.physical, false); assert.equal(b.openable, false);
+  }
+  const iron = applyDoorState(doorBlock('iron_door', { half: 'lower', open: true }));
+  assert.equal(iron.safe, true, 'an iron door held open by redstone is walkable too');
+  const gate = applyDoorState(doorBlock('oak_fence_gate', { open: true }));
+  assert.equal(gate.safe, true); assert.equal(gate.openable, false);
+});
+
+await check('Doors: a closed wooden door or gate is opened on the way; a closed iron door is a wall', async () => {
+  const { applyDoorState } = doorFns();
+  const lower = applyDoorState(doorBlock('spruce_door', { half: 'lower', open: false }));
+  assert.equal(lower.openable, true); assert.equal(lower.safe, false); assert.equal(lower.physical, false);
+  const upper = applyDoorState(doorBlock('spruce_door', { half: 'upper', open: false }));
+  assert.equal(upper.safe, true, 'the upper half opens with the lower'); assert.equal(upper.openable, false);
+  const gate = applyDoorState(doorBlock('birch_fence_gate', { open: false }));
+  assert.equal(gate.openable, true); assert.equal(gate.safe, false);
+  const iron = applyDoorState(doorBlock('iron_door', { half: 'lower', open: false }));
+  assert.equal(iron.openable, false); assert.equal(iron.safe, false);
+  const ironTop = applyDoorState(doorBlock('iron_door', { half: 'upper', open: false }));
+  assert.equal(ironTop.safe, false);
+  const stone = { name: 'stone', safe: false, physical: true, openable: false };
+  assert.deepEqual({ ...applyDoorState(stone) }, { name: 'stone', safe: false, physical: true, openable: false });
+});
+
+await check('Doors: only an already-open door or gate is skipped by the pathfinding guard', async () => {
+  const { isOpenDoorOrGate } = doorFns();
+  assert.equal(isOpenDoorOrGate(doorBlock('oak_door', { half: 'lower', open: true })), true);
+  assert.equal(isOpenDoorOrGate(doorBlock('oak_door', { half: 'lower', open: false })), false);
+  assert.equal(isOpenDoorOrGate(doorBlock('oak_fence_gate', { open: true })), true);
+  assert.equal(isOpenDoorOrGate({ name: 'chest', getProperties: () => ({}) }), false);
+  const used = []; let moving = true;
+  const fakeBot = Object.assign(new EventEmitter(), {
+    activateBlock: async (b) => { used.push(b.name); }, pathfinder: { isMoving: () => moving } });
+  const c = vm.createContext({ Vec3: class {}, Promise });
+  vm.runInContext(between(swim, 'function isOpenDoorOrGate(', 'const MAX_DIG_LABOR_COST'), c);
+  c.installDoorSupport(fakeBot);
+  await fakeBot.activateBlock(doorBlock('oak_door', { half: 'lower', open: true }));
+  await fakeBot.activateBlock(doorBlock('oak_door', { half: 'lower', open: false }));
+  moving = false;
+  await fakeBot.activateBlock(doorBlock('oak_fence_gate', { open: true })); // herd_to_pen closing its gate
+  assert.deepEqual(used, ['oak_door', 'oak_fence_gate']);
+});
+
+await check('Doors: a doorway waypoint lifted onto the door, or left on its corner, goes back to the floor centre', async () => {
+  // The door's lower half is at (5, 64, 7). postProcessPath put one route's waypoint on top of it
+  // (5.703, 65, 7.5); a closed door's "use" step left another at the raw corner (5, 64, 7).
+  const door = { name: 'oak_door', position: { y: 64 }, getProperties: () => ({ half: 'lower', open: true }) };
+  const at = (x, y, z) => (x === 5 && y === 64 && z === 7 ? door : { name: 'air', getProperties: () => ({}) });
+  class V { constructor(x, y, z) { Object.assign(this, { x, y, z }); } }
+  const c = vm.createContext({ Vec3: V });
+  vm.runInContext(between(swim, 'function fixDoorWaypoints(', 'function installDoorSupport('), c);
+  const fakeBot = { blockAt: (p) => at(p.x, p.y, p.z) };
+  const path = [{ x: 5.5, y: 64, z: 6.5 }, { x: 5.703125, y: 65, z: 7.5 }, { x: 5, y: 64, z: 7 }, { x: 5.5, y: 64, z: 8.5 }];
+  c.fixDoorWaypoints(fakeBot, path);
+  assert.deepEqual(path.map((p) => [p.x, p.y, p.z]), [[5.5, 64, 6.5], [5.5, 64, 7.5], [5.5, 64, 7.5], [5.5, 64, 8.5]]);
 });
 
 console.log(`${passed} unit checks passed.`);
