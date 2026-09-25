@@ -1,6 +1,6 @@
 # Minecraft bot behavior review and remediation register
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Review date: 2026-09-24. Source baseline: `9091ea8` on `master`.
 
@@ -83,41 +83,44 @@ equal-tier exclusion, and goal abandonment.
 ## Remediation status
 
 **Updated 2026-09-25. All 22 findings are FIXED in source and deployed to both hosts on
-`master`.** The individual entries below remain as originally written (and still say OPEN), as
-the record of what was found. Tests: `services/minecraft-bots/tests/` — `unit.test.mjs` (32
-checks), `live.test.mjs` (7 scenarios against the bot-sandbox server), and `baseline.mjs`
-(per-host metrics vs `tests/baselines/<host>.json`, pre-fix values recorded at `9091ea8`).
+`master`; 15 are verified live and 7 by unit tests.** The individual entries below remain as originally written (and still say OPEN), as
+the record of what was found. Tests: `services/minecraft-bots/tests/` — `unit.test.mjs` (42
+checks), `test_triage.py` (6), `live.test.mjs` (9 action-level scenarios on the bot-sandbox
+server), `live-bot.test.mjs` (5 full-bot scenarios: a real bot process with a fake Buzz/memory
+server), `monitoring.mjs`, and `baseline.mjs` (per-host metrics vs `tests/baselines/<host>.json`,
+pre-fix values recorded at `9091ea8`).
 The nine reproductions in `2026-09-24-minecraft-bots-repro.mjs` were inverted into
 `unit.test.mjs`; the repro script now fails against `master`, as intended.
 
 Commits: `52769b9` (P1 pass), `4fa347f` (monitoring), `3c4d4a1` (coordination/scheduling),
 `7fcc9a6` (measured waste), `0c433a5`/`f2bc3f0` (test system), `4d9750f` (server echoes),
-`89a9fd9` (remaining gaps). Merged as `dc97f5f` (#1) and `1fd30fb` (#2), plus `89a9fd9`.
+`89a9fd9` (remaining gaps), `2a6c8d8`/`5c27f7f`/`4a93184` and later (acceptance-check tests). Merged as
+`dc97f5f` (#1) and `1fd30fb` (#2); everything after is on `master`.
 
-| ID | Status | Fix | Unit | Live | Baseline metric |
+| ID | Status | Fix | Unit | Live (A = action harness, B = full-bot harness) | Baseline metric |
 |---|---|---|---|---|---|
-| MB-01 | Fixed, live-verified | `52769b9` | yes | kill + lost-track | attack_win_rate |
-| MB-02 | Fixed, live-verified | `52769b9`, `89a9fd9` (windows, flee movements) | yes | preemption + open window | — |
-| MB-03 | Fixed | `52769b9` | yes | — | stuck_teleports_per_bot_day |
-| MB-04 | Fixed, live-verified | `52769b9` | yes | preemption | action_failure_rate |
-| MB-05 | Fixed | `52769b9` | yes | — | — |
-| MB-06 | Fixed | `52769b9`, `89a9fd9` (bare stop from active commander) | yes | — | dropped_messages_per_bot_day |
-| MB-07 | Fixed, live-verified | `52769b9` | yes | armor | — |
-| MB-08 | Fixed, live-verified | `52769b9`, `89a9fd9` (`place_home`) | yes | place_home | rejected_done_per_bot_day |
-| MB-09 | Fixed | `52769b9`, `89a9fd9` (goal-reserved items) | yes | — | store_failure_rate |
-| MB-10 | Fixed | `52769b9` | yes | — | rejected_done_per_bot_day |
-| MB-11 | Fixed | `52769b9`, `4d9750f` | yes | — | — |
-| MB-12 | Fixed | `3c4d4a1` | — | — | — |
-| MB-13 | Fixed | `3c4d4a1`, `89a9fd9` (retry + delivered ack) | yes | — | — |
-| MB-14 | Fixed | `3c4d4a1` | yes | — | — |
-| MB-15 | Fixed, live-verified | `3c4d4a1` | — | raw fish | — |
-| MB-16 | Fixed | `3c4d4a1` | yes | — | — |
-| MB-17 | Fixed | `3c4d4a1` | yes | — | — |
-| MB-18 | Fixed, deployed | `4fa347f`, `89a9fd9` (structured OUTCOME lines) | yes | — | action_failure_rate |
-| MB-19 | Fixed, deployed | `4fa347f` | — | — | — |
-| MB-20 | Fixed | `3c4d4a1`, `7fcc9a6` | yes | — | — |
-| MB-21 | Fixed | `3c4d4a1` | — | — | planner_calls_per_bot_day |
-| MB-22 | Fixed | `52769b9`, `89a9fd9` (nudge through arbiter) | — | — | stuck_teleports_per_bot_day |
+| MB-01 | Verified live | `52769b9` | yes | A: real kill; lost-track | attack_win_rate |
+| MB-02 | Verified live | `52769b9`, `89a9fd9` | yes | A: preemption; open window closed | — |
+| MB-03 | Verified (unit) | `52769b9` | yes, incl. rejected /tp | — | stuck_teleports_per_bot_day |
+| MB-04 | Verified live | `52769b9` | yes | A: preemption | action_failure_rate |
+| MB-05 | Verified live | `52769b9` | yes, incl. replacement during skill lookup and planning | B: STOP mid-goal | — |
+| MB-06 | Verified live | `52769b9`, `89a9fd9` | yes | B: STOP during a long direct action | dropped_messages_per_bot_day |
+| MB-07 | Verified live | `52769b9` | yes | A: armor | — |
+| MB-08 | Verified live | `52769b9`, `89a9fd9` | yes | A: place_home | rejected_done_per_bot_day |
+| MB-09 | Verified live | `52769b9`, `89a9fd9` | yes | B: storing during a goal keeps its materials | store_failure_rate |
+| MB-10 | Verified (unit) | `52769b9` | yes, incl. cancelled replay and 13-step solve | — | rejected_done_per_bot_day |
+| MB-11 | Verified (unit) | `52769b9`, `4d9750f` | yes | — | — |
+| MB-12 | Verified live | `3c4d4a1` | yes, heartbeat + lease expiry | B: restart re-announces the goal | — |
+| MB-13 | Verified (unit) | `3c4d4a1`, `89a9fd9` | yes, three claimants → one winner; retry + ack | — | — |
+| MB-14 | Verified live | `3c4d4a1` | yes | B: night pauses, morning resumes | — |
+| MB-15 | Verified live | `3c4d4a1` | — | A: raw fish | — |
+| MB-16 | Verified live | `3c4d4a1` | yes | A: stocked chest vs village scouting | — |
+| MB-17 | Verified live | `3c4d4a1` | yes | A: mixed-species chest | — |
+| MB-18 | Verified live | `4fa347f`, `89a9fd9` | yes (+ triage) | monitoring.mjs: all 9 units mirrored and triaged | action_failure_rate |
+| MB-19 | Verified (unit) | `4fa347f` | test_triage.py: per-bot dedupe, counts, queue | — | — |
+| MB-20 | Verified live | `3c4d4a1`, `7fcc9a6` | yes, incl. restart persistence | B: Mayor restart keeps evidence | — |
+| MB-21 | Verified (unit) | `3c4d4a1` | yes, router/RAG timeouts, planning without control | — | planner_calls_per_bot_day |
+| MB-22 | Verified (unit) | `52769b9`, `89a9fd9` | yes, stationary vs wedged | — | stuck_teleports_per_bot_day |
 
 **Redundancy items:** home lighting (one maintainer + backoff, `7fcc9a6`); repeated chest search
 (60s empty-search cache), gear refresh (skipped when nothing changed), per-note duplicate search
@@ -130,8 +133,20 @@ didn't list — Soldier guard churn, instant DONEs, storing into full chests —
 The secondary-role prompt only appears for a bot with a secondary role, and no persona file
 mentions one any more — no change needed. `MINECRAFT_BOTS_DESIGN.md` 2.2.0 documents the new rules.
 
-**Still to confirm with live data:** re-record each host's baseline after a full day on `master`
+**Not verified live, by design:** MB-03, MB-10, MB-11, MB-13, MB-19, MB-21 and MB-22 need a failed
+`/tp`, a 13-step solve, Mayor going silent, three real donors, two simultaneous crashes, a stalled
+model, or a genuinely wedged bot. None can be staged safely on the shared world, so unit tests are
+their evidence.
+
+**Early fleet numbers (spark, 2026-09-25 01:25, window still mostly pre-fix):** guard goals
+68.6 → 23.2 per bot-day, home-lighting attempts 412 → 201, store failures 78% → 57%, planner calls
+245 → 175. Dropped messages since the latest restart: ~3 per bot-day vs 54 before (the 24h
+metric still reads high because of pre-fix hours and a test-induced RCON flood in the window).
+
+**Still to do:** re-record each host's baseline after a full day on `master`
 (`tests/run.sh baseline --update`), and treat any metric that doesn't improve as a reopened finding.
+The fight-or-flee policy (armed bots at critical health fight first; target is the nearest mob)
+is an operator decision the review deferred until combat worked; it now works.
 
 ## Accumulated remediation register
 
@@ -512,3 +527,4 @@ damage against a live Minecraft server.
 |---|---|---|
 | 1.0.0 | 2026-09-24 | Initial source review, effective priority analysis, 22 open findings, and nine focused reproductions. |
 | 1.1.0 | 2026-09-25 | Remediation status: all 22 findings fixed and deployed, with fix commits, tests, live verification and baseline metric per finding. |
+| 1.2.0 | 2026-09-25 | Acceptance checks run: 15 findings verified live (action and full-bot harnesses, monitoring), 7 by unit tests; early fleet numbers; the deferred fight-or-flee decision. |

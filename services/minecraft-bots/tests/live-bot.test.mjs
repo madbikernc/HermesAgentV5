@@ -1,4 +1,4 @@
-// Version: 1.0.1
+// Version: 1.0.2
 //
 // Full-bot live tests: runs a REAL bot process (index.js, as "MBProbe") against the bot-sandbox
 // server and drives it the way a player would -- whispers from the MBTester bot, restarts, injected
@@ -20,6 +20,9 @@
 // 1.0.1 | 2026-09-25 | Night-pause scenario holds the goal loop off in its first restart (the planner
 //   could drop the seeded goal before the night restart), and every boot clears the probe's
 //   cross-restart stuck state (repeated test restarts at one spot tripped the real wedge rescue).
+// 1.0.2 | 2026-09-25 | The probe's server inventory is cleared at every boot (it persists between
+//   runs), and the STOP scenario uses reachable floor-level logs and checks the action is still
+//   running when STOP is sent.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import http from "node:http";
@@ -127,7 +130,8 @@ async function bootProbe(memoryRoot, env) {
   rmSync(path.join(memoryRoot, "bots", "mbprobe", "stuck_state.json"), { force: true });
   startProbe(memoryRoot, env);
   await probe.waitLine(/\[MBProbe\] spawned at/, 60_000);
-  await rcon(`tp ${PROBE} ${HOME[0]} ${HOME[1]} ${HOME[2]}`, `effect give ${PROBE} minecraft:resistance 900 4 true`,
+  // The server keeps MBProbe's inventory between runs; every scenario starts empty-handed.
+  await rcon(`clear ${PROBE}`, `tp ${PROBE} ${HOME[0]} ${HOME[1]} ${HOME[2]}`, `effect give ${PROBE} minecraft:resistance 900 4 true`,
     `effect give ${PROBE} minecraft:saturation 1 20 true`);
   await sleep(8000); // let its Buzz watchers prime, so injected messages count as new
 }
@@ -161,12 +165,15 @@ const scenario = (name, fn) => scenarios.push({ name, fn });
 
 scenario("MB-06 STOP ends a long direct action within seconds", async () => {
   const root = newRoot();
-  await rcon(`fill ${x - 8} ${y + 1} ${z + 4} ${x - 4} ${y + 3} ${z + 8} minecraft:oak_log`);
+  // One floor-level layer: every log is reachable, so the action is long but never path-blocked.
+  await rcon(`fill ${x - 8} ${y + 1} ${z - 8} ${x + 8} ${y + 1} ${z - 6} minecraft:oak_log`,
+    `fill ${x - 8} ${y + 1} ${z + 6} ${x + 8} ${y + 1} ${z + 8} minecraft:oak_log`);
   await bootProbe(root);
   const t0 = Date.now();
   say("mine 60 oak_log for me right now");
   await waitFor(() => probeSaid(/./, t0), 60_000, "probe to acknowledge the command");
   await sleep(5000);
+  assert(!probe.since(t0, /OUTCOME {"type":"mine"/), "setup: the mine action was still running when STOP was sent");
   const tStop = Date.now();
   say("stop");
   const reply = await waitFor(() => probeSaid(/stopping/i, tStop), 10_000, "a 'stopping' reply");
