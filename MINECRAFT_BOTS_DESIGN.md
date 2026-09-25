@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.1.0
+**Version:** 2.2.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -118,7 +118,17 @@ queued action/goal. A CHAT reply may never promise a future action that isn't ac
 `planNextStep` call per tick emitting a single `ACTION <verb>` step. Steps run through the same
 `performAction()` a direct player command uses — never a parallel path.
 `MAX_CONSECUTIVE_FAILURES` is 3. A bot self-proposes a goal after `IDLE_BEFORE_SELF_GOAL_MS`
-(10 min) of idleness.
+(10 min) of idleness. Since 2026-09-24:
+- Each tick is **pinned to the goal it started with**; a result that arrives after the goal was
+  replaced, stopped or cleared is dropped, never written into the new goal.
+- Planning happens **without holding the body**; control is taken just before the physical step
+  and released right after it, before memory writes and narration.
+- Self-proposals name a `TARGET` item; one already in hand is rejected before it becomes a goal,
+  and a goal whose target turns up in inventory completes with no planner call.
+- A replayed skill never completes a goal by itself; the planner still has to claim DONE.
+- From dusk to dawn goals are **paused, not dropped**; only a goal a player set that night runs.
+- Soldier guard duty is a **standing goal** held without planner calls; a Builder item already in
+  hand is placed with `place_home` (walk home, place, verify).
 
 **DONE is never accepted on the model's word.** Inventory and world state are re-checked
 (`builderPriorityItemSatisfied()` and friends); a rejected claim logs `REJECTED DONE` /
@@ -128,16 +138,30 @@ queued action/goal. A CHAT reply may never promise a future action that isn't ac
 role**:
 
 ```
-ROUTINE 0 = GOAL_STEP 0 < DIRECT_COMMAND 10 < RECOVERY 15 < SQUAD_RESPONSE 20
-< SELF_DEFENSE 30 < DROWNING 40 < HEALTH_CRITICAL 50 < TELEPORT_HOME 60
+ROUTINE 0 = GOAL_STEP 0 < HUNGER_CRITICAL 5 < DIRECT_COMMAND 10 < RECOVERY 15 < SQUAD_RESPONSE 20
+< SELF_DEFENSE 30 < DROWNING 40 < HEALTH_CRITICAL 50 < TELEPORT_HOME 60 (cancel-and-clear only)
 ```
+
+**Ownership contract** (2026-09-24 review remediation). Every `performAction()` call passes the
+handle its caller acquired; a handle that lost control is refused before anything moves, and a
+handle-less call while someone else owns the body is refused too. A takeover cancels pathing, PvP,
+digging and collection, and **closes any open container window**. Cleanup code (path clearing,
+gear refresh, movement settings) runs only while its action still owns the body. Anything an action
+produces after cancellation is reported `{ ok: false, cancelled: true }` — never success, never a
+genuine failure. A newer player command replaces an older one at the same tier; a player `STOP`
+(addressed, or a bare "stop" from the player whose command is running) ends anything up to
+DIRECT_COMMAND without a model call. Messages that arrive while a bot is thinking are queued, not
+dropped; server echoes (`Rcon`, `Server`) and the live-test bot are not players.
 
 Role changes only what a bot chooses when nothing urgent is happening. It never touches this
 ordering.
 
 **Idle-tick checks**, each on its own interval, all at ROUTINE tier: sleep, dusk, hunger,
 inventory full, inventory insurance, surplus banking, give-requests, saplings, area lighting,
-home lighting, terrain repair, stuck detection, self-defense, sleeping-threat.
+home lighting, terrain repair, stuck detection, self-defense, sleeping-threat. Hunger escalates to
+HUNGER_CRITICAL at food ≤ 6 when there's food or a rod on hand. Home lighting runs on one
+maintainer (the Builder, or `MC_HOME_LIGHTING`) with exponential backoff. Every check that loses
+its turn to other work is counted and logged as `ROUTINE_SKIPS` every 10 minutes.
 
 ## 5. Model routing
 
@@ -208,8 +232,9 @@ means two different things, and the distinction is load-bearing:**
   table → furnace → chest → beds (`BOT_USERNAMES.size`, self-scaling) → shelter → beehive, each
   verified as a *placed block* near spawn rather than an inventory item. A stalled item is
   skipped after `BUILDER_ITEM_STALL_LIMIT` (3) cycles and revisited later. Soldier's ladder is
-  weapon → nearby hostile (`SOLDIER_PATROL_RANGE` 32) → stand guard, and it **always** returns
-  something, so a Soldier never reaches the unrestricted freeform path.
+  weapon → nearby hostile (`SOLDIER_PATROL_RANGE` 32) → missing armor (at most every 30 min) →
+  stand guard (a standing goal), and it **always** returns something, so a Soldier never reaches
+  the unrestricted freeform path.
 - **Miner, Artist, and Explorer are advisory only.** `priorityListNote()` folds them into the
   freeform prompt as a lean the model may ignore. They were never operator-specified as checkable
   ladders, and inventing one would produce a list that looks authoritative but was never decided.
@@ -228,15 +253,21 @@ explicit override. `MC_FALLBACK_COORDINATOR` (Mark) is its own flag, decoupled f
 dead silently (§22).
 
 **Tech-tree curriculum** (Mayor, non-Soldiers): basic tools → basic armor → farming → iron gear →
-diamond gear → enchanting. Only `curriculumStageIndex` persists; per-stage progress is in-memory
-and resets on every Mayor restart.
+diamond gear → enchanting. Each stage needs **every** requirement group (a pickaxe *and* an axe;
+all four armor pieces), with higher tiers counting toward lower stages. Evidence comes from each
+bot's "done" broadcasts, which carry every curriculum item it holds, and persists with the stage
+index in `mayor-curriculum.json`. Stage work goes to non-Soldier participants who haven't cleared
+it, in role-fairness order. When Mayor has been quiet past the liveness timeout (measured from
+process start if he was never seen), every bot accepts directives from the fallback coordinator.
 
 ## 9. Action verbs
 
 `attack`, `breed`, `build`, `build_pen`, `craft`, `eat`, `enchant`, `explore`, `fish`, `flee`,
 `follow`, `give`, `gohome`, `goto`, `harvest`, `harvest_hive`, `herd_to_pen`, `light_area`,
-`loot`, `milk`, `mine`, `place`, `plant_sapling`, `recover`, `repair_terrain`, `shear`, `sleep`,
-`smelt`, `stop`, `store`, `trade`.
+`loot`, `milk`, `mine`, `place`, `place_home`, `plant_sapling`, `recover`, `repair_terrain`, `shear`,
+`sleep`, `smelt`, `stop`, `store`, `trade`. `explore <feature>` (village, bee_nest, mineshaft,
+stronghold) scouts and succeeds only on a real find; plain `explore` gathers and no longer counts a
+chest withdrawal as exploring.
 
 Adding a verb means three places, every time: the `actions.js` switch, `classifyIntent`'s
 vocabulary, and `planNextStep`/`parseGoalStep`'s vocabulary. Add it to `SKILL_ACTION_VERBS` too
@@ -263,7 +294,14 @@ Behaviour worth knowing before touching a caller:
 | `minecraft-bots-backup.timer` | Nightly world tarball on muncraft, 7-day retention (live copy, not save-paused) |
 | `hermes-minecraft-backup-pull.timer` | Pulls those tarballs off the game host |
 | `hermes-minecraft-triage.service` | Tails bot journals, fires `coder`+`coder2` in parallel on triage-worthy lines; diagnosis only, never acts |
-| `minecraft-bots-activity-log.service` | Raw durable journal mirror, bot-scoped, for later review |
+| `minecraft-bots-activity-log.service` | Raw durable journal mirror, bot-scoped, for later review — on both hosts, every `minecraft-bot-*` unit |
+| `minecraft-bots-tests.timer` | Daily test run: unit + live + baseline on spark, baseline on spark2 (`services/minecraft-bots/tests/`) |
+
+**Tests** (`services/minecraft-bots/tests/README.md`): offline unit checks, live scenarios run as
+`MBTester` on an RCON-built arena at (2000, 200, 2000), and a per-host behavior baseline from the
+bots' journals (`tests/baselines/<host>.json`). Every behavior fix ships with tests (see
+`CLAUDE.md`). Each action logs one structured `OUTCOME {…}` line; triage and the baseline count
+failures from those, not from each action's prose.
 
 `journalctl` alone is not proof a bot is playing. RCON `list` is the only authoritative source
 (§28).
@@ -320,6 +358,8 @@ the original incident number, still cited throughout the code. Narrative is in g
 | `decideFightType()`: Soldiers always fight; others fight below `HALF_HEALTH` (10); 3 consecutive flees escalate to a fight; a failed flee escalates immediately; an EMERGENCY attack is capped at 8s, then falls back to flee | 43, 46, 53 |
 | Flee needs a destination — golem → nearby Soldier → home, and home only when it is >20 blocks away, or it routes deeper into the building the threat is already in | 37, 52 |
 | `attack` equips the best weapon first; the bot may be holding a freshly-crafted pickaxe | 31 |
+| `attack` must actually call `bot.pvp.attack()` — the 1.42.0 rewrite dropped it and no fight landed a hit for two weeks. Only the target's `entityDead` is a kill; a target that unloads is "lost track" | MB-01 |
+| A cancelled action is never a success, and a stale handle never acts — recovery retries, goal counters and skills all depend on it | MB-02, MB-04 |
 | `nearestHostile()` tracks one threat. Swarms are not solvable by per-bot reactive tuning — fix the spawn cause (lighting, gamerules) | 54 |
 | `checkHomeLighting()` has failed live three times, each from a different silent gate. It now loots torches from a chest first, then crafts from *any* wood source, and logs when it genuinely can't | 17, 32, 38, 54 |
 
@@ -359,8 +399,9 @@ the original incident number, still cited throughout the code. Narrative is in g
   nothing has implicated it — the first suspect if "can't cross water" ever appears (§47).
 - **Herding** places a pen and can lure a single animal with food, but there is no reliable
   round-up of an existing herd.
-- **`checkInventoryInsurance()`** banks surplus without knowing what the current goal needs, and
-  can store away a material the bot is actively working toward (§32).
+- **spark2 has no RAG venv** (`/opt/hermes/venvs/rag`), so memory and skill search fail for Bob,
+  Nell, Wade and Dale — tens of thousands of `[longterm] search failed` lines a day since before
+  2026-09-24.
 
 ## Change history
 

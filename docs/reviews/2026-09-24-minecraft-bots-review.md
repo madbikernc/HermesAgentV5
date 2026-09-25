@@ -1,6 +1,6 @@
 # Minecraft bot behavior review and remediation register
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Review date: 2026-09-24. Source baseline: `9091ea8` on `master`.
 
@@ -79,6 +79,59 @@ Overall, threat reactions and intermittent chores govern the body; Mayor curricu
 deterministic Builder/Soldier paths govern much of the work selection. Specialist personas are
 a weaker influence. Player intent is not a reliable top-level override because of input drops,
 equal-tier exclusion, and goal abandonment.
+
+## Remediation status
+
+**Updated 2026-09-25. All 22 findings are FIXED in source and deployed to both hosts on
+`master`.** The individual entries below remain as originally written (and still say OPEN), as
+the record of what was found. Tests: `services/minecraft-bots/tests/` — `unit.test.mjs` (32
+checks), `live.test.mjs` (7 scenarios against the bot-sandbox server), and `baseline.mjs`
+(per-host metrics vs `tests/baselines/<host>.json`, pre-fix values recorded at `9091ea8`).
+The nine reproductions in `2026-09-24-minecraft-bots-repro.mjs` were inverted into
+`unit.test.mjs`; the repro script now fails against `master`, as intended.
+
+Commits: `52769b9` (P1 pass), `4fa347f` (monitoring), `3c4d4a1` (coordination/scheduling),
+`7fcc9a6` (measured waste), `0c433a5`/`f2bc3f0` (test system), `4d9750f` (server echoes),
+`89a9fd9` (remaining gaps). Merged as `dc97f5f` (#1) and `1fd30fb` (#2), plus `89a9fd9`.
+
+| ID | Status | Fix | Unit | Live | Baseline metric |
+|---|---|---|---|---|---|
+| MB-01 | Fixed, live-verified | `52769b9` | yes | kill + lost-track | attack_win_rate |
+| MB-02 | Fixed, live-verified | `52769b9`, `89a9fd9` (windows, flee movements) | yes | preemption + open window | — |
+| MB-03 | Fixed | `52769b9` | yes | — | stuck_teleports_per_bot_day |
+| MB-04 | Fixed, live-verified | `52769b9` | yes | preemption | action_failure_rate |
+| MB-05 | Fixed | `52769b9` | yes | — | — |
+| MB-06 | Fixed | `52769b9`, `89a9fd9` (bare stop from active commander) | yes | — | dropped_messages_per_bot_day |
+| MB-07 | Fixed, live-verified | `52769b9` | yes | armor | — |
+| MB-08 | Fixed, live-verified | `52769b9`, `89a9fd9` (`place_home`) | yes | place_home | rejected_done_per_bot_day |
+| MB-09 | Fixed | `52769b9`, `89a9fd9` (goal-reserved items) | yes | — | store_failure_rate |
+| MB-10 | Fixed | `52769b9` | yes | — | rejected_done_per_bot_day |
+| MB-11 | Fixed | `52769b9`, `4d9750f` | yes | — | — |
+| MB-12 | Fixed | `3c4d4a1` | — | — | — |
+| MB-13 | Fixed | `3c4d4a1`, `89a9fd9` (retry + delivered ack) | yes | — | — |
+| MB-14 | Fixed | `3c4d4a1` | yes | — | — |
+| MB-15 | Fixed, live-verified | `3c4d4a1` | — | raw fish | — |
+| MB-16 | Fixed | `3c4d4a1` | yes | — | — |
+| MB-17 | Fixed | `3c4d4a1` | yes | — | — |
+| MB-18 | Fixed, deployed | `4fa347f`, `89a9fd9` (structured OUTCOME lines) | yes | — | action_failure_rate |
+| MB-19 | Fixed, deployed | `4fa347f` | — | — | — |
+| MB-20 | Fixed | `3c4d4a1`, `7fcc9a6` | yes | — | — |
+| MB-21 | Fixed | `3c4d4a1` | — | — | planner_calls_per_bot_day |
+| MB-22 | Fixed | `52769b9`, `89a9fd9` (nudge through arbiter) | — | — | stuck_teleports_per_bot_day |
+
+**Redundancy items:** home lighting (one maintainer + backoff, `7fcc9a6`); repeated chest search
+(60s empty-search cache), gear refresh (skipped when nothing changed), per-note duplicate search
+(30-min repeat cache; ingest coalesced in `3c4d4a1`), and timer fairness (`ROUTINE_SKIPS`
+instrumentation + `routine_skips_per_bot_day` metric) in `89a9fd9`. Measured waste the review
+didn't list — Soldier guard churn, instant DONEs, storing into full chests — fixed in `7fcc9a6`.
+
+**Contradictions:** Soldier role text now says weapon, then armor, and the code checks armor
+(`89a9fd9`). The HEALTH_CRITICAL comment now says fight-or-flee; teleport really is cancel-and-clear.
+The secondary-role prompt only appears for a bot with a secondary role, and no persona file
+mentions one any more — no change needed. `MINECRAFT_BOTS_DESIGN.md` 2.2.0 documents the new rules.
+
+**Still to confirm with live data:** re-record each host's baseline after a full day on `master`
+(`tests/run.sh baseline --update`), and treat any metric that doesn't improve as a reopened finding.
 
 ## Accumulated remediation register
 
@@ -458,3 +511,4 @@ damage against a live Minecraft server.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-09-24 | Initial source review, effective priority analysis, 22 open findings, and nine focused reproductions. |
+| 1.1.0 | 2026-09-25 | Remediation status: all 22 findings fixed and deployed, with fix commits, tests, live verification and baseline metric per finding. |

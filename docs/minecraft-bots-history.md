@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -83,6 +83,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.0.0 | 2026-09-24 | Restructured from a design-then-incident-log narrative into a current-state reference: roster/server/architecture/control-flow/roles/verbs/ops stated once as tables, §17-§54's 38 incident narratives distilled into an indexed rules table keyed by their original section numbers (the 488 `§N` references in code comments still resolve; full narrative preserved in git history), and every superseded plan, `[PROPOSED]`/`[UNKNOWN]` tag, and stale "design only -- nothing is built" claim removed. Body cut from ~2,720 lines to ~340; no factual content dropped that was not already contradicted by the live code. |
 
 | 2.1.0 | 2026-09-24 | Change history moved out to `docs/minecraft-bots-history.md` so this file stays a reference rather than a log. Persona split documented (`agents/minecraft-common.md` + per-bot `PROMPT.md`), a `tools/` inventory added to §10, and the memory table updated for the merged `--corpus` RAG scripts. One new rule in §11: the skills directory lives inside the memory directory, so the memory corpus scan must skip it. |
+| 2.2.0 | 2026-09-25 | Brought in line with the 2026-09-24 review remediation (`docs/reviews/2026-09-24-minecraft-bots-review.md`): the goal-loop rules (goal pinning, planning without holding the body, TARGET items, night pause, standing guard, `place_home`), the ownership contract and new HUNGER_CRITICAL tier in §4, conjunctive persisted curriculum and the Soldier armor step in §8, `place_home`/`explore <feature>` in §9, the test system and daily test timer in §10, two new rules in §11 (`attack` must call `pvp.attack`; cancellation is never success), and §12's insurance-storing item replaced by spark2's missing RAG venv. |
 
 ## services/minecraft-bots/README.md
 
@@ -158,3 +159,10 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | nell | 1.0.0 | 2026-09-13 | First build -- seventh bot, created specifically to give the Artist role a real primary owner per `MINECRAFT_BOTS_DESIGN.md` §22, direct request ("rebalance the bots so they each have exactly one role... create [more] so every role has at least one bot"). Built at the same depth as the other personas from the start. |
 | wade | 1.0.0 | 2026-09-13 | First build -- eighth bot, created specifically to give the Explorer role a real primary owner per `MINECRAFT_BOTS_DESIGN.md` §22, direct request ("rebalance the bots so they each have exactly one role... create [more] so every role has at least one bot"). Built at the same depth as the other personas from the start. |
 | all nine | 2.0.0 | 2026-09-24 | Boilerplate identical across all nine files (be useful, stay in character, treat chatters as strangers, never claim a capability you lack, the Guardrails block, and the duplicated stranger rule that appeared twice per file) moved to `agents/minecraft-common.md`, prepended by `persona.js` 1.1.0. Each file keeps its own Identity, Core directive, Voice, and Behavioral modifiers verbatim. Revision History tables removed per CLAUDE.md's rule for files loaded into live context every request, and collected here. Stale content dropped: "this build is early", dead `§15`/`§22` references, the `agents/*/PROMPT.md` convention meta-paragraph, and reply-length rules already enforced by `index.js`'s `CHAT_INSTRUCTION`. Corrections: Mayor said "five-bot collective" (nine); Amy's bed target said six (it scales with the roster); Mark's file claimed his fallback-coordinator role "was never wired to real code", which has been false since `MC_FALLBACK_COORDINATOR` shipped on his unit. |
+
+## Revision History
+
+| Version | Date | Change |
+|---|---|---|
+| 1.0.0 | 2026-09-24 | Initial file, split out of `MINECRAFT_BOTS_DESIGN.md`. |
+| 1.1.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.2.0 row and this table. |
