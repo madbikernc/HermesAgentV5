@@ -1,4 +1,4 @@
-// Version: 1.9.0
+// Version: 1.10.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -21,6 +21,8 @@
 //   clears, sleep skipping another host's bed; the older bed checks now cover the local fallback.
 // 1.9.0 | 2026-09-25 | Doors: open doors/gates walkable, closed wooden ones openable, iron closed a wall,
 //   doorway waypoints put back on the floor, and the guard that never re-toggles an open door.
+// 1.10.0 | 2026-09-25 | Close behind: doors/gates shut once clear, without a head turn; held for a
+//   follower and during herd_to_pen; iron and already-shut doors left alone.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -59,7 +61,7 @@ function makeBot() {
 function context(bot, extras = {}) {
   const quiet = { ...console, log: (l, ...r) => { if (!String(l).includes(' OUTCOME ')) console.log(l, ...r); } };
   return vm.createContext({ bot, console: quiet, setTimeout, clearTimeout, Promise, ...arbiter,
-    ACTION_TIMEOUT_MS: 400, equipBestWeapon: async () => {}, refreshGear: async () => {},
+    ACTION_TIMEOUT_MS: 400, equipBestWeapon: async () => {}, refreshGear: async () => {}, holdDoorsOpen: () => () => {},
     goals: { GoalNear: class {}, GoalFollow: class {} }, ...extras });
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -723,6 +725,7 @@ class V3 {
   equals(o) { return o.x === this.x && o.y === this.y && o.z === this.z; }
   distanceTo(o) { return Math.hypot(this.x - o.x, this.y - o.y, this.z - o.z); }
   toString() { return `(${this.x}, ${this.y}, ${this.z})`; }
+  floored() { return new V3(Math.floor(this.x), Math.floor(this.y), Math.floor(this.z)); }
 }
 // `shared`: hermes-memory's minecraft-beds rows as { name: value } (mutated by writes); omitted =
 // hermes-memory unreachable, so claims fall back to this host's files.
@@ -939,6 +942,69 @@ await check('Doors: a doorway waypoint lifted onto the door, or left on its corn
   const path = [{ x: 5.5, y: 64, z: 6.5 }, { x: 5.703125, y: 65, z: 7.5 }, { x: 5, y: 64, z: 7 }, { x: 5.5, y: 64, z: 8.5 }];
   c.fixDoorWaypoints(fakeBot, path);
   assert.deepEqual(path.map((p) => [p.x, p.y, p.z]), [[5.5, 64, 6.5], [5.5, 64, 7.5], [5.5, 64, 7.5], [5.5, 64, 8.5]]);
+});
+
+// Closing behind (2026-09-25): a fake bot walks through a doorway at (0, 64, 0) one tick at a time.
+function closerWorld({ name = 'oak_door', open = true } = {}) {
+  const props = { half: 'lower', open };
+  const door = { name, position: new V3(0, 64, 0), getProperties: () => props };
+  const bot = new EventEmitter();
+  const used = []; let looked = 0;
+  Object.assign(bot, { username: 'Amy', entities: {}, entity: { position: new V3(0.5, 64, -2) },
+    blockAt: (p) => (p.x === 0 && p.y === 64 && p.z === 0 ? door : { name: 'air', getProperties: () => ({}) }),
+    lookAt: async () => { looked++; } });
+  bot.entities[1] = bot.entity;
+  const activate = (b) => { used.push({ name: b.name, looked }); bot.lookAt(); props.open = !props.open; return Promise.resolve(); };
+  const c = vm.createContext({ Vec3: V3, Promise, console: { log() {}, error() {} } });
+  vm.runInContext(between(swim, 'const DOOR_CLOSE_MIN', 'const MAX_DIG_LABOR_COST'), c);
+  c.installDoorCloser(bot, activate);
+  const walk = async (...zs) => { for (const z of zs) { bot.entity.position = new V3(0.5, 64, z); bot.emit('physicsTick'); await sleep(0); } };
+  return { bot, c, used, props, walk, looks: () => looked };
+}
+
+await check('Close behind: a door she walked through is shut once she is clear, without turning her head', async () => {
+  const w = closerWorld();
+  await w.walk(-1, 0.5, 1.0); // through the doorway, still beside it
+  assert.equal(w.used.length, 0, 'not while she is still in or next to it');
+  await w.walk(2.0, 2.5, 3.0);
+  assert.equal(w.used.length, 1, 'closed exactly once'); assert.equal(w.props.open, false);
+  assert.equal(w.used[0].looked, 0, 'no lookAt before the click');
+  assert.equal(w.looks(), 0, "the bot's own lookAt was stubbed for the click and restored");
+  const gate = closerWorld({ name: 'oak_fence_gate' });
+  await gate.walk(0.5, 2.5);
+  assert.equal(gate.used.length, 1, 'gates too');
+});
+
+await check("Close behind: not on someone following, not while herding, not an iron or already-shut door", async () => {
+  const w = closerWorld();
+  w.bot.entities[2] = { type: 'player', position: new V3(0.5, 64, -1) }; // a bot right behind her
+  await w.walk(0.5, 2.5);
+  assert.equal(w.used.length, 0, 'held for the follower');
+  w.bot.entities[2].position = new V3(0.5, 64, 2.6); // the follower is through too
+  w.bot.entities[2].position.distanceTo = (o) => Math.hypot(0.5 - o.x, 64 - o.y, 2.6 - o.z) + 3; // and clear of it
+  await w.walk(2.6);
+  assert.equal(w.used.length, 1, 'shut once nobody is at it');
+
+  const herd = closerWorld({ name: 'oak_fence_gate' });
+  const release = herd.c.holdDoorsOpen(herd.bot);
+  await herd.walk(0.5, 2.5);
+  release(); await herd.walk(2.6);
+  assert.equal(herd.used.length, 0, 'a doorway passed while herding is forgotten, not shut later');
+
+  const iron = closerWorld({ name: 'iron_door' });
+  await iron.walk(0.5, 2.5);
+  const shut = closerWorld({ open: false });
+  await shut.walk(0.5, 2.5);
+  assert.equal(iron.used.length + shut.used.length, 0);
+});
+
+await check('Close behind: herd_to_pen holds doors open for exactly the action', async () => {
+  const bot = makeBot(); let held = 0, releases = 0;
+  const c = context(bot, { loadPenLocation: async () => null, holdDoorsOpen: () => { held++; return () => { releases++; }; } });
+  vm.runInContext(timeoutFn + actionFn, c);
+  await c.performAction(bot, { type: 'herd_to_pen', species: 'cow' }, 'test');
+  await c.performAction(bot, { type: 'follow' }, 'test');
+  assert.equal(held, 1, 'only herd_to_pen'); assert.equal(releases, 1, 'released when it ends');
 });
 
 console.log(`${passed} unit checks passed.`);

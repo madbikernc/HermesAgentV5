@@ -1,9 +1,12 @@
-// Version: 1.2.0
+// Version: 1.3.0
 //
 // 1.2.0 (2026-09-25) -- direct report: bots can't get in or out of a building through its doors,
 // "even when the doors are open." Doors and fence gates are now judged by their current state
 // (applyDoorState): open = walkable, a closed wooden door or gate = opened on the way through.
 // installDoorSupport keeps doorway waypoints on the floor and never shuts an already-open door.
+//
+// 1.3.0 (2026-09-25) -- bots close doors and gates behind themselves (installDoorCloser), except
+// near another player or while herd_to_pen holds doors open (holdDoorsOpen).
 //
 // 1.0.0 (2026-09-07) -- direct request: "build the water crossing mechanic," following the
 // anti-drowning reflex (index.js 2.29.0), which fixes SURVIVAL but not CAPABILITY: stock
@@ -122,6 +125,84 @@ export function installDoorSupport(bot) {
   const activateBlock = bot.activateBlock.bind(bot);
   bot.activateBlock = (block, ...rest) => (bot.pathfinder.isMoving() && isOpenDoorOrGate(block)
     ? Promise.resolve() : activateBlock(block, ...rest));
+  installDoorCloser(bot, activateBlock);
+}
+
+// Direct request, 2026-09-25: "make them close gates and doors behind themselves" -- an open door
+// lets mobs into the base at night. Every doorway the bot stands in is remembered; once she is
+// clear of it (DOOR_CLOSE_MIN from its centre) and still within reach, she shuts it if it's open,
+// unless another player is close to it (don't slam it on a bot or person following her) or
+// something holds doors open (herd_to_pen, leading an animal through the pen gate). Past
+// DOOR_CLOSE_MAX, or a block above or below, the chance is gone and the doorway is forgotten.
+const DOOR_CLOSE_MIN = 1.3;
+const DOOR_CLOSE_MAX = 4;
+const DOOR_CLOSE_CLEARANCE = 3;
+
+export function isClosableDoorway(block) {
+  const name = block?.name;
+  if (name?.endsWith("_fence_gate")) return true;
+  return !!name?.endsWith("_door") && name !== "iron_door" && block.getProperties?.().half === "lower";
+}
+
+// herd_to_pen (actions.js performAction) holds doors open while it runs; returns the release.
+export function holdDoorsOpen(bot) {
+  bot.doorsHeldOpen = (bot.doorsHeldOpen || 0) + 1;
+  let released = false;
+  return () => {
+    if (!released) bot.doorsHeldOpen--;
+    released = true;
+  };
+}
+
+// The closer's own right-click must not turn her head: pathfinder steers by where she faces, so a
+// look back at the door mid-walk turns her around. The server only checks reach, not facing, and
+// activateBlock calls bot.lookAt synchronously before its first await, so it's stubbed for the call.
+function useWithoutLooking(bot, activateBlock, block) {
+  const lookAt = bot.lookAt;
+  bot.lookAt = async () => {};
+  let pending;
+  try {
+    pending = activateBlock(block);
+  } finally {
+    bot.lookAt = lookAt;
+  }
+  return pending;
+}
+
+export function installDoorCloser(bot, activateBlock) {
+  const passed = new Map(); // "x,y,z" -> Vec3 of a doorway she stood in
+  let closing = false;
+  bot.on("physicsTick", () => {
+    const here = bot.entity?.position;
+    if (!here) return;
+    const cell = bot.blockAt(here.floored());
+    if (isClosableDoorway(cell)) passed.set(cell.position.toString(), cell.position);
+    if (!passed.size || closing) return;
+    for (const [key, pos] of passed) {
+      const cx = pos.x + 0.5, cz = pos.z + 0.5;
+      const away = Math.hypot(here.x - cx, here.z - cz);
+      if (away > DOOR_CLOSE_MAX || Math.abs(here.y - pos.y) > 1.5 || bot.doorsHeldOpen > 0) {
+        passed.delete(key);
+        continue;
+      }
+      if (away < DOOR_CLOSE_MIN) continue; // still in or right beside the doorway
+      const block = bot.blockAt(pos);
+      if (!isClosableDoorway(block) || !block.getProperties().open) {
+        passed.delete(key); // already shut, or gone
+        continue;
+      }
+      const centre = new Vec3(cx, pos.y, cz);
+      if (Object.values(bot.entities).some((e) => e !== bot.entity && e.type === "player" &&
+          e.position.distanceTo(centre) < DOOR_CLOSE_CLEARANCE)) continue; // someone coming through
+      passed.delete(key);
+      closing = true;
+      Promise.resolve(useWithoutLooking(bot, activateBlock, block))
+        .then(() => console.log(`[${bot.username}] closed the ${block.name} behind her at ${pos}`))
+        .catch((err) => console.error(`[${bot.username}] couldn't close the ${block.name}: ${err.message}`))
+        .finally(() => { closing = false; });
+      break;
+    }
+  });
 }
 
 const MAX_DIG_LABOR_COST = 20;

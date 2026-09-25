@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.6.0
+**Version:** 2.7.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -360,6 +360,7 @@ the original incident number, still cited throughout the code. Narrative is in g
 | 4+ `dig_error` resets in 3s → global `canDig=false` for 15s. The library discards the real dig error and recomputes the identical failing path forever | 42, 48 |
 | `flee` disables digging for its own pathfind, or a cornered bot digs instead of escaping | 42 |
 | Doors and fence gates are judged by their current state (`applyDoorState` in `swim-movements.js`): pathfinder 2.4.5 reads every door/gate as a solid wall from its block type, never opens doors, and treats an open gate as solid. Its path clean-up also lifts a doorway waypoint onto the door itself, so `installDoorSupport` puts it back on the floor and never re-toggles an already-open door while pathfinding. Before this (2026-09-25), bots could not pass any door, open or closed | 2026-09-25 |
+| Bots close doors and gates behind themselves once clear of them (`installDoorCloser`), without turning their head (a mid-walk look steers pathfinder backwards). Not while another player is at the doorway, and not during `herd_to_pen`, which leads an animal through the pen gate and closes it itself | 2026-09-25 |
 
 **Combat**
 

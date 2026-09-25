@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.5.0
+**Version:** 1.6.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -88,6 +88,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.4.0 | 2026-09-25 | Bed claims documented in §4: a destroyed claimed bed moves to the nearest unclaimed bed within 60s, claim conflicts resolve by name, and `sleep` prefers unclaimed beds and never claims another bot's. |
 | 2.5.0 | 2026-09-25 | Bed claims shared between spark and spark2 through hermes-memory `agent_state` (`minecraft-beds`), with `beds/` as the per-host fallback; memory table and §12's spark2 item updated. |
 | 2.6.0 | 2026-09-25 | Door/gate rule added to §11 Pathfinding: state-aware doors and gates, doorway waypoints kept on the floor, open doors never re-toggled. |
+| 2.7.0 | 2026-09-25 | §11 Pathfinding: bots close doors and gates behind themselves, except near another player or while herding. |
 
 ## services/minecraft-bots/README.md
 
@@ -174,3 +175,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.3.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.4.0 row. |
 | 1.4.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.5.0 row. |
 | 1.5.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.6.0 row. |
+| 1.6.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.7.0 row. |

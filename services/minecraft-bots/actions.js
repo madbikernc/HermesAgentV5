@@ -1,4 +1,7 @@
-// Version: 1.71.0
+// Version: 1.72.0
+//
+// 1.72.0 (2026-09-25) -- herd_to_pen holds doors open (swim-movements.js holdDoorsOpen) so the door
+// closer doesn't shut the pen gate on the animal being led in.
 //
 // 1.71.0 (2026-09-25) -- bed claims are shared between hosts through hermes-memory agent_state
 // ("minecraft-beds"); BEDS_DIR is the per-host fallback, and a host's existing claim is published
@@ -932,6 +935,7 @@ import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipme
 import { cancelAndRotate, isBusy, holdsControl, releaseControl } from "./arbiter.js";
 import { searchMemory } from "./longterm.js";
 import { listState, setState } from "./memory.js";
+import { holdDoorsOpen } from "./swim-movements.js";
 
 const { goals } = pathfinderPkg;
 
@@ -2414,10 +2418,13 @@ export async function performAction(bot, action, speaker, handle = null) {
   if (handle ? !holdsControl(handle) : isBusy()) return logOutcome(bot, action, startedAt, { ...LOST_CONTROL }, true);
   const alreadyHeld = !!handle;
   const token = handle ? handle.token : cancelAndRotate(bot);
+  // Leading an animal through the pen gate: don't let the door closer shut it on the animal.
+  const releaseDoors = action.type === "herd_to_pen" ? holdDoorsOpen(bot) : null;
   let result;
   try {
     result = await performActionAs(bot, action, speaker, token);
   } finally {
+    releaseDoors?.();
     // Only release if THIS call acquired (the legacy handle-less path) -- a caller holding a
     // handle owns its own release via handle.release().
     if (!alreadyHeld) releaseControl({ token });

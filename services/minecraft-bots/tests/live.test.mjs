@@ -1,4 +1,4 @@
-// Version: 1.4.0
+// Version: 1.5.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -22,6 +22,7 @@
 // 1.3.1 | 2026-09-25 | MC_BED_CLAIMS_SHARED=false: test bed claims stay out of the shared hermes-memory store.
 // 1.4.0 | 2026-09-25 | Door scenarios: out of a sealed room through a closed/open door and an open/closed
 //   fence gate, and into one through an open door, on the bots' real movement setup.
+// 1.5.0 | 2026-09-25 | Door scenarios also require the door or gate to be shut behind the bot.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -304,9 +305,8 @@ for (const [label, block, open, gapAbove] of [
     const room = await doorRoom(block, { gapAbove });
     await room.place(open);
     await walkTo(x, z + 5);
-    const after = bot.blockAt(new Vec3(x, y + 1, z + 2));
-    assert.equal(after?.name, block, "the door/gate is still there (not dug)");
-    if (open) assert.equal(after.getProperties().open, true, "an open one isn't shut on the way through");
+    assert.equal(bot.blockAt(new Vec3(x, y + 1, z + 2))?.name, block, "the door/gate is still there (not dug)");
+    await waitFor(() => bot.blockAt(new Vec3(x, y + 1, z + 2)).getProperties().open === false, 5000, "it shut behind her");
   });
 }
 scenario("Doors: walks into a room through an open door", async () => {
@@ -316,6 +316,7 @@ scenario("Doors: walks into a room through an open door", async () => {
   await waitFor(() => bot.entity.position.distanceTo(new Vec3(x, y + 1, z + 5)) < 2, 10_000, "tester outside");
   await room.place(true);
   await walkTo(x, z);
+  await waitFor(() => bot.blockAt(new Vec3(x, y + 1, z + 2)).getProperties().open === false, 5000, "it shut behind her");
 });
 
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);
