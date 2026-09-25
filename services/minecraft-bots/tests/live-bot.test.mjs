@@ -1,4 +1,4 @@
-// Version: 1.0.0
+// Version: 1.0.1
 //
 // Full-bot live tests: runs a REAL bot process (index.js, as "MBProbe") against the bot-sandbox
 // server and drives it the way a player would -- whispers from the MBTester bot, restarts, injected
@@ -17,6 +17,9 @@
 // steps use generous timeouts)
 //
 // Revision History: 1.0.0 | 2026-09-25 | Initial scenarios for MB-05, MB-06, MB-09, MB-12, MB-14, MB-20.
+// 1.0.1 | 2026-09-25 | Night-pause scenario holds the goal loop off in its first restart (the planner
+//   could drop the seeded goal before the night restart), and every boot clears the probe's
+//   cross-restart stuck state (repeated test restarts at one spot tripped the real wedge rescue).
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import http from "node:http";
@@ -118,6 +121,10 @@ function startProbe(memoryRoot, env = {}) {
   return probe;
 }
 async function bootProbe(memoryRoot, env) {
+  // Repeated test restarts at the same pinned spot would trip the bot's real "reconnected in the
+  // same place 3 times -- wedged" rescue (a teleport that drops the goal). Those reconnects are
+  // artificial, so the probe's cross-restart stuck state is cleared before every boot.
+  rmSync(path.join(memoryRoot, "bots", "mbprobe", "stuck_state.json"), { force: true });
   startProbe(memoryRoot, env);
   await probe.waitLine(/\[MBProbe\] spawned at/, 60_000);
   await rcon(`tp ${PROBE} ${HOME[0]} ${HOME[1]} ${HOME[2]}`, `effect give ${PROBE} minecraft:resistance 900 4 true`,
@@ -189,12 +196,14 @@ scenario("MB-05 STOP mid-goal drops the goal and no later step lands in it", asy
 scenario("MB-12/MB-14 restart re-announces the goal; night pauses it; morning resumes it", async () => {
   const root = newRoot();
   seedGoal(root, "collect 12 oak_log");
-  // restart 1 (day): the resumed goal is announced to peers
+  // restart 1 (day): the resumed goal is announced to peers. The goal loop is held off so the
+  // planner can't finish or drop the seeded goal before the night restart.
   let t = Date.now();
-  await bootProbe(root);
+  await bootProbe(root, { MC_GOAL_TICK_MS: "600000" });
   await waitFor(() => published((b) => b.type === "goal" && b.status === "active" && b.description === "collect 12 oak_log", t),
     20_000, "resumed goal announced");
   await probe.stop();
+  assert.equal(safeJson(readFileSync(goalFile(root), "utf8")).description, "collect 12 oak_log", "goal still saved");
   // restart 2 (night): paused -- no planning
   t = Date.now();
   await bootProbe(root, { MC_DUSK_START_TICK: "0" });
