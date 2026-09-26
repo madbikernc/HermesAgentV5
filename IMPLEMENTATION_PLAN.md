@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 2.3.0
+**Version:** 2.4.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -11,7 +11,7 @@ per-page OCR verified against a real, naturally-occurring scanned page, not a st
 was the point of no return — Sintra and Amy no longer have live gateways. S18 closed with its exit gate
 deliberately **missed** — RoCE is fixed and persistent at 13.0 GB/s, but GB10 has no GPUDirect RDMA, so
 `TP=2` stays non-viable and MiMo does not proceed. **S19 is planned, not executed** — a fourth node
-(`Anvil`, a Windows RTX 5090) adding image→mesh→printable-STL generation as a third broker job type;
+(`Anvil`, a Windows RTX 5090) adding image→mesh→viable-STL generation as a third broker job type;
 nothing in it has been run on the fleet. **2026-08-30: the "later stage"
 this line used to wait on happened — `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` were consolidated
 into this repo and all three nodes (`spark`, `spark-2`, `HomeD13`) were cut over to it. `HermesAgentV4` is
@@ -53,7 +53,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S14 | Ops tooling retarget, rename debt, sync coverage, cross-repo comparability | ✅ Done (2026-08-29) |
 | S15 | `hermes-logs` — the log analyst | ✅ Done (2026-08-29) |
 | S16 | RAG stack: eval harness, reranker, optional OCR (retriever already live, independently built) | ✅ Done (2026-08-31) — recall@5 0.538→0.705 |
-| S19 | `Anvil` — mesh node (TRELLIS.2 on a Windows 5090) + print-ready repair chain | 📋 Planned, not executed (2026-09-26) |
+| S19 | `Anvil` — mesh node (TRELLIS.2 on a Windows 5090) + viable-STL repair chain | 📋 Planned, not executed (2026-09-26) |
 
 ---
 
@@ -1822,13 +1822,14 @@ node now. **Measure it with `omni` actually stopped**, per V4 §4a's warning tha
 the `omni` role cutover are all downstream of the exit gate. So is S12's merged mode, which this
 stage would also unblock but does not itself deliver.
 
-### S19 — `Anvil`: the mesh node and a print-ready pipeline
+### S19 — `Anvil`: the mesh node and a viable-STL pipeline
 
 **Planned, not executed.** Nothing in this stage has been run on the fleet. Every figure below is either
 cited to a primary source or explicitly flagged as unverified — no generation time, VRAM number, or success
 rate here has been measured on this hardware yet.
 
-Adds a fourth node and a third job type: image/text → 3D mesh → watertight STL, for 3D printing. The
+Adds a fourth node and a third job type: image/text → 3D mesh → viable STL. Eventual use is 3D printing,
+but **the pipeline ends at the STL** — slicing and printing are explicitly not in scope (S19c). The
 capability was previously explored off-fleet (Stability Matrix + ComfyUI + TripoSR + OpenSCAD on a 16GB
 RTX 3080 Ti, one F4U Corsair STL produced as a test case). This stage brings it onto the fleet properly,
 behind the same broker/worker/screening seams every other artifact-producing capability already uses.
@@ -1955,17 +1956,29 @@ number the way `infra/comfyui/README.md` records its measured video timings, inc
 whatever the quality knob turns out to be. Do not extrapolate linearly from one data point; Stage 6's own
 frame-count table is the reason that warning is here.
 
-#### S19c — Printable, not merely generated
+#### S19c — Valid, not merely generated
 
-A generated mesh is not a printable one. Output arrives non-manifold, with floating fragments, holes, and
-no guarantee of a closed volume — a slicer will either refuse it or silently produce garbage. This is the
-half of the problem that the AI-3D ecosystem consistently under-serves, and it is where this stage earns
-its keep.
+**The deliverable is a viable STL, and the pipeline stops there.** Slicing, G-code, and printer profiles
+are out of scope — not deferred to a later stage, not partially stubbed, simply not this fleet's job
+(operator direction, 2026-09-26). What leaves `Anvil` is a file a human opens in their own tool.
+
+That makes "viable" the whole contract, so it is defined here rather than left to taste. A generated mesh
+is not a valid one: output arrives non-manifold, with floating fragments, holes, self-intersections, and no
+guarantee of a closed volume. An STL is viable for this stage when it is **a single watertight, manifold
+solid with consistent outward normals, no degenerate or duplicate faces, and no stray disconnected
+shells** — the properties that decide whether any downstream tool, slicer or CAD or mesh editor, will
+accept it at all. This is the half of the problem the AI-3D ecosystem consistently under-serves, and with
+slicing out of scope it is the *only* half that matters here.
+
+One consequence worth stating, since it is the classic STL trap: **the format carries no units.** A viable
+STL can still be the wrong size, and nothing in the file says so. The repair tool records the mesh's real
+bounding-box dimensions alongside the artifact so the number is available rather than guessed at later;
+choosing a scale stays a human decision, like the profile.
 
 **Shape-only, texture off.** TRELLIS.2 exposes a mesh-only path distinct from its texturing nodes
 (`Trellis2MeshWithVoxelGenerator` / `Trellis2ExportMesh` vs. `Trellis2MeshTexturing*`, with shipped
-mesh-only example workflows). A slicer discards materials, so PBR texture synthesis is pure cost for this
-use case. Skipping it also sidesteps the heaviest part of the pipeline.
+mesh-only example workflows). STL cannot carry materials at all, so PBR texture synthesis is pure cost for
+this use case. Skipping it also sidesteps the heaviest part of the pipeline.
 
 **Repair chain, all scriptable headless on Windows** (confirmed as `win_amd64` wheels on PyPI, not
 assumed): `trimesh` to split components and drop floating artifacts → `PyMeshLab` for non-manifold
@@ -1974,11 +1987,12 @@ Toolbox is a GUI addon and is *drivable* via `blender --background --python`, bu
 verified — it is not in the plan.
 
 This becomes `tools/hermes-mesh-repair.py`, and it is the stage's real deliverable: a mesh that fails
-repair **fails the job honestly** rather than being delivered as a plausible-looking STL that wastes
-filament and hours. That is the same principle as `screen_artifact()` and the same principle as
-`hermes-fabrication-guard.sh` — never report a success that did not happen.
+repair **fails the job honestly** rather than being delivered as a plausible-looking STL that only reveals
+itself as broken once someone tries to use it. That is the same principle as `screen_artifact()` and the
+same principle as `hermes-fabrication-guard.sh` — never report a success that did not happen.
 
-**Slicing is explicitly out of scope for S19, and here is the finding that decided it.**
+**One upstream project looked like it already did all of this. It does not, and reading it is what
+confirmed slicing should stay out rather than be inherited half-built.**
 `vel5id/3DPrint-Full-Pipeline_Blackwell` advertises exactly what this stage wants —
 "image→textured 3D→sliced STL + part segmentation", Blackwell/`sm_120`, CUDA 13.0 — and was the obvious
 thing to adopt wholesale. It was read before being trusted, and **its slicer does not slice**:
@@ -1993,21 +2007,20 @@ thing to adopt wholesale. It was read before being trusted, and **its slicer doe
   and the README's own tested-hardware row says **RTX 5060 Ti**, not a 5090.
 
 Its **part segmentation is real implemented code** (P3-SAM + XPart, with fp16/CPU-offload work for 16GB
-cards) and is worth revisiting if splitting large models across bed volumes becomes the bottleneck. But it
-is a reference to read, **not a dependency to adopt**, and nothing in S19 depends on it.
+cards) and is worth revisiting if cleanly splitting one model into multiple solids ever becomes wanted. But
+it is a reference to read, **not a dependency to adopt**, and nothing in S19 depends on it.
 
-Deferred to a later stage, with the one fact needed to start it: **OrcaSlicer's CLI is officially
-documented** (`--slice`, `--load-settings`, `--export-3mf`, `--outputdir`). PrusaSlicer ships
-`prusa-slicer-console.exe` on Windows but its official CLI documentation could not be reached to confirm
-flags — **verify before writing it into a plan**. Cura's `CuraEngine slice` is likewise unverified here.
-G-code is printer-specific and profile-specific; the fleet should hand over a clean, watertight,
-correctly-scaled STL and let a human's own slicer profile own the print.
+Recorded only so nobody re-researches it: slicer CLIs do exist for a headless path (OrcaSlicer's is
+officially documented; PrusaSlicer's and Cura's could not be confirmed and would need verifying first).
+**That is a note, not a roadmap item.** Nothing in S19 should be built to accommodate a slicing stage that
+is not planned — no G-code-shaped job type, no printer-profile config, no half-wired export step. If the
+scope ever changes, it changes deliberately, with its own stage and its own exit gate.
 
 #### S19d — Fleet integration
 
 - **`skills/mesh-gen/SKILL.md`**, following `skills/render-request/` and `skills/image-gen/` — how to ask
   for a mesh, what comes back, what the failure modes actually are, and explicitly that a returned STL is
-  repaired but **not** sliced.
+  repaired and verified viable but **not** sliced — slicing is out of scope, not pending.
 - **Topic ownership: extend `media`, do not invent `fabricate`.** `hermes-media.py` already owns the Buzz
   `media` topic and already bridges it to this exact broker/worker pipeline, submitting
   `{"type": "render", ...}`. A mesh request is the same shape of work with a different `type`. S15 and S16
@@ -2016,7 +2029,7 @@ correctly-scaled STL and let a human's own slicer profile own the print.
   topic or agent before there is real traffic that needs one.**
 - **Vision-model evaluation, deliberately not reused.** `hermes-media.py` evaluates a finished image by
   sending it to a vision model. That does not transfer: a rendered preview says nothing about whether a
-  mesh is watertight, correctly scaled, or printable. The **structural** checks in S19c are the real
+  mesh is watertight, manifold, or free of stray shells. The **structural** checks in S19c are the real
   quality gate. A vision pass over a turntable render is a possible later nicety and is not a substitute.
 - **Repo sync does not reach this node.** S14 put `hermes-repo-autopull.timer` on all three Linux nodes.
   `Anvil` is Windows and has no equivalent; S14's own finding was that a node silently going stale is a
@@ -2035,17 +2048,22 @@ Numbered before the first run, per S18's own lesson that an unnumbered gate is n
    and the broker — **not** by hand in the ComfyUI GUI.
 2. Wall-clock generation time measured and recorded, with `JOB_TIMEOUT`, client poll budget, and broker
    lease all set **against that measurement** rather than guessed.
-3. The repair chain turns a raw generated mesh into a verified watertight solid, with the watertightness
-   asserted by an independent check — not by the repair tool's own self-report. Same bar S2's recall
-   verification set.
-4. A deliberately bad mesh **fails the job honestly**, with a real error surfaced, and no artifact
+3. The repair chain turns a raw generated mesh into an STL meeting S19c's viability definition in full
+   (single watertight manifold solid, consistent normals, no degenerate faces, no stray shells), with every
+   property asserted by an **independent** check — not by the repair tool's own self-report. Same bar S2's
+   recall verification set.
+4. That STL opens clean in an unrelated third-party tool that did not produce it, with no repair prompt or
+   error. This is the real-world version of (3) and the actual definition of "viable" — an independent
+   check inside our own pipeline can still share our own wrong assumption.
+5. A deliberately bad mesh **fails the job honestly**, with a real error surfaced, and no artifact
    delivered.
-5. The F4U Corsair from the earlier off-fleet experiment re-run through this pipeline, as a like-for-like
+6. The F4U Corsair from the earlier off-fleet experiment re-run through this pipeline, as a like-for-like
    comparison against the known-good prior result.
 
-**If (3) or (4) cannot be met, S19 does not ship**, and the capability stays an off-fleet manual workflow.
-A pipeline that emits meshes nobody can print is worse than no pipeline, because it produces confident
-output that fails hours later at the printer.
+**If (3), (4) or (5) cannot be met, S19 does not ship**, and the capability stays an off-fleet manual
+workflow. Since the STL is now the entire deliverable, a pipeline that emits invalid ones is worse than no
+pipeline: it produces confident output whose failure surfaces somewhere else, later, to someone who trusted
+it.
 
 #### Risks and open questions
 
@@ -2207,3 +2225,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 2.1.0 | 2026-09-24 | S18a's fix confirmed working on the fleet, same day as the diagnosis. Operator approved the interface change; `10.129.10.1/30`+`10.129.10.2/30` assigned to the previously unused, unbonded `enp1s0f1np1` on each node at MTU 9000, with `bond-fabric0` and its `spark2-fabric` SSH aliases untouched throughout. Jumbo ping clean at 0% loss; `rocep1s0f1` now carries a RoCEv2 GID derived from the port's own permanent MAC rather than the shared bond MAC. The identical `ib_write_bw` that returned `ccnt=0` on the bond now sustains **12,994 MB/s (~13.0 GB/s) over 10s, 1.25M iterations, clean exit** — **6.5x S1's 2.0 GB/s socket baseline**, on one of two available ports, with the second `f1` port still free for multi-rail. Root cause and fix both confirmed empirically; PFC/ECN was never needed. Two items remain before S18's exit gate can be called: NCCL all-reduce validation (needs the narrow ufw rule on the new `10.129.10.0/30` that S18c anticipated — not yet applied, operator approval pending), and persistence (addressing is runtime-only `ip addr add` and reverts on reboot; needs writing into node network config and capturing as `infra/roce-fabric/README.md`). |
 | 2.2.0 | 2026-09-24 | S18 executed and closed out live on the fleet. Resolves the two items 2.1.0 left open, and the second one changes the outcome. **Persistence + firewall done:** each node's `enp1s0f1np1` NM profile converted to a static `roce-f1` (manual IPv4, MTU 9000, autoconnect; NM is the right layer since these nodes render netplan from it), re-verified at **13,007 MB/s** under the persistent config; one peer-scoped ufw rule per node on `10.129.10.0/30` per S4's exception-list rule, with the `10.129.9.0/30` bond keeping its `22/tcp`-only posture. **Exit gate MISSED.** NCCL all-reduce now runs clean over the fixed fabric — no retry-exhaustion, and `NCCL_DEBUG=INFO` confirms genuine RoCE (`NET/IB : Using [0]rocep1s0f1:1/RoCE`, `Using network IB`) rather than socket fallback — but delivers only **~1.4 GB/s busbw**, *below* S1's 2.0 GB/s socket baseline. Cause is **no GPUDirect RDMA on GB10**: `GDR 0`, `cuMemGdrSupport 0`, and `nvidia_peermem` present on disk but failing to load with `EINVAL` on both nodes while logging nothing — consistent with Grace Blackwell's coherent unified memory making the legacy discrete-GPU peer-memory path inapplicable, so every collective stages GPU→host→NIC. Tuning (`NCCL_BUFFSIZE=8M`, `IB_QPS_PER_CONNECTION=4`, `IB_SPLIT_DATA_ON_QPS=1`, `MIN_NCHANNELS=4`) moved nothing — structural, not configuration. **Consequence: `TP=2` stays non-viable, MiMo does not proceed, and the `coder2`/dual-coder retirement cost is not paid** — the gate working as designed. Kept regardless: a persistent 13.0 GB/s host-memory RDMA path, 6.5x the socket baseline, directly useful for the bulk weight staging the fabric was reserved for (S1's 46.6 GB migration ran at ~110 MB/s over GigE). The open question is now whether GPUDirect RDMA is reachable on GB10 at all — via DMA-BUF rather than `nvidia_peermem`, a newer driver/DOCA stack, or not at all — and that, not more fabric work, is what gates multi-node tensor parallelism on this hardware. |
 | 2.3.0 | 2026-09-26 | S19 planned (not executed): `Anvil`, a fourth node — Windows + RTX 5090 (`x86_64`/`sm_120`) — adding image→3D-mesh→watertight-STL generation as a third broker job type, for 3D printing. Deliberately **not** on the Sparks: `aarch64`/`sm_121` has no prebuilt wheels for this ecosystem, and S18's own GPUDirect finding is the standing reminder that GB10 is genuinely off the beaten path for third-party CUDA code. Extends what already exists rather than adding transport: the broker already treats `type` as opaque, `hermes-render-worker.py` was already `JOB_TYPE`-parameterized at Stage 6 for `video`, and `hermes-media.py` already owns the `media` topic — so `mesh` is an allowlist entry, a worker instance, and a `screen_artifact()` branch, not a new agent or topic (S15/S16 both recorded the cost of inventing one early). Model choice verified against primary sources, not assumed: **TRELLIS.2 is MIT covering weights as well as code**, chosen over Hunyuan3D 2.1, whose licence is a **Community licence and not non-commercial** as third-party forks' own headers mislabel it (commercial permitted below **1M MAU** — not the 100M figure that circulates — but Territory excludes the EU/UK/South Korea). Three real install gates found before any build: **DINOv3 is a gated, proprietarily-licensed Meta repo** TRELLIS.2 hard-depends on, making the stack MIT at the top and gated one layer down; the Windows wheel ceiling is **Torch 2.10/CUDA 13.1** (no 2.11 wheels exist, upstream issue #184), not the cu128 set secondary sources cite; and **CuMesh's remeshing is broken on `sm_120`**, with upstream shipping a `blackwell_fix.py` that moves mesh extraction to **CPU marching cubes** on exactly this GPU class — a correctness workaround, not a tuning knob, and the stage's least predictable cost. Sized Stage 6's timeout lesson in *before* the first run rather than after: the CPU fallback plus the broker's **fleet-wide claim lease with no per-type override** means a long mesh job risks claim reclamation, a worse failure than a clean timeout, so `JOB_TIMEOUT`/poll budget/lease all get set against a real measurement. **Adopting `vel5id/3DPrint-Full-Pipeline_Blackwell` wholesale was rejected after reading it: its "slicer" never slices** — `export_stl()` is a `trimesh` export loop, no `prusa\|orca\|cura\|gcode` invocation exists anywhere in the repo, and `cutter.py` only logs that bed-splitting is a future phase; 18 author commits over 4 days, stale ~3.5 months, 0 stars, unpinned `requirements.txt`, and its own tested-hardware row says RTX 5060 Ti. Kept as a reference for its genuinely-implemented P3-SAM/XPart part segmentation, not as a dependency. Slicing therefore stays out of scope (OrcaSlicer's CLI is officially documented; PrusaSlicer's could not be confirmed and must be verified before being written into a plan) — the fleet delivers a repaired watertight STL and lets a human's own printer profile own the G-code. Real deliverable is the printability half the AI-3D ecosystem under-serves: a `trimesh`→`PyMeshLab`→`manifold3d` repair chain (all confirmed `win_amd64` on PyPI) where a mesh that cannot be made watertight **fails the job honestly**, same principle as `screen_artifact()` and `hermes-fabrication-guard.sh`. Windows is a first for this fleet and four gaps are named rather than improvised: no `systemd`, no `ufw` (S10's live 8188-open-to-the-LAN finding is explicitly not to be repeated), no `hermes-repo-autopull.timer` coverage (S14's own stale-node failure mode), and no bash vault client. Two open items recorded rather than papered over: the node's VRAM was described as **24GB** where a retail 5090 is **32GB**, to be read off `nvidia-smi` before anyone sizes against it; and this is a **single-node capability with no failover**, accepted deliberately since the Sparks cannot take it over. |
+| 2.4.0 | 2026-09-26 | S19 scope narrowed by operator direction, same day it was planned: **no slicing and no printing handling — the deliverable is a viable STL and the pipeline stops there.** 2.3.0 had slicing out of S19 but framed it as deferred, carrying an OrcaSlicer/PrusaSlicer CLI note as "the one fact needed to start it"; that framing is withdrawn. Slicing is not a roadmap item, and S19 must not be built to accommodate one — explicitly no G-code-shaped job type, no printer-profile config, no half-wired export step; if scope ever changes it gets its own stage and its own exit gate. Minor rather than major because the stage's substance, ordering, node, model choice and integration seams are all unchanged — what changed is a boundary that was already outside S19, plus the additions below; bump higher if that reads as too generous. Consequence worked through rather than just deleted: with the STL now the entire deliverable, "viable" became the whole contract and is therefore **defined** instead of left to taste — a single watertight manifold solid, consistent outward normals, no degenerate or duplicate faces, no stray disconnected shells, these being the properties that decide whether *any* downstream tool accepts the file. Added the classic STL trap that the format **carries no units**, so a viable STL can still be the wrong size with nothing in the file saying so — `hermes-mesh-repair.py` records real bounding-box dimensions alongside the artifact, while choosing a scale stays a human decision like the profile. Exit gate grew from five items to six and got stricter where it counts: the viability check is now assertion of *every* named property independently, plus a **new gate (4) that the STL opens clean in an unrelated third-party tool that did not produce it** — an in-pipeline check can still share our own wrong assumption, and with printing out of scope there is no later step that would have caught it. Texture-off rationale re-grounded on the real reason (STL cannot carry materials at all) rather than on what a slicer discards. `vel5id` findings kept in full — reading that repo is what confirmed slicing should stay out rather than be inherited half-built — and its P3-SAM/XPart segmentation re-motivated away from print-bed fit toward splitting one model into multiple solids, should that ever be wanted. Section retitled ("print-ready" → "viable-STL"); §0 status row and header status line updated to match. |
