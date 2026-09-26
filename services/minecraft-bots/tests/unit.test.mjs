@@ -1,4 +1,4 @@
-// Version: 1.11.0
+// Version: 1.12.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -25,6 +25,7 @@
 //   follower and during herd_to_pen; iron and already-shut doors left alone.
 // 1.11.0 | 2026-09-25 | Farming/ranching: food fetch and backoff, farm/ranch goal routing and runners,
 //   harvested-crop curriculum evidence, farm plot and pen site choice.
+// 1.12.0 | 2026-09-25 | Ripe-crop routine backoff; drops collected only after a real harvest.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -1269,5 +1270,23 @@ await check('Doors: a closed door on her route is opened just ahead of her, with
   assert.equal(iron, false, 'an iron door is never clicked');
 });
 function closedIron(c) { return c.isClosedOpenableDoorway({ name: 'iron_door', getProperties: () => ({ half: 'lower', open: false }) }); }
+
+await check('Ripe crops: a failed routine harvest backs off 15 minutes; a cancelled one does not', async () => {
+  const calls = []; let reply = { ok: false, text: "couldn't harvest any of the 3 ripe crops found: can't reach the one at (1, 64, 1)" };
+  const bot = { isSleeping: false, entity: { position: new V3(0, 64, 0) }, spawnPoint: new V3(0, 64, 0) };
+  const c = vm.createContext({ bot, Date, process: { env: {} }, console: { log() {}, error() {} }, USERNAME: 'Amy', AUTONOMY_ENABLED: true,
+    farmStatus: () => ({ ripe: 3, growing: 0 }), routineBlocked: () => false,
+    arbiter: { OWNERS: { ROUTINE: 1 }, requestControl: async () => ({ release() {} }) },
+    performAction: async (b, a) => { calls.push(a); return reply; } });
+  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'setInterval(() => {'), c);
+  await c.checkRipeCrops(); await c.checkRipeCrops();
+  assert.equal(calls.length, 1, 'backing off after the failure');
+  assert.deepEqual({ ...calls[0] }, { type: 'harvest', onlyRipe: true });
+  const c2 = vm.createContext({ ...c, performAction: async (b, a) => { calls.push(a); return { ok: false, cancelled: true, text: 'stopped' }; } });
+  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'setInterval(() => {'), c2);
+  await c2.checkRipeCrops(); await c2.checkRipeCrops();
+  assert.equal(calls.length, 3, 'an interrupted harvest is retried');
+  assert.match(actions, /if \(total\) await collectDrops/, 'drops are collected only after a real harvest');
+});
 
 console.log(`${passed} unit checks passed.`);

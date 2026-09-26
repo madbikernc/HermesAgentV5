@@ -1,4 +1,7 @@
-// Version: 2.98.0
+// Version: 2.99.0
+//
+// 2.99.0 (2026-09-25) -- first live hour: every bot failed on the same unreachable ripe crops; the
+// ripe-crop routine now backs off 15 min after a failed harvest.
 //
 // 2.98.0 (2026-09-25) -- farming and ranching, from a day of logs. A hungry bot with nothing to eat
 // fetches food from a chest (was 4,203 silent failed "eat"s). Farm and ranch goals run their actions
@@ -5119,18 +5122,23 @@ setInterval(() => {
 // Ripe crops near home get harvested and replanted whoever planted them -- onlyRipe, so this never
 // starts a farm by itself. Any bot near home with a free moment does it.
 const RIPE_CHECK_MS = parseInt(process.env.MC_RIPE_CHECK_MS || "60000", 10);
+// First live hour (2026-09-25): every bot found the same ripe crops and failed to reach them.
+// After a failure, leave them alone for a while instead of retrying every minute.
+const RIPE_FAIL_BACKOFF_MS = 15 * 60_000;
+let ripeBlockedUntil = 0;
 
 async function checkRipeCrops() {
   if (!AUTONOMY_ENABLED || bot.isSleeping || !bot.entity) return;
   const home = bot.spawnPoint;
   if (home && bot.entity.position.distanceTo(home) > 48) return;
-  if (!farmStatus(bot, null).ripe || routineBlocked("checkRipeCrops")) return;
+  if (Date.now() < ripeBlockedUntil || !farmStatus(bot, null).ripe || routineBlocked("checkRipeCrops")) return;
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
     const result = await performAction(bot, { type: "harvest", onlyRipe: true }, USERNAME, handle);
     console.log(`[${USERNAME}] ripe crops: ${result.text} (ok=${result.ok})`);
     if (result.harvested) lastHarvestAt = Date.now();
+    else if (!result.cancelled) ripeBlockedUntil = Date.now() + RIPE_FAIL_BACKOFF_MS;
   } finally {
     handle.release();
   }

@@ -1,4 +1,7 @@
-// Version: 1.73.0
+// Version: 1.74.0
+//
+// 1.74.0 (2026-09-25) -- first live hour: harvest says which ripe crop it couldn't reach or break,
+// and only walks over drops after it actually harvested something.
 //
 // 1.73.0 (2026-09-25) -- farming and ranching, from a day of logs (0 farm/ranch steps, 4,203 failed
 // "eat"s). loot takes groups ("food", "seeds"); harvest builds a real plot (next to water, clears
@@ -4324,6 +4327,7 @@ async function performActionAs(bot, action, speaker, token) {
       }
 
       const harvestedCounts = {};
+      const missed = []; // why each ripe crop wasn't picked (live, 2026-09-25: failures said nothing)
       let replantedCount = 0;
       let stoppedEarly = false;
 
@@ -4339,8 +4343,9 @@ async function performActionAs(bot, action, speaker, token) {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(current.position.x,
             current.position.y, current.position.z, 2)), ACTION_TIMEOUT_MS,
             () => bot.pathfinder.setGoal(null));
-        } catch {
+        } catch (err) {
           if (token.cancelled) { stoppedEarly = true; break; }
+          missed.push(`can't reach the one at ${current.position} (${err.message})`);
           continue; // couldn't reach this one -- move on to the next rather than abandon the batch
         } finally {
           if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
@@ -4350,8 +4355,9 @@ async function performActionAs(bot, action, speaker, token) {
         const farmlandPos = current.position.offset(0, -1, 0); // the crop sits on this block
         try {
           await withTimeout(bot.dig(current), ACTION_TIMEOUT_MS, () => bot.stopDigging());
-        } catch {
+        } catch (err) {
           if (token.cancelled) { stoppedEarly = true; break; }
+          missed.push(`couldn't break the one at ${current.position} (${err.message})`);
           continue; // this one failed -- still worth trying the rest of the batch
         }
         harvestedCounts[current.name] = (harvestedCounts[current.name] || 0) + 1;
@@ -4369,10 +4375,13 @@ async function performActionAs(bot, action, speaker, token) {
         }
       }
 
-      await collectDrops(bot, token, matureBlocks.map((b) => b.position));
-      await refreshGear(bot);
       const total = Object.values(harvestedCounts).reduce((a, b) => a + b, 0);
-      if (!total) return stoppedEarly ? ok("stopped harvesting.") : fail("couldn't harvest any of the ripe crops found.");
+      if (total) await collectDrops(bot, token, matureBlocks.map((b) => b.position));
+      await refreshGear(bot);
+      if (!total) {
+        return stoppedEarly ? ok("stopped harvesting.")
+          : fail(`couldn't harvest any of the ${matureBlocks.length} ripe crops found: ${missed.slice(0, 2).join("; ") || "they changed"}.`);
+      }
       for (const crop of Object.keys(harvestedCounts)) await recordAchievement(bot, `harvested:${crop}`);
       const summary = Object.entries(harvestedCounts).map(([name, n]) => `${n} ${name}`).join(", ");
       return { ...ok(`harvested ${summary} (${replantedCount} replanted)${stoppedEarly ? ", stopped early" : ""}.`),
