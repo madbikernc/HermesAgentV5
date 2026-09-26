@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-09-26) -- reinit-world kills the sandbox server with SIGKILL, not SIGTERM. The world
+# is renamed aside while the server still runs, so a clean stop saved its in-memory world into a
+# freshly created world dir -- old level.dat, old seed, the chunks around the base -- and the
+# restart loaded that: "Done. World reinitialized" with nothing reset (live, 2026-09-26). It also
+# prints the steps it can't do itself: re-apply the gamerules, start other hosts' bots.
 #
 # 1.1.0 (2026-09-09) -- direct request: "add this task to the minecraft admin tool/skill on the
 # Fleet ... discover the existing bots and handle them dynamically." New "bots" subcommand group
@@ -416,8 +422,11 @@ def cmd_bots_reinit_world(client, args):
         sys.exit(f"ERROR: could not find the running PID for {BOTS_SERVICE}.service -- "
                   f"aborting before restart (the world dir has already been renamed and the "
                   f"seed already set; rerun once the service is confirmed running)")
-    print(f"Restarting the bot-sandbox server (killing PID {pid} -- Restart=always brings it back)...")
-    run(client, f"kill {pid}")
+    # SIGKILL: a clean stop would save the in-memory (old) world into a new dir under the old
+    # name, and the restart would load it instead of generating a fresh one. The old world was
+    # backed up and moved aside above, so skipping the shutdown save loses nothing.
+    print(f"Restarting the bot-sandbox server (kill -9 PID {pid} -- Restart=always brings it back)...")
+    run(client, f"kill -9 {pid}")
 
     print("Waiting for the sandbox server to come back up with the new world...")
     for _ in range(SANDBOX_RESTART_TIMEOUT_S // SANDBOX_RESTART_POLL_S):
@@ -442,6 +451,9 @@ def cmd_bots_reinit_world(client, args):
 
     seed_note = f"seed {seed}" if seed else "a fresh random seed"
     print(f"Done. World reinitialized with {seed_note}. Previous world preserved as {backup_dirname}.")
+    print("Still to do by hand (MINECRAFT_BOTS_DESIGN.md §2): check the seed changed (RCON 'seed' on port 25581); "
+          "re-apply the gamerules -- they live in the world save and are now vanilla defaults; "
+          "start the bot units on the other host (only this host's were restarted).")
 
 
 def build_parser():

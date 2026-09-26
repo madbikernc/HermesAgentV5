@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.9.0
+**Version:** 2.10.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -52,7 +52,7 @@ The host split is memory headroom, not design — `spark` carries the LLM stack,
 | | |
 |---|---|
 | Game server | `192.168.1.221:25580`, `minecraft-bots.service`, `/home/zomboid-admin/minecraft-bots/` |
-| World dir | `firmament-bots`, seed `694200161758793929` (reseeded 2026-09-14) |
+| World dir | `firmament-bots`, seed `-4028362707405145553` (fresh world and bot memory wipe 2026-09-26; previous world `firmament-bots.bak-20260926025135`) |
 | RCON | port `25581`, Vaultwarden item `Hermes - Minecraft Bot RCON` |
 | Build | vanilla `server.jar`, offline mode, MC 26.1.2 — **gamerule names are snake_case** (`mob_griefing`, not `mobGriefing`) |
 | Firewall | LAN/Tailscale only. Offline mode means any client can claim any username; this world is not internet-facing the way the human server is |
@@ -67,10 +67,17 @@ silently resets them to vanilla defaults and they must be re-applied** (§25, §
 
 **World re-init / restore:** RCON `save-all flush` → `stop`; confirm the PID that owned port
 25580 actually exited (a name-based `pgrep` matches the unrelated server); move the world aside
-as `firmament-bots.bak-<ts>`, never delete; `Restart=always` brings the server back. Then
+as `firmament-bots.bak-<ts>`, never delete; `Restart=always` brings the server back. Never move
+the world while the server runs and then stop it cleanly: its shutdown save recreates the old
+world under the same name and the restart loads it (2026-09-26). `hermes-minecraft-admin.py bots
+reinit-world` now SIGKILLs for that reason; `sudo systemctl stop minecraft-bots` on muncraft
+(pmoney) is the cleaner manual route. Check RCON `seed` afterwards. Then
 re-apply the gamerules and confirm all 9 bots reconnected (`list`). Bot memory under
 `/mnt/hermes-data/minecraft-memory/` lives on spark/spark2 and is **not** covered by a world
-restore.
+restore. A fresh start also wipes, with the bots stopped and after a tarball backup: `world/`,
+`bots/`, `known_chests.json`, `beds/`, `pen.json`, `mayor-curriculum.json` and `achievements/` on
+both hosts (not `skills/` or logs); the `mc-*` turns (and their `vec_turns` rows) and the
+`minecraft-beds` state in hermes-memory; then a `minecraft` corpus reindex prunes the index.
 
 ## 3. Architecture
 
