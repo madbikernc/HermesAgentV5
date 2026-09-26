@@ -1,4 +1,7 @@
-// Version: 1.74.0
+// Version: 1.75.0
+//
+// 1.75.0 (2026-09-25) -- harvest replants, after picking up the drops, any spot it had no seed for
+// (a harvest of someone else's farm replanted nothing).
 //
 // 1.74.0 (2026-09-25) -- first live hour: harvest says which ripe crop it couldn't reach or break,
 // and only walks over drops after it actually harvested something.
@@ -4328,6 +4331,7 @@ async function performActionAs(bot, action, speaker, token) {
 
       const harvestedCounts = {};
       const missed = []; // why each ripe crop wasn't picked (live, 2026-09-25: failures said nothing)
+      const emptied = []; // harvested with no seed in hand yet -- replanted after picking up the drops
       let replantedCount = 0;
       let stoppedEarly = false;
 
@@ -4364,6 +4368,7 @@ async function performActionAs(bot, action, speaker, token) {
 
         const seedName = CROP_REPLANT[current.name];
         const seedItem = bot.inventory.items().find((i) => i.name === seedName);
+        if (!seedItem) emptied.push({ farmlandPos, seedName });
         if (seedItem) {
           try {
             await bot.equip(seedItem, "hand");
@@ -4377,6 +4382,25 @@ async function performActionAs(bot, action, speaker, token) {
 
       const total = Object.values(harvestedCounts).reduce((a, b) => a + b, 0);
       if (total) await collectDrops(bot, token, matureBlocks.map((b) => b.position));
+      // The seeds come out of the crop she just broke, so on a farm she didn't plant herself there
+      // were none in hand at replant time (live: "harvested 8 wheat (0 replanted)"). Second pass.
+      for (const { farmlandPos, seedName } of emptied) {
+        if (token.cancelled) break;
+        const seedItem = bot.inventory.items().find((i) => i.name === seedName);
+        if (!seedItem) continue;
+        if (bot.blockAt(farmlandPos)?.name !== "farmland" || bot.blockAt(farmlandPos.offset(0, 1, 0))?.name !== "air") continue;
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(farmlandPos.x, farmlandPos.y, farmlandPos.z, 2)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+          await bot.equip(seedItem, "hand");
+          await bot.placeBlock(bot.blockAt(farmlandPos), new Vec3(0, 1, 0));
+          replantedCount++;
+        } catch (err) {
+          console.error("harvest: late replant failed:", err.message);
+        } finally {
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+        }
+      }
       await refreshGear(bot);
       if (!total) {
         return stoppedEarly ? ok("stopped harvesting.")

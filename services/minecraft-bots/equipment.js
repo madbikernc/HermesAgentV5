@@ -1,4 +1,7 @@
-// Version: 1.4.0
+// Version: 1.5.0
+//
+// 1.5.0 (2026-09-25) -- installEnchantsFix: every dig while holding an enchanted item threw
+// "enchantments.concat is not a function" (see its header); found once harvest said why it failed.
 //
 // 1.4.0 (2026-09-24) -- review MB-07: equipBestArmor() now compares against the worn piece and
 // only swaps for a strictly better one, ending the worn-vs-carried downgrade/oscillation loop.
@@ -85,6 +88,34 @@ export const WEAPON_SUFFIXES = ["_sword", "_axe"];
 // uses, not a second, driftable one.
 export function hasWeapon(bot) {
   return bot.inventory.items().some((i) => WEAPON_SUFFIXES.some((s) => i.name.endsWith(s)));
+}
+
+// On this server version prismarine-item's `enchants` returns the raw data component
+// ({ enchantments: [{ id, level }] }) instead of [{ name, lvl }], and mineflayer's digTime() calls
+// .concat() on it -- so every dig while holding an enchanted item threw "enchantments.concat is not
+// a function". Since the fleet was handed enchanted Netherite gear (2026-09-25) that was nearly every
+// crop harvest. The getter on the bot's own Item class is normalized once; an array passes through.
+export function normalizeEnchants(raw, registry) {
+  if (Array.isArray(raw)) return raw;
+  const list = Array.isArray(raw?.enchantments) ? raw.enchantments : [];
+  return list.map((e) => ({ name: registry.enchantments?.[e.id]?.name ?? null, lvl: e.level ?? e.lvl ?? 0 }));
+}
+
+export function installEnchantsFix(bot) {
+  const patch = () => {
+    const item = bot.inventory.slots.find(Boolean); // the class is only reachable through an item
+    if (!item) return false;
+    const proto = Object.getPrototypeOf(item);
+    const desc = Object.getOwnPropertyDescriptor(proto, "enchants");
+    if (!desc?.get || desc.get.normalized) return true;
+    const get = function () { return normalizeEnchants(desc.get.call(this), bot.registry); };
+    get.normalized = true;
+    Object.defineProperty(proto, "enchants", { ...desc, get });
+    return true;
+  };
+  if (patch()) return;
+  const retry = () => { if (patch()) bot.removeListener("physicsTick", retry); };
+  bot.on("physicsTick", retry);
 }
 
 export function loadEquipmentPlugins(bot) {

@@ -1,4 +1,4 @@
-// Version: 1.7.0
+// Version: 1.9.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -26,6 +26,8 @@
 // 1.6.0 | 2026-09-25 | Farming/ranching: loot food, a new plot by water, ripe-only harvest + achievement,
 //   pen on a site, herd, and a verified birth.
 // 1.7.0 | 2026-09-25 | Door scenarios carry cobblestone, the condition that crashed pathfinder's door step.
+// 1.8.0 | 2026-09-25 | The ripe-harvest scenario holds an enchanted sword (the enchants/dig crash).
+// 1.9.0 | 2026-09-25 | ...and starts with no seeds: it must replant from the drops.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -46,7 +48,7 @@ process.env.MC_RAG_DISABLED = "true";
 process.env.MC_BED_CLAIMS_SHARED = "false"; // never write test claims into the fleet's hermes-memory
 const { loadActionPlugins, performAction, checkClaimedBed, loadPenLocation, countInPen } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
-const { equipBestArmor } = await import("../equipment.js");
+const { equipBestArmor, installEnchantsFix } = await import("../equipment.js");
 const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
 const { isProtectedBlockName } = await import("../actions.js");
 
@@ -369,13 +371,19 @@ scenario("Farming: harvests ripe crops only, replants, and records the harvest",
   await rcon(...spots.map(([dx, dz]) => `setblock ${x + dx} ${y} ${z + dz} minecraft:farmland`),
     ...spots.map(([dx, dz]) => `setblock ${x + dx} ${y + 1} ${z + dz} minecraft:wheat[age=7]`),
     `setblock ${x - 3} ${y} ${z - 3} minecraft:farmland`, `setblock ${x - 3} ${y + 1} ${z - 3} minecraft:wheat[age=2]`,
-    `give ${TESTER} minecraft:wheat_seeds 4`);
-  await waitFor(() => bot.blockAt(new Vec3(x - 3, y + 1, z - 4))?.name === "wheat" && held("wheat_seeds") >= 4, 8000, "crops set up");
+    `give ${TESTER} minecraft:netherite_sword[enchantments={sharpness:5,unbreaking:3}]`);
+  await waitFor(() => bot.blockAt(new Vec3(x - 3, y + 1, z - 4))?.name === "wheat" && held("netherite_sword") > 0,
+    8000, "crops set up");
+  // No seeds in hand, like a bot harvesting a farm it didn't plant: the replant has to use the drops.
+  // Holding enchanted gear, as the fleet does: digging used to throw "enchantments.concat is not a function".
+  await bot.equip(bot.inventory.items().find((i) => i.name === "netherite_sword"), "hand");
   const result = await performAction(bot, { type: "harvest", onlyRipe: true }, TESTER);
   assert.equal(result.ok, true, result.text);
   assert.equal(result.harvested?.wheat, 3, result.text);
   await waitFor(() => held("wheat") >= 3, 8000, "wheat picked up");
   assert.equal(Number(bot.blockAt(new Vec3(x - 3, y + 1, z - 3)).getProperties().age), 2, "the unripe one was left alone");
+  const replanted = spots.filter(([dx, dz]) => bot.blockAt(new Vec3(x + dx, y + 1, z + dz))?.name === "wheat").length;
+  assert(replanted >= 2, `replanted ${replanted}/3 from the dropped seeds: ${result.text}`);
   const file = path.join(process.env.MC_MEMORY_ROOT, "achievements", `${TESTER}.json`);
   assert(JSON.parse(readFileSync(file, "utf8")).includes("harvested:wheat"), "achievement recorded");
   const again = await performAction(bot, { type: "harvest", onlyRipe: true }, TESTER);
@@ -446,6 +454,7 @@ try {
   movements.canDig = false;
   bot.pathfinder.setMovements(movements);
   installDoorSupport(bot); // as index.js does
+  installEnchantsFix(bot);
   console.log(`connected as ${TESTER} to ${HOST}:${PORT} (${bot.version})`);
   await buildArena();
 

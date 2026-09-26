@@ -1,4 +1,4 @@
-// Version: 1.12.0
+// Version: 1.13.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -26,6 +26,7 @@
 // 1.11.0 | 2026-09-25 | Farming/ranching: food fetch and backoff, farm/ranch goal routing and runners,
 //   harvested-crop curriculum evidence, farm plot and pen site choice.
 // 1.12.0 | 2026-09-25 | Ripe-crop routine backoff; drops collected only after a real harvest.
+// 1.13.0 | 2026-09-25 | Enchants normalization (digging with enchanted gear).
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -1287,6 +1288,21 @@ await check('Ripe crops: a failed routine harvest backs off 15 minutes; a cancel
   await c2.checkRipeCrops(); await c2.checkRipeCrops();
   assert.equal(calls.length, 3, 'an interrupted harvest is retried');
   assert.match(actions, /if \(total\) await collectDrops/, 'drops are collected only after a real harvest');
+});
+
+await check('Enchants: the 1.21 component shape becomes [{ name, lvl }], so digging with enchanted gear works', async () => {
+  const c = vm.createContext({ Object });
+  vm.runInContext(between(equipment, 'function normalizeEnchants(', 'function loadEquipmentPlugins('), c);
+  const registry = { enchantments: { 33: { name: 'sharpness' }, 40: { name: 'unbreaking' } } };
+  const raw = { enchantments: [{ id: 33, level: 5 }, { id: 40, level: 3 }] }; // captured live from the server
+  assert.deepEqual(c.normalizeEnchants(raw, registry).map((e) => ({ ...e })), [{ name: 'sharpness', lvl: 5 }, { name: 'unbreaking', lvl: 3 }]);
+  assert.deepEqual(c.normalizeEnchants([], registry).length, 0);
+  class Item { get enchants() { return raw; } }
+  const bot = new EventEmitter();
+  Object.assign(bot, { registry, inventory: { slots: [null, new Item()] } });
+  c.installEnchantsFix(bot); c.installEnchantsFix(bot); // idempotent
+  const held = new Item().enchants;
+  assert(Array.isArray(held)); assert.equal([].concat(held).length, 2, 'what digTime does with it');
 });
 
 console.log(`${passed} unit checks passed.`);

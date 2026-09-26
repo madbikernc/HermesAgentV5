@@ -1,4 +1,6 @@
-// Version: 2.99.0
+// Version: 2.100.0
+//
+// 2.100.0 (2026-09-25) -- installEnchantsFix at spawn (equipment.js 1.5.0).
 //
 // 2.99.0 (2026-09-25) -- first live hour: every bot failed on the same unreachable ripe crops; the
 // ripe-crop routine now backs off 15 min after a failed harvest.
@@ -1424,7 +1426,7 @@ import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
 import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
-import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon } from "./equipment.js";
+import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements, installDoorSupport } from "./swim-movements.js";
 import { findSkill, runSkill, recordSkillOutcome, authorSkillFromGoal } from "./skills.js";
@@ -1749,6 +1751,7 @@ bot.once("spawn", async () => {
   }
   bot.pathfinder.setMovements(movements);
   installDoorSupport(bot); // swim-movements.js: doorway waypoints, never shut an open door
+  installEnchantsFix(bot); // equipment.js: digging while holding enchanted gear threw
   // Real bug found live 2026-09-11 (direct report: "what's wrong with the bots now" -> repeated
   // "self-defense result: gave up on the fight -- took too long" against drowned specifically).
   // Confirmed by reading mineflayer-pvp's own source (lib/PVP.js, already read in full for the

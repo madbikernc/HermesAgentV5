@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.8.0
+**Version:** 2.9.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -371,6 +371,7 @@ the original incident number, still cited throughout the code. Narrative is in g
 | `entityCost` 8 — with 7–9 bots in one shelter, nearly every route touches an occupied square | 53 |
 | 4+ `dig_error` resets in 3s → global `canDig=false` for 15s. The library discards the real dig error and recomputes the identical failing path forever | 42, 48 |
 | `flee` disables digging for its own pathfind, or a cornered bot digs instead of escaping | 42 |
+| On this server version prismarine-item returns enchantments as the raw data component, and mineflayer's dig timing calls `.concat()` on it: every dig while holding enchanted gear failed. `installEnchantsFix` (equipment.js) normalizes it at spawn; the live harvest scenario holds an enchanted sword | 2026-09-25 |
 | Doors and fence gates are judged by their current state (`applyDoorState` in `swim-movements.js`): pathfinder 2.4.5 reads every door/gate as a solid wall from its block type, never opens doors, and treats an open gate as solid. Its path clean-up also lifts a doorway waypoint onto the door (or a closed gate), so `installDoorSupport` puts it back on the floor and never re-toggles an already-open door while pathfinding. Closed doors and gates are opened by `installDoorOpener` just ahead of the bot, never by pathfinder's own "use this block" step: its executor stays in block-placing mode afterwards and crashes the process when the bot carries any placeable block (Babs, three restarts, 2026-09-25). Before this (2026-09-25), bots could not pass any door, open or closed | 2026-09-25 |
 | Bots close doors and gates behind themselves once clear of them (`installDoorCloser`), without turning their head (a mid-walk look steers pathfinder backwards). Not while another player is at the doorway, and not during `herd_to_pen`, which leads an animal through the pen gate and closes it itself | 2026-09-25 |
 
