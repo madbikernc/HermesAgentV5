@@ -1,4 +1,4 @@
-// Version: 1.10.0
+// Version: 1.11.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -29,6 +29,7 @@
 // 1.8.0 | 2026-09-25 | The ripe-harvest scenario holds an enchanted sword (the enchants/dig crash).
 // 1.9.0 | 2026-09-25 | ...and starts with no seeds: it must replant from the drops.
 // 1.10.0 | 2026-09-26 | Beds: wool from a sheep, craft "bed" by wool colour, place_bed at home with a claim.
+// 1.11.0 | 2026-09-26 | Shelters: build on a site from mixed cobblestone and dirt.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -450,6 +451,31 @@ scenario("Beds: places a bed at home as two blocks facing away from her, and cla
   assert(bot.isABed(bot.blockAt(foot)) && halves.length >= 1, "both halves of the bed are there");
   assert(foot.distanceTo(home) >= 2 && foot.distanceTo(home) <= 11, `near home but not on it: ${foot}`);
   assert(await loadClaimedBed(bot), "she claimed the bed she placed");
+});
+
+// Shelters (2026-09-26): build on a chosen site from a mix of blocks (the old build needed 33+ of one
+// kind), and the result has walls, a roof, a doorway and a hollow inside.
+scenario("Shelters: builds a shelter on its site from mixed cobblestone and dirt", async () => {
+  await rcon(`give ${TESTER} minecraft:cobblestone 16`, `give ${TESTER} minecraft:dirt 16`);
+  await waitFor(() => held("cobblestone") >= 16 && held("dirt") >= 16, 8000, "mixed blocks");
+  const site = new Vec3(x - 4, y + 1, z - 4);
+  const result = await performAction(bot, { type: "build", at: { x: site.x, y: site.y, z: site.z } }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  assert.equal(result.built, true, result.text);
+  let solid = 0, total = 0;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      if (dx || dz) {
+        if (dx === 0 && dz === 1) continue; // doorway
+        for (let dy = 0; dy <= 2; dy++) { total++; if (bot.blockAt(site.offset(dx, dy, dz))?.boundingBox === "block") solid++; }
+      }
+      total++; if (bot.blockAt(site.offset(dx, 3, dz))?.boundingBox === "block") solid++; // roof
+    }
+  }
+  assert(solid >= total * 0.8, `${solid}/${total} shelter blocks in place`);
+  assert.notEqual(bot.blockAt(site)?.boundingBox, "block", "hollow inside");
+  assert.notEqual(bot.blockAt(site.offset(0, 0, 1))?.boundingBox, "block", "the doorway is open");
+  assert(held("cobblestone") < 16 && held("dirt") < 16, "both kinds of block were used");
 });
 
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);

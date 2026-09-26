@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.10.0
+**Version:** 1.11.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -93,6 +93,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.9.0 | 2026-09-25 | §11 Pathfinding: the enchantments/dig bug and `installEnchantsFix`, found by the first live hour of the farming change. |
 | 2.10.0 | 2026-09-26 | New world (seed -4028362707405145553) and bot memory wipe; §2 re-init warns about moving a live world, and lists what a fresh start wipes. |
 | 2.11.0 | 2026-09-26 | Bed goals run directly (`place_bed`, `get_wool`, bed colour in `craft`); `craft` makes its own crafting table; a bot with no bed at night makes one next morning. |
+| 2.12.0 | 2026-09-26 | Shelter goals run directly: site, materials, `build` on the site without scaffolding; the shelter check tolerates ±2 height. |
 
 ## services/minecraft-bots/README.md
 
@@ -184,3 +185,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.8.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.9.0 row. |
 | 1.9.0 | 2026-09-26 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.10.0 row. |
 | 1.10.0 | 2026-09-26 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.11.0 row. |
+| 1.11.0 | 2026-09-26 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.12.0 row. |

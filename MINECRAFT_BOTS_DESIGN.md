@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.11.0
+**Version:** 2.12.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -148,6 +148,12 @@ queued action/goal. A CHAT reply may never promise a future action that isn't ac
   holds 3 wool of, else wool from a chest (once), else `get_wool` (shear, or hunt a sheep and pick
   up the drop). A bot that finds no bed at night takes on "make myself a bed" for the morning.
   `craft` makes and places a crafting table itself when none is within 32 blocks.
+- **Shelter goals too** (the Builder's "build a small shelter", any self-proposed one): a flat, clear
+  3x3 site within 4 blocks of home (`findShelterSite`), building blocks if short (planks from logs
+  she holds, else dirt), then `build` on that site. `build` mixes any plain building blocks (never
+  sand/gravel or functional blocks), builds with pathfinder scaffolding off (dirt and cobblestone are
+  its defaults, and she pillared up inside her own shelter), and the goal is done only when
+  `hasShelterNearHome()` -- which now looks 2 blocks above and below spawn height -- sees it.
 
 **DONE is never accepted on the model's word.** Inventory and world state are re-checked
 (`builderPriorityItemSatisfied()` and friends); a rejected claim logs `REJECTED DONE` /

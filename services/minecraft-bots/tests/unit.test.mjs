@@ -1,4 +1,4 @@
-// Version: 1.14.0
+// Version: 1.15.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -28,6 +28,7 @@
 // 1.12.0 | 2026-09-25 | Ripe-crop routine backoff; drops collected only after a real harvest.
 // 1.13.0 | 2026-09-25 | Enchants normalization (digging with enchanted gear).
 // 1.14.0 | 2026-09-26 | Beds: colour choice, bed site, bed goal routing and runner, the no-bed-at-night goal.
+// 1.15.0 | 2026-09-26 | Shelters: materials, site, routing, the height-tolerant shelter check, the goal runner.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -1129,7 +1130,7 @@ await check('Farm goals: a missing hoe is fetched (loot, then craft) and the har
 });
 
 await check('Farm goals: holding a crop, or a DONE claim, never finishes one -- only a harvest', async () => {
-  assert.match(index, /goal\.farmTask \?\?= farmTaskFor\(goal\.description\);[\s\S]{0,400}if \(goal\.targetItem && holdsItem\(goal\.targetItem\)\)/,
+  assert.match(index, /goal\.farmTask \?\?= farmTaskFor\(goal\.description\);[\s\S]{0,900}if \(goal\.targetItem && holdsItem\(goal\.targetItem\)\)/,
     'farm/ranch routing runs before the "already holding the target" shortcut and the skill lookup');
   const w = farmGoalWorld([{ ok: false, text: "couldn't start a farm: tilled 0, planted 0 (the grass_block didn't turn to farmland)." }]);
   await w.tick(); await w.tick(); await w.tick();
@@ -1409,6 +1410,91 @@ await check('Beds: a night with no bed gives an idle bot a bed goal for the morn
   assert.equal(vm.runInContext('currentGoal.farmTask', c), 'bed');
   await c.wantBed();
   assert.equal(saved.length, 1, 'an existing goal is left alone');
+});
+
+// Shelters (2026-09-26).
+const shelterFns = () => {
+  const c = vm.createContext({ Vec3: V3, Math, isProtectedBlockName: (n) => /chest|_bed$|_door$|crafting_table|furnace/.test(n) });
+  vm.runInContext(between(actions, 'const SHELTER_MATERIAL', 'export const CROP_MAX_AGE').replace(/export /g, ''), c);
+  return c;
+};
+
+await check('Shelters: any mix of plain building blocks; never sand, gravel, valuables or functional blocks', async () => {
+  const c = shelterFns();
+  for (const n of ['dirt', 'cobblestone', 'oak_planks', 'spruce_log', 'stripped_birch_log', 'crimson_stem', 'stone_bricks', 'deepslate']) {
+    assert.equal(c.isShelterMaterial(n), true, n);
+  }
+  for (const n of ['sand', 'gravel', 'chest', 'crafting_table', 'diamond_block', 'torch', 'oak_leaves', 'tnt', 'iron_ore']) {
+    assert.equal(c.isShelterMaterial(n), false, n);
+  }
+  const bot = { inventory: { items: () => [{ name: 'dirt', count: 20 }, { name: 'cobblestone', count: 12 }, { name: 'sand', count: 64 }] } };
+  assert.equal(c.shelterMaterialCount(bot), 32, 'dirt and cobblestone add up; sand does not count');
+  assert.equal(c.shelterPositions(new V3(0, 64, 0)).length, 30, '7 wall columns x 3 + a 3x3 roof');
+  const build = actions.slice(actions.indexOf('case "build": {'), actions.indexOf('case "build_pen": {'));
+  assert.match(build, /buildMovements\.scafoldingBlocks = \[\];/, 'no scaffolding: she pillared up inside her own shelter');
+  assert.match(build, /buildMovements\.allow1by1towers = false;/);
+  assert.match(build, /finally \{\s+if \(bot\.pathfinder\.movements === buildMovements\) bot\.pathfinder\.setMovements\(sharedMovements\);/);
+});
+
+function shelterWorld({ groundY = (x, z) => 63, blocked = [] } = {}) {
+  const b = new Set(blocked.map((p) => `${p.x},${p.y},${p.z}`));
+  return { blockAt: (p) => (p.y <= groundY(p.x, p.z) || b.has(`${p.x},${p.y},${p.z}`)
+    ? { name: 'grass_block', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' }) };
+}
+
+await check('Shelters: the site is a flat, clear 3x3 within 4 blocks of home, even a step above or below it', async () => {
+  const c = shelterFns();
+  const home = new V3(0, 64, 0);
+  const flat = c.findShelterSite(shelterWorld(), home);
+  assert.deepEqual([flat.x, flat.y, flat.z], [0, 64, 0], 'right on home when that is clear');
+  const tree = c.findShelterSite(shelterWorld({ blocked: [new V3(0, 65, 0)] }), home);
+  assert(Math.max(Math.abs(tree.x), Math.abs(tree.z)) <= 4 && Math.max(Math.abs(tree.x), Math.abs(tree.z)) >= 2, `moved off the obstacle: ${tree}`);
+  const raised = c.findShelterSite(shelterWorld({ groundY: () => 64 }), home);
+  assert.equal(raised.y, 65, 'the ground is a block higher than spawn');
+  assert.equal(c.findShelterSite(shelterWorld({ groundY: (x, z) => 63 + ((x + z) & 1) }), home), null, 'nowhere flat');
+});
+
+await check('Shelters: shelter goals are recognised, and the shelter check finds one a block above spawn', async () => {
+  const c = vm.createContext({ setInterval() {}, Date });
+  vm.runInContext(farmGoalSrc(), c);
+  assert.equal(c.farmTaskFor('go home and build a small shelter there'), 'shelter');
+  assert.equal(c.farmTaskFor("No roof over my head yet... I'm building a quick shelter nearby"), 'shelter');
+  assert.equal(c.farmTaskFor('go to the shelter and wait'), null);
+  // A complete shelter whose floor is at spawn height + 1: the old check only looked at spawn height.
+  const s = shelterFns();
+  const solid = new Set(s.shelterPositions(new V3(0, 65, 0)).map((p) => `${p.x},${p.y},${p.z}`));
+  const bot = { spawnPoint: new V3(0, 64, 0),
+    blockAt: (p) => ({ boundingBox: p.y <= 64 || solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' }) };
+  const h = vm.createContext({ bot, Math });
+  vm.runInContext(between(index, 'function shelterGeometryPositions(', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+  assert.equal(h.hasShelterNearHome(), true);
+});
+
+await check('Shelters: a shelter goal gets materials (planks from her logs), builds on its site, and is done when it stands', async () => {
+  const inv = [{ name: 'oak_log', count: 3 }];
+  let standing = false; const calls = []; const done = [];
+  const performAction = async (b, action) => {
+    calls.push(action.type + (action.item ? `:${action.item}` : '') + (action.block ? `:${action.block}` : ''));
+    if (action.type === 'craft') { inv.push({ name: 'oak_planks', count: 40 }); return { ok: true, text: 'crafted planks' }; }
+    if (action.type === 'build') { standing = true; return { ok: true, text: 'built a small shelter', built: true }; }
+    return { ok: false, text: '?' };
+  };
+  const s = shelterFns();
+  const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Amy', MAX_CONSECUTIVE_FAILURES: 3,
+    bot: { chat() {}, spawnPoint: new V3(0, 64, 0), inventory: { items: () => inv }, entities: {},
+      blockAt: () => ({ boundingBox: 'empty' }) },
+    Vec3: V3, performAction, narrateAction: async (t) => t, recordGoalOutcome() {},
+    broadcastGoalState: async (status) => { done.push(status); }, retireGoal: async () => {}, saveGoalIfCurrent: async () => {},
+    logStep: () => {}, farmStatus: () => ({ ripe: 0, growing: 0 }), loadPenLocation: async () => null, LIVESTOCK: [],
+    BREEDING_FOOD: {}, countInPen: () => 0, findPenSite: () => null, woolCounts: () => ({}), bedItemFor: () => 'white_bed',
+    hasShelterNearHome: () => standing, findShelterSite: () => new V3(1, 64, 1), shelterPositions: s.shelterPositions,
+    shelterMaterialCount: (b) => b.inventory.items().filter((i) => /_(planks|log)$/.test(i.name)).reduce((n, i) => n + i.count, 0) });
+  vm.runInContext(farmGoalSrc(), c);
+  const goal = { description: 'go home and build a small shelter there', createdAt: Date.now(), consecutiveFailures: 0 };
+  for (let i = 0; i < 4 && !done.length; i++) await c.runShelterGoal(goal, async () => true, () => ({ release() {} }), () => false);
+  assert.deepEqual(calls, ['craft:oak_planks', 'build']);
+  assert.deepEqual(done, ['done']);
+  assert.deepEqual({ ...goal.shelterAt }, { x: 1, y: 64, z: 1 });
 });
 
 console.log(`${passed} unit checks passed.`);

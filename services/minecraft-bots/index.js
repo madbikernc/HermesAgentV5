@@ -1,4 +1,8 @@
-// Version: 2.101.0
+// Version: 2.102.0
+//
+// 2.102.0 (2026-09-26) -- shelter goals run directly (site, materials, build; done only when
+// hasShelterNearHome() sees it), and that check now finds a shelter up to 2 blocks above or below
+// spawn height, not only at it.
 //
 // 2.101.0 (2026-09-26) -- bed goals ("craft a bed", the Builder's "set up more beds") run directly:
 // place a held bed, else craft one, else wool from a chest or sheep; done only when a bed stands
@@ -1428,7 +1432,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -3064,12 +3068,16 @@ function hasShelterNearHome() {
   // philosophy rather than multiplying the already-real cost (81 candidate anchors x 30 blockAt
   // calls each) by a third axis for a much smaller real-world benefit.
   const SHELTER_SEARCH_RADIUS = 4; // gohome's own GoalNear(..., 3) tolerance, plus a 1-block margin
+  // 2026-09-26: also 2 blocks above/below spawn height -- a real shelter one step up a slope from
+  // spawn never counted, so the Builder was sent to build it again and again.
   for (let dx = -SHELTER_SEARCH_RADIUS; dx <= SHELTER_SEARCH_RADIUS; dx++) {
     for (let dz = -SHELTER_SEARCH_RADIUS; dz <= SHELTER_SEARCH_RADIUS; dz++) {
-      const base = center.offset(dx, 0, dz);
-      const positions = shelterGeometryPositions(base);
-      const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
-      if (solid >= positions.length * 0.8 && hasHollowInterior(base)) return true;
+      for (let dy = -2; dy <= 2; dy++) {
+        const base = center.offset(dx, dy, dz);
+        const positions = shelterGeometryPositions(base);
+        const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
+        if (solid >= positions.length * 0.8 && hasHollowInterior(base)) return true;
+      }
     }
   }
   return false;
@@ -3478,6 +3486,7 @@ const RANCH_WORDS = /\b(ranch(ing)?|breed(ing)?|livestock|(animal|cow|sheep|pig|
 function farmTaskFor(description) {
   if (!description) return null;
   if (BED_WORDS.test(description) && !NOT_MAKING_A_BED.test(description)) return "bed";
+  if (SHELTER_WORDS.test(description)) return "shelter";
   if (RANCH_WORDS.test(description)) return "ranch";
   if (FARM_WORDS.test(description) && !NOT_A_CROP_FARM.test(description)) return "farm";
   return null;
@@ -3693,6 +3702,49 @@ async function wantBed() {
   console.log(`[${USERNAME}] no bed to sleep in -- new goal: ${BED_GOAL}`);
 }
 
+// Shelters (2026-09-26): the Builder's "build a small shelter" went to the planner -- 202 rejected
+// DONE claims and one real "build" in two days. A shelter goal now runs directly: a flat, clear
+// site within 4 blocks of home, enough building blocks (planks from logs she holds, else dirt), then
+// "build" on that site. Done only when hasShelterNearHome() sees it.
+const SHELTER_WORDS = /\b(build(ing)?|mak(e|ing)|set(ting)? up|put(ting)? up|need)\b[^.]*?\bshelter\b/i;
+
+async function shelterStep(goal, handle) {
+  if (hasShelterNearHome()) return { ok: true, text: "there's a shelter at home.", done: true };
+  if (!bot.spawnPoint) return { ok: false, text: "don't know where home is yet." };
+  const site = goal.shelterAt ? new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z) : findShelterSite(bot, bot.spawnPoint);
+  if (!site) return { ok: false, text: "couldn't find a flat, clear 3x3 spot within 4 blocks of home." };
+  goal.shelterAt = { x: site.x, y: site.y, z: site.z };
+  const needed = shelterPositions(site).filter((p) => bot.blockAt(p)?.boundingBox !== "block").length;
+  const short = needed - shelterMaterialCount(bot);
+  if (short > 0) {
+    const log = bot.inventory.items().find((i) => /_(log|stem)$/.test(i.name));
+    if (log) {
+      const item = `${log.name.replace(/^stripped_/, "").replace(/_(log|stem)$/, "")}_planks`;
+      return { ...(await performAction(bot, { type: "craft", item, count: short }, USERNAME, handle)), action: { type: "craft", item } };
+    }
+    return { ...(await performAction(bot, { type: "mine", block: "dirt", count: short }, USERNAME, handle)),
+      action: { type: "mine", block: "dirt" } };
+  }
+  const built = await performAction(bot, { type: "build", at: goal.shelterAt }, USERNAME, handle);
+  return { ...built, done: !!built.built && hasShelterNearHome(), action: { type: "build" } };
+}
+
+async function runShelterGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  const step = await shelterStep(goal, getHandle());
+  getHandle()?.release();
+  if (step.cancelled || replaced()) return;
+  logStep(goal, `shelter: ${step.text}`, step.ok, step.action);
+  console.log(`[${USERNAME}] shelter goal: ${step.text} (ok=${step.ok})`);
+  if (step.done) return completeGoal(goal, "built a shelter at home");
+  if (step.ok) {
+    goal.consecutiveFailures = 0;
+    await saveGoalIfCurrent(goal);
+    return;
+  }
+  await failGoalStep(goal, step.text);
+}
+
 async function goalTick() {
   if (!AUTONOMY_ENABLED || routineBlocked("goalTick")) return;
   // Review MB-14: no new work or goal steps from dusk to dawn (the goal is paused, not dropped).
@@ -3769,6 +3821,10 @@ async function goalTick() {
     }
     if (goal.farmTask === "bed") {
       await runBedGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    if (goal.farmTask === "shelter") {
+      await runShelterGoal(goal, takeControl, () => handle, replaced);
       return;
     }
     if (goal.targetItem && holdsItem(goal.targetItem)) {

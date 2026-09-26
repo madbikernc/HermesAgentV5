@@ -1,4 +1,8 @@
-// Version: 1.76.0
+// Version: 1.77.0
+//
+// 1.77.0 (2026-09-26) -- shelters: build takes a site (action.at), mixes any plain building blocks
+// (isShelterMaterial -- never sand/gravel or functional blocks), counts only what's missing, and says
+// whether the result passes the 80% shelter check. New findShelterSite / shelterPositions.
 //
 // 1.76.0 (2026-09-26) -- craft makes and places a crafting table when none is around. Beds ("I don't think the bots know how to build a bed"): craft "bed" picks
 // the colour she has wool for; loot takes "wool"; new get_wool (shear, or hunt a sheep, and pick up
@@ -2343,6 +2347,69 @@ export function findBedSite(bot, home) {
   return best;
 }
 
+// Shelters (2026-09-26, "what's wrong with shelter building?"): in two days the Builder got "build a
+// small shelter" 120 times, the planner claimed it done 202 times (all rejected), and "build" ran
+// once. It also only built from one stack of 33+ of a single block (the biggest stack, sand and
+// gravel included), wherever she happened to stand.
+// Plain building blocks she may use, mixed freely; never gravity blocks or anything valuable/functional.
+const SHELTER_MATERIAL = /^(dirt|coarse_dirt|rooted_dirt|cobblestone|cobbled_deepslate|mossy_cobblestone|stone|deepslate|andesite|diorite|granite|tuff|calcite|netherrack|blackstone|basalt|sandstone|red_sandstone|packed_mud|mud_bricks|bricks|stone_bricks|.+_planks|(stripped_)?.+_(log|wood|stem|hyphae))$/;
+
+export function isShelterMaterial(name) {
+  return SHELTER_MATERIAL.test(name);
+}
+
+export function shelterMaterialCount(bot) {
+  return bot.inventory.items().filter((i) => isShelterMaterial(i.name)).reduce((n, i) => n + i.count, 0);
+}
+
+// The 3x3 shelter around `base` (its interior cell, at floor level): walls three high except a
+// doorway on the +z side, then a roof. Same shape index.js's hasShelterNearHome() checks for.
+export function shelterPositions(base) {
+  const walls = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      if (Math.abs(dx) !== 1 && Math.abs(dz) !== 1) continue; // interior column
+      if (dx === 0 && dz === 1) continue; // doorway column
+      for (let dy = 0; dy <= 2; dy++) walls.push(base.offset(dx, dy, dz));
+    }
+  }
+  const roof = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) roof.push(base.offset(dx, 3, dz));
+  }
+  return [...walls, ...roof];
+}
+
+// A flat, clear 3x3 footprint within 4 blocks of home (the range hasShelterNearHome() looks in):
+// solid ground under all nine columns, four blocks of open air above each (small plants are fine,
+// she clears nothing she'd need), no bed/door/chest in the way. Nearest to home wins.
+export function findShelterSite(bot, home) {
+  const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
+  const clear = (p) => {
+    const b = bot.blockAt(p);
+    return !!b && b.boundingBox !== "block" && b.name !== "water" && b.name !== "lava" && !isProtectedBlockName(b.name);
+  };
+  let best = null, bestDist = Infinity;
+  for (let dx = -4; dx <= 4; dx++) {
+    for (let dz = -4; dz <= 4; dz++) {
+      for (let dy = -2; dy <= 2; dy++) {
+        const base = new Vec3(hx + dx, hy + dy, hz + dz);
+        const dist = Math.hypot(dx, dz) + Math.abs(dy) * 0.5;
+        if (dist >= bestDist) continue;
+        let ok = true;
+        for (let ox = -1; ox <= 1 && ok; ox++) {
+          for (let oz = -1; oz <= 1 && ok; oz++) {
+            ok = bot.blockAt(base.offset(ox, -1, oz))?.boundingBox === "block";
+            for (let oy = 0; oy <= 3 && ok; oy++) ok = clear(base.offset(ox, oy, oz));
+          }
+        }
+        if (ok) { best = base; bestDist = dist; }
+      }
+    }
+  }
+  return best;
+}
+
 export const CROP_MAX_AGE = { wheat: 7, carrots: 7, potatoes: 7, beetroots: 3 };
 
 // Breaking a crop (or the grass on a plot) from 2 blocks away leaves its drops on the ground -- the
@@ -3797,53 +3864,39 @@ async function performActionAs(bot, action, speaker, token) {
     }
 
     case "build": {
-      // Direct request, 2026-09-07 ("build the water crossing mechanic" -> "do 1,2,4,5" -> a
-      // real building capability, the "own pass" this file's header always said it deserved
-      // rather than being half-built alongside navigate/gather/fight, see the header's own
-      // 1.0.0-era comment). Deliberately one fixed, small shape (a 3x3 footprint, three walls
-      // tall, one doorway, a roof) using whatever solid block she already has the most of --
-      // not a general blueprint/planning system (even Voyager needs human feedback for its own
-      // house-building; a real planner is its own much bigger feature, left for a future pass
-      // same as this one was). Placement order matters: walls are generated ground-up
-      // (dy 0 -> 1 -> 2 per column) so each new block always has an already-placed block right
-      // below it to reference off of, and the roof is generated so the center tile references an
-      // already-placed edge tile horizontally -- no cell ever needs a reference that doesn't
-      // exist yet. The doorway (south edge, one column, all three wall heights) is never in the
-      // placement list at all, so she can never seal herself in no matter what order placement
-      // actually succeeds in.
-      const material = bot.inventory.items()
-        .filter((i) => bot.registry.blocksByName[i.name] && !isEssentialItem(i.name))
-        .sort((a, b) => b.count - a.count)[0];
-      if (!material) return fail("don't have a good building material -- need a stack of some solid block.");
+      // A small fixed shelter (3x3, walls three high with a doorway, a roof). Rebuilt 2026-09-26:
+      // any mix of plain building blocks (isShelterMaterial), only the blocks not already solid
+      // count toward what she needs, and action.at puts it on a chosen site (a shelter goal's
+      // findShelterSite) rather than wherever she stood. No site: around her, as before.
+      const base = action.at ? new Vec3(action.at.x, action.at.y, action.at.z).floored() : bot.entity.position.floored();
+      const buildOrder = shelterPositions(base);
+      const missing = () => buildOrder.filter((pos) => bot.blockAt(pos)?.boundingBox !== "block").length;
+      const needed = missing();
+      if (!needed) return { ...ok("the shelter is already standing."), built: true };
+      const have = shelterMaterialCount(bot);
+      if (have < needed) {
+        return { ...fail(`need ${needed} building blocks (dirt, cobblestone, planks...) for a small shelter, only have ${have}.`),
+          short: needed - have };
+      }
 
-      const base = bot.entity.position.floored();
-      const wallPositions = [];
-      for (let dx = -1; dx <= 1; dx++) {
-        for (let dz = -1; dz <= 1; dz++) {
-          if (Math.abs(dx) !== 1 && Math.abs(dz) !== 1) continue; // interior column -- no wall here
-          if (dx === 0 && dz === 1) continue; // doorway column -- never placed, on purpose
-          for (let dy = 0; dy <= 2; dy++) wallPositions.push(base.offset(dx, dy, dz));
-        }
-      }
-      const roofPositions = [];
-      for (let dx = -1; dx <= 1; dx++) {
-        for (let dz = -1; dz <= 1; dz++) roofPositions.push(base.offset(dx, 3, dz));
-      }
-      const buildOrder = [...wallPositions, ...roofPositions];
-
-      const needed = buildOrder.length;
-      if (material.count < needed) {
-        return fail(`need ${needed} ${material.name} for a small shelter, only have ${material.count}.`);
-      }
+      // Pathfinder's default scaffolding blocks are dirt and cobblestone -- the shelter's own
+      // materials -- so reaching for the roof she pillared up inside it and filled the interior
+      // (live test, 2026-09-26). Build on a copy with no scaffolding and no pillaring (flee's
+      // pattern), and reach 4 so the roof can be placed from the ground.
+      const sharedMovements = bot.pathfinder.movements;
+      const buildMovements = Object.assign(Object.create(Object.getPrototypeOf(sharedMovements)), sharedMovements);
+      buildMovements.scafoldingBlocks = [];
+      buildMovements.allow1by1towers = false;
+      bot.pathfinder.setMovements(buildMovements);
 
       let placed = 0;
+      try {
       for (const pos of buildOrder) {
         if (token.cancelled) break;
-        const existing = bot.blockAt(pos);
-        if (existing?.boundingBox === "block") { placed++; continue; } // terrain already solid here
+        if (bot.blockAt(pos)?.boundingBox === "block") continue; // terrain already solid here
 
         try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 4)),
             ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
         } catch {
           if (token.cancelled) break;
@@ -3853,8 +3906,6 @@ async function performActionAs(bot, action, speaker, token) {
         }
         if (token.cancelled) break;
 
-        // A solid neighbor to place against, below first (matches how a wall naturally grows
-        // upward), otherwise whichever cardinal/vertical neighbor is already solid.
         let refBlock = null, face = null;
         for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
           const neighbor = bot.blockAt(pos.offset(dx, dy, dz));
@@ -3864,11 +3915,11 @@ async function performActionAs(bot, action, speaker, token) {
             break;
           }
         }
-        if (!refBlock) continue; // nothing solid to place against yet -- skip, a later pass could catch it
+        if (!refBlock) continue; // nothing solid to place against yet -- the second pass below catches it
 
+        const item = bot.inventory.items().filter((i) => isShelterMaterial(i.name)).sort((a, b) => b.count - a.count)[0];
+        if (!item) break; // ran out mid-build
         try {
-          const item = bot.inventory.items().find((i) => i.name === material.name);
-          if (!item) break; // ran out mid-build
           await bot.equip(item, "hand");
           await bot.placeBlock(refBlock, face);
           placed++;
@@ -3876,10 +3927,17 @@ async function performActionAs(bot, action, speaker, token) {
           console.error(`build: placement failed at ${pos}:`, err.message);
         }
       }
+      } finally {
+        if (bot.pathfinder.movements === buildMovements) bot.pathfinder.setMovements(sharedMovements);
+      }
+      await refreshGear(bot);
 
-      if (token.cancelled) return ok(`stopped building (${placed}/${needed} placed).`);
-      if (!placed) return fail("couldn't place any of the shelter.");
-      return ok(`built a small shelter out of ${material.name} (${placed}/${needed} blocks placed).`);
+      if (token.cancelled) return ok(`stopped building (${placed} placed, ${missing()} still missing).`);
+      const left = missing();
+      if (!placed && left) return fail(`couldn't place any of the shelter (${left} blocks still missing).`);
+      const built = left <= Math.floor(buildOrder.length * 0.2); // the same 80% index.js's check accepts
+      return { ...(built ? ok(`built a small shelter (${placed} blocks placed).`)
+        : fail(`built part of a shelter: ${placed} placed, ${left} still missing.`)), built };
     }
 
     case "build_pen": {
