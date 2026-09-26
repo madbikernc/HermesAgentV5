@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 2.2.0
+**Version:** 2.3.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -8,7 +8,11 @@ schedulers still Sintra/Amy-shaped, a security-relevant sudoers leftover, a sync
 live-caught executable-bit regression, all real, all fixed. S16 closed the RAG stack's remaining gaps —
 reranking measured a real +16.7pp recall@5 improvement (0.538→0.705), not an assumed one; optional
 per-page OCR verified against a real, naturally-occurring scanned page, not a staged one. S8
-was the point of no return — Sintra and Amy no longer have live gateways. **2026-08-30: the "later stage"
+was the point of no return — Sintra and Amy no longer have live gateways. S18 closed with its exit gate
+deliberately **missed** — RoCE is fixed and persistent at 13.0 GB/s, but GB10 has no GPUDirect RDMA, so
+`TP=2` stays non-viable and MiMo does not proceed. **S19 is planned, not executed** — a fourth node
+(`Anvil`, a Windows RTX 5090) adding image→mesh→printable-STL generation as a third broker job type;
+nothing in it has been run on the fleet. **2026-08-30: the "later stage"
 this line used to wait on happened — `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` were consolidated
 into this repo and all three nodes (`spark`, `spark-2`, `HomeD13`) were cut over to it. `HermesAgentV4` is
 now superseded, not live; this repo is the deployed checkout.** See `README.md`'s status section for the
@@ -49,6 +53,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S14 | Ops tooling retarget, rename debt, sync coverage, cross-repo comparability | ✅ Done (2026-08-29) |
 | S15 | `hermes-logs` — the log analyst | ✅ Done (2026-08-29) |
 | S16 | RAG stack: eval harness, reranker, optional OCR (retriever already live, independently built) | ✅ Done (2026-08-31) — recall@5 0.538→0.705 |
+| S19 | `Anvil` — mesh node (TRELLIS.2 on a Windows 5090) + print-ready repair chain | 📋 Planned, not executed (2026-09-26) |
 
 ---
 
@@ -1817,6 +1822,251 @@ node now. **Measure it with `omni` actually stopped**, per V4 §4a's warning tha
 the `omni` role cutover are all downstream of the exit gate. So is S12's merged mode, which this
 stage would also unblock but does not itself deliver.
 
+### S19 — `Anvil`: the mesh node and a print-ready pipeline
+
+**Planned, not executed.** Nothing in this stage has been run on the fleet. Every figure below is either
+cited to a primary source or explicitly flagged as unverified — no generation time, VRAM number, or success
+rate here has been measured on this hardware yet.
+
+Adds a fourth node and a third job type: image/text → 3D mesh → watertight STL, for 3D printing. The
+capability was previously explored off-fleet (Stability Matrix + ComfyUI + TripoSR + OpenSCAD on a 16GB
+RTX 3080 Ti, one F4U Corsair STL produced as a test case). This stage brings it onto the fleet properly,
+behind the same broker/worker/screening seams every other artifact-producing capability already uses.
+
+**Node name: `Anvil`** — a Windows box with an RTX 5090, joining `Watch` (spark) / `Forge` (spark-2) /
+`Kiln` (HomeD13). Continues the existing metaphor, and it is the right one: `Kiln` fires images, `Anvil`
+shapes solids. Like `Kiln` it is a **tooling endpoint — no agent, no persona, no Matrix identity** (§4.3's
+own pattern). §4 gains a `4.4` node subsection when this stage executes; §4 is not edited while S19 is
+merely planned, per the same discipline S16/S18 followed.
+
+#### Why not the Sparks
+
+The obvious instinct — put this on the GB10s, which have 128GB unified memory each — is wrong, and the
+reasoning is the same reasoning S18 ended on. The Sparks are `aarch64` + `sm_121` + CUDA 13.x, and that
+combination has no prebuilt wheels for this workload: every dependency must exist for ARM64 or be built
+from source. S18 spent real effort discovering that GB10's coherent unified memory makes the legacy
+discrete-GPU path (`nvidia_peermem`, GPUDirect RDMA) structurally inapplicable — a reminder that this
+hardware is genuinely off the beaten path for third-party CUDA code, not merely new.
+
+`Anvil` is `x86_64` + `sm_120` + Windows, which is where this ecosystem's prebuilt wheels actually exist
+(§S19a). The Sparks keep the work they are good at: deciding *what* to generate, evaluating the result,
+and owning the job's lifecycle. **No mesh inference is planned on Watch or Forge.** If `Anvil` is ever
+retired, this capability goes with it rather than silently falling back to a node that cannot run it.
+
+#### S19a — Stand up `Anvil` (model choice and the real install gates)
+
+**Model: TRELLIS.2 (Microsoft, 4B, image-to-3D), via `visualbruno/ComfyUI-Trellis2`.** Chosen over
+Hunyuan3D 2.1 on licensing and maintenance, both verified against primary sources rather than assumed:
+
+- **TRELLIS.2 is MIT, and the MIT terms cover the weights as well as the code** (HF model card tags the
+  4B weights `mit`, ungated). No revenue threshold, no territory clause, no acceptable-use rider.
+- **Hunyuan3D's licence is a Community licence, not a non-commercial one** — a correction worth recording,
+  since third-party forks' own source headers mislabel it "NON-COMMERCIAL". Commercial use is permitted
+  below **1 million MAU** (not 100M, a figure that circulates), but the **Territory excludes the EU, UK,
+  and South Korea**. Irrelevant to hobby printing from Virginia; relevant if anything derived is ever
+  redistributed, since the agreement must be passed along and stay in-Territory.
+- ComfyUI-Trellis2 is actively maintained (changelog entries through 2026-02-27). The Hunyuan3D Blackwell
+  route requires hand-compiling `custom_rasterizer` for `sm_120` with VS 2022 Build Tools v14.44
+  (explicitly **not** VS 2026), CUDA Toolkit 12.8, a patched `setup.py` with `--allow-unsupported-compiler`
+  and `TORCH_CUDA_ARCH_LIST=12.0`. That is a real, documented, fragile build; TRELLIS.2 ships wheels.
+
+Hunyuan3D 2.1 stays the **documented fallback**, not a dead end — its PBR texture quality is genuinely
+better, and if textured output is ever wanted, that build cost becomes worth paying. Printing does not
+need it (see S19c).
+
+Three real install gates, all verified and all of which would otherwise be discovered late:
+
+1. **DINOv3 is gated.** TRELLIS.2 requires `facebook/dinov3-vitl16-pretrain-lvd1689m` cloned into
+   `ComfyUI/models/facebook/`. That HF repo requires agreeing to share contact information and is
+   licensed under Meta's proprietary `dinov3-license` — **not** MIT. So the pipeline is MIT at the
+   TRELLIS.2 layer and proprietary-gated one layer down. Request access **first**; nothing else in this
+   stage can be tested without it. Same class of gate as S11's model-ID discipline: confirm the artifact
+   is actually obtainable before building around it.
+2. **Pin the wheel set to Torch 2.10 / CUDA 13.1, cp311–cp313.** The repo ships Windows wheels
+   (`cumesh`, `custom_rasterizer`, `flex_gemm`, `nvdiffrast`, `o_voxel`, `natten`, `dcx_pkg`) for
+   Torch 2.7.0 and 2.8.0 + cu128 *and* for **Torch 2.10 / CUDA 13.1**, which is the set to use. **There
+   are no Torch 2.11 Windows wheels** — an open upstream request (issue #184). Do not install Torch 2.11
+   on this node and expect the wheels to load; the version ceiling is 2.10, set by someone else's build
+   schedule, not by preference.
+3. **CuMesh's remeshing path is broken on `sm_120` — on this exact GPU class.** The repo ships
+   `blackwell_fix.py` for precisely this: it replaces the CUDA `to_glb()` mesh extraction with a
+   **CPU voxel/marching-cubes path** on RTX 5070/5070 Ti/5080/5090. Related symptom upstream is the
+   classic wrong-arch `NATTEN ... no kernel image is available` (issue #187). **Consequence to size
+   before the first real job: part of the mesh extraction runs on CPU, so wall-clock will not look like
+   a pure-GPU pipeline.** This directly feeds the timeout question in S19b, and it is the single most
+   likely source of an unpleasant surprise in this stage.
+
+**Unverified and deliberately not guessed:** TRELLIS.2's actual VRAM requirement. Upstream documents no
+figure. Secondary sources say "16GB+", which the 5090 clears either way, so this does not gate the stage —
+but it will be measured on first run rather than asserted here.
+
+> **Open discrepancy, flagged not silently corrected:** this node was described as a **24GB** 5090. A
+> retail RTX 5090 is **32GB**; 24GB would be a 5080 Super-class card or a misremembered figure. It does
+> not change any decision in S19 (both clear the requirement, and shape-only inference is the cheap path
+> regardless), so it is not worth blocking on — but the real figure should be read off `nvidia-smi` on the
+> node and written in before anyone sizes a batch against it.
+
+Firewall posture is set at install time, not after. **S10 found ComfyUI's port 8188 open to the entire LAN
+on `Kiln` and flagged it rather than silently narrowing it** — `Anvil` does not get to repeat that. Its
+ComfyUI port is scoped to the fleet's own hosts from the first minute. Note this is **Windows Firewall, not
+`ufw`** — the fleet's whole isolation vocabulary (S4, S10) is `ufw`-shaped, and this node is the first
+exception. Write the rules as a checklist in `infra/anvil/README.md` in the same recipe style as
+`infra/comfyui/README.md`.
+
+#### S19b — A `mesh` job type through the existing broker
+
+No new transport, no new queue, no new agent. `hermes-broker.py` already treats `type` as an opaque
+`TEXT NOT NULL` column, and `hermes-render-worker.py` was already generalized from render-only to a
+`JOB_TYPE`-parameterized worker at Stage 6, with one systemd instance per type. Stage 6 added `video` that
+way; **S19 adds `mesh` the same way**, which is the established extension path rather than a new one.
+
+- **A third worker instance on `Anvil`** with `JOB_TYPE=mesh`, claiming `/jobs/claim?type=mesh`. Not a
+  systemd unit — this is Windows. Needs a real service wrapper (NSSM or a Task Scheduler
+  at-boot task); the fleet's `Restart=always` semantics must be reproduced deliberately, not assumed.
+- **`hermes-render-request.sh` gains `--type mesh`**, alongside `render|video`. The client already
+  threads `--type` through untouched, so this is an allowlist entry plus a poll budget.
+- **`screen_artifact()` gains a mesh branch.** Today it does real magic-byte checks — PNG/JPEG/WEBP for
+  images, a video signature for video — before an artifact is ever uploaded or delivered. A mesh artifact
+  gets the same treatment on its own terms: `glTF`'s `glTF` magic for `.glb`, and for `.stl` the honest
+  observation that **binary STL has no magic number** — it is an 80-byte free-form header followed by a
+  `uint32` triangle count, so the real check is `80 + 4 + 50 × count == filesize`, a structural check, not
+  a signature. Say so in the code rather than pretending a signature exists. ASCII STL starts with
+  `solid`, which is checkable but is not a guarantee.
+- **Matrix delivery.** The broker maps `image/*` → `m.image` and `video/*` → `m.video`; a `.glb`/`.stl`
+  has no such mapping and will land as a generic file. That is acceptable — but a large mesh is not
+  something anyone wants pushed into a room by default, so **`mesh` is a candidate for
+  `BROKER_QUIET_TYPES`**, which already exists precisely to skip Matrix delivery per type while keeping
+  the job's real result retrievable.
+
+**The timeout question, sized before the first run rather than after.** This is the one thing in S19 with
+a known-in-advance failure mode, and the fleet has already paid for this lesson once: Stage 6's
+`JOB_TIMEOUT` was sized against a 33-frame video measurement, and a real, legitimate 121-frame job
+(1415s) would have been killed mid-generation — a false failure on work that actually succeeds given
+time. Two specifics make mesh jobs the same shape of risk:
+
+- the CPU marching-cubes fallback from S19a means wall-clock is not GPU-bound, and
+- **the broker's claim lease is fleet-wide with no per-type override** — by its own design note — so a
+  long mesh job risks having its claim reclaimed out from under it, which is a *different and worse*
+  failure than a clean timeout.
+
+So: **measure a real generation end-to-end first, then set `JOB_TIMEOUT`, the client poll budget, and the
+lease against that measurement** — in that order, the same order Stage 6 should have used. Record the real
+number the way `infra/comfyui/README.md` records its measured video timings, including how cost scales with
+whatever the quality knob turns out to be. Do not extrapolate linearly from one data point; Stage 6's own
+frame-count table is the reason that warning is here.
+
+#### S19c — Printable, not merely generated
+
+A generated mesh is not a printable one. Output arrives non-manifold, with floating fragments, holes, and
+no guarantee of a closed volume — a slicer will either refuse it or silently produce garbage. This is the
+half of the problem that the AI-3D ecosystem consistently under-serves, and it is where this stage earns
+its keep.
+
+**Shape-only, texture off.** TRELLIS.2 exposes a mesh-only path distinct from its texturing nodes
+(`Trellis2MeshWithVoxelGenerator` / `Trellis2ExportMesh` vs. `Trellis2MeshTexturing*`, with shipped
+mesh-only example workflows). A slicer discards materials, so PBR texture synthesis is pure cost for this
+use case. Skipping it also sidesteps the heaviest part of the pipeline.
+
+**Repair chain, all scriptable headless on Windows** (confirmed as `win_amd64` wheels on PyPI, not
+assumed): `trimesh` to split components and drop floating artifacts → `PyMeshLab` for non-manifold
+element removal and hole filling → `manifold3d` for a guaranteed-watertight result. Blender's 3D-Print
+Toolbox is a GUI addon and is *drivable* via `blender --background --python`, but no headless recipe was
+verified — it is not in the plan.
+
+This becomes `tools/hermes-mesh-repair.py`, and it is the stage's real deliverable: a mesh that fails
+repair **fails the job honestly** rather than being delivered as a plausible-looking STL that wastes
+filament and hours. That is the same principle as `screen_artifact()` and the same principle as
+`hermes-fabrication-guard.sh` — never report a success that did not happen.
+
+**Slicing is explicitly out of scope for S19, and here is the finding that decided it.**
+`vel5id/3DPrint-Full-Pipeline_Blackwell` advertises exactly what this stage wants —
+"image→textured 3D→sliced STL + part segmentation", Blackwell/`sm_120`, CUDA 13.0 — and was the obvious
+thing to adopt wholesale. It was read before being trusted, and **its slicer does not slice**:
+
+- `export_stl()` is a `trimesh` `.export()` loop. A repo-wide search for `prusa|orca|cura|slic3r|gcode`
+  finds **no slicer invocation anywhere**; "Prusa MK4" appears only as a bed-dimension constant. Its own
+  README says STLs are ready *for* slicing — the English summaries calling it "sliced" are wrong.
+- `cutter.py` does not cut. Oversized parts only log that BSP splitting "will be available in Phase 2",
+  so the bed-fit check is a warning, not a fix.
+- **18 commits by its author**, all within 2026-06-05 → 2026-06-08, last activity ~3.5 months ago,
+  0 stars, 0 forks; `requirements.txt` pins nothing (`torch` bare, despite the README's version badges);
+  and the README's own tested-hardware row says **RTX 5060 Ti**, not a 5090.
+
+Its **part segmentation is real implemented code** (P3-SAM + XPart, with fp16/CPU-offload work for 16GB
+cards) and is worth revisiting if splitting large models across bed volumes becomes the bottleneck. But it
+is a reference to read, **not a dependency to adopt**, and nothing in S19 depends on it.
+
+Deferred to a later stage, with the one fact needed to start it: **OrcaSlicer's CLI is officially
+documented** (`--slice`, `--load-settings`, `--export-3mf`, `--outputdir`). PrusaSlicer ships
+`prusa-slicer-console.exe` on Windows but its official CLI documentation could not be reached to confirm
+flags — **verify before writing it into a plan**. Cura's `CuraEngine slice` is likewise unverified here.
+G-code is printer-specific and profile-specific; the fleet should hand over a clean, watertight,
+correctly-scaled STL and let a human's own slicer profile own the print.
+
+#### S19d — Fleet integration
+
+- **`skills/mesh-gen/SKILL.md`**, following `skills/render-request/` and `skills/image-gen/` — how to ask
+  for a mesh, what comes back, what the failure modes actually are, and explicitly that a returned STL is
+  repaired but **not** sliced.
+- **Topic ownership: extend `media`, do not invent `fabricate`.** `hermes-media.py` already owns the Buzz
+  `media` topic and already bridges it to this exact broker/worker pipeline, submitting
+  `{"type": "render", ...}`. A mesh request is the same shape of work with a different `type`. S15 and S16
+  both recorded the same lesson from the other direction — S15 found a reserved topic with no real
+  subscriber, and S16's first draft proposed a retriever agent that already existed. **Do not create a
+  topic or agent before there is real traffic that needs one.**
+- **Vision-model evaluation, deliberately not reused.** `hermes-media.py` evaluates a finished image by
+  sending it to a vision model. That does not transfer: a rendered preview says nothing about whether a
+  mesh is watertight, correctly scaled, or printable. The **structural** checks in S19c are the real
+  quality gate. A vision pass over a turntable render is a possible later nicety and is not a substitute.
+- **Repo sync does not reach this node.** S14 put `hermes-repo-autopull.timer` on all three Linux nodes.
+  `Anvil` is Windows and has no equivalent; S14's own finding was that a node silently going stale is a
+  real failure mode (`HomeD13` had already done it once). Either give `Anvil` a scheduled-task equivalent
+  or record explicitly that it is manually synced — **do not leave this undecided**, which is exactly how
+  the last gap happened.
+- **Secrets.** `tools/vault-get-secret.sh` is bash. The worker needs a broker token on a Windows node, so
+  either a PowerShell equivalent or a documented WSL path is required. New ground for this fleet; name the
+  choice rather than improvising it per-script.
+
+#### Exit gate
+
+Numbered before the first run, per S18's own lesson that an unnumbered gate is not a gate:
+
+1. A real image → a real `.glb`/`.stl` on `Anvil`, produced through `hermes-render-request.sh --type mesh`
+   and the broker — **not** by hand in the ComfyUI GUI.
+2. Wall-clock generation time measured and recorded, with `JOB_TIMEOUT`, client poll budget, and broker
+   lease all set **against that measurement** rather than guessed.
+3. The repair chain turns a raw generated mesh into a verified watertight solid, with the watertightness
+   asserted by an independent check — not by the repair tool's own self-report. Same bar S2's recall
+   verification set.
+4. A deliberately bad mesh **fails the job honestly**, with a real error surfaced, and no artifact
+   delivered.
+5. The F4U Corsair from the earlier off-fleet experiment re-run through this pipeline, as a like-for-like
+   comparison against the known-good prior result.
+
+**If (3) or (4) cannot be met, S19 does not ship**, and the capability stays an off-fleet manual workflow.
+A pipeline that emits meshes nobody can print is worse than no pipeline, because it produces confident
+output that fails hours later at the printer.
+
+#### Risks and open questions
+
+1. **The CPU marching-cubes fallback is an unknown cost.** It is a correctness workaround for `sm_120`,
+   not a tuning choice, and on this GPU class there is no way around it today. If wall-clock proves
+   unacceptable, the fallback — not the node — is what to attack: check whether upstream has fixed CuMesh
+   for `sm_120`, or re-price the Hunyuan3D route whose build cost S19a declined.
+2. **DINOv3's gate is a single point of failure.** Access is granted by Meta, not obtainable on demand.
+   If it is refused, TRELLIS.2 is unavailable and Hunyuan3D 2.1 becomes the primary rather than the
+   fallback — a reversal that changes S19a's licensing analysis but not the rest of the stage.
+3. **Windows is a first for this fleet.** No `systemd`, no `ufw`, no `hermes-repo-autopull.timer`, no
+   bash vault client. Four small gaps, each individually easy and each a place where "it works on the
+   Linux nodes" will quietly not be true.
+4. **The 24GB-vs-32GB VRAM figure is unresolved** (S19a). Harmless now, wrong to leave in writing.
+5. **Single-node capability with no failover, accepted deliberately.** Unlike the dispatcher's three-rung
+   ladder (S12), mesh generation has exactly one node that can do it, and the Sparks cannot take over.
+   This is fine — it is a convenience capability, not control plane — but it should be a stated decision
+   rather than a discovered one.
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -1956,3 +2206,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 2.0.0 | 2026-09-24 | S18a executed live (read-only diagnostics over the tailnet; no node configuration changed). **Major bump — S18b is a reversal of prior guidance, not just an addition.** S1's long-standing hypothesis that the RoCE failure needs PFC/ECN lossless-fabric work is **wrong**, and S18 as scoped this morning would have solved the wrong problem. Root cause: `balance-rr` bonding is structurally incompatible with RoCE. Enslavement overwrote both ConnectX-7 ports' distinct permanent MACs with the bond's on each node, so both RDMA devices derive one GID and one IP, while round-robin puts every other packet of a QP onto the other card's wire, where no matching QP context exists to ACK it. Reproduced outside NCCL in seconds with a single HCA (`ib_write_bw -x 3`): `status 12 syndrom 0x81, scnt=128 ccnt=0` — zero completions at zero load, which PFC cannot explain or fix. H1 (GID index) eliminated: RoCEv2 GID is index 3 on both nodes, pinned, exchanged correctly, still fails. Supporting evidence: S1's own persisted hw_counters (node up since 2026-08-27) show `local_ack_timeout_err` 48/96 with `packet_seq_err`/`out_of_sequence` at **zero** — packets never arrive rather than arriving reordered; `lldpctl` confirms direct attach with no switch. Also found two already-cabled, unbonded, unconfigured `f1` ports per node (`carrier=1` on all four ports both sides) — a ready-made dedicated RDMA path needing no change to `bond-fabric0`, now the recommended fix. End-to-end confirmation is blocked pending operator approval for `ip addr add` on those two interfaces. |
 | 2.1.0 | 2026-09-24 | S18a's fix confirmed working on the fleet, same day as the diagnosis. Operator approved the interface change; `10.129.10.1/30`+`10.129.10.2/30` assigned to the previously unused, unbonded `enp1s0f1np1` on each node at MTU 9000, with `bond-fabric0` and its `spark2-fabric` SSH aliases untouched throughout. Jumbo ping clean at 0% loss; `rocep1s0f1` now carries a RoCEv2 GID derived from the port's own permanent MAC rather than the shared bond MAC. The identical `ib_write_bw` that returned `ccnt=0` on the bond now sustains **12,994 MB/s (~13.0 GB/s) over 10s, 1.25M iterations, clean exit** — **6.5x S1's 2.0 GB/s socket baseline**, on one of two available ports, with the second `f1` port still free for multi-rail. Root cause and fix both confirmed empirically; PFC/ECN was never needed. Two items remain before S18's exit gate can be called: NCCL all-reduce validation (needs the narrow ufw rule on the new `10.129.10.0/30` that S18c anticipated — not yet applied, operator approval pending), and persistence (addressing is runtime-only `ip addr add` and reverts on reboot; needs writing into node network config and capturing as `infra/roce-fabric/README.md`). |
 | 2.2.0 | 2026-09-24 | S18 executed and closed out live on the fleet. Resolves the two items 2.1.0 left open, and the second one changes the outcome. **Persistence + firewall done:** each node's `enp1s0f1np1` NM profile converted to a static `roce-f1` (manual IPv4, MTU 9000, autoconnect; NM is the right layer since these nodes render netplan from it), re-verified at **13,007 MB/s** under the persistent config; one peer-scoped ufw rule per node on `10.129.10.0/30` per S4's exception-list rule, with the `10.129.9.0/30` bond keeping its `22/tcp`-only posture. **Exit gate MISSED.** NCCL all-reduce now runs clean over the fixed fabric — no retry-exhaustion, and `NCCL_DEBUG=INFO` confirms genuine RoCE (`NET/IB : Using [0]rocep1s0f1:1/RoCE`, `Using network IB`) rather than socket fallback — but delivers only **~1.4 GB/s busbw**, *below* S1's 2.0 GB/s socket baseline. Cause is **no GPUDirect RDMA on GB10**: `GDR 0`, `cuMemGdrSupport 0`, and `nvidia_peermem` present on disk but failing to load with `EINVAL` on both nodes while logging nothing — consistent with Grace Blackwell's coherent unified memory making the legacy discrete-GPU peer-memory path inapplicable, so every collective stages GPU→host→NIC. Tuning (`NCCL_BUFFSIZE=8M`, `IB_QPS_PER_CONNECTION=4`, `IB_SPLIT_DATA_ON_QPS=1`, `MIN_NCHANNELS=4`) moved nothing — structural, not configuration. **Consequence: `TP=2` stays non-viable, MiMo does not proceed, and the `coder2`/dual-coder retirement cost is not paid** — the gate working as designed. Kept regardless: a persistent 13.0 GB/s host-memory RDMA path, 6.5x the socket baseline, directly useful for the bulk weight staging the fabric was reserved for (S1's 46.6 GB migration ran at ~110 MB/s over GigE). The open question is now whether GPUDirect RDMA is reachable on GB10 at all — via DMA-BUF rather than `nvidia_peermem`, a newer driver/DOCA stack, or not at all — and that, not more fabric work, is what gates multi-node tensor parallelism on this hardware. |
+| 2.3.0 | 2026-09-26 | S19 planned (not executed): `Anvil`, a fourth node — Windows + RTX 5090 (`x86_64`/`sm_120`) — adding image→3D-mesh→watertight-STL generation as a third broker job type, for 3D printing. Deliberately **not** on the Sparks: `aarch64`/`sm_121` has no prebuilt wheels for this ecosystem, and S18's own GPUDirect finding is the standing reminder that GB10 is genuinely off the beaten path for third-party CUDA code. Extends what already exists rather than adding transport: the broker already treats `type` as opaque, `hermes-render-worker.py` was already `JOB_TYPE`-parameterized at Stage 6 for `video`, and `hermes-media.py` already owns the `media` topic — so `mesh` is an allowlist entry, a worker instance, and a `screen_artifact()` branch, not a new agent or topic (S15/S16 both recorded the cost of inventing one early). Model choice verified against primary sources, not assumed: **TRELLIS.2 is MIT covering weights as well as code**, chosen over Hunyuan3D 2.1, whose licence is a **Community licence and not non-commercial** as third-party forks' own headers mislabel it (commercial permitted below **1M MAU** — not the 100M figure that circulates — but Territory excludes the EU/UK/South Korea). Three real install gates found before any build: **DINOv3 is a gated, proprietarily-licensed Meta repo** TRELLIS.2 hard-depends on, making the stack MIT at the top and gated one layer down; the Windows wheel ceiling is **Torch 2.10/CUDA 13.1** (no 2.11 wheels exist, upstream issue #184), not the cu128 set secondary sources cite; and **CuMesh's remeshing is broken on `sm_120`**, with upstream shipping a `blackwell_fix.py` that moves mesh extraction to **CPU marching cubes** on exactly this GPU class — a correctness workaround, not a tuning knob, and the stage's least predictable cost. Sized Stage 6's timeout lesson in *before* the first run rather than after: the CPU fallback plus the broker's **fleet-wide claim lease with no per-type override** means a long mesh job risks claim reclamation, a worse failure than a clean timeout, so `JOB_TIMEOUT`/poll budget/lease all get set against a real measurement. **Adopting `vel5id/3DPrint-Full-Pipeline_Blackwell` wholesale was rejected after reading it: its "slicer" never slices** — `export_stl()` is a `trimesh` export loop, no `prusa\|orca\|cura\|gcode` invocation exists anywhere in the repo, and `cutter.py` only logs that bed-splitting is a future phase; 18 author commits over 4 days, stale ~3.5 months, 0 stars, unpinned `requirements.txt`, and its own tested-hardware row says RTX 5060 Ti. Kept as a reference for its genuinely-implemented P3-SAM/XPart part segmentation, not as a dependency. Slicing therefore stays out of scope (OrcaSlicer's CLI is officially documented; PrusaSlicer's could not be confirmed and must be verified before being written into a plan) — the fleet delivers a repaired watertight STL and lets a human's own printer profile own the G-code. Real deliverable is the printability half the AI-3D ecosystem under-serves: a `trimesh`→`PyMeshLab`→`manifold3d` repair chain (all confirmed `win_amd64` on PyPI) where a mesh that cannot be made watertight **fails the job honestly**, same principle as `screen_artifact()` and `hermes-fabrication-guard.sh`. Windows is a first for this fleet and four gaps are named rather than improvised: no `systemd`, no `ufw` (S10's live 8188-open-to-the-LAN finding is explicitly not to be repeated), no `hermes-repo-autopull.timer` coverage (S14's own stale-node failure mode), and no bash vault client. Two open items recorded rather than papered over: the node's VRAM was described as **24GB** where a retail 5090 is **32GB**, to be read off `nvidia-smi` before anyone sizes against it; and this is a **single-node capability with no failover**, accepted deliberately since the Sparks cannot take it over. |
