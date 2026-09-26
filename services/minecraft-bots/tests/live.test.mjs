@@ -1,4 +1,4 @@
-// Version: 1.9.0
+// Version: 1.10.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -28,6 +28,7 @@
 // 1.7.0 | 2026-09-25 | Door scenarios carry cobblestone, the condition that crashed pathfinder's door step.
 // 1.8.0 | 2026-09-25 | The ripe-harvest scenario holds an enchanted sword (the enchants/dig crash).
 // 1.9.0 | 2026-09-25 | ...and starts with no seeds: it must replant from the drops.
+// 1.10.0 | 2026-09-26 | Beds: wool from a sheep, craft "bed" by wool colour, place_bed at home with a claim.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -46,7 +47,7 @@ const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
 process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
 process.env.MC_RAG_DISABLED = "true";
 process.env.MC_BED_CLAIMS_SHARED = "false"; // never write test claims into the fleet's hermes-memory
-const { loadActionPlugins, performAction, checkClaimedBed, loadPenLocation, countInPen } = await import("../actions.js");
+const { loadActionPlugins, performAction, checkClaimedBed, loadPenLocation, countInPen, loadClaimedBed } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor, installEnchantsFix } = await import("../equipment.js");
 const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
@@ -410,6 +411,45 @@ scenario("Ranching: builds a pen on its site, herds a cow in, and breeds a real 
   const bred = await performAction(bot, { type: "breed", species: "cow", near: pen.center }, TESTER);
   assert.equal(bred.ok, true, bred.text);
   assert.equal(bred.bred, "cow");
+});
+
+// Beds (2026-09-26): after the world reset no bot could make a bed. Wool from a sheep, a bed crafted
+// from it, and a bed placed at home the right way round.
+scenario("Beds: gets wool from a sheep (no shears: hunts it and picks up the drop)", async () => {
+  scenarioCleanup.push(() => rcon(`kill @e[type=minecraft:sheep,x=${x - r},y=${y},z=${z - r},dx=${2 * r},dy=6,dz=${2 * r}]`).catch(() => {}));
+  await rcon(`give ${TESTER} minecraft:netherite_sword[enchantments={sharpness:5}]`,
+    `summon minecraft:sheep ${x + 4} ${y + 1} ${z} {Tags:["${TAG}"],PersistenceRequired:1b,Color:0b}`);
+  await waitFor(() => held("netherite_sword") > 0 && Object.values(bot.entities).some((e) => e.name === "sheep"), 10_000, "sword and sheep");
+  const result = await performAction(bot, { type: "get_wool", count: 1 }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  assert(held("white_wool") >= 1, "wool picked up");
+});
+
+scenario("Beds: crafts \"bed\" as the colour of the wool she holds", async () => {
+  // No crafting table anywhere, as in a fresh world: craft has to make and place one first.
+  await rcon(`give ${TESTER} minecraft:red_wool 3`, `give ${TESTER} minecraft:oak_planks 7`);
+  await waitFor(() => held("red_wool") >= 3 && held("oak_planks") >= 7, 8000, "wool and planks");
+  const result = await performAction(bot, { type: "craft", item: "bed", count: 1 }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  await waitFor(() => held("red_bed") >= 1, 5000, "a red bed");
+  assert(bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, maxDistance: 6 }), "the table she made is standing");
+});
+
+scenario("Beds: places a bed at home as two blocks facing away from her, and claims it", async () => {
+  const home = new Vec3(x - 4, y + 1, z - 4);
+  const worldSpawn = bot.spawnPoint;
+  bot.spawnPoint = home;
+  scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
+  await rcon(`give ${TESTER} minecraft:white_bed`);
+  await waitFor(() => held("white_bed") >= 1, 5000, "a bed to place");
+  const result = await performAction(bot, { type: "place_bed" }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  const foot = new Vec3(result.bedAt.x, result.bedAt.y, result.bedAt.z);
+  const halves = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => bot.blockAt(foot.offset(dx, 0, dz)))
+    .filter((b) => bot.isABed(b));
+  assert(bot.isABed(bot.blockAt(foot)) && halves.length >= 1, "both halves of the bed are there");
+  assert(foot.distanceTo(home) >= 2 && foot.distanceTo(home) <= 11, `near home but not on it: ${foot}`);
+  assert(await loadClaimedBed(bot), "she claimed the bed she placed");
 });
 
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);

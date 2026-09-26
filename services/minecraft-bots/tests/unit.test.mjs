@@ -1,4 +1,4 @@
-// Version: 1.13.0
+// Version: 1.14.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -27,6 +27,7 @@
 //   harvested-crop curriculum evidence, farm plot and pen site choice.
 // 1.12.0 | 2026-09-25 | Ripe-crop routine backoff; drops collected only after a real harvest.
 // 1.13.0 | 2026-09-25 | Enchants normalization (digging with enchanted gear).
+// 1.14.0 | 2026-09-26 | Beds: colour choice, bed site, bed goal routing and runner, the no-bed-at-night goal.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -1022,7 +1023,7 @@ await check('Food: loot "food" asks chests for every edible item; "seeds" for an
   const groups = vm.runInContext('LOOT_GROUPS', c);
   assert.deepEqual([...groups.food], ['bread', 'carrot']);
   assert.deepEqual([...groups.seeds], ['wheat_seeds', 'carrot', 'potato', 'beetroot_seeds']);
-  assert.match(actions, /const group = LOOT_GROUPS\[action\.item\];/);
+  assert.match(actions, /: LOOT_GROUPS\[action\.item\]; \/\/ "food", "seeds"/);
   assert.match(actions, /const wantedNames = group \|\| gearCategoryNames\(bot, action\.item\);/);
 });
 
@@ -1303,6 +1304,111 @@ await check('Enchants: the 1.21 component shape becomes [{ name, lvl }], so digg
   c.installEnchantsFix(bot); c.installEnchantsFix(bot); // idempotent
   const held = new Item().enchants;
   assert(Array.isArray(held)); assert.equal([].concat(held).length, 2, 'what digTime does with it');
+});
+
+// Beds (2026-09-26).
+const bedFns = () => {
+  const c = vm.createContext({ Vec3: V3, Math, Object });
+  vm.runInContext(between(actions, 'function woolCounts(', 'export const CROP_MAX_AGE'), c);
+  return c;
+};
+
+await check('Beds: "bed" is crafted in the colour she has 3 wool of, white when she has none', async () => {
+  const c = bedFns();
+  const inv = (items) => ({ inventory: { items: () => items } });
+  assert.equal(c.bedItemFor(inv([])), 'white_bed');
+  assert.equal(c.bedItemFor(inv([{ name: 'red_wool', count: 2 }, { name: 'blue_wool', count: 4 }])), 'blue_bed');
+  assert.equal(c.bedItemFor(inv([{ name: 'red_wool', count: 2 }, { name: 'red_wool', count: 1 }])), 'red_bed', 'stacks add up');
+  assert.match(actions, /if \(action\.item === "bed" \|\| action\.item === "beds"\) action = \{ \.\.\.action, item: bedItemFor\(bot\) \};/);
+  assert.match(actions, /const group = action\.item === "wool"/, 'loot "wool" takes any colour');
+  const craftCase = actions.slice(actions.indexOf('case "craft": {'), actions.indexOf('case "loot": {') > actions.indexOf('case "craft": {') ? actions.indexOf('case "loot": {') : undefined);
+  const [makeTable, placeTable, giveUp] = ['{ type: "craft", item: "crafting_table", count: 1 }', '{ type: "place", item: "crafting_table" }', 'need a crafting table nearby for']
+    .map((t) => craftCase.indexOf(t));
+  assert(makeTable > 0 && makeTable < placeTable && placeTable < giveUp, 'no table around: make one and set it down before giving up');
+});
+
+function bedSiteWorld({ beds = [], doors = [], walls = [] } = {}) {
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  const bedSet = new Set(beds.map(key)), doorSet = new Set(doors.map(key)), wallSet = new Set(walls.map(key));
+  return {
+    blockAt: (p) => {
+      if (p.y < 64) return { name: 'grass_block', boundingBox: 'block' };
+      if (bedSet.has(key(p))) return { name: 'red_bed', boundingBox: 'block' };
+      if (doorSet.has(key(p))) return { name: 'oak_door', boundingBox: 'block' };
+      if (wallSet.has(key(p))) return { name: 'cobblestone', boundingBox: 'block' };
+      return { name: 'air', boundingBox: 'empty' };
+    },
+    isABed: (b) => b.name.endsWith('_bed'),
+    findBlocks: () => beds.map((b) => new V3(b.x, b.y, b.z)),
+  };
+}
+
+await check('Beds: a bed spot is two open, supported cells with room to stand behind, off spawn, beside other beds', async () => {
+  const c = bedFns();
+  const home = new V3(0, 64, 0);
+  const site = c.findBedSite(bedSiteWorld(), home);
+  assert(Math.max(Math.abs(site.foot.x), Math.abs(site.foot.z)) >= 2, 'not on the spawn spot');
+  const dir = [site.head.x - site.foot.x, site.head.z - site.foot.z];
+  assert.deepEqual([site.stand.x - site.foot.x, site.stand.z - site.foot.z], [0 - dir[0] + 0, 0 - dir[1] + 0], 'she stands behind the foot');
+  const near = c.findBedSite(bedSiteWorld({ beds: [new V3(6, 64, 6), new V3(7, 64, 6)] }), home);
+  assert(Math.min(near.foot.distanceTo(new V3(6, 64, 6)), near.foot.distanceTo(new V3(7, 64, 6))) <= 1.5, `next to the other beds: ${near.foot}`);
+  const doorAt = new V3(2, 64, 0);
+  const byDoor = c.findBedSite(bedSiteWorld({ doors: [doorAt] }), home);
+  for (const cell of [byDoor.foot, byDoor.head]) assert(cell.distanceTo(doorAt) > 1, 'never beside a door');
+});
+
+await check('Beds: bed goals are recognised; going to bed and bedrock are not', async () => {
+  const c = vm.createContext({ setInterval() {}, Date });
+  vm.runInContext(farmGoalSrc(), c);
+  assert.equal(c.farmTaskFor('go home and set up more beds there -- we have 0, need at least 9'), 'bed');
+  assert.equal(c.farmTaskFor('Amy, craft a bed and store your gear in a chest'), 'bed');
+  assert.equal(c.farmTaskFor('make myself a bed and place it at home'), 'bed');
+  assert.equal(c.farmTaskFor('go to bed, it is late'), null);
+  assert.equal(c.farmTaskFor('mine down to bedrock'), null);
+  assert.equal(c.farmTaskFor('breed two cows'), 'ranch', 'breed is not bed');
+});
+
+await check('Beds: a bed goal loots wool once, gets the rest from sheep, crafts, places, then is done', async () => {
+  const inv = [{ name: 'oak_log', count: 4 }];
+  const calls = []; const done = [];
+  const performAction = async (b, action) => {
+    calls.push(action.type + (action.item ? `:${action.item}` : ''));
+    if (action.type === 'loot') return { ok: false, text: 'no wool in any chest' };
+    if (action.type === 'get_wool') { inv.push({ name: 'white_wool', count: 3 }); return { ok: true, text: 'gathered wool' }; }
+    if (action.type === 'craft') { inv.splice(0, inv.length, { name: action.item, count: 1 }); return { ok: true, text: 'crafted' }; }
+    if (action.type === 'place_bed') return { ok: true, text: 'placed a white_bed at home.', bedAt: { x: 3, y: 64, z: 0 } };
+    return { ok: false, text: '?' };
+  };
+  const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Amy', MAX_CONSECUTIVE_FAILURES: 3,
+    bot: { chat() {}, inventory: { items: () => inv }, entities: {} }, Vec3: V3, performAction,
+    farmStatus: () => ({ ripe: 0, growing: 0 }), narrateAction: async (t) => t, recordGoalOutcome() {},
+    broadcastGoalState: async (status) => { done.push(status); }, retireGoal: async () => {}, saveGoalIfCurrent: async () => {},
+    logStep: () => {}, loadPenLocation: async () => null, LIVESTOCK: [], BREEDING_FOOD: {}, countInPen: () => 0, findPenSite: () => null,
+    woolCounts: (b) => Object.fromEntries(b.inventory.items().filter((i) => i.name.endsWith('_wool')).map((i) => [i.name.slice(0, -5), i.count])),
+    bedItemFor: () => 'white_bed' });
+  vm.runInContext(farmGoalSrc(), c);
+  const goal = { description: 'make myself a bed and place it at home', createdAt: Date.now(), consecutiveFailures: 0 };
+  for (let i = 0; i < 6 && !done.length; i++) await c.runBedGoal(goal, async () => true, () => ({ release() {} }), () => false);
+  assert.deepEqual(calls, ['loot:wool', 'get_wool', 'craft:white_bed', 'place_bed']);
+  assert.deepEqual(done, ['done']);
+});
+
+await check('Beds: a night with no bed gives an idle bot a bed goal for the morning, and never replaces a goal', async () => {
+  assert.match(index, /if \(!result\.ok && !result\.cancelled && \/couldn't find a bed\/\.test\(result\.text\)\) await wantBed\(\);/);
+  const saved = []; const c = vm.createContext({ console: { log() {} }, Date, USERNAME: 'Amy', PERSONA_NAME: 'amy',
+    newGoal: (g) => ({ ...g }), saveGoal: async (p, g) => { saved.push(g.description); }, broadcastGoalState: async () => {},
+    currentGoal: null, SELF_PROPOSE_GOALS: true, selfProposeResumeAt: 0, IDLE_BEFORE_SELF_GOAL_MS: 600_000,
+    lastActivityAt: Date.now() - 60_000 });
+  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, 'const BED_GOAL', 'async function bedStep(') +
+    between(index, 'async function wantBed(', 'async function goalTick('), c);
+  await c.wantBed();
+  assert.deepEqual(saved, [], 'a player spoke a minute ago (e.g. STOP): not yet');
+  c.lastActivityAt = Date.now() - 11 * 60_000;
+  await c.wantBed();
+  assert.deepEqual(saved, ['make myself a bed and place it at home']);
+  assert.equal(vm.runInContext('currentGoal.farmTask', c), 'bed');
+  await c.wantBed();
+  assert.equal(saved.length, 1, 'an existing goal is left alone');
 });
 
 console.log(`${passed} unit checks passed.`);

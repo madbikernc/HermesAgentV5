@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.9.0
+**Version:** 1.10.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -92,6 +92,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.8.0 | 2026-09-25 | Farming and ranching: farm/ranch goals skip the planner, harvested-crop curriculum evidence and achievements, ripe-crop routine, hunger fetches food, ranch on the Builder ladder, 7x7 pens; herding caveat updated in §12. The §11 door rule now covers the door opener that replaced pathfinder's crashing "use" step. |
 | 2.9.0 | 2026-09-25 | §11 Pathfinding: the enchantments/dig bug and `installEnchantsFix`, found by the first live hour of the farming change. |
 | 2.10.0 | 2026-09-26 | New world (seed -4028362707405145553) and bot memory wipe; §2 re-init warns about moving a live world, and lists what a fresh start wipes. |
+| 2.11.0 | 2026-09-26 | Bed goals run directly (`place_bed`, `get_wool`, bed colour in `craft`); `craft` makes its own crafting table; a bot with no bed at night makes one next morning. |
 
 ## services/minecraft-bots/README.md
 
@@ -182,3 +183,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.7.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.8.0 row. |
 | 1.8.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.9.0 row. |
 | 1.9.0 | 2026-09-26 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.10.0 row. |
+| 1.10.0 | 2026-09-26 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.11.0 row. |

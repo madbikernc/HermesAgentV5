@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.10.0
+**Version:** 2.11.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -142,6 +142,12 @@ queued action/goal. A CHAT reply may never promise a future action that isn't ac
   by the goal or by the ripe-crop routine. A ranch goal crafts fences and a gate, builds a 7x7 pen
   on a flat site 8-20 blocks from home (`findPenSite`), herds a pair of one species in, and is done
   only when a baby is actually born.
+- **Bed goals too** (the Builder's "set up more beds", any "craft a bed"): place a held bed with
+  `place_bed` (two free, supported cells near home, next to existing beds, facing away from where
+  she stands; checked it appeared; claimed if she has no bed), else `craft` "bed" in the colour she
+  holds 3 wool of, else wool from a chest (once), else `get_wool` (shear, or hunt a sheep and pick
+  up the drop). A bot that finds no bed at night takes on "make myself a bed" for the morning.
+  `craft` makes and places a crafting table itself when none is within 32 blocks.
 
 **DONE is never accepted on the model's word.** Inventory and world state are re-checked
 (`builderPriorityItemSatisfied()` and friends); a rejected claim logs `REJECTED DONE` /

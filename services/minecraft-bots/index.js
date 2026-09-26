@@ -1,4 +1,8 @@
-// Version: 2.100.0
+// Version: 2.101.0
+//
+// 2.101.0 (2026-09-26) -- bed goals ("craft a bed", the Builder's "set up more beds") run directly:
+// place a held bed, else craft one, else wool from a chest or sheep; done only when a bed stands
+// near home. A bot that finds no bed at night takes on "make myself a bed" for the morning.
 //
 // 2.100.0 (2026-09-25) -- installEnchantsFix at spawn (equipment.js 1.5.0).
 //
@@ -1424,7 +1428,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -3473,6 +3477,7 @@ const RANCH_WORDS = /\b(ranch(ing)?|breed(ing)?|livestock|(animal|cow|sheep|pig|
 
 function farmTaskFor(description) {
   if (!description) return null;
+  if (BED_WORDS.test(description) && !NOT_MAKING_A_BED.test(description)) return "bed";
   if (RANCH_WORDS.test(description)) return "ranch";
   if (FARM_WORDS.test(description) && !NOT_A_CROP_FARM.test(description)) return "farm";
   return null;
@@ -3634,6 +3639,60 @@ async function runRanchGoal(goal, takeControl, getHandle, replaced) {
   await failGoalStep(goal, step.text);
 }
 
+// Beds (2026-09-26): after the world reset nobody had a bed, "craft bed" failed for every bot, and
+// the Builder's "set up more beds" went to the planner. A bed goal now runs directly, one step a
+// tick: place a bed she holds, else craft one from 3 wool of a colour, else take wool from a chest
+// (once), else get it from sheep. Done only when a bed is actually standing near home.
+const BED_WORDS = /\b(make|craft|build|set up|place|get|need|more)\b[^.]*?\bbeds?\b/i;
+const NOT_MAKING_A_BED = /\b(go(ing)? to|sleep(ing)? in|find a|head(ing)? to) (a |the |your |her )?bed\b/i;
+const BED_GOAL = "make myself a bed and place it at home";
+
+async function bedStep(goal, handle) {
+  if (bot.inventory.items().some((i) => i.name.endsWith("_bed"))) {
+    const placed = await performAction(bot, { type: "place_bed" }, USERNAME, handle);
+    return { ...placed, done: !!placed.bedAt, action: { type: "place_bed" } };
+  }
+  if (Math.max(0, ...Object.values(woolCounts(bot))) >= 3) {
+    const item = bedItemFor(bot);
+    return { ...(await performAction(bot, { type: "craft", item, count: 1 }, USERNAME, handle)), action: { type: "craft", item } };
+  }
+  if (!goal.triedWoolChest) {
+    goal.triedWoolChest = true;
+    const looted = await performAction(bot, { type: "loot", item: "wool", count: 3 }, USERNAME, handle);
+    if (looted.ok || looted.cancelled) return { ...looted, action: { type: "loot", item: "wool" } };
+  }
+  return { ...(await performAction(bot, { type: "get_wool", count: 3 }, USERNAME, handle)), action: { type: "get_wool" } };
+}
+
+async function runBedGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  const step = await bedStep(goal, getHandle());
+  getHandle()?.release();
+  if (step.cancelled || replaced()) return;
+  logStep(goal, `bed: ${step.text}`, step.ok, step.action);
+  console.log(`[${USERNAME}] bed goal: ${step.text} (ok=${step.ok})`);
+  if (step.done) return completeGoal(goal, "placed a bed");
+  if (step.ok) {
+    goal.consecutiveFailures = 0;
+    await saveGoalIfCurrent(goal);
+    return;
+  }
+  await failGoalStep(goal, step.text);
+}
+
+// A night with no bed anywhere near: with nothing else on, she makes her own in the morning (goals
+// pause overnight). Found live: all nine failed "sleep" every few minutes after the reset. Same
+// rules as any self-proposed goal -- a player's STOP a minute ago still means stop (live test MB-05).
+async function wantBed() {
+  if (currentGoal || !SELF_PROPOSE_GOALS || Date.now() < selfProposeResumeAt ||
+      Date.now() - lastActivityAt < IDLE_BEFORE_SELF_GOAL_MS) return;
+  currentGoal = newGoal({ description: BED_GOAL, source: "self" });
+  currentGoal.farmTask = "bed";
+  await saveGoal(PERSONA_NAME, currentGoal);
+  await broadcastGoalState("active", BED_GOAL);
+  console.log(`[${USERNAME}] no bed to sleep in -- new goal: ${BED_GOAL}`);
+}
+
 async function goalTick() {
   if (!AUTONOMY_ENABLED || routineBlocked("goalTick")) return;
   // Review MB-14: no new work or goal steps from dusk to dawn (the goal is paused, not dropped).
@@ -3706,6 +3765,10 @@ async function goalTick() {
     }
     if (goal.farmTask === "ranch") {
       await runRanchGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    if (goal.farmTask === "bed") {
+      await runBedGoal(goal, takeControl, () => handle, replaced);
       return;
     }
     if (goal.targetItem && holdsItem(goal.targetItem)) {
@@ -4570,6 +4633,7 @@ async function checkSleep() {
     const result = await performAction(bot, { type: "sleep" }, USERNAME, handle);
     console.log(`[${USERNAME}] sleep (attempt ${sleepTonight.attempts}): ${result.text} (ok=${result.ok})`);
     if (result.ok) sleepTonight.done = true;
+    if (!result.ok && !result.cancelled && /couldn't find a bed/.test(result.text)) await wantBed();
     if (!result.cancelled && (result.ok || sleepTonight.attempts >= MAX_NIGHT_ATTEMPTS)) {
       bot.chat(await narrateAction(result.ok ? result.text : `couldn't get to sleep: ${result.text}`));
     }

@@ -1,4 +1,8 @@
-// Version: 1.75.0
+// Version: 1.76.0
+//
+// 1.76.0 (2026-09-26) -- craft makes and places a crafting table when none is around. Beds ("I don't think the bots know how to build a bed"): craft "bed" picks
+// the colour she has wool for; loot takes "wool"; new get_wool (shear, or hunt a sheep, and pick up
+// the drop) and place_bed (two free cells near home, facing the right way, checked it appeared).
 //
 // 1.75.0 (2026-09-25) -- harvest replants, after picking up the drops, any spot it had no seed for
 // (a harvest of someone else's farm replanted nothing).
@@ -1168,6 +1172,7 @@ export const SKILL_ACTION_VERBS = new Set([
   "stop", "goto", "follow", "mine", "craft", "loot", "attack", "flee", "eat", "fish", "give",
   "sleep", "smelt", "place", "build", "store", "trade", "harvest", "breed", "enchant", "explore",
   "plant_sapling", "light_area", "harvest_hive", "shear", "milk", "build_pen", "herd_to_pen", "gohome",
+  "get_wool", "place_bed",
 ]);
 
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
@@ -2286,6 +2291,58 @@ export function chooseFarmPlot(bot, near) {
   return { plot, hydrated: false, center: first };
 }
 
+// Beds (2026-09-26, "I don't think the bots know how to build a bed"): after the world reset every
+// bot failed "sleep" all night and every "craft bed" failed with "I don't recognize the item bed".
+// A bed only exists as a colour (white_bed, ...), crafted from 3 wool of that colour + 3 planks.
+export function woolCounts(bot) {
+  const counts = {};
+  for (const item of bot.inventory.items()) {
+    if (item.name.endsWith("_wool")) counts[item.name.slice(0, -5)] = (counts[item.name.slice(0, -5)] || 0) + item.count;
+  }
+  return counts;
+}
+
+// The bed she can make from the wool she holds (3 of one colour); white when she has none yet.
+export function bedItemFor(bot) {
+  const [color] = Object.entries(woolCounts(bot)).filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1])[0] ?? ["white"];
+  return `${color}_bed`;
+}
+
+// Two free, supported cells in a row near home, plus a standing spot behind the foot: a bed is
+// placed facing the way she looks, so she stands at foot - dir and looks at the foot. Beds go next
+// to existing beds when there are any (one bedroom, not beds strewn across paths), else as close to
+// home as possible but not on it; never beside a door or gate.
+const BED_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+export function findBedSite(bot, home) {
+  const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
+  const open = (p) => { const b = bot.blockAt(p); return !!b && b.name === "air"; };
+  const solid = (p) => bot.blockAt(p)?.boundingBox === "block";
+  const standable = (p) => solid(p.offset(0, -1, 0)) && open(p) && open(p.offset(0, 1, 0));
+  const nearDoor = (p) => BED_DIRS.some(([dx, dz]) => {
+    const n = bot.blockAt(p.offset(dx, 0, dz))?.name ?? "";
+    return n.endsWith("_door") || n.endsWith("_fence_gate");
+  });
+  const beds = bot.findBlocks({ matching: (b) => bot.isABed(b), maxDistance: 16, count: 32, point: new Vec3(hx, hy, hz) });
+  const anchor = (p) => (beds.length ? Math.min(...beds.map((b) => b.distanceTo(p))) : p.distanceTo(new Vec3(hx, hy, hz)));
+  let best = null, bestScore = Infinity;
+  for (let dx = -10; dx <= 10; dx++) {
+    for (let dz = -10; dz <= 10; dz++) {
+      if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue; // keep the spawn spot itself clear
+      for (let dy = -2; dy <= 2; dy++) {
+        const foot = new Vec3(hx + dx, hy + dy, hz + dz);
+        if (!standable(foot)) continue;
+        for (const [ox, oz] of BED_DIRS) {
+          const head = foot.offset(ox, 0, oz), stand = foot.offset(-ox, 0, -oz);
+          if (!standable(head) || !standable(stand) || nearDoor(foot) || nearDoor(head)) continue;
+          const score = anchor(foot);
+          if (score < bestScore) { best = { foot, head, stand }; bestScore = score; }
+        }
+      }
+    }
+  }
+  return best;
+}
+
 export const CROP_MAX_AGE = { wheat: 7, carrots: 7, potatoes: 7, beetroots: 3 };
 
 // Breaking a crop (or the grass on a plot) from 2 blocks away leaves its drops on the ground -- the
@@ -2805,6 +2862,7 @@ async function performActionAs(bot, action, speaker, token) {
     }
 
     case "craft": {
+      if (action.item === "bed" || action.item === "beds") action = { ...action, item: bedItemFor(bot) }; // beds come in colours
       const itemDef = bot.registry.itemsByName[action.item];
       if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
 
@@ -2859,6 +2917,15 @@ async function performActionAs(bot, action, speaker, token) {
           if (remembered) {
             await gotoRememberedSpot(bot, token, remembered);
             positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
+          }
+        }
+        if (!positions.length && action.item !== "crafting_table") {
+          // 2026-09-26 (fresh world, live test): with no table anywhere yet, every table recipe --
+          // a bed, a pickaxe, fences -- just failed. Make one (2x2, no table needed) and set it down.
+          const made = await performActionAs(bot, { type: "craft", item: "crafting_table", count: 1 }, speaker, token);
+          if (made.ok && !token.cancelled) {
+            const placed = await performActionAs(bot, { type: "place", item: "crafting_table" }, speaker, token);
+            if (placed.ok) positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
           }
         }
         if (!positions.length) return fail(`need a crafting table nearby for ${action.item}.`);
@@ -2932,7 +2999,9 @@ async function performActionAs(bot, action, speaker, token) {
       // chest-first fallback already relies on, so there is only ever one implementation of
       // "take up to <count> of <item> from a chest," not two that could quietly drift apart.
       if (action.item) {
-        const group = LOOT_GROUPS[action.item]; // "food", "seeds" (2026-09-25)
+        const group = action.item === "wool" // any colour (2026-09-26)
+          ? Object.keys(bot.registry.itemsByName).filter((n) => n.endsWith("_wool"))
+          : LOOT_GROUPS[action.item]; // "food", "seeds" (2026-09-25)
         if (!group && !bot.registry.itemsByName[action.item]) return fail(`I don't recognize the item "${action.item}".`);
         // gearCategoryNames() (2026-09-18, "pick up ONE of those pieces... and abandon the quest
         // to craft it"): broadens an equipment request to ANY tier of the same category, not
@@ -4609,6 +4678,66 @@ async function performActionAs(bot, action, speaker, token) {
       return ok(useShears
         ? "took honeycomb from the hive -- might have upset the bees."
         : "collected a bottle of honey from the hive.");
+    }
+
+    case "get_wool": {
+      // Wool for a bed (2026-09-26): shear a sheep with shears, otherwise take it the hard way --
+      // a killed sheep drops one wool -- and pick up what drops. Until she holds action.count of
+      // one colour, a handful of sheep at most.
+      const want = action.count ?? 3;
+      const best = () => Math.max(0, ...Object.values(woolCounts(bot)));
+      const startedWith = best();
+      for (let tries = 0; tries < 6 && best() < want && !token.cancelled; tries++) {
+        const sheep = Object.values(bot.entities)
+          .filter((e) => e.name === "sheep" && e.position.distanceTo(bot.entity.position) <= 32)
+          .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+        if (!sheep) break;
+        const shears = bot.inventory.items().some((i) => i.name === "shears");
+        const got = await performActionAs(bot, shears ? { type: "shear" } : { type: "attack", target: sheep }, speaker, token);
+        if (token.cancelled) return ok("stopped gathering wool.");
+        if (!got.ok) continue;
+        await collectDrops(bot, token, [bot.entity.position.clone()], 6000);
+      }
+      if (best() >= want) return ok(`gathered wool: now have ${best()} of one colour.`);
+      const gained = best() - startedWith;
+      return fail(gained > 0 ? `got ${gained} wool, still short of ${want} of one colour.`
+        : "no sheep nearby to get wool from.");
+    }
+
+    case "place_bed": {
+      // 2026-09-26: "place" put a bed down like any one-block item, next to wherever she stood --
+      // a bed needs two free, supported cells the way she faces, and nothing checked it appeared.
+      const bedItem = bot.inventory.items().find((i) => i.name.endsWith("_bed"));
+      if (!bedItem) return fail("don't have a bed to place.");
+      const home = await performActionAs(bot, { type: "gohome" }, speaker, token);
+      if (token.cancelled) return home;
+      if (!home.ok) return fail(`couldn't get home to place the bed: ${home.text}`);
+      const site = findBedSite(bot, bot.spawnPoint ?? bot.entity.position);
+      if (!site) return fail("couldn't find two free, flat blocks in a row near home for a bed.");
+      try {
+        await withTimeout(bot.pathfinder.goto(new goals.GoalBlock(site.stand.x, site.stand.y, site.stand.z)),
+          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+      } catch (err) {
+        if (token.cancelled) return ok("stopped on the way to the bed spot.");
+        return fail(`couldn't get to the bed spot: ${err.message}`);
+      } finally {
+        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+      }
+      if (token.cancelled) return ok("stopped before placing the bed.");
+      try {
+        await bot.equip(bedItem, "hand");
+        await bot.placeBlock(bot.blockAt(site.foot.offset(0, -1, 0)), new Vec3(0, 1, 0));
+      } catch (err) {
+        return fail(`couldn't place the bed: ${err.message}`);
+      } finally {
+        await refreshGear(bot);
+      }
+      await new Promise((r) => setTimeout(r, 250)); // the head half's update lands a tick later
+      if (!bot.isABed(bot.blockAt(site.foot)) || !bot.isABed(bot.blockAt(site.head))) {
+        return fail(`the bed didn't go down at ${site.foot}.`);
+      }
+      if (!(await loadClaimedBed(bot))) await saveClaimedBed(bot, site.head); // her own, if she had none
+      return { ...ok(`placed a ${bedItem.name} at home.`), bedAt: { x: site.foot.x, y: site.foot.y, z: site.foot.z } };
     }
 
     case "shear": {
