@@ -1,4 +1,4 @@
-// Version: 1.5.0
+// Version: 1.7.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -23,6 +23,9 @@
 // 1.4.0 | 2026-09-25 | Door scenarios: out of a sealed room through a closed/open door and an open/closed
 //   fence gate, and into one through an open door, on the bots' real movement setup.
 // 1.5.0 | 2026-09-25 | Door scenarios also require the door or gate to be shut behind the bot.
+// 1.6.0 | 2026-09-25 | Farming/ranching: loot food, a new plot by water, ripe-only harvest + achievement,
+//   pen on a site, herd, and a verified birth.
+// 1.7.0 | 2026-09-25 | Door scenarios carry cobblestone, the condition that crashed pathfinder's door step.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -41,7 +44,7 @@ const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
 process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
 process.env.MC_RAG_DISABLED = "true";
 process.env.MC_BED_CLAIMS_SHARED = "false"; // never write test claims into the fleet's hermes-memory
-const { loadActionPlugins, performAction, checkClaimedBed } = await import("../actions.js");
+const { loadActionPlugins, performAction, checkClaimedBed, loadPenLocation, countInPen } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor } = await import("../equipment.js");
 const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
@@ -276,6 +279,9 @@ async function doorRoom(block, { gapAbove = false } = {}) {
   };
 }
 function useBotMovements() {
+  // Carrying placeable blocks is what crashed pathfinder's own "use a door" step in production
+  // (Babs, 2026-09-25), so every door scenario carries some.
+  rcon(`give ${TESTER} minecraft:cobblestone 16`).catch(() => {});
   const movements = new SwimMovements(bot);
   movements.canOpenDoors = true;
   movements.canDig = false;
@@ -317,6 +323,85 @@ scenario("Doors: walks into a room through an open door", async () => {
   await room.place(true);
   await walkTo(x, z);
   await waitFor(() => bot.blockAt(new Vec3(x, y + 1, z + 2)).getProperties().open === false, 5000, "it shut behind her");
+});
+
+// Farming and ranching (2026-09-25). The arena floor is one layer of sea lanterns with air under it,
+// so dirt, farmland and water go into that layer (water gets glass under it), and each scenario puts
+// the floor back.
+const restoreFloor = () => scenarioCleanup.push(() => rcon(
+  `fill ${x - r + 1} ${y} ${z - r + 1} ${x + r - 1} ${y} ${z + r - 1} minecraft:sea_lantern`,
+  `fill ${x - r + 1} ${y - 1} ${z - r + 1} ${x + r - 1} ${y - 1} ${z + r - 1} minecraft:air`,
+  `kill @e[type=minecraft:item,x=${x - r},y=${y - 2},z=${z - r},dx=${2 * r},dy=8,dz=${2 * r}]`).catch(() => {}));
+const held = (name) => bot.inventory.items().filter((i) => i.name === name).reduce((n, i) => n + i.count, 0);
+
+scenario("Food: loot \"food\" takes food out of a chest", async () => {
+  await placeChest(3, 0, [["bread", 5]]);
+  const result = await performAction(bot, { type: "loot", item: "food", count: 8 }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  await waitFor(() => held("bread") > 0, 5000, "bread in inventory");
+});
+
+scenario("Farming: starts a plot by water -- clears grass, tills, plants, and checks each took", async () => {
+  restoreFloor();
+  await rcon(`fill ${x + 3} ${y} ${z + 3} ${x + 7} ${y} ${z + 7} minecraft:grass_block`,
+    `setblock ${x + 5} ${y - 1} ${z + 5} minecraft:glass`, `setblock ${x + 5} ${y} ${z + 5} minecraft:water`,
+    `setblock ${x + 4} ${y + 1} ${z + 5} minecraft:short_grass`,
+    `give ${TESTER} minecraft:wooden_hoe`, `give ${TESTER} minecraft:wheat_seeds 8`);
+  await waitFor(() => held("wheat_seeds") >= 8 && bot.blockAt(new Vec3(x + 5, y, z + 5))?.name === "water", 8000, "plot setup");
+  const result = await performAction(bot, { type: "harvest", near: { x: x + 5, y, z: z + 5 } }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  assert(result.planted >= 4, `planted ${result.planted}: ${result.text}`);
+  let crops = 0;
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dz = -2; dz <= 2; dz++) {
+      const ground = bot.blockAt(new Vec3(x + 5 + dx, y, z + 5 + dz));
+      const crop = bot.blockAt(new Vec3(x + 5 + dx, y + 1, z + 5 + dz));
+      if (crop?.name === "wheat") { crops++; assert.equal(ground.name, "farmland"); }
+    }
+  }
+  assert.equal(crops, result.planted, "every planted count is a real wheat crop on farmland");
+  assert.notEqual(bot.blockAt(new Vec3(x + 4, y + 1, z + 5))?.name, "short_grass", "the grass on the plot was cleared");
+});
+
+scenario("Farming: harvests ripe crops only, replants, and records the harvest", async () => {
+  restoreFloor();
+  const spots = [[-4, -4], [-4, -3], [-3, -4]];
+  await rcon(...spots.map(([dx, dz]) => `setblock ${x + dx} ${y} ${z + dz} minecraft:farmland`),
+    ...spots.map(([dx, dz]) => `setblock ${x + dx} ${y + 1} ${z + dz} minecraft:wheat[age=7]`),
+    `setblock ${x - 3} ${y} ${z - 3} minecraft:farmland`, `setblock ${x - 3} ${y + 1} ${z - 3} minecraft:wheat[age=2]`,
+    `give ${TESTER} minecraft:wheat_seeds 4`);
+  await waitFor(() => bot.blockAt(new Vec3(x - 3, y + 1, z - 4))?.name === "wheat" && held("wheat_seeds") >= 4, 8000, "crops set up");
+  const result = await performAction(bot, { type: "harvest", onlyRipe: true }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  assert.equal(result.harvested?.wheat, 3, result.text);
+  await waitFor(() => held("wheat") >= 3, 8000, "wheat picked up");
+  assert.equal(Number(bot.blockAt(new Vec3(x - 3, y + 1, z - 3)).getProperties().age), 2, "the unripe one was left alone");
+  const file = path.join(process.env.MC_MEMORY_ROOT, "achievements", `${TESTER}.json`);
+  assert(JSON.parse(readFileSync(file, "utf8")).includes("harvested:wheat"), "achievement recorded");
+  const again = await performAction(bot, { type: "harvest", onlyRipe: true }, TESTER);
+  assert.equal(again.ok, false, "onlyRipe never starts a farm");
+});
+
+scenario("Ranching: builds a pen on its site, herds a cow in, and breeds a real baby", async () => {
+  useBotMovements(); // the fleet's real movement setup: gates open on the way through
+  scenarioCleanup.push(() => rcon(`kill @e[type=minecraft:cow,x=${x - r},y=${y},z=${z - r},dx=${2 * r},dy=6,dz=${2 * r}]`).catch(() => {}));
+  await rcon(`give ${TESTER} minecraft:oak_fence 23`, `give ${TESTER} minecraft:oak_fence_gate 1`, `give ${TESTER} minecraft:wheat 16`);
+  await waitFor(() => held("oak_fence") >= 23 && held("oak_fence_gate") >= 1 && held("wheat") >= 16, 8000, "pen materials");
+  const site = { x: x - 5, y: y + 1, z: z - 5 };
+  const built = await performAction(bot, { type: "build_pen", at: site }, TESTER);
+  assert.equal(built.ok, true, built.text);
+  const pen = await loadPenLocation();
+  assert.deepEqual([pen.center.x, pen.center.y, pen.center.z], [site.x, site.y, site.z], "pen saved at its site");
+  // One cow already inside (summoned), one out in the arena to herd in.
+  await rcon(`summon minecraft:cow ${site.x + 0.5} ${site.y} ${site.z + 0.5} {Tags:["${TAG}"],PersistenceRequired:1b}`,
+    `summon minecraft:cow ${x + 5} ${y + 1} ${z + 5} {Tags:["${TAG}"],PersistenceRequired:1b}`);
+  await waitFor(() => Object.values(bot.entities).filter((e) => e.name === "cow").length >= 2, 10_000, "two cows");
+  const herded = await performAction(bot, { type: "herd_to_pen", species: "cow" }, TESTER);
+  assert.equal(herded.ok, true, herded.text);
+  assert(countInPen(bot, pen, "cow") >= 2, `cows in pen: ${countInPen(bot, pen, "cow")}`);
+  const bred = await performAction(bot, { type: "breed", species: "cow", near: pen.center }, TESTER);
+  assert.equal(bred.ok, true, bred.text);
+  assert.equal(bred.bred, "cow");
 });
 
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);

@@ -1,4 +1,12 @@
-// Version: 1.72.0
+// Version: 1.73.0
+//
+// 1.73.0 (2026-09-25) -- farming and ranching, from a day of logs (0 farm/ranch steps, 4,203 failed
+// "eat"s). loot takes groups ("food", "seeds"); harvest builds a real plot (next to water, clears
+// plants on top, checks each block turned to farmland and each seed took), can harvest only ripe
+// crops, and reports what it did; build_pen takes a site; breed can stay at the pen and checks a
+// baby actually appeared; herd_to_pen waits for the animal and holds the gate only while leading; pens
+// are 7x7. Verified achievements (harvested:/penned:/bred:) are recorded per bot for
+// the Mayor's curriculum. A failed OUTCOME line now says why.
 //
 // 1.72.0 (2026-09-25) -- herd_to_pen holds doors open (swim-movements.js holdDoorsOpen) so the door
 // closer doesn't shut the pen gate on the animal being led in.
@@ -2141,6 +2149,170 @@ async function savePenLocation(center, gate) {
   }
 }
 
+// 2026-09-25 farming/ranching. loot's item can name a group: "food" (a hungry bot with nothing to eat
+// fetches some -- index.js checkHunger) or "seeds" (anything harvest can plant).
+export const SEED_NAMES = ["wheat_seeds", "carrot", "potato", "beetroot_seeds"];
+const LOOT_GROUPS = { food: FOOD_NAMES, seeds: SEED_NAMES };
+
+// Verified achievements -- recorded by the action that actually did the thing (harvest picked a ripe
+// crop, herd_to_pen got an animal into the pen, breed saw a baby appear), never by a planner's claim.
+// Mayor's curriculum counts these instead of "holding a crop", which looting satisfied. One small
+// per-bot file so a restart keeps them; bot.emit("achievement") lets index.js report a new one.
+const ACHIEVEMENTS_DIR = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/achievements`;
+const achievementsByBot = new Map();
+
+export async function loadAchievements(bot) {
+  if (!achievementsByBot.has(bot.username)) {
+    let names = [];
+    try {
+      names = JSON.parse(await readFile(path.join(ACHIEVEMENTS_DIR, `${bot.username}.json`), "utf8"));
+    } catch {}
+    if (!achievementsByBot.has(bot.username)) achievementsByBot.set(bot.username, new Set(Array.isArray(names) ? names : []));
+  }
+  return achievementsByBot.get(bot.username);
+}
+
+export function getAchievements(bot) {
+  return achievementsByBot.get(bot.username) ?? new Set();
+}
+
+export async function recordAchievement(bot, name) {
+  const set = await loadAchievements(bot);
+  if (set.has(name)) return false;
+  set.add(name);
+  try {
+    await mkdir(ACHIEVEMENTS_DIR, { recursive: true });
+    await writeFile(path.join(ACHIEVEMENTS_DIR, `${bot.username}.json`), JSON.stringify([...set]), "utf8");
+  } catch (err) {
+    console.error("achievements: failed to persist:", err.message);
+  }
+  console.log(`[${bot.username}] achievement: ${name}`);
+  bot.emit("achievement", name);
+  return true;
+}
+
+export { loadPenLocation, BREEDING_FOOD };
+
+export const LIVESTOCK = ["cow", "sheep", "pig", "chicken"];
+
+// Animals of one kind standing inside the pen (its 5x5 interior).
+export function countInPen(bot, pen, species) {
+  return Object.values(bot.entities).filter((e) => e.name === species &&
+    Math.abs(e.position.x - (pen.center.x + 0.5)) < 2.6 && Math.abs(e.position.z - (pen.center.z + 0.5)) < 2.6 &&
+    Math.abs(e.position.y - pen.center.y) < 2).length;
+}
+
+// A flat, open 7x7 spot 8-20 blocks from home for build_pen (which builds around its site): same
+// floor height across all 49 columns, two blocks of air above each. Building around the bot where
+// she stood at home would fence the fleet into its own shelter.
+export function findPenSite(bot, home) {
+  const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
+  const feet = new Map(); // "x,z" -> feet y of an open column with solid ground, or null
+  const feetAt = (x, z) => {
+    const key = `${x},${z}`;
+    if (feet.has(key)) return feet.get(key);
+    let found = null;
+    for (let y = hy + 3; y >= hy - 3 && found === null; y--) {
+      const ground = bot.blockAt(new Vec3(x, y - 1, z));
+      const a = bot.blockAt(new Vec3(x, y, z)), b = bot.blockAt(new Vec3(x, y + 1, z));
+      if (ground?.boundingBox === "block" && a?.name === "air" && b?.name === "air") found = y;
+    }
+    feet.set(key, found);
+    return found;
+  };
+  let best = null, bestDist = Infinity;
+  for (let dx = -20; dx <= 20; dx++) {
+    for (let dz = -20; dz <= 20; dz++) {
+      const dist = Math.hypot(dx, dz);
+      if (dist < 8 || dist > 20 || dist >= bestDist) continue;
+      const y = feetAt(hx + dx, hz + dz);
+      if (y === null) continue;
+      let flat = true;
+      for (let ox = -3; ox <= 3 && flat; ox++) {
+        for (let oz = -3; oz <= 3 && flat; oz++) flat = feetAt(hx + dx + ox, hz + dz + oz) === y;
+      }
+      if (flat) { best = new Vec3(hx + dx, y, hz + dz); bestDist = dist; }
+    }
+  }
+  return best;
+}
+
+// Farm plots (harvest). Farmland is hydrated by water within 4 blocks at its own level, so the plot
+// goes around the water with the most tillable ground beside it; with no water, the tillable blocks
+// closest together near the bot. Tilling needs nothing on top, so small plants get cleared first.
+const FARM_PLOT_SIZE = 8;
+const TILLABLE = new Set(["dirt", "grass_block", "dirt_path", "rooted_dirt"]);
+const CLEAR_ABOVE = new Set(["short_grass", "grass", "tall_grass", "fern", "large_fern", "dead_bush",
+  ...BREEDING_FOOD.bee]);
+function tillableAt(bot, pos) {
+  const ground = bot.blockAt(pos), above = bot.blockAt(pos.offset(0, 1, 0));
+  return !!ground && TILLABLE.has(ground.name) && !!above && (above.name === "air" || CLEAR_ABOVE.has(above.name));
+}
+
+export function chooseFarmPlot(bot, near) {
+  const origin = near || bot.entity.position;
+  const waterId = bot.registry.blocksByName.water?.id;
+  const waters = waterId === undefined ? [] : bot.findBlocks({ matching: waterId, maxDistance: 32, count: 60, point: origin });
+  let best = null;
+  for (const w of waters) {
+    const around = [];
+    for (let dx = -4; dx <= 4; dx++) {
+      for (let dz = -4; dz <= 4; dz++) {
+        const pos = w.offset(dx, 0, dz);
+        if ((dx || dz) && tillableAt(bot, pos)) around.push(pos);
+      }
+    }
+    if (around.length < 4) continue;
+    if (!best || around.length > best.plot.length ||
+        (around.length === best.plot.length && w.distanceTo(origin) < best.water.distanceTo(origin))) {
+      best = { water: w, plot: around };
+    }
+  }
+  if (best) {
+    const plot = best.plot.sort((a, b) => a.distanceTo(best.water) - b.distanceTo(best.water)).slice(0, FARM_PLOT_SIZE);
+    return { plot, hydrated: true, center: best.water };
+  }
+  const soil = bot.findBlocks({ matching: (b) => TILLABLE.has(b.name), maxDistance: 32, count: 200, point: origin })
+    .filter((pos) => tillableAt(bot, pos));
+  if (!soil.length) return null;
+  const first = soil[0];
+  const plot = soil.filter((pos) => pos.distanceTo(first) <= 3).slice(0, FARM_PLOT_SIZE);
+  return { plot, hydrated: false, center: first };
+}
+
+export const CROP_MAX_AGE = { wheat: 7, carrots: 7, potatoes: 7, beetroots: 3 };
+
+// Breaking a crop (or the grass on a plot) from 2 blocks away leaves its drops on the ground -- the
+// harvested wheat never reached her inventory (live test, 2026-09-25). Walk over what's lying around
+// the spots she worked, nearest first, for at most maxMs.
+async function collectDrops(bot, token, spots, maxMs = 10_000) {
+  const deadline = Date.now() + maxMs;
+  for (let tries = 0; tries < 12 && Date.now() < deadline && !token.cancelled; tries++) {
+    const drop = Object.values(bot.entities)
+      .filter((e) => e.name === "item" && spots.some((spot) => e.position.distanceTo(spot) <= 4))
+      .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+    if (!drop) return;
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 1)),
+        Math.max(1000, deadline - Date.now()), () => bot.pathfinder.setGoal(null));
+    } catch {
+      // unreachable or timed out -- the loop's deadline and try cap end it
+    } finally {
+      if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+    }
+    await new Promise((r) => setTimeout(r, 300)); // the pickup lands a tick or two later
+  }
+}
+
+// What's planted near a spot: ripe crops, and crops still growing.
+export function farmStatus(bot, near) {
+  const cropIds = Object.keys(CROP_MAX_AGE).map((n) => bot.registry.blocksByName[n]?.id).filter((id) => id !== undefined);
+  const crops = bot.findBlocks({ matching: cropIds, maxDistance: 32, count: 128, ...(near ? { point: near } : {}) })
+    .map((p) => bot.blockAt(p)).filter(Boolean);
+  const ripe = crops.filter((b) => Number(b.getProperties?.().age) === CROP_MAX_AGE[b.name]);
+  return { ripe: ripe.length, growing: crops.length - ripe.length };
+}
+
 // Direct request, 2026-09-13 ("remember what is in chests when someone opens it. if someone
 // takes the item out of a chest, redact it from global memory"). A structured, mutable, SHARED
 // registry -- deliberately NOT the fuzzy RAG-based world-memory notes (hermes-rag/longterm.js)
@@ -2418,13 +2590,10 @@ export async function performAction(bot, action, speaker, handle = null) {
   if (handle ? !holdsControl(handle) : isBusy()) return logOutcome(bot, action, startedAt, { ...LOST_CONTROL }, true);
   const alreadyHeld = !!handle;
   const token = handle ? handle.token : cancelAndRotate(bot);
-  // Leading an animal through the pen gate: don't let the door closer shut it on the animal.
-  const releaseDoors = action.type === "herd_to_pen" ? holdDoorsOpen(bot) : null;
   let result;
   try {
     result = await performActionAs(bot, action, speaker, token);
   } finally {
-    releaseDoors?.();
     // Only release if THIS call acquired (the legacy handle-less path) -- a caller holding a
     // handle owns its own release via handle.release().
     if (!alreadyHeld) releaseControl({ token });
@@ -2435,8 +2604,9 @@ export async function performAction(bot, action, speaker, handle = null) {
 // Review MB-18 follow-up (2026-09-24): one structured line per action outcome, so triage and
 // tests/baseline.mjs count outcomes from data instead of pattern-matching each action's prose.
 function logOutcome(bot, action, startedAt, result, refused = false) {
+  const why = !result.ok && !result.cancelled && result.text ? { why: String(result.text).slice(0, 100) } : {};
   console.log(`[${bot.username}] OUTCOME ${JSON.stringify({ type: action.type, ok: !!result.ok,
-    cancelled: !!result.cancelled, refused, ms: Date.now() - startedAt })}`);
+    cancelled: !!result.cancelled, refused, ms: Date.now() - startedAt, ...why })}`);
   return result;
 }
 
@@ -2756,13 +2926,13 @@ async function performActionAs(bot, action, speaker, token) {
       // chest-first fallback already relies on, so there is only ever one implementation of
       // "take up to <count> of <item> from a chest," not two that could quietly drift apart.
       if (action.item) {
-        const itemDef = bot.registry.itemsByName[action.item];
-        if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
+        const group = LOOT_GROUPS[action.item]; // "food", "seeds" (2026-09-25)
+        if (!group && !bot.registry.itemsByName[action.item]) return fail(`I don't recognize the item "${action.item}".`);
         // gearCategoryNames() (2026-09-18, "pick up ONE of those pieces... and abandon the quest
         // to craft it"): broadens an equipment request to ANY tier of the same category, not
         // just the exact material she named -- a chest's diamond_pickaxe satisfies "LOOT
         // wooden_pickaxe" just as well.
-        const wantedNames = gearCategoryNames(bot, action.item);
+        const wantedNames = group || gearCategoryNames(bot, action.item);
         let sawObstruction = false;
         for (const pos of positions) {
           if (token.cancelled) return ok("stopped on the way to a chest.");
@@ -3649,15 +3819,17 @@ async function performActionAs(bot, action, speaker, token) {
       if (!fence) return fail("don't have any fence blocks for a pen.");
       if (!gate) return fail("don't have a fence gate for a pen.");
 
-      const base = bot.entity.position.floored();
+      const base = action.at ? new Vec3(action.at.x, action.at.y, action.at.z).floored() : bot.entity.position.floored();
       const perimeter = [];
-      for (let dx = -2; dx <= 2; dx++) {
-        for (let dz = -2; dz <= 2; dz++) {
-          if (Math.abs(dx) !== 2 && Math.abs(dz) !== 2) continue; // interior -- open pen floor, no fence here
+      // 2026-09-25: 7x7 (5x5 inside), was 5x5 -- a tempted animal stops ~2.5 blocks from her, so in a
+      // 3x3 pen there was nowhere inside for it to stop.
+      for (let dx = -3; dx <= 3; dx++) {
+        for (let dz = -3; dz <= 3; dz++) {
+          if (Math.abs(dx) !== 3 && Math.abs(dz) !== 3) continue; // interior -- open pen floor, no fence here
           perimeter.push(base.offset(dx, 0, dz));
         }
       }
-      const gatePos = base.offset(0, 0, 2); // south edge, middle -- the gate, matching "build"'s own doorway convention
+      const gatePos = base.offset(0, 0, 3); // south edge, middle -- the gate, matching "build"'s own doorway convention
       const fencePositions = perimeter.filter((p) => !(p.x === gatePos.x && p.y === gatePos.y && p.z === gatePos.z));
       const PEN_TOTAL = perimeter.length; // small fixed shape -- no extra batch cap needed
 
@@ -3726,18 +3898,12 @@ async function performActionAs(bot, action, speaker, token) {
 
       const animal = Object.values(bot.entities)
         .filter((e) => e.name === action.species &&
-          e.position.distanceTo(pen.center) > 4 && // not already in/near the pen
+          !(Math.abs(e.position.x - (pen.center.x + 0.5)) < 2.6 && Math.abs(e.position.z - (pen.center.z + 0.5)) < 2.6) && // not already penned
           e.position.distanceTo(bot.entity.position) <= 32)
         .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
       if (!animal) return fail(`no loose ${action.species} nearby to herd.`);
 
-      try {
-        await bot.equip(foodItem, "hand");
-      } catch (err) {
-        return fail(`couldn't hold the ${foodItem.name}: ${err.message}`);
-      }
-
-      // Close enough to trigger the animal's own tempt-follow behavior before leading it anywhere.
+      // Walk up to it empty-handed; the food comes out once she's there (below).
       try {
         await withTimeout(
           bot.pathfinder.goto(new goals.GoalNear(animal.position.x, animal.position.y, animal.position.z, 3)),
@@ -3750,9 +3916,27 @@ async function performActionAs(bot, action, speaker, token) {
       }
       if (token.cancelled) return ok("stopped before herding.");
 
+      // 2026-09-25 (live test): the food comes out only now that she's at the animal -- held from the
+      // start, the one already in the pen followed her out -- and the gate is held open only while
+      // she leads (performAction used to hold it for the whole action, walk out included).
+      const releaseDoors = holdDoorsOpen(bot);
+      try {
+        return await (async () => {
+      try {
+        await bot.equip(foodItem, "hand");
+      } catch (err) {
+        return fail(`couldn't hold the ${foodItem.name}: ${err.message}`);
+      }
+
+
       const HERD_STEP_DISTANCE = 3;
       const HERD_MAX_STEPS = 15;
       const HERD_FOLLOW_RANGE = 8; // generous margin over vanilla TemptGoal's own real tempt radius
+      const waitForAnimal = async (done, ms) => {
+        for (let waited = 0; waited < ms && !token.cancelled && !done(); waited += 250) {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      };
       let steps = 0;
       while (steps < HERD_MAX_STEPS) {
         if (token.cancelled) return ok(`stopped herding partway (${steps} steps).`);
@@ -3780,11 +3964,15 @@ async function performActionAs(bot, action, speaker, token) {
           if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         steps++;
+        // 2026-09-25 (live test): a tempted animal walks slower than she does -- let it catch up
+        // before the next step instead of outrunning it.
+        await waitForAnimal(() => bot.entities[animal.id]?.position.distanceTo(bot.entity.position) <= 4, 3000);
       }
 
-      // Final leg: through the gate and into the pen's own interior.
+      // Final leg: through the gate to the pen's back wall. A tempted animal stops ~2.5 blocks short of
+      // her, so leading only to the middle left it standing in the gateway (live test, 2026-09-25).
       try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pen.center.x, pen.center.y, pen.center.z, 1)),
+        await withTimeout(bot.pathfinder.goto(new goals.GoalBlock(pen.center.x, pen.center.y, pen.center.z - 2)),
           ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
       } catch {
         // best effort -- the real success check below decides regardless of how this leg went
@@ -3792,8 +3980,12 @@ async function performActionAs(bot, action, speaker, token) {
         if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
       }
 
+      // It trails her in through the gate: wait for it to be inside the pen, not merely near it.
+      const inPen = (e) => !!e && Math.abs(e.position.x - (pen.center.x + 0.5)) < 2.6 &&
+        Math.abs(e.position.z - (pen.center.z + 0.5)) < 2.6;
+      await waitForAnimal(() => inPen(bot.entities[animal.id]), 15_000);
       const finalAnimal = bot.entities[animal.id];
-      if (!finalAnimal || finalAnimal.position.distanceTo(pen.center) > 4) {
+      if (!inPen(finalAnimal)) {
         return fail(`reached the pen, but the ${action.species} didn't follow all the way in.`);
       }
 
@@ -3808,7 +4000,13 @@ async function performActionAs(bot, action, speaker, token) {
         }
       }
 
+      await recordAchievement(bot, `penned:${action.species}`);
       return ok(`herded a ${action.species} into the pen.`);
+        })();
+      } finally {
+        releaseDoors();
+        await refreshGear(bot); // put the food away, or the animal follows her back out
+      }
     }
 
     case "repair_terrain": {
@@ -4034,103 +4232,95 @@ async function performActionAs(bot, action, speaker, token) {
     }
 
     case "harvest": {
-      // Direct request, 2026-09-07 ("what else can we add" -> farming, a sustainable food
-      // source instead of always depending on looted/found food). Simpler than farming from
-      // scratch: harvest a crop that's already ripe and replant, rather than placing on bare
-      // dirt. Ages/replant items confirmed against minecraft-data's own block-state definitions
-      // (wheat/carrots/potatoes: age 0-7, mature at 7; beetroots: age 0-3, mature at 3).
-      //
-      // 2026-09-07, later same day ("build the water crossing mechanic" -> "do 1,2,4,5" ->
-      // farm automation): real gap found by comparing against dedicated farm bots elsewhere in
-      // the mineflayer ecosystem -- this only ever processed ONE crop per invocation, so a
-      // genuinely productive field needed one goal step (a full classifyIntent/goalTick round
-      // trip) per single plant. Now processes up to HARVEST_BATCH_LIMIT mature crops in one call,
-      // one goto+dig+replant cycle each -- a real "work the field" pass, not one plant at a time.
-      // Bounded, not the whole field in one go: each cycle already carries its own ACTION_TIMEOUT_MS
-      // pathing/digging risk (same withTimeout/stopDigging protection as every other digging
-      // action here), so an unbounded batch could compound that risk across dozens of plants
-      // instead of the usual single one.
-      const CROP_MAX_AGE = { wheat: 7, carrots: 7, potatoes: 7, beetroots: 3 };
+      // Direct request, 2026-09-07 (farming), rebuilt 2026-09-25 from a day of logs: the old
+      // start-a-farm branch tilled the 8 nearest dirt blocks wherever they were, counted a till that
+      // silently failed (grass on top), ignored water, and never said why it failed. action.near:
+      // work around this spot (a farm goal's plot). action.onlyRipe: harvest ripe crops or nothing
+      // -- the ripe-crop routine uses it so it never starts a farm on its own.
       const CROP_REPLANT = { wheat: "wheat_seeds", carrots: "carrot", potatoes: "potato", beetroots: "beetroot_seeds" };
       const HARVEST_BATCH_LIMIT = 8;
       const cropIds = Object.keys(CROP_MAX_AGE).map((n) => bot.registry.blocksByName[n]?.id)
         .filter((id) => id !== undefined);
       if (!cropIds.length) return fail("don't know how to recognize any crops here.");
+      const near = action.near ? new Vec3(action.near.x, action.near.y, action.near.z) : null;
 
-      // Real gap avoided here, not found live: findBlocks' own function-matcher path (used for
-      // beds/sleep elsewhere in this file) was never confirmed to populate real block-state
-      // properties DURING the search itself -- rather than assume, this searches broadly by
-      // block TYPE (the proven-reliable pattern, same as loot/smelt/store) and checks maturity
-      // afterward via direct bot.blockAt() calls, the exact pattern already confirmed working
-      // for the double-chest obstruction check.
-      const positions = bot.findBlocks({ matching: cropIds, maxDistance: 32, count: 40 });
+      const positions = bot.findBlocks({ matching: cropIds, maxDistance: 32, count: 64, ...(near ? { point: near } : {}) });
       const matureBlocks = positions.map((pos) => bot.blockAt(pos))
         .filter((block) => block && Number(block.getProperties?.().age) === CROP_MAX_AGE[block.name])
         .slice(0, HARVEST_BATCH_LIMIT);
 
-      // Direct request, 2026-09-08 ("farming from scratch"). Real gap: "harvest" could only ever
-      // work a field that already existed (replant what's already growing) -- with nothing yet
-      // planted anywhere nearby, it just failed outright, no path to ever bootstrap a farm at
-      // all. Real vanilla tilling has no dedicated mineflayer API: right-clicking a hoe on
-      // dirt/grass_block with air directly above is what converts it to farmland, so this uses
-      // bot.activateBlock() (the same "simulate a real client interaction" primitive prismarine
-      // itself documents for exactly this kind of non-dig, non-place block interaction).
-      // Deliberately doesn't check for nearby water -- unhydrated farmland just grows slower in
-      // real vanilla mechanics, it isn't broken or crop-killing, so this isn't worth the added
-      // complexity of a water search for what would only ever be a minor optimization.
       if (!matureBlocks.length) {
+        if (action.onlyRipe) return fail("nothing ripe to harvest.");
         const hoe = bot.inventory.items().find((i) => i.name.endsWith("_hoe"));
-        if (!hoe) return fail("couldn't find any ripe crops, and don't have a hoe to start a new farm.");
-        const seedNames = Object.values(CROP_REPLANT);
-        if (!bot.inventory.items().some((i) => seedNames.includes(i.name))) {
-          return fail("couldn't find any ripe crops, and don't have any seeds to start a new farm.");
+        if (!hoe) return { ...fail("couldn't find any ripe crops, and don't have a hoe to start a new farm."), missing: "hoe" };
+        if (!bot.inventory.items().some((i) => SEED_NAMES.includes(i.name))) {
+          return { ...fail("couldn't find any ripe crops, and don't have any seeds to start a new farm."), missing: "seeds" };
         }
-
-        const barePositions = bot.findBlocks({
-          matching: (block) => (block.name === "dirt" || block.name === "grass_block") &&
-            bot.blockAt(block.position.offset(0, 1, 0))?.boundingBox !== "block",
-          maxDistance: 32, count: HARVEST_BATCH_LIMIT,
-        });
-        if (!barePositions.length) return fail("couldn't find any ripe crops or open ground to start a new farm.");
+        const site = chooseFarmPlot(bot, near);
+        if (!site) return fail("couldn't find any ripe crops or open ground to start a new farm.");
 
         let tilled = 0, planted = 0;
-        for (const pos of barePositions) {
+        const problems = [];
+        for (const pos of site.plot) {
           if (token.cancelled) break;
+          if (!tillableAt(bot, pos) && bot.blockAt(pos)?.name !== "farmland") continue; // changed since chosen
           try {
             await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2)),
               ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
           } catch {
             if (token.cancelled) break;
-            continue; // couldn't reach this one -- try the next candidate
+            problems.push("unreachable");
+            continue;
           } finally {
             if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
           }
           if (token.cancelled) break;
 
-          const dirtBlock = bot.blockAt(pos);
-          if (!dirtBlock) continue;
-          try {
-            await bot.equip(hoe, "hand");
-            await bot.activateBlock(dirtBlock);
-            tilled++;
-          } catch (err) {
-            console.error("harvest: tilling failed:", err.message);
-            continue;
-          }
-          const seed = bot.inventory.items().find((i) => seedNames.includes(i.name));
-          if (seed) {
+          const above = bot.blockAt(pos.offset(0, 1, 0));
+          if (above && above.name !== "air") {
             try {
-              await bot.equip(seed, "hand");
-              await bot.placeBlock(bot.blockAt(pos), new Vec3(0, 1, 0)); // re-fetch: now farmland, not the old dirtBlock snapshot
-              planted++;
-            } catch (err) {
-              console.error("harvest: planting failed:", err.message); // this tilling still counts
+              await withTimeout(bot.dig(above), ACTION_TIMEOUT_MS, () => bot.stopDigging()); // grass often drops seeds
+            } catch {
+              problems.push(`couldn't clear the ${above.name}`);
+              continue;
             }
           }
+          if (bot.blockAt(pos)?.name !== "farmland") {
+            try {
+              const currentHoe = bot.inventory.items().find((i) => i.name.endsWith("_hoe"));
+              if (!currentHoe) { problems.push("hoe broke"); break; }
+              await bot.equip(currentHoe, "hand");
+              await bot.activateBlock(bot.blockAt(pos));
+            } catch (err) {
+              problems.push(`tilling: ${err.message}`);
+              continue;
+            }
+            await new Promise((r) => setTimeout(r, 250)); // the block update lands a tick or two later
+            if (bot.blockAt(pos)?.name !== "farmland") {
+              problems.push(`the ${bot.blockAt(pos)?.name ?? "block"} didn't turn to farmland`);
+              continue;
+            }
+          }
+          tilled++;
+          const seed = bot.inventory.items().find((i) => SEED_NAMES.includes(i.name));
+          if (!seed) { problems.push("ran out of seeds"); continue; }
+          try {
+            await bot.equip(seed, "hand");
+            await bot.placeBlock(bot.blockAt(pos), new Vec3(0, 1, 0));
+          } catch (err) {
+            problems.push(`planting: ${err.message}`);
+            continue;
+          }
+          if (cropIds.includes(bot.blockAt(pos.offset(0, 1, 0))?.type)) planted++;
+          else problems.push("the seed didn't take");
         }
+        await collectDrops(bot, token, site.plot); // seeds from the cleared grass
         await refreshGear(bot);
-        if (!tilled) return fail("couldn't till any ground to start a new farm.");
-        return ok(`started a new farm plot: tilled ${tilled}, planted ${planted}${token.cancelled ? ", stopped early" : ""}.`);
+        const why = problems.length ? ` (${[...new Set(problems)].slice(0, 3).join("; ")})` : "";
+        if (!planted && !token.cancelled) return fail(`couldn't start a farm: tilled ${tilled}, planted 0${why}.`);
+        const result = ok(`started a farm plot${site.hydrated ? " by water" : " (no water nearby, it'll grow slowly)"}: ` +
+          `tilled ${tilled}, planted ${planted}${token.cancelled ? ", stopped early" : ""}${why}.`);
+        return { ...result, tilled, planted, plot: { x: site.center.x, y: site.center.y, z: site.center.z } };
       }
 
       const harvestedCounts = {};
@@ -4142,9 +4332,6 @@ async function performActionAs(bot, action, speaker, token) {
           stoppedEarly = true;
           break;
         }
-        // A crop dug earlier in this same batch can leave a later position stale (already dug by
-        // a nearby double-wide plant, or the age check above is now out of date) -- re-check
-        // rather than trust the snapshot from before this loop started.
         const current = bot.blockAt(cropBlock.position);
         if (!current || Number(current.getProperties?.().age) !== CROP_MAX_AGE[current.name]) continue;
 
@@ -4162,11 +4349,6 @@ async function performActionAs(bot, action, speaker, token) {
 
         const farmlandPos = current.position.offset(0, -1, 0); // the crop sits on this block
         try {
-          // Real gap found live, 2026-09-07 (chasing an all-day recurring OOM crash): a bare
-          // bot.dig() with no timeout at all -- if it never settles (confirmed against dig.js's
-          // own source: it awaits a promise that only resolves via a per-block blockUpdate
-          // listener or bot.stopDigging(), neither guaranteed here), this would hang forever with
-          // no recovery, same underlying risk "mine"'s own withTimeout exists to prevent.
           await withTimeout(bot.dig(current), ACTION_TIMEOUT_MS, () => bot.stopDigging());
         } catch {
           if (token.cancelled) { stoppedEarly = true; break; }
@@ -4187,11 +4369,14 @@ async function performActionAs(bot, action, speaker, token) {
         }
       }
 
+      await collectDrops(bot, token, matureBlocks.map((b) => b.position));
       await refreshGear(bot);
       const total = Object.values(harvestedCounts).reduce((a, b) => a + b, 0);
       if (!total) return stoppedEarly ? ok("stopped harvesting.") : fail("couldn't harvest any of the ripe crops found.");
+      for (const crop of Object.keys(harvestedCounts)) await recordAchievement(bot, `harvested:${crop}`);
       const summary = Object.entries(harvestedCounts).map(([name, n]) => `${n} ${name}`).join(", ");
-      return ok(`harvested ${summary} (${replantedCount} replanted)${stoppedEarly ? ", stopped early" : ""}.`);
+      return { ...ok(`harvested ${summary} (${replantedCount} replanted)${stoppedEarly ? ", stopped early" : ""}.`),
+        harvested: harvestedCounts };
     }
 
     case "plant_sapling": {
@@ -4294,9 +4479,12 @@ async function performActionAs(bot, action, speaker, token) {
       const foodItem = bot.inventory.items().find((i) => foods.includes(i.name));
       if (!foodItem) return fail(`don't have the right food to breed a ${action.species} (need ${foods[0]}).`);
 
-      const animals = Object.values(bot.entities)
-        .filter((e) => e.name === action.species && e.position.distanceTo(bot.entity.position) <= 24)
-        .slice(0, 2);
+      // action.near (a ranch goal's pen centre): breed the pair inside the pen, not two strays.
+      const near = action.near ? new Vec3(action.near.x + 0.5, action.near.y, action.near.z + 0.5) : null;
+      const kin = () => Object.values(bot.entities).filter((e) => e.name === action.species &&
+        (near ? e.position.distanceTo(near) <= 3.6 : e.position.distanceTo(bot.entity.position) <= 24));
+      const before = kin().length;
+      const animals = kin().slice(0, 2);
       if (animals.length < 2) {
         return fail(`need two ${action.species}s nearby to breed, only found ${animals.length}.`);
       }
@@ -4321,8 +4509,18 @@ async function performActionAs(bot, action, speaker, token) {
           if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
       }
+      await refreshGear(bot);
       if (!fed) return fail(`couldn't get close enough to feed any ${action.species}s.`);
-      return ok(`fed ${fed} ${action.species}${fed > 1 ? "s" : ""} -- hopefully a baby soon.`);
+      // 2026-09-25: success used to be "fed some" -- a pair already on cooldown, or one fed twice,
+      // looked the same. A baby appearing within ~10s is the real result.
+      let bred = false;
+      for (let waited = 0; waited < 10_000 && !token.cancelled; waited += 500) {
+        await new Promise((r) => setTimeout(r, 500));
+        if (kin().length > before) { bred = true; break; }
+      }
+      if (!bred) return fail(`fed ${fed} ${action.species}${fed > 1 ? "s" : ""}, but no baby came of it (on cooldown, or too young?).`);
+      await recordAchievement(bot, `bred:${action.species}`);
+      return { ...ok(`bred a baby ${action.species}.`), bred: action.species };
     }
 
     case "harvest_hive": {

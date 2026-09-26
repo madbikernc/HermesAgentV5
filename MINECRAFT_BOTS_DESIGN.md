@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.7.0
+**Version:** 2.8.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -129,6 +129,12 @@ queued action/goal. A CHAT reply may never promise a future action that isn't ac
 - From dusk to dawn goals are **paused, not dropped**; only a goal a player set that night runs.
 - Soldier guard duty is a **standing goal** held without planner calls; a Builder item already in
   hand is placed with `place_home` (walk home, place, verify).
+- **Farm and ranch goals skip the planner and the skill lookup** (`farmTaskFor`, ahead of the
+  "already holding the target" shortcut). A farm goal plants a plot (`harvest`, fetching a hoe or
+  seeds when missing), waits while it grows, and is done only when crops are actually harvested,
+  by the goal or by the ripe-crop routine. A ranch goal crafts fences and a gate, builds a 7x7 pen
+  on a flat site 8-20 blocks from home (`findPenSite`), herds a pair of one species in, and is done
+  only when a baby is actually born.
 
 **DONE is never accepted on the model's word.** Inventory and world state are re-checked
 (`builderPriorityItemSatisfied()` and friends); a rejected claim logs `REJECTED DONE` /
@@ -158,8 +164,10 @@ ordering.
 
 **Idle-tick checks**, each on its own interval, all at ROUTINE tier: sleep, dusk, hunger,
 inventory full, inventory insurance, surplus banking, give-requests, saplings, area lighting,
-home lighting, terrain repair, stuck detection, self-defense, sleeping-threat. Hunger escalates to
-HUNGER_CRITICAL at food ≤ 6 when there's food or a rod on hand. Home lighting runs on one
+home lighting, terrain repair, stuck detection, self-defense, sleeping-threat, ripe crops (harvest
+and replant ripe crops within reach of home, never start a farm). With nothing to eat, hunger
+fetches food from a chest (`loot` "food"), then fishes; a failed fetch backs off 5 min instead of
+failing `eat` every 15 s. Hunger escalates to HUNGER_CRITICAL at food ≤ 6. Home lighting runs on one
 maintainer (the Builder, or `MC_HOME_LIGHTING`) with exponential backoff. Every check that loses
 its turn to other work is counted and logged as `ROUTINE_SKIPS` every 10 minutes.
 
@@ -203,7 +211,7 @@ routing decision is still open (§12).
 | `minecraft-skills` RAG corpus | Reusable skills, indexed on description | Same two scripts, `--corpus minecraft-skills` |
 | `known_chests.json` | Chest contents, position-keyed | Structured JSON, overwritten on every open |
 | hermes-memory `agent_state`, agent `minecraft-beds` | Claimed beds, both hosts | Key = bot name; `beds/` files are the per-host fallback |
-| `pen.json`, `mayor-curriculum.json`, `skills/` | Pen gate, curriculum stage, skill store | Files under `/mnt/hermes-data/minecraft-memory/` |
+| `pen.json`, `mayor-curriculum.json`, `achievements/`, `skills/` | Pen gate, curriculum stage, verified achievements, skill store | Files under `/mnt/hermes-data/minecraft-memory/` |
 
 Chest contents are deliberately **not** in RAG: they change on every open and need real
 point-in-time overwrites, which RAG's append-with-dedup shape can't give. One store per mutable
@@ -239,7 +247,7 @@ means two different things, and the distinction is load-bearing:**
 
 - **Builder and Soldier are deterministic.** `nextBuilderPriority()` / `nextSoldierPriority()`
   check real world state and **override** freeform self-propose. Builder's ladder is crafting
-  table → furnace → chest → beds (`BOT_USERNAMES.size`, self-scaling) → shelter → beehive, each
+  table → furnace → chest → beds (`BOT_USERNAMES.size`, self-scaling) → shelter → beehive → ranch, each
   verified as a *placed block* near spawn rather than an inventory item. A stalled item is
   skipped after `BUILDER_ITEM_STALL_LIMIT` (3) cycles and revisited later. Soldier's ladder is
   weapon → nearby hostile (`SOLDIER_PATROL_RANGE` 32) → missing armor (at most every 30 min) →
@@ -264,9 +272,13 @@ dead silently (§22).
 
 **Tech-tree curriculum** (Mayor, non-Soldiers): basic tools → basic armor → farming → iron gear →
 diamond gear → enchanting. Each stage needs **every** requirement group (a pickaxe *and* an axe;
-all four armor pieces), with higher tiers counting toward lower stages. Evidence comes from each
-bot's "done" broadcasts, which carry every curriculum item it holds, and persists with the stage
-index in `mayor-curriculum.json`. Stage work goes to non-Soldier participants who haven't cleared
+all four armor pieces), with higher tiers counting toward lower stages. Farming needs a
+**harvested** crop (`harvested:wheat` etc.): verified achievements that `harvest`, `herd_to_pen` and
+`breed` record per bot (`achievements/<name>.json`) only when they really happen; holding looted
+food does not count. Evidence comes from each bot's "done" broadcasts, which carry every
+curriculum item and achievement it holds, and from an "evidence" message sent the moment a new
+achievement lands. It persists with the stage index in `mayor-curriculum.json`, and the current
+stage is re-judged by its current rule on load. Stage work goes to non-Soldier participants who haven't cleared
 it, in role-fairness order. When Mayor has been quiet past the liveness timeout (measured from
 process start if he was never seen), every bot accepts directives from the fallback coordinator.
 
@@ -359,7 +371,7 @@ the original incident number, still cited throughout the code. Narrative is in g
 | `entityCost` 8 — with 7–9 bots in one shelter, nearly every route touches an occupied square | 53 |
 | 4+ `dig_error` resets in 3s → global `canDig=false` for 15s. The library discards the real dig error and recomputes the identical failing path forever | 42, 48 |
 | `flee` disables digging for its own pathfind, or a cornered bot digs instead of escaping | 42 |
-| Doors and fence gates are judged by their current state (`applyDoorState` in `swim-movements.js`): pathfinder 2.4.5 reads every door/gate as a solid wall from its block type, never opens doors, and treats an open gate as solid. Its path clean-up also lifts a doorway waypoint onto the door itself, so `installDoorSupport` puts it back on the floor and never re-toggles an already-open door while pathfinding. Before this (2026-09-25), bots could not pass any door, open or closed | 2026-09-25 |
+| Doors and fence gates are judged by their current state (`applyDoorState` in `swim-movements.js`): pathfinder 2.4.5 reads every door/gate as a solid wall from its block type, never opens doors, and treats an open gate as solid. Its path clean-up also lifts a doorway waypoint onto the door (or a closed gate), so `installDoorSupport` puts it back on the floor and never re-toggles an already-open door while pathfinding. Closed doors and gates are opened by `installDoorOpener` just ahead of the bot, never by pathfinder's own "use this block" step: its executor stays in block-placing mode afterwards and crashes the process when the bot carries any placeable block (Babs, three restarts, 2026-09-25). Before this (2026-09-25), bots could not pass any door, open or closed | 2026-09-25 |
 | Bots close doors and gates behind themselves once clear of them (`installDoorCloser`), without turning their head (a mid-walk look steers pathfinder backwards). Not while another player is at the doorway, and not during `herd_to_pen`, which leads an animal through the pen gate and closes it itself | 2026-09-25 |
 
 **Combat**
@@ -412,8 +424,8 @@ the original incident number, still cited throughout the code. Narrative is in g
   search budget. No live report has shown it (§50).
 - **`liquidCost` 20** carries the same maxCost-pruning risk `digCost` did. Untouched because
   nothing has implicated it — the first suspect if "can't cross water" ever appears (§47).
-- **Herding** places a pen and can lure a single animal with food, but there is no reliable
-  round-up of an existing herd.
+- **Herding** leads one animal at a time (the ranch goal repeats it until two are penned); there
+  is no round-up of an existing herd, and a penned animal can still slip out when the gate opens.
 - **spark2 keeps its own copies of non-RAG shared state** — `known_chests.json`, `pen.json` and
   per-bot goal files live on spark2's local `/mnt/hermes-data`, so its four bots don't share the
   chest registry with spark's five. Bed claims are shared through hermes-memory since 2026-09-25. RAG memory and skills are shared via

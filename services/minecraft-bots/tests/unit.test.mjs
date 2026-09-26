@@ -1,4 +1,4 @@
-// Version: 1.10.0
+// Version: 1.11.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -23,6 +23,8 @@
 //   doorway waypoints put back on the floor, and the guard that never re-toggles an open door.
 // 1.10.0 | 2026-09-25 | Close behind: doors/gates shut once clear, without a head turn; held for a
 //   follower and during herd_to_pen; iron and already-shut doors left alone.
+// 1.11.0 | 2026-09-25 | Farming/ranching: food fetch and backoff, farm/ranch goal routing and runners,
+//   harvested-crop curriculum evidence, farm plot and pen site choice.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -879,7 +881,7 @@ function doorBlock(name, props) {
 }
 const doorFns = () => {
   const c = vm.createContext({});
-  vm.runInContext(between(swim, 'function applyDoorState(', 'const MAX_DIG_LABOR_COST'), c);
+  vm.runInContext(between(swim, 'function applyDoorState(', 'const MAX_DIG_LABOR_COST') + between(swim, 'function isDoorway(', 'export function isOpenDoorOrGate('), c);
   return c;
 };
 
@@ -895,14 +897,14 @@ await check('Doors: an open door or gate is walkable, never a floor', async () =
   assert.equal(gate.safe, true); assert.equal(gate.openable, false);
 });
 
-await check('Doors: a closed wooden door or gate is opened on the way; a closed iron door is a wall', async () => {
+await check('Doors: a closed wooden door or gate is routed through (never pathfinder\'s "use" step); a closed iron door is a wall', async () => {
   const { applyDoorState } = doorFns();
   const lower = applyDoorState(doorBlock('spruce_door', { half: 'lower', open: false }));
-  assert.equal(lower.openable, true); assert.equal(lower.safe, false); assert.equal(lower.physical, false);
+  assert.equal(lower.openable, false, 'the use step crashes the executor'); assert.equal(lower.safe, true); assert.equal(lower.physical, false);
   const upper = applyDoorState(doorBlock('spruce_door', { half: 'upper', open: false }));
-  assert.equal(upper.safe, true, 'the upper half opens with the lower'); assert.equal(upper.openable, false);
+  assert.equal(upper.safe, true); assert.equal(upper.openable, false);
   const gate = applyDoorState(doorBlock('birch_fence_gate', { open: false }));
-  assert.equal(gate.openable, true); assert.equal(gate.safe, false);
+  assert.equal(gate.openable, false); assert.equal(gate.safe, true);
   const iron = applyDoorState(doorBlock('iron_door', { half: 'lower', open: false }));
   assert.equal(iron.openable, false); assert.equal(iron.safe, false);
   const ironTop = applyDoorState(doorBlock('iron_door', { half: 'upper', open: false }));
@@ -937,7 +939,7 @@ await check('Doors: a doorway waypoint lifted onto the door, or left on its corn
   const at = (x, y, z) => (x === 5 && y === 64 && z === 7 ? door : { name: 'air', getProperties: () => ({}) });
   class V { constructor(x, y, z) { Object.assign(this, { x, y, z }); } }
   const c = vm.createContext({ Vec3: V });
-  vm.runInContext(between(swim, 'function fixDoorWaypoints(', 'function installDoorSupport('), c);
+  vm.runInContext(between(swim, 'function isDoorway(', 'export function isOpenDoorOrGate(') + between(swim, 'function fixDoorWaypoints(', 'function installDoorSupport('), c);
   const fakeBot = { blockAt: (p) => at(p.x, p.y, p.z) };
   const path = [{ x: 5.5, y: 64, z: 6.5 }, { x: 5.703125, y: 65, z: 7.5 }, { x: 5, y: 64, z: 7 }, { x: 5.5, y: 64, z: 8.5 }];
   c.fixDoorWaypoints(fakeBot, path);
@@ -998,13 +1000,274 @@ await check("Close behind: not on someone following, not while herding, not an i
   assert.equal(iron.used.length + shut.used.length, 0);
 });
 
-await check('Close behind: herd_to_pen holds doors open for exactly the action', async () => {
-  const bot = makeBot(); let held = 0, releases = 0;
-  const c = context(bot, { loadPenLocation: async () => null, holdDoorsOpen: () => { held++; return () => { releases++; }; } });
+await check('Close behind: herd_to_pen holds doors open only while leading, with the food out only then', async () => {
+  const bot = makeBot(); let held = 0;
+  const c = context(bot, { loadPenLocation: async () => null, holdDoorsOpen: () => { held++; return () => {}; } });
   vm.runInContext(timeoutFn + actionFn, c);
   await c.performAction(bot, { type: 'herd_to_pen', species: 'cow' }, 'test');
-  await c.performAction(bot, { type: 'follow' }, 'test');
-  assert.equal(held, 1, 'only herd_to_pen'); assert.equal(releases, 1, 'released when it ends');
+  assert.equal(held, 0, 'no hold when there is nothing to lead');
+  const herd = actions.slice(actions.indexOf('case "herd_to_pen": {'), actions.indexOf('case "repair_terrain": {'));
+  const [approach, hold, equip, backWall] = ['GoalNear(animal.position.x', 'holdDoorsOpen(bot)', 'bot.equip(foodItem', 'pen.center.z - 2']
+    .map((t) => herd.indexOf(t));
+  assert(approach > 0 && approach < hold && hold < equip && equip < backWall, 'walk out empty-handed, then hold + food, then lead to the back wall');
+  assert.match(herd, /} finally \{\s+releaseDoors\(\);\s+await refreshGear\(bot\);/, 'released and the food put away on every exit');
 });
+
+// Farming and ranching (2026-09-25).
+await check('Food: loot "food" asks chests for every edible item; "seeds" for anything plantable', async () => {
+  const c = vm.createContext({ FOOD_NAMES: ['bread', 'carrot'] });
+  vm.runInContext(between(actions, 'const SEED_NAMES', '// Verified achievements'), c);
+  const groups = vm.runInContext('LOOT_GROUPS', c);
+  assert.deepEqual([...groups.food], ['bread', 'carrot']);
+  assert.deepEqual([...groups.seeds], ['wheat_seeds', 'carrot', 'potato', 'beetroot_seeds']);
+  assert.match(actions, /const group = LOOT_GROUPS\[action\.item\];/);
+  assert.match(actions, /const wantedNames = group \|\| gearCategoryNames\(bot, action\.item\);/);
+});
+
+function hungerWorld({ food = 10, items = [], lootGives = null } = {}) {
+  const inv = [...items];
+  const calls = [];
+  const bot = { food, isSleeping: false, inventory: { items: () => inv } };
+  const performAction = async (b, action) => {
+    calls.push(action.type + (action.item ? `:${action.item}` : ''));
+    if (action.type === 'loot') {
+      if (!lootGives) return { ok: false, text: 'checked nearby chests, no food in any of them.' };
+      inv.push({ name: lootGives, count: 8 });
+      return { ok: true, text: `found 8 ${lootGives} in a chest.` };
+    }
+    if (action.type === 'eat') {
+      const i = inv.findIndex((it) => ['bread', 'carrot'].includes(it.name));
+      return i < 0 ? { ok: false, text: "don't have anything to eat." } : { ok: true, text: `ate some ${inv[i].name}.` };
+    }
+    return { ok: true, text: 'fished.' };
+  };
+  const c = vm.createContext({ bot, performAction, console: { log() {}, error() {} }, Date, USERNAME: 'Amy',
+    AUTONOMY_ENABLED: true, HUNGER_THRESHOLD: 18, CRITICAL_FOOD_LEVEL: 6, FOOD_NAMES: ['bread', 'carrot'],
+    routineBlocked: () => false, arbiter: { OWNERS: { ROUTINE: 1, HUNGER_CRITICAL: 2 }, requestControl: async () => ({ release() {} }) } });
+  vm.runInContext(between(index, 'const FOOD_FETCH_COUNT', 'setInterval(() => {'), c);
+  return { c, calls, inv };
+}
+
+await check('Food: a hungry bot with nothing to eat fetches food from a chest, then eats', async () => {
+  const w = hungerWorld({ lootGives: 'bread' });
+  await w.c.checkHunger();
+  assert.deepEqual(w.calls, ['loot:food', 'eat']);
+});
+
+await check('Food: a failed fetch backs off instead of failing "eat" every 15 seconds', async () => {
+  const w = hungerWorld();
+  await w.c.checkHunger();
+  assert.deepEqual(w.calls, ['loot:food'], 'no eat attempt with nothing to eat');
+  await w.c.checkHunger(); await w.c.checkHunger();
+  assert.deepEqual(w.calls, ['loot:food'], 'nothing at all while the fetch backs off');
+  const fisher = hungerWorld({ items: [{ name: 'fishing_rod', count: 1 }] });
+  await fisher.c.checkHunger();
+  assert.deepEqual(fisher.calls, ['loot:food', 'fish'], 'a rod is still the fallback');
+});
+
+const farmGoalSrc = () => between(index, 'const FARM_WORDS', 'async function goalTick(');
+
+await check('Farm goals: farming and ranching goals are recognised; iron farms and wool are not', async () => {
+  const c = vm.createContext({ setInterval() {}, Date });
+  vm.runInContext(farmGoalSrc(), c);
+  const t = (d) => c.farmTaskFor(d);
+  assert.equal(t('start a farm and bring back some real food from it -- till ground, plant seeds'), 'farm');
+  assert.equal(t('Wade, scout out some arable land, till it, and plant seeds'), 'farm');
+  assert.equal(t('harvest crops for the storehouse'), 'farm');
+  assert.equal(t('set up a ranch near home: build an animal pen, lead two animals of one kind into it, and breed them'), 'ranch');
+  assert.equal(t('breed two cows'), 'ranch');
+  assert.equal(t("I'm heading to the iron farm to check on Mark"), null);
+  assert.equal(t('shear a sheep for wool'), null);
+  assert.equal(t('mine iron and smelt it'), null);
+});
+
+function farmGoalWorld(results, status = { ripe: 0, growing: 0 }) {
+  const calls = [], done = [], retired = [];
+  const performAction = async (b, action) => { calls.push({ ...action }); return results.shift() ?? { ok: false, text: 'nothing' }; };
+  const world = { status };
+  const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Babs', MAX_CONSECUTIVE_FAILURES: 3,
+    bot: { chat() {}, inventory: { items: () => [] }, entities: {} }, Vec3: V3, performAction,
+    farmStatus: () => world.status, narrateAction: async (t) => t, recordGoalOutcome() {},
+    broadcastGoalState: async (status, d, item) => { done.push([status, item]); },
+    retireGoal: async (g) => { retired.push(g); }, saveGoalIfCurrent: async () => {},
+    logStep: () => {}, loadPenLocation: async () => null, LIVESTOCK: [], BREEDING_FOOD: {}, countInPen: () => 0, findPenSite: () => null });
+  vm.runInContext(farmGoalSrc(), c);
+  const goal = { description: 'start a farm', createdAt: Date.now() - 1000, consecutiveFailures: 0 };
+  const tick = () => c.runFarmGoal(goal, async () => true, () => ({ release() {} }), () => false);
+  return { c, calls, done, retired, goal, world, tick };
+}
+
+await check('Farm goals: plant, wait while it grows (no actions), harvest when ripe, then done', async () => {
+  const w = farmGoalWorld([
+    { ok: true, text: 'started a farm plot by water: tilled 8, planted 8.', planted: 8, plot: { x: 5, y: 64, z: 5 } },
+    { ok: true, text: 'harvested 8 wheat (8 replanted).', harvested: { wheat: 8 } },
+  ]);
+  await w.tick();
+  assert.deepEqual(w.goal.farmPlot, { x: 5, y: 64, z: 5 }); assert.equal(w.retired.length, 0);
+  w.world.status = { ripe: 0, growing: 8 };
+  await w.tick(); await w.tick();
+  assert.equal(w.calls.length, 1, 'no actions while it grows');
+  w.world.status = { ripe: 8, growing: 0 };
+  await w.tick();
+  assert.deepEqual(w.calls[1], { type: 'harvest', near: { x: 5, y: 64, z: 5 } });
+  assert.deepEqual(w.done, [['done', 'wheat']]); assert.equal(w.retired.length, 1);
+});
+
+await check('Farm goals: a missing hoe is fetched (loot, then craft) and the harvest retried', async () => {
+  const w = farmGoalWorld([
+    { ok: false, text: "don't have a hoe", missing: 'hoe' },
+    { ok: false, text: 'no hoe in any chest' },
+    { ok: true, text: 'crafted 1 wooden_hoe.' },
+    { ok: true, text: 'started a farm plot', planted: 4, plot: { x: 1, y: 64, z: 1 } },
+  ]);
+  await w.tick();
+  assert.deepEqual(w.calls.map((a) => a.type + (a.item ? `:${a.item}` : '')), ['harvest', 'loot:wooden_hoe', 'craft:wooden_hoe', 'harvest']);
+  assert.deepEqual(w.goal.farmPlot, { x: 1, y: 64, z: 1 });
+});
+
+await check('Farm goals: holding a crop, or a DONE claim, never finishes one -- only a harvest', async () => {
+  assert.match(index, /goal\.farmTask \?\?= farmTaskFor\(goal\.description\);[\s\S]{0,400}if \(goal\.targetItem && holdsItem\(goal\.targetItem\)\)/,
+    'farm/ranch routing runs before the "already holding the target" shortcut and the skill lookup');
+  const w = farmGoalWorld([{ ok: false, text: "couldn't start a farm: tilled 0, planted 0 (the grass_block didn't turn to farmland)." }]);
+  await w.tick(); await w.tick(); await w.tick();
+  assert.deepEqual(w.done, [['abandoned', undefined]], 'three real failures give up; nothing claims done');
+});
+
+await check('Ranch goals: fences and gate crafted from the wood she has, pen built on a site, pair penned, bred', async () => {
+  const inv = [{ name: 'birch_log', count: 8 }];
+  let pen = null; const cows = [];
+  const calls = [];
+  const performAction = async (b, action) => {
+    calls.push(action.type + (action.item ? `:${action.item}` : '') + (action.species ? `:${action.species}` : ''));
+    if (action.type === 'craft') { inv.push({ name: action.item, count: action.item.endsWith('_gate') ? 1 : 23 }); return { ok: true, text: 'crafted' }; }
+    if (action.type === 'build_pen') { pen = { center: new V3(20, 64, 20), gate: new V3(20, 64, 22) }; return { ok: true, text: 'built a pen' }; }
+    if (action.type === 'loot') { inv.push({ name: action.item, count: 8 }); return { ok: true, text: 'found wheat' }; }
+    if (action.type === 'herd_to_pen') { cows.push(1); return { ok: true, text: 'herded a cow into the pen.' }; }
+    if (action.type === 'breed') return { ok: true, text: 'bred a baby cow.', bred: 'cow' };
+    return { ok: false, text: '?' };
+  };
+  const done = [];
+  const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Amy', MAX_CONSECUTIVE_FAILURES: 3,
+    bot: { chat() {}, spawnPoint: new V3(0, 64, 0), inventory: { items: () => inv },
+      entities: { 1: { name: 'cow', position: new V3(30, 64, 30) }, 2: { name: 'cow', position: new V3(31, 64, 30) } } },
+    Vec3: V3, performAction, farmStatus: () => ({ ripe: 0, growing: 0 }), narrateAction: async (t) => t, recordGoalOutcome() {},
+    broadcastGoalState: async (status) => { done.push(status); }, retireGoal: async () => {}, saveGoalIfCurrent: async () => {},
+    logStep: () => {}, loadPenLocation: async () => pen, LIVESTOCK: ['cow', 'sheep'], BREEDING_FOOD: { cow: ['wheat'], sheep: ['wheat'] },
+    countInPen: () => cows.length, findPenSite: () => new V3(20, 64, 20) });
+  vm.runInContext(farmGoalSrc(), c);
+  const goal = { description: 'set up a ranch', createdAt: Date.now(), consecutiveFailures: 0 };
+  for (let i = 0; i < 8 && !done.length; i++) await c.runRanchGoal(goal, async () => true, () => ({ release() {} }), () => false);
+  assert.deepEqual(calls, ['craft:birch_fence', 'craft:birch_fence_gate', 'build_pen', 'loot:wheat',
+    'herd_to_pen:cow', 'herd_to_pen:cow', 'breed:cow']);
+  assert.deepEqual(done, ['done']); assert.equal(goal.ranchSpecies, 'cow');
+});
+
+await check('Curriculum: farming needs a harvested crop, and a stage cleared by holding food is re-earned', async () => {
+  const c = vm.createContext({});
+  vm.runInContext(between(index, 'const withTiers', '\nconst MEMORY_ROOT'), c);
+  const farming = vm.runInContext('TECH_TREE_STAGES', c)[2];
+  assert.equal(farming.name, 'farming');
+  assert.equal(c.stageSatisfied(farming, new Set(['wheat', 'bread', 'carrot'])), false, 'looted food is not farming');
+  assert.equal(c.stageSatisfied(farming, new Set(['harvested:carrots'])), true);
+  const disk = { '/mem/mayor-curriculum.json': JSON.stringify({ stageIndex: 2, stageProgress: ['Amy', 'Babs'],
+    evidence: { Amy: ['wheat', 'bread'], Babs: ['harvested:wheat'] } }) };
+  const m = vm.createContext({ readFile: async (p) => disk[p], writeFile: async () => {}, mkdir: async () => {}, JSON, Object, Map, Set,
+    console: { error() {} }, USERNAME: 'Mayor', BOT_ROLES: {}, ROLES: { SOLDIER: {} }, bot: { inventory: { items: () => [], slots: [] } } });
+  vm.runInContext(between(index, 'const withTiers', '\nconst MEMORY_ROOT') + '\nconst MEMORY_ROOT = "/mem";' +
+    between(index, 'const CURRICULUM_FILE', 'async function checkCurriculumAdvance('), m);
+  await m.loadCurriculumStage();
+  assert.deepEqual([...vm.runInContext('stageProgress', m)], ['Babs'], 'Amy only held food; Babs harvested');
+});
+
+function plotWorld(blocks, water) {
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  const at = new Map(Object.entries(blocks).map(([k, name]) => [k, name]));
+  const blockAt = (p) => ({ name: at.get(key(p)) ?? 'air', position: p });
+  return { entity: { position: new V3(0, 65, 0) }, registry: { blocksByName: { water: { id: 1 } } }, blockAt,
+    findBlocks: ({ matching, point }) => {
+      if (matching === 1) return water;
+      return [...at.entries()].filter(([, n]) => matching({ name: n })).map(([k]) => new V3(...k.split(',').map(Number)))
+        .sort((a, b) => a.distanceTo(point) - b.distanceTo(point));
+    } };
+}
+
+await check('Farm plots: ground around water, grass cleared first, covered ground skipped; else a tight cluster', async () => {
+  const c = vm.createContext({ BREEDING_FOOD: { bee: ['poppy'] }, Vec3: V3 });
+  vm.runInContext(between(actions, 'const FARM_PLOT_SIZE', 'export const CROP_MAX_AGE').replace(/export /g, ''), c);
+  const blocks = { '10,64,10': 'water' };
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) if (dx || dz) blocks[`${10 + dx},64,${10 + dz}`] = 'grass_block';
+  blocks['11,65,10'] = 'short_grass'; // clearable
+  blocks['9,65,10'] = 'stone';        // covered: not tillable
+  const bot = plotWorld(blocks, [new V3(10, 64, 10)]);
+  const site = c.chooseFarmPlot(bot, null);
+  assert.equal(site.hydrated, true); assert.equal(site.plot.length, 8);
+  const keys = site.plot.map((p) => `${p.x},${p.z}`);
+  assert(keys.includes('11,10'), 'grass-covered ground is kept (cleared when tilled)');
+  assert(!keys.includes('9,10'), 'stone-covered ground is skipped');
+  assert(site.plot.every((p) => Math.max(Math.abs(p.x - 10), Math.abs(p.z - 10)) <= 4), 'all within hydration range');
+  const dry = { '0,64,0': 'dirt', '1,64,0': 'dirt', '2,64,1': 'dirt', '20,64,20': 'dirt' };
+  const drySite = c.chooseFarmPlot(plotWorld(dry, []), new V3(0, 64, 0));
+  assert.equal(drySite.hydrated, false);
+  assert.deepEqual(drySite.plot.map((p) => p.x).sort((a, b) => a - b), [0, 1, 2], 'the close cluster, not the far block');
+});
+
+await check('Pens: the site is flat, open, and 8-20 blocks from home, never home itself', async () => {
+  const c = vm.createContext({ Vec3: V3 });
+  vm.runInContext(between(actions, 'function findPenSite(', '// Farm plots'), c);
+  const tree = new Set(['8,64,0', '8,65,0']); // something standing on the nearest spot east
+  const bot = { blockAt: (p) => ({ boundingBox: p.y < 64 ? 'block' : 'empty',
+    name: p.y < 64 ? 'grass_block' : (tree.has(`${p.x},${p.y},${p.z}`) ? 'oak_log' : 'air') }) };
+  const site = c.findPenSite(bot, new V3(0, 64, 0));
+  const dist = Math.hypot(site.x, site.z);
+  assert(dist >= 8 && dist <= 20, `distance ${dist}`); assert.equal(site.y, 64);
+  assert(Math.abs(site.x - 8) > 3 || Math.abs(site.z) > 3, 'the 7x7 area avoids the obstacle');
+});
+
+await check('Harvest: walks over the drops around the crops she broke, and gives up on the unreachable', async () => {
+  const bot = makeBot();
+  bot.entity = { position: new V3(0, 64, 0) };
+  bot.entities = { 1: { name: 'item', position: new V3(3, 64, 0) }, 2: { name: 'item', position: new V3(30, 64, 0) },
+    3: { name: 'cow', position: new V3(2, 64, 0) } };
+  const visited = [];
+  bot.pathfinder.goto = async (goal) => { visited.push(goal.x); bot.entity.position = new V3(goal.x, 64, 0); delete bot.entities[1]; };
+  const c = context(bot, { Vec3: V3, goals: { GoalNear: class { constructor(x) { this.x = x; } } } });
+  vm.runInContext(timeoutFn + between(actions, 'async function collectDrops(', "// What's planted near a spot"), c);
+  await c.collectDrops(bot, { cancelled: false }, [new V3(2, 64, 0)], 3000);
+  assert.deepEqual(visited, [3], 'only the drop near the harvested spot, once');
+});
+
+await check('Doors: a closed gate lifted onto its top is put back on the floor too', async () => {
+  const gate = { name: 'oak_fence_gate', position: { y: 64 }, getProperties: () => ({ open: false }) };
+  const c = vm.createContext({ Vec3: class { constructor(x, y, z) { Object.assign(this, { x, y, z }); } } });
+  vm.runInContext(between(swim, 'function isDoorway(', 'export function isOpenDoorOrGate(') + between(swim, 'function fixDoorWaypoints(', 'function installDoorSupport('), c);
+  const path = [{ x: 3.5, y: 65.5, z: 7.5 }];
+  c.fixDoorWaypoints({ blockAt: (p) => (p.x === 3 && p.y === 64 && p.z === 7 ? gate : { name: 'air', getProperties: () => ({}) }) }, path);
+  assert.deepEqual([path[0].x, path[0].y, path[0].z], [3.5, 64, 7.5]);
+});
+
+await check('Doors: a closed door on her route is opened just ahead of her, without a head turn, not twice at once', async () => {
+  const props = { half: 'lower', open: false };
+  const door = { name: 'oak_door', position: new V3(0, 64, 2), getProperties: () => props };
+  const bot = new EventEmitter();
+  let looks = 0, moving = true; const used = [];
+  Object.assign(bot, { username: 'Amy', entity: { position: new V3(0.5, 64, 0.5) }, lookAt: async () => { looks++; },
+    pathfinder: { isMoving: () => moving },
+    blockAt: (p) => (p.x === 0 && p.y === 64 && p.z === 2 ? door : { name: 'air', getProperties: () => ({}) }) });
+  const activate = (b) => { bot.lookAt(); used.push(b.name); return new Promise(() => {}); }; // never settles: one at a time
+  const c = vm.createContext({ Vec3: V3, Promise, Date, console: { log() {}, error() {} } });
+  vm.runInContext(between(swim, 'function isDoorway(', 'export function isOpenDoorOrGate(') +
+    between(swim, 'function useWithoutLooking(', 'export function installDoorCloser(') +
+    between(swim, 'const DOOR_OPEN_REACH', 'const DOOR_CLOSE_MIN'), c);
+  const route = { path: [{ x: 0.5, y: 64, z: 1.5 }, { x: 0.5, y: 64, z: 2.5 }, { x: 0.5, y: 64, z: 3.5 }] };
+  c.installDoorOpener(bot, activate, route);
+  bot.emit('physicsTick'); bot.emit('physicsTick');
+  assert.deepEqual(used, ['oak_door'], 'opened once, not again while the first click is pending');
+  assert.equal(looks, 0, "her head didn't turn");
+  moving = false;
+  const idle = { ...c }; void idle;
+  const iron = closedIron(c);
+  assert.equal(iron, false, 'an iron door is never clicked');
+});
+function closedIron(c) { return c.isClosedOpenableDoorway({ name: 'iron_door', getProperties: () => ({ half: 'lower', open: false }) }); }
 
 console.log(`${passed} unit checks passed.`);

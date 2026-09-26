@@ -1,9 +1,13 @@
-// Version: 1.3.0
+// Version: 1.4.0
 //
 // 1.2.0 (2026-09-25) -- direct report: bots can't get in or out of a building through its doors,
 // "even when the doors are open." Doors and fence gates are now judged by their current state
 // (applyDoorState): open = walkable, a closed wooden door or gate = opened on the way through.
 // installDoorSupport keeps doorway waypoints on the floor and never shuts an already-open door.
+//
+// 1.4.0 (2026-09-25) -- closed doors and gates are opened by installDoorOpener just before she
+// reaches them, not by pathfinder's "use this block" step: after that step its executor stays in
+// block-placing mode and crashes the process (placingBlock.y of undefined) when she carries blocks.
 //
 // 1.3.0 (2026-09-25) -- bots close doors and gates behind themselves (installDoorCloser), except
 // near another player or while herd_to_pen holds doors open (holdDoorsOpen).
@@ -66,28 +70,27 @@ function isWater(block) {
 // "block" for every door and fence gate whether open or closed, and only treats names containing
 // "gate" as openable. So an open door or open gate was a solid wall (and doors are in
 // blocksCantBreak, so no route at all), and a closed door was never opened. Judge them by state
-// instead: open = walkable; a closed wooden door or gate = openable, which getMoveForward turns
-// into a "use this block" step (the executor right-clicks it, then walks through). Opening a
-// door's lower half opens both, so a closed upper half counts as passable. Iron doors only open by
-// redstone. A door is never something to stand on.
+// instead: open = walkable; a closed wooden door or gate = walkable too, because installDoorOpener
+// opens it just before she gets there. (Not pathfinder's own "use this block" step: its executor
+// never leaves block-placing mode afterwards, and on the next tick it crashes the whole process
+// when she carries any placeable block -- Babs, three times in eight minutes, 2026-09-25.) Iron
+// doors only open by redstone. A door is never something to stand on.
 export function applyDoorState(b) {
   const name = b?.name;
   const door = !!name?.endsWith("_door");
   if (!door && !name?.endsWith("_fence_gate")) return b;
   if (door) b.physical = false;
   const props = b.getProperties?.() || {};
-  if (props.open) {
-    b.safe = true;
-    b.openable = false;
-  } else if (name !== "iron_door") {
-    if (door && props.half === "upper") {
-      b.safe = true;
-      b.openable = false;
-    } else {
-      b.openable = true;
-    }
-  }
+  b.openable = false; // never pathfinder's "use" step (see above)
+  if (props.open || name !== "iron_door") b.safe = true;
   return b;
+}
+
+// The block she walks through in a doorway: a door's lower half, or a fence gate.
+function isDoorway(block) {
+  const name = block?.name;
+  if (name?.endsWith("_fence_gate")) return true;
+  return !!name?.endsWith("_door") && block.getProperties?.().half === "lower";
 }
 
 export function isOpenDoorOrGate(block) {
@@ -106,7 +109,7 @@ export function fixDoorWaypoints(bot, path) {
     const fx = Math.floor(point.x), fz = Math.floor(point.z);
     for (const dy of [0, -1]) {
       const block = bot.blockAt(new Vec3(fx, Math.floor(point.y) + dy, fz));
-      if (!block?.name?.endsWith("_door") || block.getProperties?.().half !== "lower") continue;
+      if (!isDoorway(block)) continue;
       point.x = fx + 0.5;
       point.y = block.position.y;
       point.z = fz + 0.5;
@@ -121,11 +124,49 @@ export function fixDoorWaypoints(bot, path) {
 // was planned, which would shut it in the bot's face -- skipped, but only while pathfinding, so
 // herd_to_pen still closes its gate deliberately after she has stopped.
 export function installDoorSupport(bot) {
-  bot.on("path_update", (results) => fixDoorWaypoints(bot, results.path));
+  const route = { path: [] }; // pathfinder's live path array: it shifts points off as she reaches them
+  bot.on("path_update", (results) => {
+    fixDoorWaypoints(bot, results.path);
+    route.path = results.path;
+  });
   const activateBlock = bot.activateBlock.bind(bot);
   bot.activateBlock = (block, ...rest) => (bot.pathfinder.isMoving() && isOpenDoorOrGate(block)
     ? Promise.resolve() : activateBlock(block, ...rest));
+  installDoorOpener(bot, activateBlock, route);
   installDoorCloser(bot, activateBlock);
+}
+
+// Opens a closed wooden door or gate on her route once she's within DOOR_OPEN_REACH of it, without
+// turning her head, at most once every DOOR_OPEN_RETRY_MS per doorway (a click that didn't take gets
+// another go; one that did is left alone, since toggling again would shut it).
+const DOOR_OPEN_REACH = 2.5;
+const DOOR_OPEN_RETRY_MS = 1500;
+
+export function isClosedOpenableDoorway(block) {
+  return isDoorway(block) && block.name !== "iron_door" && block.getProperties?.().open === false;
+}
+
+export function installDoorOpener(bot, activateBlock, route) {
+  const lastTried = new Map();
+  let opening = false;
+  bot.on("physicsTick", () => {
+    if (opening || !route.path.length || !bot.entity || !bot.pathfinder.isMoving()) return;
+    const here = bot.entity.position;
+    for (const point of route.path.slice(0, 4)) {
+      const cell = new Vec3(Math.floor(point.x), Math.floor(point.y), Math.floor(point.z));
+      if (Math.hypot(cell.x + 0.5 - here.x, cell.z + 0.5 - here.z) > DOOR_OPEN_REACH) continue;
+      const block = bot.blockAt(cell);
+      if (!isClosedOpenableDoorway(block)) continue;
+      const key = cell.toString();
+      if (Date.now() - (lastTried.get(key) ?? 0) < DOOR_OPEN_RETRY_MS) continue;
+      lastTried.set(key, Date.now());
+      opening = true;
+      Promise.resolve(useWithoutLooking(bot, activateBlock, block))
+        .catch((err) => console.error(`[${bot.username}] couldn't open the ${block.name}: ${err.message}`))
+        .finally(() => { opening = false; });
+      return;
+    }
+  });
 }
 
 // Direct request, 2026-09-25: "make them close gates and doors behind themselves" -- an open door

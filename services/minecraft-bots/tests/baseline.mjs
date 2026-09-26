@@ -1,4 +1,4 @@
-// Version: 1.1.0
+// Version: 1.2.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -17,6 +17,7 @@
 //
 // Revision History: 1.0.0 | 2026-09-24 | Initial metrics from the 2026-09-23 fleet measurement.
 // 1.1.0 | 2026-09-24 | action_failure_rate (OUTCOME lines) and routine_skips_per_bot_day (ROUTINE_SKIPS).
+// 1.2.0 | 2026-09-25 | failed_eats_per_bot_day and farm_ranch_successes_per_bot_day (farming/ranching fixes).
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import os from "node:os";
@@ -121,6 +122,16 @@ const METRICS = {
     about: "periodic checks that lost their turn to other work (fairness), from ROUTINE_SKIPS lines",
     better: "lower", tolerance: 0.5, floor: 50,
     value: (c, ctx) => { const n = c.sumJson(/\] ROUTINE_SKIPS (\{.*\})/); return n ? perBotDay(n, ctx) : null; },
+  },
+  failed_eats_per_bot_day: {
+    about: "\"eat\" with nothing to eat -- 4,203/day on spark before hunger fetched food (2026-09-25)",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/\] OUTCOME \{"type":"eat","ok":false,"cancelled":false/), ctx),
+  },
+  farm_ranch_successes_per_bot_day: {
+    about: "harvest/build_pen/herd_to_pen/breed that succeeded -- 0/day before farm goals ran directly (2026-09-25)",
+    better: "higher", tolerance: 0.5, floor: 0.2,
+    value: (c, ctx) => perBotDay(c(/\] OUTCOME \{"type":"(harvest|build_pen|herd_to_pen|breed)","ok":true/), ctx),
   },
   crashes_per_bot_day: {
     about: "JS runtime errors and OOMs",

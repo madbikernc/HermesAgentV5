@@ -1,4 +1,12 @@
-// Version: 2.97.0
+// Version: 2.98.0
+//
+// 2.98.0 (2026-09-25) -- farming and ranching, from a day of logs. A hungry bot with nothing to eat
+// fetches food from a chest (was 4,203 silent failed "eat"s). Farm and ranch goals run their actions
+// directly instead of through the planner (zero farm/ranch steps in a day; "DONE wheat" on the first
+// call; a "Mine and Craft" skill matched to farming) and finish only on a verified harvest or birth.
+// Ripe crops near home get harvested by whoever is free. The curriculum's farming stage needs a crop
+// the bot HARVESTED (a verified achievement), not one it holds, and achievements reach the Mayor as
+// they happen. The Builder's checklist ends with setting up a ranch.
 //
 // 2.97.0 (2026-09-25) -- doors: installDoorSupport (swim-movements.js 1.2.0) keeps doorway waypoints
 // on the floor and never shuts an already-open door while pathfinding.
@@ -1411,7 +1419,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -1602,6 +1610,13 @@ bot.once("spawn", async () => {
   // but loading it is cheap and harmless for every other bot too -- one code path, not a
   // separate Mayor-only startup branch.
   if (USERNAME === MAYOR_USERNAME) await loadCurriculumStage();
+  await loadAchievements(bot);
+  // 2026-09-25: a new verified achievement (harvested:/penned:/bred:) reaches the Mayor right away,
+  // not only when a goal happens to finish -- the ripe-crop routine harvests outside any goal.
+  bot.on("achievement", () => {
+    buzzPublish(AGENT_ID, "minecraft-coordination", JSON.stringify({ type: "evidence", have: heldCurriculumItems() }))
+      .catch((err) => console.error(`[${USERNAME}] evidence publish failed:`, err.message));
+  });
   // SwimMovements (swim-movements.js): stock Movements can walk across open water at a
   // constant Y-level but can never change depth once already in it -- see that file's own
   // comment for the confirmed library gap this closes (water crossings only, lava unaffected).
@@ -3101,6 +3116,11 @@ function nextBuilderPriority() {
   if (countNearHome(["beehive"]) < 1) {
     candidates.push({ name: "beehive", directive: "craft a beehive (needs planks and honeycomb) and place it near home" });
   }
+  // 2026-09-25: nothing ever asked for ranching. Last on the list: a pen near home with a breeding
+  // pair, done for good once she has bred an animal (a verified achievement, never a claim).
+  if (![...getAchievements(bot)].some((a) => a.startsWith("bred:"))) {
+    candidates.push({ name: "ranch", directive: "set up a ranch near home: build an animal pen, lead two animals of one kind into it, and breed them" });
+  }
   if (!candidates.length) {
     builderStallItem = null;
     builderStallCount = 0;
@@ -3435,6 +3455,179 @@ function holdsItem(name) {
     [5, 6, 7, 8, 45].some((slot) => bot.inventory.slots[slot]?.name === name);
 }
 
+// ---- farm and ranch goals (2026-09-25) ---------------------------------------------------------
+// A day of logs: farming goals issued all day, and the planner chose zero farm or ranch steps --
+// its first answer to "till the ground, plant seeds" was a hallucinated "DONE wheat", and the
+// stored-skill lookup matched "Mine and Craft" to it. Ranching was never asked for at all. These
+// goals now run their actions directly, one step per goal tick, like builder placement and guard
+// duty, and finish only on a verified result (a crop actually harvested, a baby actually born).
+const FARM_WORDS = /\b(farm(ing|land)?|till(ing|ed)?|crops?|sow(ing)?|plant(ing)? (some |the )?(seeds|crops|wheat|carrots|potatoes|beetroots?))\b/i;
+const NOT_A_CROP_FARM = /\b(iron|xp|mob|tree|gold|sugar ?cane|wool|honey|bee|fish) farm/i;
+const RANCH_WORDS = /\b(ranch(ing)?|breed(ing)?|livestock|(animal|cow|sheep|pig|chicken) pen|herd(ing)?)\b/i;
+
+function farmTaskFor(description) {
+  if (!description) return null;
+  if (RANCH_WORDS.test(description)) return "ranch";
+  if (FARM_WORDS.test(description) && !NOT_A_CROP_FARM.test(description)) return "farm";
+  return null;
+}
+
+async function completeGoal(goal, why, item = null) {
+  console.log(`[${USERNAME}] goal complete (${why}): ${goal.description}`);
+  bot.chat(await narrateAction(`goal complete: ${goal.description}.`));
+  recordGoalOutcome(goal.description, "done", null);
+  await broadcastGoalState("done", goal.description, item);
+  await retireGoal(goal);
+}
+
+async function failGoalStep(goal, reason) {
+  goal.consecutiveFailures += 1;
+  if (goal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    console.log(`[${USERNAME}] giving up on goal after ${goal.consecutiveFailures} failures: ${goal.description}`);
+    recordGoalOutcome(goal.description, "gave up", reason);
+    await broadcastGoalState("abandoned", goal.description);
+    await retireGoal(goal);
+    return;
+  }
+  await saveGoalIfCurrent(goal);
+}
+
+// Crops ripen on their own schedule (tens of minutes), so a farm goal plants, then waits -- holding
+// nothing, routines and chat carry on -- and finishes when something is harvested: by this goal, or
+// by the ripe-crop routine below, which any bot near home runs.
+const FARM_WAIT_LOG_MS = 5 * 60_000;
+const FARM_GIVE_UP_MS = 90 * 60_000; // crops that haven't ripened in 90 min won't soon
+let lastHarvestAt = 0;
+const CROP_ITEM = { wheat: "wheat", carrots: "carrot", potatoes: "potato", beetroots: "beetroot" };
+
+async function fetchFarmSupply(missing, handle) {
+  if (missing === "hoe") {
+    const looted = await performAction(bot, { type: "loot", item: "wooden_hoe", count: 1 }, USERNAME, handle); // any hoe
+    if (looted.ok || looted.cancelled) return { ...looted, type: "loot" };
+    return { ...(await performAction(bot, { type: "craft", item: "wooden_hoe", count: 1 }, USERNAME, handle)), type: "craft" };
+  }
+  return { ...(await performAction(bot, { type: "loot", item: "seeds", count: 16 }, USERNAME, handle)), type: "loot" };
+}
+
+async function runFarmGoal(goal, takeControl, getHandle, replaced) {
+  if (lastHarvestAt > (goal.createdAt ?? 0)) return completeGoal(goal, "harvested crops from the farm");
+  const plot = goal.farmPlot ? new Vec3(goal.farmPlot.x, goal.farmPlot.y, goal.farmPlot.z) : null;
+  if (plot) {
+    const status = farmStatus(bot, plot);
+    if (!status.ripe && status.growing) {
+      if (Date.now() - (goal.farmPlantedAt ?? 0) > FARM_GIVE_UP_MS) {
+        console.log(`[${USERNAME}] farm goal: nothing ripened in ${FARM_GIVE_UP_MS / 60_000} min, giving up`);
+        recordGoalOutcome(goal.description, "gave up", "crops never ripened");
+        await broadcastGoalState("abandoned", goal.description);
+        await retireGoal(goal);
+        return;
+      }
+      if (Date.now() - (goal.farmWaitLoggedAt ?? 0) >= FARM_WAIT_LOG_MS) {
+        goal.farmWaitLoggedAt = Date.now();
+        console.log(`[${USERNAME}] farm goal: ${status.growing} crops growing, none ripe yet`);
+      }
+      return;
+    }
+  }
+  if (replaced() || !(await takeControl())) return;
+  const harvestAction = { type: "harvest", ...(plot ? { near: goal.farmPlot } : {}) };
+  let result = await performAction(bot, harvestAction, USERNAME, getHandle());
+  if (!result.ok && !result.cancelled && result.missing && !replaced()) {
+    const supply = await fetchFarmSupply(result.missing, getHandle());
+    logStep(goal, `farm supply (${result.missing}): ${supply.text}`, supply.ok, { type: supply.type });
+    console.log(`[${USERNAME}] farm goal: needed ${result.missing} -- ${supply.text} (ok=${supply.ok})`);
+    if (supply.ok && !replaced()) result = await performAction(bot, harvestAction, USERNAME, getHandle());
+  }
+  getHandle()?.release();
+  if (result.cancelled || replaced()) return;
+  logStep(goal, `harvest: ${result.text}`, result.ok, { type: "harvest" });
+  console.log(`[${USERNAME}] farm goal: ${result.text} (ok=${result.ok})`);
+  if (result.harvested) {
+    lastHarvestAt = Date.now();
+    return completeGoal(goal, "harvested crops", CROP_ITEM[Object.keys(result.harvested)[0]] ?? null);
+  }
+  if (result.planted) {
+    goal.farmPlot = result.plot;
+    goal.farmPlantedAt = Date.now();
+    goal.consecutiveFailures = 0;
+    await saveGoalIfCurrent(goal);
+    return;
+  }
+  await failGoalStep(goal, result.text);
+}
+
+// A ranch goal: a pen near home (crafting the fences and gate first), then two animals of one kind
+// led into it, then bred. Each goal tick takes the next missing step; done when a baby is born.
+const RANCH_PEN_FENCES = 23; // build_pen's 7x7 ring is 24 blocks, one of them the gate
+
+function heldCount(test) {
+  return bot.inventory.items().filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0);
+}
+
+function woodKind() {
+  const wood = bot.inventory.items().map((i) => i.name).find((n) => /_(planks|log|stem)$/.test(n));
+  return wood ? wood.replace(/^stripped_/, "").replace(/_(planks|log|stem)$/, "") : "oak";
+}
+
+function pickRanchSpecies(pen) {
+  return LIVESTOCK.map((species) => [species, Object.values(bot.entities)
+    .filter((e) => e.name === species && e.position.distanceTo(pen.center) <= 48).length])
+    .filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
+
+async function ranchStep(goal, handle) {
+  const pen = await loadPenLocation();
+  if (!pen) {
+    const wood = woodKind();
+    const fences = heldCount((n) => n.endsWith("_fence") && !n.endsWith("_fence_gate"));
+    if (fences < RANCH_PEN_FENCES) {
+      const item = `${wood}_fence`;
+      return { ...(await performAction(bot, { type: "craft", item, count: RANCH_PEN_FENCES - fences }, USERNAME, handle)),
+        action: { type: "craft", item } };
+    }
+    if (!heldCount((n) => n.endsWith("_fence_gate"))) {
+      const item = `${wood}_fence_gate`;
+      return { ...(await performAction(bot, { type: "craft", item, count: 1 }, USERNAME, handle)), action: { type: "craft", item } };
+    }
+    const site = bot.spawnPoint && findPenSite(bot, bot.spawnPoint);
+    if (!site) return { ok: false, text: "couldn't find a flat, open 5x5 spot near home for a pen." };
+    return { ...(await performAction(bot, { type: "build_pen", at: site }, USERNAME, handle)), action: { type: "build_pen" } };
+  }
+  const species = goal.ranchSpecies ?? pickRanchSpecies(pen);
+  if (!species) return { ok: false, text: "no two animals of one kind anywhere near the pen." };
+  goal.ranchSpecies = species;
+  const foods = BREEDING_FOOD[species];
+  if (!bot.inventory.items().some((i) => foods.includes(i.name))) {
+    for (const item of foods) {
+      const got = await performAction(bot, { type: "loot", item, count: 8 }, USERNAME, handle);
+      if (got.ok || got.cancelled) return { ...got, action: { type: "loot", item } };
+    }
+    return { ok: false, text: `need ${foods[0]} to lure and breed ${species}s, and no chest has any.` };
+  }
+  if (countInPen(bot, pen, species) < 2) {
+    return { ...(await performAction(bot, { type: "herd_to_pen", species }, USERNAME, handle)),
+      action: { type: "herd_to_pen", species } };
+  }
+  const bred = await performAction(bot, { type: "breed", species, near: pen.center }, USERNAME, handle);
+  return { ...bred, done: !!bred.bred, action: { type: "breed", species } };
+}
+
+async function runRanchGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  const step = await ranchStep(goal, getHandle());
+  getHandle()?.release();
+  if (step.cancelled || replaced()) return;
+  logStep(goal, `ranch: ${step.text}`, step.ok, step.action);
+  console.log(`[${USERNAME}] ranch goal: ${step.text} (ok=${step.ok})`);
+  if (step.done) return completeGoal(goal, `bred a ${goal.ranchSpecies}`);
+  if (step.ok) {
+    goal.consecutiveFailures = 0;
+    await saveGoalIfCurrent(goal);
+    return;
+  }
+  await failGoalStep(goal, step.text);
+}
+
 async function goalTick() {
   if (!AUTONOMY_ENABLED || routineBlocked("goalTick")) return;
   // Review MB-14: no new work or goal steps from dusk to dawn (the goal is paused, not dropped).
@@ -3497,6 +3690,18 @@ async function goalTick() {
     }
     // Efficiency pass, 2026-09-24: a goal whose target item is already in hand is done -- no
     // planner call needed to notice (see targetItemFor / proposeOwnGoal's TARGET).
+    // 2026-09-25: farm and ranch goals run their actions directly (see runFarmGoal), ahead of the
+    // "already holding the target" shortcut and the stored-skill lookup, both of which let a farming
+    // goal "finish" without farming.
+    goal.farmTask ??= farmTaskFor(goal.description);
+    if (goal.farmTask === "farm") {
+      await runFarmGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    if (goal.farmTask === "ranch") {
+      await runRanchGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
     if (goal.targetItem && holdsItem(goal.targetItem)) {
       console.log(`[${USERNAME}] goal complete (already have ${goal.targetItem}): ${goal.description}`);
       recordGoalOutcome(goal.description, "done", null);
@@ -3956,7 +4161,9 @@ const TECH_TREE_STAGES = [
   {
     name: "farming",
     directive: "start a farm and bring back some real food from it -- till ground, plant seeds, and harvest what you grow",
-    requires: [["wheat", "carrot", "potato", "beetroot", "bread"]],
+    // 2026-09-25: a crop the bot HARVESTED (verified achievement), not one it holds -- six bots
+    // "cleared" farming by looting bread and carrots from a chest.
+    requires: [["harvested:wheat", "harvested:carrots", "harvested:potatoes", "harvested:beetroots"]],
   },
   {
     name: "iron gear",
@@ -3983,6 +4190,7 @@ function stageSatisfied(stage, itemNames) {
 function heldCurriculumItems() {
   const names = new Set(bot.inventory.items().map((i) => i.name));
   for (const slot of [5, 6, 7, 8, 45]) if (bot.inventory.slots[slot]) names.add(bot.inventory.slots[slot].name);
+  for (const achievement of getAchievements(bot)) names.add(achievement);
   return [...names].filter(isCurriculumItem);
 }
 
@@ -4014,6 +4222,10 @@ async function loadCurriculumStage() {
     if (data.evidence && typeof data.evidence === "object") {
       stageEvidence = new Map(Object.entries(data.evidence).map(([name, items]) => [name, new Set(items)]));
     }
+    // 2026-09-25: re-judge the current stage by its current requirement, so a stage cleared under an
+    // older, looser rule (farming by holding looted food) has to be earned again.
+    const stage = TECH_TREE_STAGES[curriculumStageIndex];
+    if (stage) stageProgress = new Set([...stageProgress].filter((name) => stageSatisfied(stage, stageEvidence.get(name) ?? new Set())));
   } catch {
     // no saved progress yet -- start at stage 0, the normal first-ever-run case
   }
@@ -4039,6 +4251,7 @@ async function saveCurriculumStage() {
 function mayorHasStageItem(stage) {
   const names = new Set(bot.inventory.items().map((i) => i.name));
   for (const slot of [5, 6, 7, 8, 45]) if (bot.inventory.slots[slot]) names.add(bot.inventory.slots[slot].name);
+  for (const achievement of getAchievements(bot)) names.add(achievement);
   return stageSatisfied(stage, names);
 }
 
@@ -4066,6 +4279,20 @@ function recordCurriculumEvidence(agentName, item) {
 // Checked after every relevant "done" broadcast AND once per directive tick -- advancing
 // promptly rather than waiting up to a full MAYOR_DIRECTIVE_MS after the fleet's last bot
 // actually finishes the current stage.
+// Mayor: credit one bot's curriculum items -- a finished goal's item and holdings, or an "evidence"
+// message carrying a new verified achievement.
+function creditCurriculumEvidence(fromAgent, items) {
+  if (curriculumStageIndex >= TECH_TREE_STAGES.length) return;
+  const stage = TECH_TREE_STAGES[curriculumStageIndex];
+  const agentName = [...BOT_USERNAMES].find((name) => `mc-${name.toLowerCase()}` === fromAgent);
+  if (!agentName) return;
+  // MB-20: one item is evidence toward a stage, not the whole stage.
+  const evidence = [...new Set(items.filter(Boolean))];
+  if (!evidence.map((it) => recordCurriculumEvidence(agentName, it)).some(Boolean)) return;
+  console.log(`[${USERNAME}] curriculum: ${agentName} cleared "${stage.name}"`);
+  checkCurriculumAdvance().catch((err) => console.error(`[${USERNAME}] checkCurriculumAdvance error:`, err.message));
+}
+
 async function checkCurriculumAdvance() {
   if (curriculumStageIndex >= TECH_TREE_STAGES.length) return; // graduated the whole ladder
   const stage = TECH_TREE_STAGES[curriculumStageIndex];
@@ -4837,30 +5064,44 @@ const HUNGER_THRESHOLD = 18; // out of a max of 20
 // level it preempts goal steps and chores (HUNGER_CRITICAL tier) instead of waiting for idle.
 const CRITICAL_FOOD_LEVEL = 6; // vanilla: sprinting stops at 6, starvation damage at 0
 
+// 2026-09-25 (4,203 failed "eat"s in a day on spark, 10 successes): with nothing to eat this used to
+// fail silently every 15s, forever -- next to a chest holding 64 of every food. Now she fetches food
+// from a chest first (loot "food"); fishing stays the fallback. A failed fetch waits
+// FOOD_FETCH_BACKOFF_MS before the next try, and with nothing to eat, no rod and the fetch backing
+// off, the check does nothing at all instead of logging another failed "eat".
+const FOOD_FETCH_COUNT = 8;
+const FOOD_FETCH_BACKOFF_MS = 5 * 60_000;
+let foodFetchBlockedUntil = 0;
+const hasFood = () => bot.inventory.items().some((i) => FOOD_NAMES.includes(i.name));
+const hasRod = () => bot.inventory.items().some((i) => i.name === "fishing_rod");
+
 async function checkHunger() {
   if (!AUTONOMY_ENABLED || bot.isSleeping) return;
   if (bot.food >= HUNGER_THRESHOLD) return;
-  // Only escalate when there is something to act on -- preempting a goal every check just to
-  // report "nothing to eat" would thrash it for nothing.
-  const canFeed = bot.inventory.items().some((i) => FOOD_NAMES.includes(i.name) || i.name === "fishing_rod");
-  const critical = bot.food <= CRITICAL_FOOD_LEVEL && canFeed;
+  const canFetch = Date.now() >= foodFetchBlockedUntil;
+  if (!hasFood() && !hasRod() && !canFetch) return;
+  const critical = bot.food <= CRITICAL_FOOD_LEVEL;
   if (!critical && routineBlocked("checkHunger")) return;
 
-  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   const handle = await arbiter.requestControl(bot,
     critical ? arbiter.OWNERS.HUNGER_CRITICAL : arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
-    const result = await performAction(bot, { type: "eat" }, USERNAME, handle);
-    if (result.ok) {
-      console.log(`[${USERNAME}] hunger: ${result.text} (food was ${bot.food})`);
-      return;
+    if (!hasFood() && canFetch) {
+      const fetched = await performAction(bot, { type: "loot", item: "food", count: FOOD_FETCH_COUNT }, USERNAME, handle);
+      console.log(`[${USERNAME}] hunger: nothing to eat, fetching food -- ${fetched.text} (ok=${fetched.ok})`);
+      if (fetched.cancelled) return;
+      if (!fetched.ok) foodFetchBlockedUntil = Date.now() + FOOD_FETCH_BACKOFF_MS;
     }
-    // Real gap: "eat" failing (almost always "don't have anything to eat") used to just get
-    // silently ignored every 15s until food showed up on its own -- no attempt to actually GET
-    // any. A held fishing rod turns hunger into something she can act on herself: a passive,
-    // low-risk food source for when there's nothing to harvest/breed nearby either.
-    if (bot.inventory.items().some((i) => i.name === "fishing_rod")) {
+    if (hasFood()) {
+      const result = await performAction(bot, { type: "eat" }, USERNAME, handle);
+      if (result.ok) {
+        console.log(`[${USERNAME}] hunger: ${result.text} (food was ${bot.food})`);
+        return;
+      }
+      if (result.cancelled) return;
+    }
+    if (hasRod()) {
       const fishResult = await performAction(bot, { type: "fish" }, USERNAME, handle);
       console.log(`[${USERNAME}] hunger (fishing): ${fishResult.text} (ok=${fishResult.ok})`);
     }
@@ -4874,6 +5115,31 @@ async function checkHunger() {
 setInterval(() => {
   checkHunger().catch((err) => console.error(`[${USERNAME}] checkHunger error:`, err.message));
 }, HUNGER_CHECK_MS);
+
+// Ripe crops near home get harvested and replanted whoever planted them -- onlyRipe, so this never
+// starts a farm by itself. Any bot near home with a free moment does it.
+const RIPE_CHECK_MS = parseInt(process.env.MC_RIPE_CHECK_MS || "60000", 10);
+
+async function checkRipeCrops() {
+  if (!AUTONOMY_ENABLED || bot.isSleeping || !bot.entity) return;
+  const home = bot.spawnPoint;
+  if (home && bot.entity.position.distanceTo(home) > 48) return;
+  if (!farmStatus(bot, null).ripe || routineBlocked("checkRipeCrops")) return;
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
+  try {
+    const result = await performAction(bot, { type: "harvest", onlyRipe: true }, USERNAME, handle);
+    console.log(`[${USERNAME}] ripe crops: ${result.text} (ok=${result.ok})`);
+    if (result.harvested) lastHarvestAt = Date.now();
+  } finally {
+    handle.release();
+  }
+}
+
+setInterval(() => {
+  checkRipeCrops().catch((err) => console.error(`[${USERNAME}] checkRipeCrops error:`, err.message));
+}, RIPE_CHECK_MS);
+
 
 // Direct follow-up, 2026-09-07: "look for more ways to improve their autonomy" -> bot-to-bot
 // help. Fulfilling a request is itself a real action (path to the requester, toss the item), so
@@ -5807,19 +6073,11 @@ bot.once("spawn", () => {
         // DONE <item_id>, not a self-reported claim) is the only trustworthy signal available
         // for tracking someone else's progress -- payload.item is null for a skill-served
         // completion or a NONE-typed goal, both harmlessly no-ops here.
-        if (USERNAME === MAYOR_USERNAME && payload.status === "done" && (payload.item || payload.have?.length) &&
-            curriculumStageIndex < TECH_TREE_STAGES.length) {
-          const stage = TECH_TREE_STAGES[curriculumStageIndex];
-          const agentName = [...BOT_USERNAMES].find((name) => `mc-${name.toLowerCase()}` === msg.from_agent);
-          // MB-20: one item is evidence toward a stage, not the whole stage.
-          const evidence = [...new Set([payload.item, ...(payload.have ?? [])].filter(Boolean))];
-          const cleared = agentName && evidence.map((it) => recordCurriculumEvidence(agentName, it)).some(Boolean);
-          if (cleared) {
-            console.log(`[${USERNAME}] curriculum: ${agentName} cleared "${stage.name}"`);
-            checkCurriculumAdvance().catch((err) =>
-              console.error(`[${USERNAME}] checkCurriculumAdvance error:`, err.message));
-          }
+        if (USERNAME === MAYOR_USERNAME && payload.status === "done" && (payload.item || payload.have?.length)) {
+          creditCurriculumEvidence(msg.from_agent, [payload.item, ...(payload.have ?? [])]);
         }
+      } else if (payload.type === "evidence") {
+        if (USERNAME === MAYOR_USERNAME && payload.have?.length) creditCurriculumEvidence(msg.from_agent, payload.have);
       } else if (payload.type === "threat" && SQUAD_RESPONDER && !squadResponseInFlight) {
         if (withinSquadAssistRange(payload)) {
           console.log(`[${USERNAME}] squad response: ${msg.from_agent} under attack (${payload.name}) ` +

@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.6.0
+**Version:** 1.7.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -89,6 +89,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.5.0 | 2026-09-25 | Bed claims shared between spark and spark2 through hermes-memory `agent_state` (`minecraft-beds`), with `beds/` as the per-host fallback; memory table and §12's spark2 item updated. |
 | 2.6.0 | 2026-09-25 | Door/gate rule added to §11 Pathfinding: state-aware doors and gates, doorway waypoints kept on the floor, open doors never re-toggled. |
 | 2.7.0 | 2026-09-25 | §11 Pathfinding: bots close doors and gates behind themselves, except near another player or while herding. |
+| 2.8.0 | 2026-09-25 | Farming and ranching: farm/ranch goals skip the planner, harvested-crop curriculum evidence and achievements, ripe-crop routine, hunger fetches food, ranch on the Builder ladder, 7x7 pens; herding caveat updated in §12. The §11 door rule now covers the door opener that replaced pathfinder's crashing "use" step. |
 
 ## services/minecraft-bots/README.md
 
@@ -176,3 +177,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.4.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.5.0 row. |
 | 1.5.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.6.0 row. |
 | 1.6.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.7.0 row. |
+| 1.7.0 | 2026-09-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.8.0 row. |
