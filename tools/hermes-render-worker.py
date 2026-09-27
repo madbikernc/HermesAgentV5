@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.5.1
+# Version: 1.6.0
+#
+# 1.6.0 (2026-09-27, HermesAgentV5 S19b, pre-node) — screen_artifact() gains a `mesh` branch
+# (screen_mesh): GLB by magic plus its header length field, binary STL by the exact
+# 84 + 50*count == size identity (binary STL has no magic number, and a header beginning "solid"
+# proves nothing), ASCII STL by solid/endsolid. Format only — viability is enforced earlier by
+# tools/hermes-mesh-repair.py. No other job type's behaviour changes.
 #
 # 1.5.1 (2026-08-30) — HermesAgentV5 consolidation: REPO_DIR default repointed from
 # HermesAgentV4 to HermesAgentV5; also fixed a stale GENERATE_SCRIPT docstring line that
@@ -194,8 +200,12 @@ def screen_artifact(path, job_type):
         if size > MAX_ARTIFACT_BYTES:
             return f"artifact is {size} bytes — larger than the {MAX_ARTIFACT_BYTES} byte bound"
         with open(path, "rb") as fh:
-            head = fh.read(16)
+            head = fh.read(84)
 
+        if job_type == "mesh":
+            return screen_mesh(path, size, head)
+
+        head = head[:16]
         if job_type == "video":
             # MP4/MOV (ISO base media): a 4-byte box size, then literal b"ftyp" at offset 4 —
             # the size varies, so unlike the fixed-offset checks below this only fixes bytes
@@ -212,6 +222,36 @@ def screen_artifact(path, job_type):
         return f"first 16 bytes don't match any known image signature (PNG/JPEG/WEBP): {head!r}"
     except Exception as exc:
         return f"screening itself failed, treating as a reject: {exc}"
+
+
+def screen_mesh(path, size, head):
+    """S19b: mesh artifacts on their own terms. This is a FORMAT check only — whether the mesh is
+    a viable solid is tools/hermes-mesh-repair.py's job, verified before the file ever gets here."""
+    # GLB: 12-byte header of magic b"glTF", uint32 version, uint32 total length — the length
+    # field must equal the real file size, which makes this structural, not just a magic match.
+    if head[:4] == b"glTF":
+        version = int.from_bytes(head[4:8], "little")
+        length = int.from_bytes(head[8:12], "little")
+        if version != 2 or length != size:
+            return f"GLB header claims version {version}, length {length}; file is {size} bytes"
+        return None
+    # Binary STL has NO magic number: an 80-byte free-form header (which some exporters begin with
+    # "solid", so that word proves nothing) then a uint32 triangle count, then 50 bytes per
+    # triangle. The size identity is the only real check, and it is exact.
+    if len(head) >= 84:
+        count = int.from_bytes(head[80:84], "little")
+        if 84 + 50 * count == size:
+            return None if count else "binary STL declares zero triangles"
+    # ASCII STL: begins "solid" and ends "endsolid" — checkable, but not a guarantee of content.
+    if head.lstrip()[:5].lower() == b"solid":
+        with open(path, "rb") as fh:
+            fh.seek(max(0, size - 512))
+            if b"endsolid" in fh.read().lower():
+                return None
+        return "starts with 'solid' but has no 'endsolid' and fails the binary STL size identity"
+    return (f"not a GLB (no 'glTF' magic), not a binary STL (84 + 50 * "
+            f"{int.from_bytes(head[80:84], 'little') if len(head) >= 84 else '?'} != {size} bytes), "
+            "not an ASCII STL")
 
 
 def report(job_id, exit_code, path, error, caption):

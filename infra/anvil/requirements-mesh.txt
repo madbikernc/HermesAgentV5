@@ -1,0 +1,15 @@
+# Version: 1.0.0
+#
+# The S19c repair/verify chain (tools/hermes-mesh-repair.py, tools/hermes-mesh-verify.py), pinned to
+# the exact set infra/anvil/tests/test_mesh_pipeline.py passed against on 2026-09-27 (Python 3.12,
+# spark, aarch64). All six also publish win_amd64 wheels for Anvil — re-run the tests there before
+# trusting that, and re-pin together, never one at a time.
+# scipy and networkx are not pulled in by trimesh itself; without them the chain fails mid-job.
+#
+# Revision History: 1.0.0 | 2026-09-27 | Initial pin, from the first passing test run.
+numpy==2.5.3
+scipy==1.18.1
+networkx==3.7
+trimesh==5.1.0
+pymeshlab==2025.7.post1
+manifold3d==3.5.4
