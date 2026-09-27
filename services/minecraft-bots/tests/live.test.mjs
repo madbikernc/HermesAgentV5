@@ -1,4 +1,4 @@
-// Version: 1.11.0
+// Version: 1.13.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -30,6 +30,8 @@
 // 1.9.0 | 2026-09-25 | ...and starts with no seeds: it must replant from the drops.
 // 1.10.0 | 2026-09-26 | Beds: wool from a sheep, craft "bed" by wool colour, place_bed at home with a claim.
 // 1.11.0 | 2026-09-26 | Shelters: build on a site from mixed cobblestone and dirt.
+// 1.12.0 | 2026-09-26 | place_bed with a cow standing on the best spot (the server refuses occupied cells).
+// 1.13.0 | 2026-09-27 | Shelter scenario: a 4x4 shelter from mixed blocks, then a bed placed inside its room.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -48,7 +50,7 @@ const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
 process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
 process.env.MC_RAG_DISABLED = "true";
 process.env.MC_BED_CLAIMS_SHARED = "false"; // never write test claims into the fleet's hermes-memory
-const { loadActionPlugins, performAction, checkClaimedBed, loadPenLocation, countInPen, loadClaimedBed } = await import("../actions.js");
+const { loadActionPlugins, performAction, checkClaimedBed, loadPenLocation, countInPen, loadClaimedBed, findBedSites } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor, installEnchantsFix } = await import("../equipment.js");
 const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
@@ -443,6 +445,13 @@ scenario("Beds: places a bed at home as two blocks facing away from her, and cla
   scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
   await rcon(`give ${TESTER} minecraft:white_bed`);
   await waitFor(() => held("white_bed") >= 1, 5000, "a bed to place");
+  // Something standing on the best spot's foot, as the fleet crowds spawn: the server refuses a bed
+  // whose foot cell is occupied (live, 2026-09-26; a mob on the head cell it allows), so place_bed
+  // has to use another spot.
+  scenarioCleanup.push(() => rcon(`kill @e[type=minecraft:cow,x=${x - r},y=${y},z=${z - r},dx=${2 * r},dy=6,dz=${2 * r}]`).catch(() => {}));
+  const best = findBedSites(bot, home)[0];
+  await rcon(`summon minecraft:cow ${best.foot.x + 0.5} ${best.foot.y} ${best.foot.z + 0.5} {NoAI:1b,Tags:["${TAG}"],PersistenceRequired:1b}`);
+  await waitFor(() => Object.values(bot.entities).some((e) => e.name === "cow"), 8000, "a cow on the best spot");
   const result = await performAction(bot, { type: "place_bed" }, TESTER);
   assert.equal(result.ok, true, result.text);
   const foot = new Vec3(result.bedAt.x, result.bedAt.y, result.bedAt.z);
@@ -451,31 +460,32 @@ scenario("Beds: places a bed at home as two blocks facing away from her, and cla
   assert(bot.isABed(bot.blockAt(foot)) && halves.length >= 1, "both halves of the bed are there");
   assert(foot.distanceTo(home) >= 2 && foot.distanceTo(home) <= 11, `near home but not on it: ${foot}`);
   assert(await loadClaimedBed(bot), "she claimed the bed she placed");
+  assert(!bot.isABed(bot.blockAt(best.foot)), "not on the cell the cow stands in");
 });
 
-// Shelters (2026-09-26): build on a chosen site from a mix of blocks (the old build needed 33+ of one
-// kind), and the result has walls, a roof, a doorway and a hollow inside.
-scenario("Shelters: builds a shelter on its site from mixed cobblestone and dirt", async () => {
-  await rcon(`give ${TESTER} minecraft:cobblestone 16`, `give ${TESTER} minecraft:dirt 16`);
-  await waitFor(() => held("cobblestone") >= 16 && held("dirt") >= 16, 8000, "mixed blocks");
-  const site = new Vec3(x - 4, y + 1, z - 4);
-  const result = await performAction(bot, { type: "build", at: { x: site.x, y: site.y, z: site.z } }, TESTER);
+// Shelters (2026-09-26/27): build on a chosen site from a mix of blocks (the old build needed 33+
+// of one kind), and the shelter must fit a bed: a 2x2 room, then a bed placed in it from the doorway.
+scenario("Shelters: builds a 4x4 shelter from mixed blocks, and a bed goes inside it", async () => {
+  await rcon(`give ${TESTER} minecraft:cobblestone 26`, `give ${TESTER} minecraft:dirt 26`, `give ${TESTER} minecraft:white_bed`);
+  await waitFor(() => held("cobblestone") >= 26 && held("dirt") >= 26 && held("white_bed") >= 1, 8000, "mixed blocks and a bed");
+  const base = new Vec3(x - 4, y + 1, z - 4); // the room's back-left cell
+  const result = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
   assert.equal(result.ok, true, result.text);
   assert.equal(result.built, true, result.text);
-  let solid = 0, total = 0;
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dz = -1; dz <= 1; dz++) {
-      if (dx || dz) {
-        if (dx === 0 && dz === 1) continue; // doorway
-        for (let dy = 0; dy <= 2; dy++) { total++; if (bot.blockAt(site.offset(dx, dy, dz))?.boundingBox === "block") solid++; }
-      }
-      total++; if (bot.blockAt(site.offset(dx, 3, dz))?.boundingBox === "block") solid++; // roof
-    }
-  }
-  assert(solid >= total * 0.8, `${solid}/${total} shelter blocks in place`);
-  assert.notEqual(bot.blockAt(site)?.boundingBox, "block", "hollow inside");
-  assert.notEqual(bot.blockAt(site.offset(0, 0, 1))?.boundingBox, "block", "the doorway is open");
-  assert(held("cobblestone") < 16 && held("dirt") < 16, "both kinds of block were used");
+  const room = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([dx, dz]) => base.offset(dx, 0, dz));
+  for (const cell of room) assert.notEqual(bot.blockAt(cell)?.boundingBox, "block", `room cell ${cell} is open`);
+  assert.notEqual(bot.blockAt(base.offset(0, 0, 2))?.boundingBox, "block", "the doorway is open");
+  assert.equal(bot.blockAt(base.offset(0, 3, 0))?.boundingBox, "block", "roofed");
+  assert(held("cobblestone") < 26 && held("dirt") < 26, "both kinds of block were used");
+
+  const worldSpawn = bot.spawnPoint;
+  bot.spawnPoint = base;
+  scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
+  const placed = await performAction(bot, { type: "place_bed" }, TESTER);
+  assert.equal(placed.ok, true, placed.text);
+  const foot = new Vec3(placed.bedAt.x, placed.bedAt.y, placed.bedAt.z);
+  assert(room.some((cell) => cell.equals(foot)), `the bed is in the shelter room: foot ${foot}`);
+  assert.notEqual(bot.blockAt(base.offset(0, 0, 2))?.boundingBox, "block", "the doorway is still open");
 });
 
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);

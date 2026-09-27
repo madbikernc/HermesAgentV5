@@ -1,4 +1,4 @@
-// Version: 1.15.0
+// Version: 1.17.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -29,6 +29,8 @@
 // 1.13.0 | 2026-09-25 | Enchants normalization (digging with enchanted gear).
 // 1.14.0 | 2026-09-26 | Beds: colour choice, bed site, bed goal routing and runner, the no-bed-at-night goal.
 // 1.15.0 | 2026-09-26 | Shelters: materials, site, routing, the height-tolerant shelter check, the goal runner.
+// 1.16.0 | 2026-09-26 | Beds: occupied spots skipped and refused spots not retried; wood before crafting.
+// 1.17.0 | 2026-09-27 | Shelters fit a bed (4x4, 2x2 room; the old 3x3 no longer counts); beds prefer the room; the bed-shortage goal trigger.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -1340,6 +1342,7 @@ function bedSiteWorld({ beds = [], doors = [], walls = [] } = {}) {
       return { name: 'air', boundingBox: 'empty' };
     },
     isABed: (b) => b.name.endsWith('_bed'),
+    entity: {}, entities: {},
     findBlocks: () => beds.map((b) => new V3(b.x, b.y, b.z)),
   };
 }
@@ -1369,19 +1372,21 @@ await check('Beds: bed goals are recognised; going to bed and bedrock are not', 
   assert.equal(c.farmTaskFor('breed two cows'), 'ranch', 'breed is not bed');
 });
 
-await check('Beds: a bed goal loots wool once, gets the rest from sheep, crafts, places, then is done', async () => {
+await check('Beds: a bed goal loots wool once, gets the rest from sheep, makes planks from her logs, crafts, places, then is done', async () => {
   const inv = [{ name: 'oak_log', count: 4 }];
   const calls = []; const done = [];
   const performAction = async (b, action) => {
     calls.push(action.type + (action.item ? `:${action.item}` : ''));
     if (action.type === 'loot') return { ok: false, text: 'no wool in any chest' };
     if (action.type === 'get_wool') { inv.push({ name: 'white_wool', count: 3 }); return { ok: true, text: 'gathered wool' }; }
+    if (action.type === 'craft' && action.item.endsWith('_planks')) { inv.push({ name: action.item, count: action.count }); return { ok: true, text: 'crafted planks' }; }
     if (action.type === 'craft') { inv.splice(0, inv.length, { name: action.item, count: 1 }); return { ok: true, text: 'crafted' }; }
     if (action.type === 'place_bed') return { ok: true, text: 'placed a white_bed at home.', bedAt: { x: 3, y: 64, z: 0 } };
     return { ok: false, text: '?' };
   };
   const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Amy', MAX_CONSECUTIVE_FAILURES: 3,
-    bot: { chat() {}, inventory: { items: () => inv }, entities: {} }, Vec3: V3, performAction,
+    bot: { chat() {}, inventory: { items: () => inv }, entities: {}, registry: { blocksByName: { crafting_table: { id: 1 } } },
+      findBlocks: () => [] }, Vec3: V3, performAction,
     farmStatus: () => ({ ripe: 0, growing: 0 }), narrateAction: async (t) => t, recordGoalOutcome() {},
     broadcastGoalState: async (status) => { done.push(status); }, retireGoal: async () => {}, saveGoalIfCurrent: async () => {},
     logStep: () => {}, loadPenLocation: async () => null, LIVESTOCK: [], BREEDING_FOOD: {}, countInPen: () => 0, findPenSite: () => null,
@@ -1389,13 +1394,15 @@ await check('Beds: a bed goal loots wool once, gets the rest from sheep, crafts,
     bedItemFor: () => 'white_bed' });
   vm.runInContext(farmGoalSrc(), c);
   const goal = { description: 'make myself a bed and place it at home', createdAt: Date.now(), consecutiveFailures: 0 };
-  for (let i = 0; i < 6 && !done.length; i++) await c.runBedGoal(goal, async () => true, () => ({ release() {} }), () => false);
-  assert.deepEqual(calls, ['loot:wool', 'get_wool', 'craft:white_bed', 'place_bed']);
+  for (let i = 0; i < 8 && !done.length; i++) await c.runBedGoal(goal, async () => true, () => ({ release() {} }), () => false);
+  assert.deepEqual(calls, ['loot:wool', 'get_wool', 'craft:oak_planks', 'craft:white_bed', 'place_bed'],
+    'no table nearby: 7 planks from her logs before the bed');
   assert.deepEqual(done, ['done']);
 });
 
 await check('Beds: a night with no bed gives an idle bot a bed goal for the morning, and never replaces a goal', async () => {
-  assert.match(index, /if \(!result\.ok && !result\.cancelled && \/couldn't find a bed\/\.test\(result\.text\)\) await wantBed\(\);/);
+  assert.match(index, /\/couldn't find a bed\/\.test\(result\.text\) \|\|\s+\(\/found beds nearby, but couldn't use any\/\.test\(result\.text\) && bedsNearHome\(\) < BOT_USERNAMES\.size\)\)\) await wantBed\(\);/,
+    'no bed at all, or none free while home has fewer beds than bots');
   const saved = []; const c = vm.createContext({ console: { log() {} }, Date, USERNAME: 'Amy', PERSONA_NAME: 'amy',
     newGoal: (g) => ({ ...g }), saveGoal: async (p, g) => { saved.push(g.description); }, broadcastGoalState: async () => {},
     currentGoal: null, SELF_PROPOSE_GOALS: true, selfProposeResumeAt: 0, IDLE_BEFORE_SELF_GOAL_MS: 600_000,
@@ -1429,7 +1436,7 @@ await check('Shelters: any mix of plain building blocks; never sand, gravel, val
   }
   const bot = { inventory: { items: () => [{ name: 'dirt', count: 20 }, { name: 'cobblestone', count: 12 }, { name: 'sand', count: 64 }] } };
   assert.equal(c.shelterMaterialCount(bot), 32, 'dirt and cobblestone add up; sand does not count');
-  assert.equal(c.shelterPositions(new V3(0, 64, 0)).length, 30, '7 wall columns x 3 + a 3x3 roof');
+  assert.equal(c.shelterPositions(new V3(0, 64, 0)).length, 49, '11 wall columns x 3 + a 4x4 roof (a 2x2 room inside)');
   const build = actions.slice(actions.indexOf('case "build": {'), actions.indexOf('case "build_pen": {'));
   assert.match(build, /buildMovements\.scafoldingBlocks = \[\];/, 'no scaffolding: she pillared up inside her own shelter');
   assert.match(build, /buildMovements\.allow1by1towers = false;/);
@@ -1442,11 +1449,15 @@ function shelterWorld({ groundY = (x, z) => 63, blocked = [] } = {}) {
     ? { name: 'grass_block', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' }) };
 }
 
-await check('Shelters: the site is a flat, clear 3x3 within 4 blocks of home, even a step above or below it', async () => {
+await check('Shelters: the site is a flat, clear 4x4 within 4 blocks of home, even a step above or below it', async () => {
   const c = shelterFns();
   const home = new V3(0, 64, 0);
   const flat = c.findShelterSite(shelterWorld(), home);
   assert.deepEqual([flat.x, flat.y, flat.z], [0, 64, 0], 'right on home when that is clear');
+  const wall = [];
+  for (let z = -3; z <= 6; z++) for (let y = 64; y <= 66; y++) wall.push(new V3(3, y, z)); // a wall one block past the 4x4
+  const tight = c.findShelterSite(shelterWorld({ blocked: wall }), home);
+  assert(tight.x + 2 < 3, `the whole 4x4 footprint stays clear of the wall: base ${tight}`);
   const tree = c.findShelterSite(shelterWorld({ blocked: [new V3(0, 65, 0)] }), home);
   assert(Math.max(Math.abs(tree.x), Math.abs(tree.z)) <= 4 && Math.max(Math.abs(tree.x), Math.abs(tree.z)) >= 2, `moved off the obstacle: ${tree}`);
   const raised = c.findShelterSite(shelterWorld({ groundY: () => 64 }), home);
@@ -1462,12 +1473,26 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
   assert.equal(c.farmTaskFor('go to the shelter and wait'), null);
   // A complete shelter whose floor is at spawn height + 1: the old check only looked at spawn height.
   const s = shelterFns();
-  const solid = new Set(s.shelterPositions(new V3(0, 65, 0)).map((p) => `${p.x},${p.y},${p.z}`));
-  const bot = { spawnPoint: new V3(0, 64, 0),
-    blockAt: (p) => ({ boundingBox: p.y <= 64 || solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' }) };
-  const h = vm.createContext({ bot, Math });
-  vm.runInContext(between(index, 'function shelterGeometryPositions(', 'const BUILDER_ITEM_STALL_LIMIT'), h);
-  assert.equal(h.hasShelterNearHome(), true);
+  const shelterBot = (cells, bedAt = null) => {
+    const solid = new Set(cells.map((p) => `${p.x},${p.y},${p.z}`));
+    return { spawnPoint: new V3(0, 64, 0), isABed: (b) => b.name === 'white_bed',
+      blockAt: (p) => (bedAt && p.equals(bedAt) ? { name: 'white_bed', boundingBox: 'block' }
+        : { name: 'x', boundingBox: p.y <= 64 || solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' }) };
+  };
+  const check = (bot) => {
+    const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s) });
+    vm.runInContext(between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+    return h.hasShelterNearHome();
+  };
+  assert.equal(check(shelterBot(s.shelterPositions(new V3(0, 65, 0)))), true, 'a 4x4 shelter a step up');
+  assert.equal(check(shelterBot(s.shelterPositions(new V3(0, 65, 0)), new V3(0, 65, 1))), true, 'a bed in the room still counts');
+  // The old 3x3 shelter (one cell inside) no longer counts: it can't fit a bed.
+  const old = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    if ((dx || dz) && !(dx === 0 && dz === 1)) for (let dy = 0; dy <= 2; dy++) old.push(new V3(dx, 65 + dy, dz));
+    old.push(new V3(dx, 68, dz));
+  }
+  assert.equal(check(shelterBot(old)), false, "a shelter that can't fit a bed isn't enough");
 });
 
 await check('Shelters: a shelter goal gets materials (planks from her logs), builds on its site, and is done when it stands', async () => {
@@ -1475,7 +1500,7 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
   let standing = false; const calls = []; const done = [];
   const performAction = async (b, action) => {
     calls.push(action.type + (action.item ? `:${action.item}` : '') + (action.block ? `:${action.block}` : ''));
-    if (action.type === 'craft') { inv.push({ name: 'oak_planks', count: 40 }); return { ok: true, text: 'crafted planks' }; }
+    if (action.type === 'craft') { inv.push({ name: 'oak_planks', count: 60 }); return { ok: true, text: 'crafted planks' }; }
     if (action.type === 'build') { standing = true; return { ok: true, text: 'built a small shelter', built: true }; }
     return { ok: false, text: '?' };
   };
@@ -1495,6 +1520,36 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
   assert.deepEqual(calls, ['craft:oak_planks', 'build']);
   assert.deepEqual(done, ['done']);
   assert.deepEqual({ ...goal.shelterAt }, { x: 1, y: 64, z: 1 });
+});
+
+await check('Beds: a spot with a bot standing in it is skipped, and a refused spot is not retried', async () => {
+  const c = bedFns();
+  vm.runInContext(between(actions, 'function cellOccupied(', 'export function findBedSite('), c);
+  const world = bedSiteWorld();
+  const free = c.findBedSites({ ...world, entity: {}, entities: {} }, new V3(0, 64, 0));
+  const best = free[0];
+  const crowded = { ...world, entity: {}, entities: { 7: { position: new V3(best.head.x + 0.5, 64, best.head.z + 0.5) } } };
+  const next = c.findBedSites(crowded, new V3(0, 64, 0))[0];
+  assert(!(next.foot.equals(best.foot) && next.head.equals(best.head)), 'the occupied spot is not offered');
+  for (const cell of [next.foot, next.head]) assert(!(cell.x === best.head.x && cell.z === best.head.z), 'nothing standing in it');
+  const place = actions.slice(actions.indexOf('case "place_bed": {'), actions.indexOf('case "shear": {'));
+  assert.match(place, /\.find\(\(c\) => !tried\.some\(\(t\) => t\.equals\(c\.foot\)\)\)/, 'each attempt takes a spot not tried yet');
+});
+
+await check('Beds: the first choice is a spot under a roof -- the shelter room, entered from its doorway', async () => {
+  const c = bedFns();
+  vm.runInContext(between(actions, 'function cellOccupied(', 'export function findBedSite('), c);
+  const s = shelterFns();
+  const base = new V3(5, 64, 5);
+  const walls = new Set(s.shelterPositions(base).map((p) => `${p.x},${p.y},${p.z}`));
+  const bot = { entity: {}, entities: {}, isABed: () => false, findBlocks: () => [],
+    blockAt: (p) => (p.y < 64 || walls.has(`${p.x},${p.y},${p.z}`) ? { name: 'cobblestone', boundingBox: 'block' }
+      : { name: 'air', boundingBox: 'empty' }) };
+  const site = c.findBedSites(bot, new V3(0, 64, 0))[0];
+  assert.deepEqual([site.foot.x, site.foot.z, site.head.x, site.head.z, site.stand.x, site.stand.z], [5, 6, 5, 5, 5, 7],
+    'foot (0,1) and head (0,0) of the room, placed standing in the doorway');
+  const atSpawn = c.findBedSites(bot, base)[0]; // spawn inside the shelter, as at the fleet's home
+  assert.deepEqual([atSpawn.foot.x, atSpawn.foot.z], [5, 6], 'the room is still used when it sits on spawn');
 });
 
 console.log(`${passed} unit checks passed.`);

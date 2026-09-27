@@ -1,4 +1,13 @@
-// Version: 1.77.0
+// Version: 1.79.0
+//
+// 1.79.0 (2026-09-27, "a shelter is not enough if it can't fit at least one bed"): the shelter is
+// 4x4 outside with a 2x2 inside (was 3x3 with one cell) -- a bed fits along one side, entered from
+// the doorway, with room to stand beside it. findShelterSite also needs a walkable approach to the
+// doorway, and place_bed prefers a spot under a roof, so the first bed goes in the shelter.
+//
+// 1.78.0 (2026-09-26) -- place_bed skips spots with a bot or mob standing in them (the server
+// refuses those; the fleet crowds around spawn) and tries up to 4 spots instead of retrying one.
+// findBedSites returns every usable spot, best first.
 //
 // 1.77.0 (2026-09-26) -- shelters: build takes a site (action.at), mixes any plain building blocks
 // (isShelterMaterial -- never sand/gravel or functional blocks), counts only what's missing, and says
@@ -2317,7 +2326,20 @@ export function bedItemFor(bot) {
 // to existing beds when there are any (one bedroom, not beds strewn across paths), else as close to
 // home as possible but not on it; never beside a door or gate.
 const BED_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+// Something standing in a cell (a bot, a mob): the server refuses a bed there. The bots crowd around
+// spawn, and two of them retried the same spot beside it six times (live, 2026-09-26).
+function cellOccupied(bot, p) {
+  return Object.values(bot.entities).some((e) => e !== bot.entity && e.position &&
+    Math.floor(e.position.x) === p.x && Math.floor(e.position.z) === p.z && Math.abs(e.position.y - p.y) < 2);
+}
+
 export function findBedSite(bot, home) {
+  return findBedSites(bot, home)[0] ?? null;
+}
+
+// Every usable spot, best first (next to existing beds, else nearest home), none with anything
+// standing in the bed's two cells.
+export function findBedSites(bot, home) {
   const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
   const open = (p) => { const b = bot.blockAt(p); return !!b && b.name === "air"; };
   const solid = (p) => bot.blockAt(p)?.boundingBox === "block";
@@ -2326,25 +2348,35 @@ export function findBedSite(bot, home) {
     const n = bot.blockAt(p.offset(dx, 0, dz))?.name ?? "";
     return n.endsWith("_door") || n.endsWith("_fence_gate");
   });
+  // Walled on two opposite sides (a doorway, a corridor): a bed there blocks the way through --
+  // the first try put one in the shelter's own doorway (2026-09-27).
+  const chokepoint = (p) => [[1, 0], [0, 1]].some(([dx, dz]) =>
+    solid(p.offset(dx, 0, dz)) && solid(p.offset(-dx, 0, -dz)) && solid(p.offset(dx, 1, dz)) && solid(p.offset(-dx, 1, -dz)));
   const beds = bot.findBlocks({ matching: (b) => bot.isABed(b), maxDistance: 16, count: 32, point: new Vec3(hx, hy, hz) });
   const anchor = (p) => (beds.length ? Math.min(...beds.map((b) => b.distanceTo(p))) : p.distanceTo(new Vec3(hx, hy, hz)));
-  let best = null, bestScore = Infinity;
+  const sites = [];
   for (let dx = -10; dx <= 10; dx++) {
     for (let dz = -10; dz <= 10; dz++) {
-      if (Math.max(Math.abs(dx), Math.abs(dz)) < 2) continue; // keep the spawn spot itself clear
+      // Keep the open ground right at spawn clear -- but not a shelter room: the shelter is built
+      // within 4 blocks of spawn, often right over it (2026-09-27).
+      const nearSpawn = Math.max(Math.abs(dx), Math.abs(dz)) < 2;
       for (let dy = -2; dy <= 2; dy++) {
         const foot = new Vec3(hx + dx, hy + dy, hz + dz);
         if (!standable(foot)) continue;
         for (const [ox, oz] of BED_DIRS) {
           const head = foot.offset(ox, 0, oz), stand = foot.offset(-ox, 0, -oz);
           if (!standable(head) || !standable(stand) || nearDoor(foot) || nearDoor(head)) continue;
-          const score = anchor(foot);
-          if (score < bestScore) { best = { foot, head, stand }; bestScore = score; }
+          if (chokepoint(foot) || chokepoint(head)) continue; // never block a doorway or a corridor
+          if (cellOccupied(bot, foot) || cellOccupied(bot, head)) continue;
+          // Under a roof (a shelter's room) beats anywhere in the open (2026-09-27).
+          const covered = solid(foot.offset(0, 3, 0)) && solid(head.offset(0, 3, 0));
+          if (nearSpawn && !covered) continue;
+          sites.push({ foot, head, stand, score: anchor(foot) - (covered ? 100 : 0) });
         }
       }
     }
   }
-  return best;
+  return sites.sort((a, b) => a.score - b.score);
 }
 
 // Shelters (2026-09-26, "what's wrong with shelter building?"): in two days the Builder got "build a
@@ -2362,27 +2394,30 @@ export function shelterMaterialCount(bot) {
   return bot.inventory.items().filter((i) => isShelterMaterial(i.name)).reduce((n, i) => n + i.count, 0);
 }
 
-// The 3x3 shelter around `base` (its interior cell, at floor level): walls three high except a
-// doorway on the +z side, then a roof. Same shape index.js's hasShelterNearHome() checks for.
+// The shelter: 4x4 outside, a 2x2 room inside. `base` is the room's back-left cell at floor level;
+// the room is base..base+(1,0,1), walls three high round it with a doorway at (0, *, 2), and a 4x4
+// roof on top. The room fits a bed (foot at (0,1), head at (0,0), placed from the doorway) with
+// (1,0)-(1,1) left to stand in. index.js's hasShelterNearHome() checks this same shape.
+export const SHELTER_ROOM = [[0, 0], [1, 0], [0, 1], [1, 1]];
 export function shelterPositions(base) {
   const walls = [];
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dz = -1; dz <= 1; dz++) {
-      if (Math.abs(dx) !== 1 && Math.abs(dz) !== 1) continue; // interior column
-      if (dx === 0 && dz === 1) continue; // doorway column
+  for (let dx = -1; dx <= 2; dx++) {
+    for (let dz = -1; dz <= 2; dz++) {
+      if (dx >= 0 && dx <= 1 && dz >= 0 && dz <= 1) continue; // the room
+      if (dx === 0 && dz === 2) continue; // doorway column
       for (let dy = 0; dy <= 2; dy++) walls.push(base.offset(dx, dy, dz));
     }
   }
   const roof = [];
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dz = -1; dz <= 1; dz++) roof.push(base.offset(dx, 3, dz));
+  for (let dx = -1; dx <= 2; dx++) {
+    for (let dz = -1; dz <= 2; dz++) roof.push(base.offset(dx, 3, dz));
   }
   return [...walls, ...roof];
 }
 
-// A flat, clear 3x3 footprint within 4 blocks of home (the range hasShelterNearHome() looks in):
-// solid ground under all nine columns, four blocks of open air above each (small plants are fine,
-// she clears nothing she'd need), no bed/door/chest in the way. Nearest to home wins.
+// A flat, clear 4x4 footprint within 4 blocks of home (the range hasShelterNearHome() looks in):
+// solid ground under all sixteen columns, four blocks of open air above each, no bed/door/chest in
+// the way, and a walkable cell outside the doorway so the room can be entered. Nearest home wins.
 export function findShelterSite(bot, home) {
   const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
   const clear = (p) => {
@@ -2397,12 +2432,14 @@ export function findShelterSite(bot, home) {
         const dist = Math.hypot(dx, dz) + Math.abs(dy) * 0.5;
         if (dist >= bestDist) continue;
         let ok = true;
-        for (let ox = -1; ox <= 1 && ok; ox++) {
-          for (let oz = -1; oz <= 1 && ok; oz++) {
+        for (let ox = -1; ox <= 2 && ok; ox++) {
+          for (let oz = -1; oz <= 2 && ok; oz++) {
             ok = bot.blockAt(base.offset(ox, -1, oz))?.boundingBox === "block";
             for (let oy = 0; oy <= 3 && ok; oy++) ok = clear(base.offset(ox, oy, oz));
           }
         }
+        const outside = base.offset(0, 0, 3); // in front of the doorway
+        ok = ok && bot.blockAt(outside.offset(0, -1, 0))?.boundingBox === "block" && clear(outside) && clear(outside.offset(0, 1, 0));
         if (ok) { best = base; bestDist = dist; }
       }
     }
@@ -4770,29 +4807,42 @@ async function performActionAs(bot, action, speaker, token) {
       const home = await performActionAs(bot, { type: "gohome" }, speaker, token);
       if (token.cancelled) return home;
       if (!home.ok) return fail(`couldn't get home to place the bed: ${home.text}`);
-      const site = findBedSite(bot, bot.spawnPoint ?? bot.entity.position);
-      if (!site) return fail("couldn't find two free, flat blocks in a row near home for a bed.");
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalBlock(site.stand.x, site.stand.y, site.stand.z)),
-          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to the bed spot.");
-        return fail(`couldn't get to the bed spot: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+      // Up to 4 spots, best first: a refusal (someone stepped into it, a stale view) moves on to the
+      // next instead of retrying the same one. A bed that appeared despite an error still counts.
+      const tried = [];
+      let site = null;
+      for (let attempt = 0; attempt < 4 && !token.cancelled && !site; attempt++) {
+        const candidate = findBedSites(bot, bot.spawnPoint ?? bot.entity.position)
+          .find((c) => !tried.some((t) => t.equals(c.foot)));
+        if (!candidate) break;
+        tried.push(candidate.foot);
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalBlock(candidate.stand.x, candidate.stand.y, candidate.stand.z)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        } catch {
+          if (token.cancelled) return ok("stopped on the way to the bed spot.");
+          continue; // unreachable -- next spot
+        } finally {
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+        }
+        if (token.cancelled) return ok("stopped before placing the bed.");
+        if (cellOccupied(bot, candidate.foot) || cellOccupied(bot, candidate.head)) continue; // someone walked in
+        const bedNow = bot.inventory.items().find((i) => i.name.endsWith("_bed"));
+        if (!bedNow) break;
+        try {
+          await bot.equip(bedNow, "hand");
+          await bot.placeBlock(bot.blockAt(candidate.foot.offset(0, -1, 0)), new Vec3(0, 1, 0));
+        } catch (err) {
+          console.log(`[${bot.username}] place_bed: ${candidate.foot} refused (${err.message}) -- trying another spot`);
+        }
+        await new Promise((r) => setTimeout(r, 250)); // the head half's update lands a tick later
+        if (bot.isABed(bot.blockAt(candidate.foot)) && bot.isABed(bot.blockAt(candidate.head))) site = candidate;
       }
-      if (token.cancelled) return ok("stopped before placing the bed.");
-      try {
-        await bot.equip(bedItem, "hand");
-        await bot.placeBlock(bot.blockAt(site.foot.offset(0, -1, 0)), new Vec3(0, 1, 0));
-      } catch (err) {
-        return fail(`couldn't place the bed: ${err.message}`);
-      } finally {
-        await refreshGear(bot);
-      }
-      await new Promise((r) => setTimeout(r, 250)); // the head half's update lands a tick later
-      if (!bot.isABed(bot.blockAt(site.foot)) || !bot.isABed(bot.blockAt(site.head))) {
-        return fail(`the bed didn't go down at ${site.foot}.`);
+      await refreshGear(bot);
+      if (token.cancelled) return ok("stopped placing the bed.");
+      if (!site) {
+        return fail(tried.length ? `the server refused the bed at ${tried.length} spot(s) near home (${tried.join(", ")}).`
+          : "couldn't find two free, flat blocks in a row near home for a bed.");
       }
       if (!(await loadClaimedBed(bot))) await saveClaimedBed(bot, site.head); // her own, if she had none
       return { ...ok(`placed a ${bedItem.name} at home.`), bedAt: { x: site.foot.x, y: site.foot.y, z: site.foot.z } };

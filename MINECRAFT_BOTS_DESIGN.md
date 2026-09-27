@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.12.0
+**Version:** 2.14.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -146,10 +146,18 @@ queued action/goal. A CHAT reply may never promise a future action that isn't ac
   `place_bed` (two free, supported cells near home, next to existing beds, facing away from where
   she stands; checked it appeared; claimed if she has no bed), else `craft` "bed" in the colour she
   holds 3 wool of, else wool from a chest (once), else `get_wool` (shear, or hunt a sheep and pick
-  up the drop). A bot that finds no bed at night takes on "make myself a bed" for the morning.
+  up the drop); before crafting she gets the wood (3 planks, +4 if she must make the table: planks
+  from held logs, else the nearest tree). The server refuses a bed whose foot cell has someone in
+  it, and the fleet crowds spawn, so `place_bed` skips occupied spots and tries up to 4 spots
+  instead of retrying one. It prefers a spot under a roof (the shelter room, even when that sits on
+  spawn) and never puts a bed in a chokepoint (a doorway, a corridor). A bot takes on "make myself
+  a bed" for the morning when it finds no bed at night, or finds beds but none free while home has
+  fewer beds than bots.
   `craft` makes and places a crafting table itself when none is within 32 blocks.
-- **Shelter goals too** (the Builder's "build a small shelter", any self-proposed one): a flat, clear
-  3x3 site within 4 blocks of home (`findShelterSite`), building blocks if short (planks from logs
+- **Shelter goals too** (the Builder's "build a small shelter", any self-proposed one). A shelter
+  must fit a bed: 4x4 outside, a 2x2 room inside (a bed along one side, placed from the doorway,
+  room to stand beside it) -- the old 3x3 with one cell inside no longer counts. A flat, clear
+  4x4 site within 4 blocks of home with a walkable approach to the doorway (`findShelterSite`), building blocks if short (planks from logs
   she holds, else dirt), then `build` on that site. `build` mixes any plain building blocks (never
   sand/gravel or functional blocks), builds with pathfinder scaffolding off (dirt and cobblestone are
   its defaults, and she pillared up inside her own shelter), and the goal is done only when

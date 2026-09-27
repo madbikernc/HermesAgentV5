@@ -1,4 +1,11 @@
-// Version: 2.102.0
+// Version: 2.104.0
+//
+// 2.104.0 (2026-09-27) -- a shelter counts only if its 2x2 room fits a bed (actions.js 1.79.0's
+// shape; a bed already in it still counts). A bot also makes itself a bed when beds exist but none
+// was free and home has fewer beds than bots -- spark2's four never started one.
+//
+// 2.103.0 (2026-09-26) -- bed goals get wood before crafting (3 planks, +4 when a crafting table
+// has to be made too): planks from held logs, else chop the nearest tree.
 //
 // 2.102.0 (2026-09-26) -- shelter goals run directly (site, materials, build; done only when
 // hasShelterNearHome() sees it), and that check now finds a shelter up to 2 blocks above or below
@@ -1432,7 +1439,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -3035,28 +3042,16 @@ function countNearHome(names, filterFn) {
 // always report "no shelter" even after a real, successful build, since it was checking the wrong
 // 3x3 footprint. Now slides the candidate anchor across a small search radius (matching gohome's
 // own tolerance plus a margin) and accepts the first one that passes.
-function shelterGeometryPositions(base) {
-  const wallAndRoof = [];
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dz = -1; dz <= 1; dz++) {
-      if (Math.abs(dx) !== 1 && Math.abs(dz) !== 1) continue; // interior column -- no wall here
-      if (dx === 0 && dz === 1) continue; // doorway column -- never required solid
-      for (let dy = 0; dy <= 2; dy++) wallAndRoof.push(base.offset(dx, dy, dz));
-    }
-  }
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dz = -1; dz <= 1; dz++) wallAndRoof.push(base.offset(dx, 3, dz));
-  }
-  return wallAndRoof;
-}
+// 2026-09-27: the shape now comes from actions.js (shelterPositions) -- one definition for what
+// "build" builds and what this check accepts. The room must be 2x2 and clear two high (a bed in it
+// still counts): a shelter that can't fit a bed isn't enough.
+const shelterGeometryPositions = shelterPositions;
 
-// The single most distinguishing feature of an actual SHELTER (a hollow room) versus a solid
-// mass of terrain that coincidentally passes the wall/roof solidity threshold (a small hill, a
-// rock outcrop) -- checked in addition to, not instead of, the solidity count. Real, cheap: only
-// 3 air-space checks (the interior column, feet/head height, matching the doorway's own opening).
 function hasHollowInterior(base) {
-  const interior = [base.offset(0, 0, 0), base.offset(0, 1, 0)];
-  return interior.every((pos) => bot.blockAt(pos)?.boundingBox !== "block");
+  return SHELTER_ROOM.every(([dx, dz]) => {
+    const floor = bot.blockAt(base.offset(dx, 0, dz)), above = bot.blockAt(base.offset(dx, 1, dz));
+    return (floor?.boundingBox !== "block" || bot.isABed(floor)) && above?.boundingBox !== "block";
+  });
 }
 
 function hasShelterNearHome() {
@@ -3662,6 +3657,26 @@ async function bedStep(goal, handle) {
     return { ...placed, done: !!placed.bedAt, action: { type: "place_bed" } };
   }
   if (Math.max(0, ...Object.values(woolCounts(bot))) >= 3) {
+    // Wood first (live, 2026-09-26: Mark and Bob had the wool and failed "don't have the
+    // ingredients"): 3 planks for the bed, 4 more if she'll have to make the crafting table too.
+    const tableType = bot.registry.blocksByName.crafting_table;
+    const tableNear = heldCount((n) => n === "crafting_table") > 0 ||
+      (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
+    const planksNeeded = 3 + (tableNear ? 0 : 4);
+    const planks = heldCount((n) => n.endsWith("_planks"));
+    if (planks < planksNeeded) {
+      const log = bot.inventory.items().find((i) => /_(log|stem)$/.test(i.name));
+      if (log) {
+        const item = `${log.name.replace(/^stripped_/, "").replace(/_(log|stem)$/, "")}_planks`;
+        return { ...(await performAction(bot, { type: "craft", item, count: planksNeeded - planks }, USERNAME, handle)),
+          action: { type: "craft", item } };
+      }
+      const tree = bot.findBlocks({ matching: (b) => /_log$/.test(b.name) && !b.name.startsWith("stripped_"), maxDistance: 32, count: 1 })[0];
+      if (!tree) return { ok: false, text: "need wood for the bed and there's no tree nearby." };
+      const block = bot.blockAt(tree).name;
+      return { ...(await performAction(bot, { type: "mine", block, count: Math.ceil((planksNeeded - planks) / 4) }, USERNAME, handle)),
+        action: { type: "mine", block } };
+    }
     const item = bedItemFor(bot);
     return { ...(await performAction(bot, { type: "craft", item, count: 1 }, USERNAME, handle)), action: { type: "craft", item } };
   }
@@ -3692,6 +3707,11 @@ async function runBedGoal(goal, takeControl, getHandle, replaced) {
 // A night with no bed anywhere near: with nothing else on, she makes her own in the morning (goals
 // pause overnight). Found live: all nine failed "sleep" every few minutes after the reset. Same
 // rules as any self-proposed goal -- a player's STOP a minute ago still means stop (live test MB-05).
+function bedsNearHome() {
+  const bedNames = Object.keys(bot.registry.blocksByName).filter((n) => n.endsWith("_bed"));
+  return countNearHome(bedNames, (block) => block?.getProperties?.().part === "head");
+}
+
 async function wantBed() {
   if (currentGoal || !SELF_PROPOSE_GOALS || Date.now() < selfProposeResumeAt ||
       Date.now() - lastActivityAt < IDLE_BEFORE_SELF_GOAL_MS) return;
@@ -4689,7 +4709,10 @@ async function checkSleep() {
     const result = await performAction(bot, { type: "sleep" }, USERNAME, handle);
     console.log(`[${USERNAME}] sleep (attempt ${sleepTonight.attempts}): ${result.text} (ok=${result.ok})`);
     if (result.ok) sleepTonight.done = true;
-    if (!result.ok && !result.cancelled && /couldn't find a bed/.test(result.text)) await wantBed();
+    // No bed at all, or beds but none free while home has fewer beds than bots (2026-09-27: with
+    // five beds taken, spark2's four bots only ever saw "found beds nearby, but couldn't use any").
+    if (!result.ok && !result.cancelled && (/couldn't find a bed/.test(result.text) ||
+        (/found beds nearby, but couldn't use any/.test(result.text) && bedsNearHome() < BOT_USERNAMES.size))) await wantBed();
     if (!result.cancelled && (result.ok || sleepTonight.attempts >= MAX_NIGHT_ATTEMPTS)) {
       bot.chat(await narrateAction(result.ok ? result.text : `couldn't get to sleep: ${result.text}`));
     }
