@@ -1,6 +1,6 @@
 # Anvil — mesh node setup checklist
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Ordered steps to stand up `Anvil`, the fleet's mesh node (IMPLEMENTATION_PLAN.md S19): a Windows box with
 an RTX 5090 that turns a finished render into a viable STL. This file is the recipe; S19 in the plan is the
@@ -184,10 +184,9 @@ In this order, each after the one before it works:
    output, and open the STL in Bambu Studio (installed on the operator's PC) for gate 4.
 4. **Exit gate 6:** re-run the F4U Corsair from the earlier off-fleet experiment (its STL is not on the
    operator's PC; it is probably on the old 3080 Ti box).
-5. **Before the first real job,** make `mesh` a quiet broker type. Install
-   `infra/hermes-broker/hermes-broker.service` on spark: it now has
-   `BROKER_QUIET_TYPES=embed,wake,mesh`, where the live unit has only `embed,wake`. Then run
-   `daemon-reload` and restart the broker. Until that's done, mesh jobs would also be posted to FleetOps.
+5. ~~Make `mesh` a quiet broker type.~~ **Done 2026-09-27:** the repo's `hermes-broker.service` was
+   installed live on spark, and the broker now runs with `BROKER_QUIET_TYPES=embed,wake,mesh`. The
+   previous unit is kept at `/etc/systemd/system/hermes-broker.service.bak-2026-09-27`.
 6. Set `MESH_ENABLED=1` in hermes-media's service environment on spark-2.
 7. Update the dispatcher's `media` target description in `tools/hermes-dispatch.py` ("generate an image or
    video via the render broker") to include 3D-printable meshes, so requests actually reach the route.
@@ -198,3 +197,4 @@ In this order, each after the one before it works:
 |---|---|---|
 | 1.0.0 | 2026-09-27 | Initial checklist, written before the node exists: what is already built and tested, the install constraints S19a verified, loopback-only ComfyUI, workflow export with `{{INPUT_IMAGE}}`/`{{SEED}}` placeholders, the win_amd64 test gate, three named operator decisions (service wrapper, secrets, repo sync), and the go-live order. |
 | 1.1.0 | 2026-09-27 | Operator decisions made and built, same day: NSSM (`install-anvil.ps1`: `HermesComfyUI` loopback-only + `HermesMeshWorker`), native `bw` (`tools/vault-get-secret.ps1`, `set-vault-bootstrap.ps1`, `hermes-mesh-worker.ps1`; bootstrap DPAPI-bound to the service account), 30-minute `HermesRepoSync` task (`hermes-repo-sync.ps1`), and STLs stored on NAS2 rather than posted to FleetOps (`mesh` quiet, required hash-verified NAS2 copy, `MESH_ARCHIVE_DIR`). Flagged the SMB share name `PMoney` as an assumption to verify — the Sparks reach NAS2 over NFS. Windows scripts tested by `tests/test_windows_scripts.ps1`. |
+| 1.2.0 | 2026-09-27 | Go-live step 5 done: `mesh` quiet on the live broker (unit installed on spark, backup kept). |
