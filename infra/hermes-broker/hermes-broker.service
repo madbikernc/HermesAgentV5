@@ -21,6 +21,11 @@ Environment="BROKER_ARTIFACTS=/mnt/hermes-data/broker/artifacts"
 Environment="BROKER_BIND=10.129.1.15"
 Environment="BROKER_PORT=8100"
 Environment="MATRIX_HOMESERVER=http://127.0.0.1:6167"
+# Job types whose results are never posted to FleetOps. embed (Phase 30c) and wake were already set
+# on the live unit but missing from this copy — drift found 2026-09-27 reading the live env before
+# adding mesh. mesh (S19, operator decision 2026-09-27): STLs are stored on NAS2 by Anvil's worker
+# (Private/Hermes/Meshes), not pushed into a room.
+Environment="BROKER_QUIET_TYPES=embed,wake,mesh"
 # 900s (the code default) is shorter than a real 121-frame video job's
 # measured worst-case runtime (~1415s) -- the lease is global across every
 # job type, not per-type, so a video job's own worker could still be

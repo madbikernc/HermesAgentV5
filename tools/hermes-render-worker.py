@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.7.0
+#
+# 1.7.0 (2026-09-27, HermesAgentV5 S19b, pre-node) — two additions for the `mesh` worker on Anvil:
+# payload `source_job` (the render job whose image becomes the mesh) passes through as
+# --source-job, validated against the broker's own job-id charset, and `keep_largest: true` as
+# --keep-largest; and a GENERATE_SCRIPT ending in .py is run via sys.executable, since Windows
+# cannot exec a script by its shebang. Neither changes render/video behaviour — neither key is ever
+# in their payloads, and their scripts are .sh.
 #
 # 1.6.0 (2026-09-27, HermesAgentV5 S19b, pre-node) — screen_artifact() gains a `mesh` branch
 # (screen_mesh): GLB by magic plus its header length field, binary STL by the exact
@@ -96,6 +103,9 @@ FRAMES_RE = re.compile(r"^\d{1,4}$")
 # V4: same allowlist discipline, for amy-generate-image.sh's new --engine flag
 # (IMPLEMENTATION_PLAN.md §6 Stage 3/6 — SDXL stays the default, flux2 is opt-in).
 ENGINE_RE = re.compile(r"^(sdxl|flux2)$")
+# S19: a mesh job names the render job whose image it turns into a mesh. Same charset the broker
+# itself enforces on job ids (hermes-broker.py JOB_ID_RE).
+JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 BROKER_URL = os.environ.get("BROKER_URL", "http://10.129.1.15:8100").rstrip("/")
 TOKEN = os.environ.get("BROKER_TOKEN", "")
@@ -140,10 +150,13 @@ def run_job(job):
     if not prompt:
         return 2, None, "payload has no prompt"
 
-    cmd = [SCRIPT, "--prompt", prompt]
+    # A .py generation script is run through this same interpreter: on Windows (Anvil, S19) a
+    # script is not directly executable the way a chmod +x file is on the Linux nodes.
+    cmd = ([sys.executable] if SCRIPT.endswith(".py") else []) + [SCRIPT, "--prompt", prompt]
     for flag, key in (("--style", "style"), ("--negative", "negative"),
                       ("--resolution", "resolution"), ("--room", "room"),
-                      ("--frames", "frames"), ("--engine", "engine")):
+                      ("--frames", "frames"), ("--engine", "engine"),
+                      ("--source-job", "source_job")):
         if not payload.get(key):
             continue
         value = str(payload[key])
@@ -153,7 +166,11 @@ def run_job(job):
             return 2, None, f"payload frames {value!r} is not a plain integer — refused"
         if key == "engine" and not ENGINE_RE.match(value):
             return 2, None, f"payload engine {value!r} is not 'sdxl' or 'flux2' — refused"
+        if key == "source_job" and not JOB_ID_RE.match(value):
+            return 2, None, f"payload source_job {value!r} is not a broker job id — refused"
         cmd += [flag, value]
+    if payload.get("keep_largest") is True:
+        cmd.append("--keep-largest")
 
     log(f"job {job['id']}: running {os.path.basename(SCRIPT)} (attempt {job.get('attempt')})")
     try:

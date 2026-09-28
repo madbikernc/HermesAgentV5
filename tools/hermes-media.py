@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-09-27, HermesAgentV5 S19d, pre-node) — the `mesh` route, extending this agent's own
+# `media` topic rather than inventing a `fabricate` one (S19d). A request that explicitly asks for
+# something printable (MESH_REQUEST_RE: STL, 3D print, printable, 3D model/mesh/object) renders a
+# reference image steered toward image-to-3D, runs it through the same evaluate/regenerate loop as
+# any render, then submits a `mesh` broker job naming that render as `source_job` and reports the
+# STL's name, which carries its size. The structural checks in hermes-mesh-repair.py are the mesh's
+# quality gate; the vision evaluator only ever judges the reference image (S19d: a rendered preview
+# says nothing about watertightness). OFF by default (MESH_ENABLED=0) until Anvil exists — with no
+# mesh worker, a mesh job would queue forever — and while off, nothing about image requests changes.
+# `mesh` is a quiet broker type, so the STL is not posted to FleetOps; the completion message points
+# at its NAS2 copy (Private/Hermes/Meshes), which Anvil's worker writes and verifies.
 #
 # 1.2.0 (2026-08-30) — conversation continuity's one genuinely different shape among the
 # specialists that got it: this agent never called a model before submitting a prompt to the
@@ -79,10 +91,12 @@
 #   EVAL_ENABLED    default "1" — set "0" to skip evaluation entirely (revert to 1.0.0 behavior)
 #   EVAL_TIMEOUT_SECONDS default 60 — confirmed live a real evaluation takes ~3s; generous margin
 #   MAX_REGENERATE_ATTEMPTS default 1 — bounded, never loop more than one regeneration
+#   MESH_ENABLED    default "0" — S19: set "1" only once Anvil's mesh worker is live
 
 import base64
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -110,6 +124,20 @@ EVAL_ENABLED = os.environ.get("EVAL_ENABLED", "1") == "1"
 EVAL_TIMEOUT_SECONDS = int(os.environ.get("EVAL_TIMEOUT_SECONDS", "60"))
 MAX_REGENERATE_ATTEMPTS = int(os.environ.get("MAX_REGENERATE_ATTEMPTS", "1"))
 ANSWER_HISTORY_TURNS = int(os.environ.get("ANSWER_HISTORY_TURNS", "20"))
+# S19: off until Anvil exists. With no mesh worker, a mesh job would sit queued forever and this
+# agent would wait on it forever; off, a mesh-shaped request is simply rendered as an image.
+MESH_ENABLED = os.environ.get("MESH_ENABLED", "0") == "1"
+# Deterministic, not a model call: an explicit ask for something printable. "3D" alone is not
+# enough ("a 3D-style render" is an image request), nor is "mesh" (a mesh laundry bag) or "3D
+# printer" (a picture of the machine).
+MESH_REQUEST_RE = re.compile(
+    r"\bstls?\b|\b3-?d[\s-]*print(?!ers?\b)|\bprintable\b|\b3-?d\s+(?:model|mesh|object)s?\b",
+    re.IGNORECASE)
+# `mesh` is a quiet broker type (nothing posted to FleetOps); Anvil's worker stores every STL here.
+MESH_ARCHIVE_LABEL = "Private/Hermes/Meshes"
+# Same steering as hermes-render-request.sh --type mesh: image-to-3D wants one whole, isolated object.
+MESH_RENDER_STYLE = ("single object, whole object fully in frame, centered, three-quarter view, "
+                     "plain white background, soft even lighting, no shadows")
 
 SYNTHESIZE_PROMPT_SYSTEM = (
     "You rewrite an image/video generation request into one complete, standalone prompt, using "
@@ -258,6 +286,44 @@ def submit_broker_job(prompt):
     return _post(f"{BROKER_URL}/jobs", {"type": "render", "payload": {"prompt": prompt}}, BROKER_TOKEN)
 
 
+def is_mesh_request(text):
+    return MESH_ENABLED and bool(MESH_REQUEST_RE.search(text))
+
+
+def submit_mesh_job(prompt, source_job):
+    """S19b: TRELLIS.2 is image-to-3D, so the mesh job names the finished render job whose image
+    Anvil's worker fetches through the broker — no image bytes pass through this agent."""
+    return _post(f"{BROKER_URL}/jobs", {"type": "mesh",
+                                        "payload": {"prompt": prompt, "source_job": source_job}},
+                 BROKER_TOKEN)
+
+
+def finish_mesh(task_id, memory_ref, prompt, render_job_id):
+    set_task_state(task_id, "meshing")
+    try:
+        mesh_job = submit_mesh_job(prompt, render_job_id)
+    except Exception as exc:
+        publish_result(task_id, memory_ref, False,
+                       f"The reference image was delivered to FleetOps, but the 3D mesh job could "
+                       f"not be submitted: {exc}")
+        return
+    log(f"task {task_id!r}: render {render_job_id} -> mesh job {mesh_job['id']}, polling")
+    status = wait_for_job(mesh_job["id"])
+    if status.get("state") == "dead":
+        publish_result(task_id, memory_ref, False,
+                       "The reference image was delivered to FleetOps, but no viable STL could be "
+                       f"made from it: {status.get('error', '')[:300]}")
+        log(f"mesh job {mesh_job['id']}: dead, task {task_id!r} closed with failure")
+        return
+    name = os.path.basename(status.get("artifact") or "")
+    publish_result(task_id, memory_ref, True,
+                   f"3D-printable STL generated and saved to NAS2 at {MESH_ARCHIVE_LABEL}/{name} "
+                   f"(broker job {mesh_job['id']}) — watertight and verified, not sliced. STL "
+                   "carries no units; the numbers in the filename are its size in the model's own "
+                   "units, so check the scale in your slicer.")
+    log(f"mesh job {mesh_job['id']}: done, task {task_id!r} closed")
+
+
 def broker_job_status(job_id):
     return _get(f"{BROKER_URL}/jobs/{job_id}", BROKER_TOKEN)
 
@@ -347,6 +413,12 @@ def process_media_request():
         except Exception as exc:
             log(f"claim {claim_id}: prompt synthesis failed, using request as-is: {exc}")
 
+    mesh = is_mesh_request(prompt)
+    request = prompt
+    if mesh:
+        # The reference render is the image the mesh is built from — evaluated (and possibly
+        # regenerated) below against this steered prompt, like any other render.
+        prompt = f"{prompt}, {MESH_RENDER_STYLE}"
     try:
         job = submit_broker_job(prompt)
     except Exception as exc:
@@ -378,6 +450,9 @@ def process_media_request():
             log(f"job {job_id}: regenerated job died, task {task_id!r} closed with failure")
             return True
 
+    if mesh:
+        finish_mesh(task_id, memory_ref, request, job_id)
+        return True
     publish_result(task_id, memory_ref, True, f"Image generated and delivered to FleetOps.{note}")
     log(f"job {job_id}: done, task {task_id!r} closed")
     return True
