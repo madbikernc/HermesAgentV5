@@ -1,6 +1,6 @@
 # hermes-model-scan — recreate checklist
 
-**Version:** 1.0.1
+**Version:** 1.1.0
 
 Weekly check for new open-weight LLM and image/video model releases (`tools/hermes-model-scan.py`),
 filtered against what this fleet's actual hardware can run, emailing The Boss a summary. Not part of
@@ -20,6 +20,10 @@ sudo cp hermes-model-scan.service hermes-model-scan.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-model-scan.timer
 ```
+
+**Deployed on `spark` 2026-10-01** — the first install on any V5 node, so the 2026-09-24 script fix had
+no schedule behind it until then. Verified with a `--dry-run` and one real `systemctl start`
+(`Result=success`, email sent, state file created).
 
 Runs Monday 08:00, matching v1's original schedule. Adjust `OnCalendar` if a different day/time is
 wanted — nothing else depends on the specific slot.
@@ -69,5 +73,6 @@ reported as "size unknown," not silently dropped or guessed at.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-10-01 | Installed and enabled `hermes-model-scan.timer` on `spark`. It had never been installed on any V5 node (no unit file, no state file), so the weekly scan wasn't running at all despite the 2026-09-24 script fix. Verified with a dry run plus one live service run. |
 | 1.0.1 | 2026-08-30 | HermesAgentV5 consolidation: Usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
 | 1.0.0 | 2026-08-13 | Initial version. Ports the weekly open-weight model scan capability forward from `HermesAgent` (v1), redesigned as a deterministic HF-API-based tool rather than a raw agent-prompt cron job, per the fabrication-risk lesson already established in `LESSONS_LEARNED.md` §2g-§2j. |
