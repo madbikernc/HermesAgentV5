@@ -1,0 +1,8 @@
+[Unit]
+Description=Minecraft Bot World mob cap (chickens, dropped eggs)
+After=minecraft-bots.service
+
+[Service]
+Type=oneshot
+User=zomboid-admin
+ExecStart=/home/zomboid-admin/minecraft-bots/mobcap.sh
