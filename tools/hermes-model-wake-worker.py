@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-10-07) — `coder` moved from spark's WAKE_TARGETS to spark-2's, alongside `coder2`
+# (see hermes-router.py 2.14.0's changelog for the full rationale: spark's chronic ~97%
+# memory/swap, coder was its biggest avoidable resident consumer).
 #
 # 1.3.0 (2026-09-05) — `WAKE_TARGETS` split by `HERMES_NODE` (spark vs spark-2), new `coder2` entry
 # on the spark-2 branch (Muse Glimmer 30B, port 8099, llama-coder2 unit) -- spark-2's first-ever
@@ -105,13 +109,8 @@ NODE = os.environ.get("HERMES_NODE", "spark")
 if NODE == "spark":
     WAKE_TARGETS = {
         "super": ("http://127.0.0.1:8095/health", "llama-super", 25),
-        # coder = Huihui-Qwen3.8-27B-abliterated, byte-verified 16,810,714,400 bytes (15.65GiB),
-        # moved here from spark-2's retired Qwen3-Coder-Next after a real execution-verified
-        # bake-off (2026-08-26): Coder-Next crashed on its own generated code, Qwen3.8 passed all
-        # correctness checks. On-demand rather than always-resident since coding tasks tolerate
-        # the wake latency. 23 = 15.65GiB real size * the same ~1.45 margin ratio super's own
-        # 17.2GB->25GiB figure used.
-        "coder": ("http://127.0.0.1:8094/health", "llama-coder", 23),
+        # coder moved to spark-2 2026-10-07 (spark was chronically at ~97% memory) -- see its
+        # entry on the spark-2 branch below.
     }
 else:
     WAKE_TARGETS = {
@@ -120,6 +119,15 @@ else:
         # in this fleet goes through. 24 = 16.12GiB * the same ~1.46 margin ratio coder's/super's
         # own figures used, rounded up.
         "coder2": ("http://127.0.0.1:8099/health", "llama-coder2", 24),
+        # coder = Huihui-Qwen3.8-27B-abliterated, byte-verified 16,810,714,400 bytes (15.65GiB).
+        # Moved here from spark 2026-10-07 (fleet-health investigation: spark was chronically at
+        # ~97% memory/swapping; coder was its single largest avoidable resident consumer) -- was
+        # itself moved to spark from spark-2's retired Qwen3-Coder-Next after a real
+        # execution-verified bake-off (2026-08-26): Coder-Next crashed on its own generated code,
+        # Qwen3.8 passed all correctness checks. On-demand rather than always-resident since coding
+        # tasks tolerate the wake latency. 23 = 15.65GiB real size * the same ~1.45 margin ratio
+        # super's own 17.2GB->25GiB figure used.
+        "coder": ("http://127.0.0.1:8094/health", "llama-coder", 23),
     }
 
 

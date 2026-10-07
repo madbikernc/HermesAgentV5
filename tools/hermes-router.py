@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 2.13.0
+# Version: 2.14.0
+#
+# 2.14.0 (2026-10-07) — `coder` moved from spark to spark-2 (fleet-health investigation: spark
+# was chronically at ~97% memory, swapping heavily, and coder -- on-demand but in near-continuous
+# real use, never actually idling out -- was its single largest avoidable resident consumer).
+# Weights rsynced spark -> spark-2 over bond-fabric0 (16.8GB in 38s, sha256-verified identical).
+# `coder` now shares spark-2 with `coder2`, which the original placement deliberately avoided for
+# memory-bandwidth isolation during dual-coder review -- checked hermes-dualcoder.py's task log
+# first: zero real reviews claimed in 30 days, and its two security_review() calls are sequential
+# even when it does run, so this is accepted as a dormant risk. See ROLES' own inline comments.
+# Companion changes: hermes-model-wake-worker.py's WAKE_TARGETS (coder entry moved to spark-2's
+# branch), new llama-coder.service/start-coder.sh/hermes-coder-idle-sleep.{service,timer} on
+# spark-2 (infra/hermes-router/README.md §3 updated), ufw opened on spark-2 for spark -> :8094,
+# spark's own llama-coder.service and idle-sleep timer stopped and disabled.
 #
 # 2.13.0 (2026-09-24) — `omni`'s backend swapped from Nemotron-3-Nano-Omni-30B-A3B to
 # gemma-4-26B-A4B-it (Google, stock, MoE/4B-active). Metadata-only change here; no routing shape,
@@ -261,7 +274,16 @@ if NODE not in ("spark", "spark-2"):
 if NODE == "spark":
     ROLES = {
         "super": ("http://127.0.0.1:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
-        "coder": ("http://127.0.0.1:8094", True, "Qwen3.8-27B-abliterated", True),
+        # coder moved to spark-2 2026-10-07 (fleet-health investigation: spark was chronically
+        # at ~97% memory / swapping; coder was its single largest avoidable resident consumer).
+        # coder2 already lives on spark-2 -- the two coding backends now share a node, which is
+        # exactly what the old placement was built to avoid (see coder2's own comment below), but
+        # hermes-dualcoder.py's own task log shows zero real dual-coder-review runs in the prior
+        # 30 days (claim_next() only ever timing out / connection-refused), and its two
+        # security_review() calls are sequential, never concurrent, even when it does run -- so
+        # the contention this was guarding against is dormant risk, not an active one. Revisit if
+        # dual-coder-review ever becomes real traffic again.
+        "coder": (f"http://{SPARK2_IP}:8094", True, "Qwen3.8-27B-abliterated", True),
         "muse": (f"http://{SPARK2_IP}:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
         "omni": (f"http://{SPARK2_IP}:8091", False, "gemma-4-26B-A4B-it (Google, stock)", False),
         # Port 8097, not the target's proposed 8088 -- that was nano's port and moving dispatch onto
@@ -269,16 +291,18 @@ if NODE == "spark":
         # and S12's DISPATCH_CHAT_URL standby override in the same pass for a cosmetic port-number
         # match with no functional benefit. Deferred, not forgotten -- see IMPLEMENTATION_PLAN.md S13.
         "dispatch": ("http://127.0.0.1:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
-        # coder2 (dual-coder review's second reviewer) is cross-node like muse/omni, not same-node
-        # like coder -- deliberately on spark-2, not spark, so the two coding backends never
-        # contend for the same node's memory bandwidth (or spark's own dispatch traffic) during a
-        # long back-and-forth review. Muse Glimmer 30B (Meta, stock, Apache-2.0) -- not abliterated.
+        # coder2 (dual-coder review's second reviewer) is cross-node like muse/omni. Originally kept
+        # off the same node as coder so the two coding backends would never contend for memory
+        # bandwidth during a long back-and-forth review -- now moot, see coder's own comment above:
+        # coder lives alongside coder2 on spark-2 as of 2026-10-07. Muse Glimmer 30B (Meta, stock,
+        # Apache-2.0) -- not abliterated.
         "coder2": (f"http://{SPARK2_IP}:8099", True, "Muse-Glimmer-30B (Meta, stock, Apache-2.0)", False),
     }
 else:
     ROLES = {
         "super": (f"http://{SPARK_IP}:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
-        "coder": (f"http://{SPARK_IP}:8094", True, "Qwen3.8-27B-abliterated", True),
+        # coder moved here from spark 2026-10-07 -- see spark branch's own comment above.
+        "coder": ("http://127.0.0.1:8094", True, "Qwen3.8-27B-abliterated", True),
         "muse": ("http://127.0.0.1:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
         "omni": ("http://127.0.0.1:8091", False, "gemma-4-26B-A4B-it (Google, stock)", False),
         "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
