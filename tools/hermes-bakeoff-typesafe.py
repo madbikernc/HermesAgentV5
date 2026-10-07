@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-06) — two opt-in vision tasks for multimodal System One models (Cloudflare Clef /
+# Clef-flash, served by tools/hermes-clef-server.py): `camera` (Reolink-label yes/no questions on
+# real frames, incumbent `omni`) and `mediajudge` (hermes-media's PASS/FAIL judge on real broker
+# renders, incumbent `omni` with the exact EVAL_SYSTEM_PROMPT). Both refuse to run against a
+# non-private endpoint, and image bytes never go into the egress file. jev() takes `images`.
+# Also documents that `rerank` must run under the RAG venv (sqlite_vec) -- the default task list
+# crashed there under the benchmark venv, after the other tasks' results were already lost.
 """
 hermes-bakeoff-typesafe.py — Bake-off of TypeSafe's Jev (a cloud "System One" model: state +
 typed Choice/Score/Noul questions in, calibrated probabilities out, no text generation) against
@@ -16,22 +24,41 @@ the fleet's incumbent for each narrow-judgment role it could plausibly take over
              Defaults to the fleet-docs + podcasts questions only; ops/personal-kb chunks leave
              the fleet only with --all-corpora.
 
-Every labelled case below is synthetic, written for this bake-off -- no chat history, camera data,
-or memory rows are read. The Jev side runs only when TYPESAFE_API_KEY is set; without it the
+Two vision tasks run only when named in --tasks, and only against a private/tailnet endpoint (a
+self-hosted Clef, not a cloud API -- camera frames and renders never leave the fleet):
+
+  camera     people/vehicle/package/animal yes-no per frame in BAKEOFF_FRAMES_DIR (default the
+             2026-09-24 omni bake-off's six frames, /tmp/bakeoff-frames). Gold comes from an
+             optional labels.json there ({"frame.jpg": {"people": 1, ...}}); without it the report
+             is agreement with `omni` only.
+  mediajudge hermes-media's PASS/FAIL judge on --media-n real `render` jobs from the broker DB.
+             Each image is judged twice: with its own prompt (PASS presumed, reported as a pass
+             rate, not accuracy) and with an unrelated job's prompt (FAIL certain).
+
+Every labelled text case below is synthetic, written for this bake-off -- no chat history or
+memory rows are read; only the opt-in vision tasks read real frames and renders. The Jev side runs only when TYPESAFE_API_KEY is set; without it the
 incumbent side still runs and the request payloads Jev *would* receive are written to --out, so
 the egress can be reviewed before any key exists.
 
 Run on spark with the guard's venv (torch/transformers):
-  /opt/benchmark-venv/bin/python3 tools/hermes-bakeoff-typesafe.py [--tasks dispatch,mcintent,guard,rerank]
+  /opt/benchmark-venv/bin/python3 tools/hermes-bakeoff-typesafe.py [--tasks dispatch,mcintent,guard,camera,mediajudge]
+`rerank` needs sqlite_vec, which only the RAG venv has -- run it as its own invocation:
+  /opt/hermes/venvs/rag/bin/python3 tools/hermes-bakeoff-typesafe.py --tasks rerank
 """
 import argparse
+import base64
 import importlib.util
+import io
+import ipaddress
 import json
 import os
 import re
+import socket
+import sqlite3
 import statistics
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -70,12 +97,16 @@ def chat(role, messages, max_tokens, temperature=None):
 EGRESS = []  # every Jev payload, whether or not it was actually sent
 
 
-def jev(state, questions):
-    EGRESS.append({"state": state, "questions": questions})
+def jev(state, questions, images=None):
+    # Image bytes are counted, not copied, into the egress record: it's a review file, and the
+    # vision tasks only ever run against a private endpoint anyway.
+    EGRESS.append({"state": state, "questions": questions, "images": len(images or [])})
     if not TYPESAFE_KEY:
         return None, None
-    out, dt = post(TYPESAFE_URL, {"state": state, "model": JEV_MODEL, "questions": questions},
-                   headers={"Authorization": f"Bearer {TYPESAFE_KEY}"})
+    body = {"state": state, "model": JEV_MODEL, "questions": questions}
+    if images:
+        body["images"] = images
+    out, dt = post(TYPESAFE_URL, body, headers={"Authorization": f"Bearer {TYPESAFE_KEY}"})
     return out, dt
 
 
@@ -434,6 +465,179 @@ def run_rerank(results, corpora, top_k=5):
               f"local={row['local']!s:5} jev={row.get('jev')}", flush=True)
 
 
+# --------------------------------------------------------------------------------- vision
+
+VISION_TASKS = ("camera", "mediajudge")
+FRAMES_DIR = Path(os.environ.get("BAKEOFF_FRAMES_DIR", "/tmp/bakeoff-frames"))
+BROKER_DB = os.environ.get("BROKER_DB", "/mnt/hermes-data/broker/jobs.db")
+VISION_MAX_SIDE = 1280  # both arms see the same downscaled JPEG, so neither gets more pixels
+TAILNET = ipaddress.ip_network("100.64.0.0/10")
+
+
+def endpoint_is_private():
+    host = urllib.parse.urlparse(TYPESAFE_URL).hostname or ""
+    try:
+        ip = ipaddress.ip_address(socket.gethostbyname(host))
+    except (OSError, ValueError):
+        return False
+    return ip.is_private or ip.is_loopback or ip in TAILNET
+
+
+def jpeg_b64(image_bytes):
+    from PIL import Image
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img.thumbnail((VISION_MAX_SIDE, VISION_MAX_SIDE))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def omni_chat(system, text, b64, max_tokens):
+    content = ([{"type": "text", "text": text}] if text else []) + [
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]
+    return chat("omni", [{"role": "system", "content": system},
+                         {"role": "user", "content": content}], max_tokens, 0)
+
+
+CAMERA_QUESTIONS = {  # the Reolink Hub's own AI labels, minus `face` and `other`
+    "people": "Is at least one person visible anywhere in this security-camera frame?",
+    "vehicle": "Is at least one vehicle (car, truck, van, motorcycle) visible anywhere in this "
+               "security-camera frame?",
+    "package": "Is a delivered package or parcel visible anywhere in this security-camera frame?",
+    "animal": "Is a dog or cat visible anywhere in this security-camera frame?",
+}
+CAMERA_OMNI_SYSTEM = ("You answer one yes/no question about a security-camera image. Look at the "
+                      "whole frame. Reply with exactly YES or NO.")
+
+
+def run_camera(results):
+    labels_path = FRAMES_DIR / "labels.json"
+    labels = json.loads(labels_path.read_text()) if labels_path.exists() else {}
+    if not labels:
+        print(f"  camera: no {labels_path} -- reporting agreement with omni only", flush=True)
+    for frame in sorted(FRAMES_DIR.glob("*.jpg")):
+        b64 = jpeg_b64(frame.read_bytes())
+        out, dt = jev({"source": "home security camera, motion-event frame",
+                       "camera": frame.stem.split("-")[-1]},
+                      {q: {"type": "noul", "instructions": text}
+                       for q, text in CAMERA_QUESTIONS.items()}, images=[b64])
+        for i, (q, text) in enumerate(CAMERA_QUESTIONS.items()):
+            row = {"task": "camera", "input": f"{frame.name}:{q}",
+                   "gold": labels.get(frame.name, {}).get(q)}
+            try:
+                reply, ldt = omni_chat(CAMERA_OMNI_SYSTEM, text, b64, 5)
+                row.update(local=int(reply.strip().upper().startswith("YES")), local_raw=reply.strip(),
+                           local_s=ldt)
+            except Exception as exc:
+                row["local"], row["local_err"] = None, str(exc)
+            if out:
+                p = out["answers"][q]["noul"]
+                row.update(jev_p=p, jev=int(p >= 0.5))
+                if i == 0:  # one Clef request answers all four questions; count its latency once
+                    row["jev_s"] = dt
+            results.append(row)
+            print(f"  camera    {row['input']:40} gold={row['gold']} omni={row.get('local')} "
+                  f"clef={row.get('jev_p')}", flush=True)
+
+
+STOPWORDS = {"image", "picture", "generate", "create", "draft", "make", "render", "draw", "with",
+             "that", "this", "from", "into", "some", "style", "photo"}
+
+
+def content_words(prompt):
+    return {w for w in re.findall(r"[a-z]{4,}", prompt.lower())} - STOPWORDS
+
+
+def media_cases(n):
+    db = sqlite3.connect(f"file:{BROKER_DB}?mode=ro", uri=True)
+    seen, picked = set(), []
+    for payload, artifact in db.execute(
+            "SELECT payload, artifact FROM jobs WHERE type='render' AND state='done' "
+            "AND artifact LIKE '%.png' ORDER BY created_at DESC"):
+        prompt = json.loads(payload).get("prompt", "").strip()
+        key = " ".join(sorted(content_words(prompt)))
+        if prompt and key and key not in seen and Path(artifact).exists():
+            seen.add(key)
+            picked.append((prompt, Path(artifact)))
+        if len(picked) == n:
+            break
+    cases = []
+    for i, (prompt, path) in enumerate(picked):
+        cases.append((path, prompt, 1, "own"))
+        # An unrelated prompt: the first other job, half the list away, sharing no content word.
+        for k in range(1, len(picked)):
+            other = picked[(i + len(picked) // 2 + k - 1) % len(picked)][0]
+            if other != prompt and not (content_words(other) & content_words(prompt)):
+                cases.append((path, other, 0, "swapped"))
+                break
+    return cases
+
+
+def run_mediajudge(results, n):
+    spec = importlib.util.spec_from_file_location("hermes_media", TOOLS / "hermes-media.py")
+    media = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(media)
+    question = {"type": "noul",
+                "instructions": "Does the image match `prompt` and look correct -- no obvious "
+                                "rendering artifacts, anatomy errors, or missing/garbled elements "
+                                "the prompt asked for?",
+                "criteria": {"true": "PASS: the image depicts what `prompt` asks for and looks "
+                                     "correct.",
+                             "false": "FAIL: a plausible-looking image that doesn't match "
+                                      "`prompt`, or one with obvious artifacts or missing "
+                                      "elements."}}
+    b64_cache = {}
+    for path, prompt, gold, kind in media_cases(n):
+        b64 = b64_cache.setdefault(path, jpeg_b64(path.read_bytes()))
+        row = {"task": "mediajudge", "kind": kind, "gold": gold,
+               "input": f"{path.parent.name} [{kind}] {prompt}"}
+        try:
+            reply, dt = omni_chat(media.EVAL_SYSTEM_PROMPT, f"Prompt: {prompt}", b64, 150)
+            row.update(local=int(reply.strip().upper().startswith("PASS")),
+                       local_raw=reply.strip()[:200], local_s=dt)
+        except Exception as exc:
+            row["local"], row["local_err"] = None, str(exc)
+        out, dt = jev({"prompt": prompt}, {"judge": question}, images=[b64])
+        if out:
+            p = out["answers"]["judge"]["noul"]
+            row.update(jev_p=p, jev=int(p >= 0.5), jev_s=dt)
+        results.append(row)
+        print(f"  mediajudge {kind:7} gold={gold} omni={row.get('local')} clef={row.get('jev_p')} "
+              f":: {prompt[:50]}", flush=True)
+
+
+def summarize_vision(results):
+    lines = []
+    for task in VISION_TASKS:
+        rows = [r for r in results if r["task"] == task]
+        if not rows:
+            continue
+        lines.append(f"\n== {task} (n={len(rows)})")
+        groups = ([("all", rows)] if task == "camera" else
+                  [(k, [r for r in rows if r["kind"] == k]) for k in ("swapped", "own")])
+        for name, rs in groups:
+            for k, label in (("local", "omni"), ("jev", ARM_NAME)):
+                scored = [r for r in rs if r.get(k) is not None and r["gold"] is not None]
+                if scored:
+                    a = sum(r[k] == r["gold"] for r in scored) / len(scored)
+                    metric = "PASS rate (presumed match)" if name == "own" else "accuracy"
+                    lines.append(f"  {name:7} {label:10} {metric} {a:.3f} ({len(scored)})")
+            both = [r for r in rs if r.get("local") is not None and r.get("jev") is not None]
+            if both:
+                agree = sum(r["local"] == r["jev"] for r in both) / len(both)
+                lines.append(f"  {name:7} agreement omni/{ARM_NAME} {agree:.3f} ({len(both)})")
+        for k, label in (("local_s", "omni"), ("jev_s", ARM_NAME)):
+            v = sorted(r[k] for r in rows if r.get(k) is not None)
+            if v:
+                lines.append(f"  latency {label:10} p50 {statistics.median(v)*1000:.0f}ms "
+                             f"max {v[-1]*1000:.0f}ms ({len(v)} calls)")
+        for r in rows:
+            if r.get("jev") is not None and r.get("local") is not None and r["jev"] != r["local"]:
+                lines.append(f"    disagree: omni={r['local']} {ARM_NAME}={r['jev_p']:.2f} "
+                             f"gold={r['gold']} :: {r['input'][:80]}")
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------------- report
 
 def summarize(results):
@@ -499,23 +703,29 @@ def main():
     ap.add_argument("--tasks", default="dispatch,mcintent,guard,rerank")
     ap.add_argument("--all-corpora", action="store_true",
                     help="include ops + personal-kb chunks in the rerank task (they leave the fleet)")
+    ap.add_argument("--media-n", type=int, default=12,
+                    help="distinct real renders for the mediajudge task (each judged twice)")
     ap.add_argument("--out", default=str(Path.home() / ".hermes" / "state" / "bakeoff-typesafe"))
     args = ap.parse_args()
     tasks = args.tasks.split(",")
     corpora = ["fleet-docs", "podcasts"] + (["ops", "personal-kb"] if args.all_corpora else [])
     print(f"{ARM_NAME} side: "
           f"{'LIVE (' + TYPESAFE_URL + ')' if TYPESAFE_KEY else 'DRY -- no TYPESAFE_API_KEY'}")
+    if TYPESAFE_KEY and any(t in VISION_TASKS for t in tasks) and not endpoint_is_private():
+        sys.exit(f"refusing {', '.join(t for t in tasks if t in VISION_TASKS)}: {TYPESAFE_URL} is "
+                 f"not a private/tailnet address, and camera frames and renders stay in the fleet")
     results = []
     for t in tasks:
         print(f"-- {t}", flush=True)
         {"dispatch": run_dispatch, "mcintent": run_mcintent, "guard": run_guard,
-         "rerank": lambda r: run_rerank(r, corpora)}[t](results)
+         "rerank": lambda r: run_rerank(r, corpora), "camera": run_camera,
+         "mediajudge": lambda r: run_mediajudge(r, args.media_n)}[t](results)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%S")
     (out / f"results-{stamp}.json").write_text(json.dumps(results, indent=1))
     (out / f"egress-{stamp}.json").write_text(json.dumps(EGRESS, indent=1))
-    report = summarize(results)
+    report = summarize(results) + summarize_vision(results)
     (out / f"report-{stamp}.txt").write_text(report)
     print(report)
     print(f"\nwrote {out}/*-{stamp}.* ({len(EGRESS)} Jev payloads "
