@@ -13,4 +13,4 @@ WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
 Environment=MB_TEST_SUITE=all
 Environment=MB_TEST_REPORT_DIR=/mnt/hermes-data/minecraft-memory/test-reports
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/tests/run.sh ${MB_TEST_SUITE}
-TimeoutStartSec=15min
+TimeoutStartSec=30min

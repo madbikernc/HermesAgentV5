@@ -27,3 +27,4 @@ with `journalctl -u minecraft-bots-tests.service -n 50`.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-09-24 | Initial daily test timer. |
+| 1.1.0 | 2026-10-07 | `TimeoutStartSec` 15min -> 30min — spark's `all` suite now runs live's 23 scenarios plus 7 livebot scenarios plus baseline, and was being SIGTERM'd mid-run (found via a Critical fleet-health rollup: unit+rag+live+2/7 livebot scenarios all passed before the kill at 15:00 exactly). |

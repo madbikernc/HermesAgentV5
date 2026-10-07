@@ -1,4 +1,11 @@
-// Version: 1.79.0
+// Version: 1.80.0
+//
+// 1.80.0 (2026-10-07, found investigating a fleet-health Critical from spark-2's
+// store_failure_rate regressing to 1.0): logged the one silent candidate-skip left in the
+// "store" chest loop (blockAt() returning nothing), closing the gap the 2026-09-09 fix left
+// open for the other two candidates. spark-2's actual regression traced to something else
+// entirely (its storage cluster genuinely full/obstructed, not a code bug) -- this was a
+// pre-existing diagnosability gap found along the way, not the fix for that regression.
 //
 // 1.79.0 (2026-09-27, "a shelter is not enough if it can't fit at least one bed"): the shelter is
 // 4x4 outside with a 2x2 inside (was 3x3 with one cell) -- a bed fits along one side, entered from
@@ -4281,7 +4288,15 @@ async function performActionAs(bot, action, speaker, token) {
       for (const pos of positions) {
         if (token.cancelled) return ok("stopped on the way to a chest.");
         const chestBlock = bot.blockAt(pos);
-        if (!chestBlock) continue;
+        // Real live gap, found 2026-10-07 investigating spark's own store_failure_rate baseline
+        // (0.781, already the worst metric in the fleet): this candidate was still as silent as
+        // the other two the 2026-09-09 fix closed -- blockAt() returning nothing for a position
+        // findBlocks() just reported (stale/unloaded chunk) left zero trace, same undiagnosable
+        // shape as the obstruction and deposit-failure cases just below.
+        if (!chestBlock) {
+          console.log(`[store] skipping chest at ${pos}: blockAt() returned nothing (unloaded chunk?).`);
+          continue;
+        }
         // Real live gap, 2026-09-09: this and the pathfinder catch just below were exactly as
         // silent as the deposit failure right after them ("found chests nearby, but couldn't
         // store anything in any of them" with zero clue why) -- a real occurrence of this
