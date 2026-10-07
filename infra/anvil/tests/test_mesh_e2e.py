@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.1.1
 #
 # End-to-end check of the S19 mesh path through the REAL broker, workers and client — everything
 # but TRELLIS.2 itself (IMPLEMENTATION_PLAN.md S19b). Nothing touches the live fleet:
@@ -16,6 +16,8 @@
 #
 # Revision History: 1.0.0 | 2026-09-27 | Initial end-to-end check, written before Anvil exists.
 #                   1.1.0 | 2026-09-27 | NAS2 archive: verified copy on success, exit 8 when unreachable.
+#                   1.1.1 | 2026-10-03 | Fixture node class names made synthetic: they named the withdrawn
+#                                         custom node, which read as if the script depended on them.
 import hashlib
 import importlib.util
 import json
@@ -125,10 +127,14 @@ BROKER_URL = f"http://127.0.0.1:{BROKER_PORT}"
 WORKFLOW = TMP / "workflow.api.json"
 ARCHIVE = TMP / "nas2" / "Private" / "Hermes" / "Meshes"   # stands in for the NAS2 share
 LAST_RENDER = []
+# The node class names here are deliberately synthetic. hermes-generate-mesh.py never looks at a
+# class_type -- it substitutes the two placeholders and finds mesh outputs structurally -- so this
+# fixture asserts that independence rather than mirroring whatever the real graph happens to use.
+# (It previously named the withdrawn custom node's classes, which read as if they mattered.)
 WORKFLOW.write_text(json.dumps({
     "1": {"class_type": "LoadImage", "inputs": {"image": "{{INPUT_IMAGE}}"}},
-    "2": {"class_type": "Trellis2MeshWithVoxelGenerator", "inputs": {"image": ["1", 0], "seed": "{{SEED}}"}},
-    "9": {"class_type": "Trellis2ExportMesh", "inputs": {"mesh": ["2", 0]}},
+    "2": {"class_type": "AnyMeshGeneratorNode", "inputs": {"image": ["1", 0], "seed": "{{SEED}}"}},
+    "9": {"class_type": "AnyMeshExportNode", "inputs": {"mesh": ["2", 0]}},
 }))
 RENDER_STUB = TMP / "stub-generate-image.py"
 RENDER_STUB.write_text(

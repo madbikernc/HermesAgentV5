@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 2.8.0
+**Version:** 3.3.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -11,8 +11,18 @@ per-page OCR verified against a real, naturally-occurring scanned page, not a st
 was the point of no return — Sintra and Amy no longer have live gateways. S18 closed with its exit gate
 deliberately **missed** — RoCE is fixed and persistent at 13.0 GB/s, but GB10 has no GPUDirect RDMA, so
 `TP=2` stays non-viable and MiMo does not proceed. **S19 is planned, not executed** — a fourth node
-(`Anvil`, a Windows RTX 5090) adding image→mesh→viable-STL generation as a third broker job type;
-`Anvil` does not exist yet and nothing has been deployed. Its node-independent half is built and
+(`Anvil`) adding image→mesh→viable-STL generation as a third broker job type. On **2026-10-03** `Anvil`
+was identified as the operator's own Windows workstation (`PMWIN11`), and reading its hardware corrected
+the stage twice over: it is an **RTX 5060 Ti with 16GB**, not the 32GB 5090 S19 was planned against, and
+the generation route was **replaced** — TRELLIS.2 went native in ComfyUI 0.34.0 four weeks before S19 was
+planned, which the original research missed. The custom-node route, its wheel pin, its gated DINOv3
+dependency and its `sm_120` CPU fallback are all withdrawn. **2026-10-04: the node's ComfyUI was updated
+`v0.31.0` → `v0.38.2`**, clearing S19a's first install gate with the existing image/video setup verified
+intact. **2026-10-04: the model files are in place and the `win_amd64` test gate is closed** (10/10 on
+the node, all six pins resolving identically to aarch64). The **exported workflow is the one remaining
+pre-node item**, and it needs GUI work on `Anvil` that cannot be scripted. Nothing else is deployed
+on the node. Its
+node-independent half is built and
 tested (2026-09-27): the S19c repair chain, the independent viability checker, and the worker's mesh
 screening. **2026-08-30: the "later stage"
 this line used to wait on happened — `HermesAgentV4`'s `tools/`, `skills/`, and `infra/` were consolidated
@@ -55,7 +65,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S14 | Ops tooling retarget, rename debt, sync coverage, cross-repo comparability | ✅ Done (2026-08-29) |
 | S15 | `hermes-logs` — the log analyst | ✅ Done (2026-08-29) |
 | S16 | RAG stack: eval harness, reranker, optional OCR (retriever already live, independently built) | ✅ Done (2026-08-31) — recall@5 0.538→0.705 |
-| S19 | `Anvil` — mesh node (TRELLIS.2 on a Windows 5090) + viable-STL repair chain | 🔨 Everything but the node built + tested end to end (2026-09-27); node not stood up. DINOv3 access approved 2026-09-27 |
+| S19 | `Anvil` — mesh node (native-ComfyUI TRELLIS.2 on a Windows 5060 Ti) + viable-STL repair chain | 🔨 Everything but the node built + tested end to end (2026-09-27); node not stood up. Node identified as `PMWIN11`, route corrected to native ComfyUI (2026-10-03); ComfyUI 0.38.2, models in place and win_amd64 gate closed (2026-10-04); workflow export is the last pre-node item |
 
 ---
 
@@ -1837,7 +1847,8 @@ time, VRAM number, or success rate here has been measured on this hardware yet.
 > parser, none of the repair chain's libraries), the `mesh` branch of `screen_artifact()` in
 > `hermes-render-worker.py` (S19b), and `infra/anvil/tests/test_mesh_pipeline.py` — 10 check groups,
 > built-in fixtures each breaking one viability property, all passing on `spark` (aarch64) against the
-> set pinned in `infra/anvil/requirements-mesh.txt`. It has **not** yet been run on `win_amd64`. Four
+> set pinned in `infra/anvil/requirements-mesh.txt`. **Now also passing on `win_amd64` — 10/10 on the node,
+> 2026-10-04 — with all six pins resolving to the identical versions, so no per-platform split is needed.** Four
 > things building it found, each now in the code:
 > - **trimesh needs `scipy` and `networkx` and installs neither.** Without them the chain crashes
 >   mid-job, so both are imported at startup and pinned.
@@ -1911,6 +1922,27 @@ time, VRAM number, or success rate here has been measured on this hardware yet.
 > so `hermes-media` came back image-only. Two things noticed along the way, neither caused by this
 > change: any pull restarts a node's **entire** service stack, models included; and `hermes-repo-sync`'s
 > FleetOps notice already fails from spark-2 (6 times in the past week) and HomeD13 (29 times).
+>
+> **Correction, 2026-10-03 — the node was identified and two planning assumptions were wrong.**
+> `Anvil` is the operator's own Windows workstation, `PMWIN11`. Reading it rather than recalling it
+> changed the stage:
+> - **The GPU is an RTX 5060 Ti with 16GB**, not a 32GB (or 24GB) 5090. `nvidia-smi` reports one GPU,
+>   16311 MiB, driver 610.88, compute capability (12, 0). Every `sm_120` finding survives; the memory
+>   budget does not.
+> - **The generation route is replaced.** TRELLIS.2 went native in ComfyUI 0.34.0 on 2026-08-31 — four
+>   weeks before this stage was planned — and S19a's research missed it. The custom node, the Torch
+>   2.10 wheel pin, the `blackwell_fix.py` CPU marching-cubes fallback and the gated DINOv3 dependency
+>   are all withdrawn. See S19a.
+>
+> Four things this did **not** change, checked rather than assumed: the Python tooling is route-agnostic
+> (`hermes-generate-mesh.py` names no node class and discovers mesh outputs structurally), the repair
+> chain and its pins are generation-independent, the broker/worker seams are untouched, and the exit
+> gate still stands as written. What is newly verified on the node: the broker is reachable from it
+> (`/health` → `{"ok": true}`), NAS2's `PMoney` share is real and mounted (`\\10.129.1.167\PMoney`,
+> with `\Private\Hermes` already present), and **Bambu Studio is installed**, so exit gate 4 has its
+> third-party tool. **ComfyUI was updated to `v0.38.2` on 2026-10-04** (gate 1, below). Still missing on
+> the node: the TRELLIS.2 model files, the exported workflow, NSSM, the `bw` CLI, the `C:\hermes` tree
+> and the mesh venv.
 
 Adds a fourth node and a third job type: image/text → 3D mesh → viable STL. Eventual use is 3D printing,
 but **the pipeline ends at the STL** — slicing and printing are explicitly not in scope (S19c). The
@@ -1918,7 +1950,8 @@ capability was previously explored off-fleet (Stability Matrix + ComfyUI + Tripo
 RTX 3080 Ti, one F4U Corsair STL produced as a test case). This stage brings it onto the fleet properly,
 behind the same broker/worker/screening seams every other artifact-producing capability already uses.
 
-**Node name: `Anvil`** — a Windows box with an RTX 5090, joining `Watch` (spark) / `Forge` (spark-2) /
+**Node name: `Anvil`** — the operator's own Windows workstation `PMWIN11` (i9-12900K, 128GB RAM,
+**RTX 5060 Ti 16GB**; identified 2026-10-03), joining `Watch` (spark) / `Forge` (spark-2) /
 `Kiln` (HomeD13). Continues the existing metaphor, and it is the right one: `Kiln` fires images, `Anvil`
 shapes solids. Like `Kiln` it is a **tooling endpoint — no agent, no persona, no Matrix identity** (§4.3's
 own pattern). §4 gains a `4.4` node subsection when this stage executes; §4 is not edited while S19 is
@@ -1933,63 +1966,114 @@ from source. S18 spent real effort discovering that GB10's coherent unified memo
 discrete-GPU path (`nvidia_peermem`, GPUDirect RDMA) structurally inapplicable — a reminder that this
 hardware is genuinely off the beaten path for third-party CUDA code, not merely new.
 
-`Anvil` is `x86_64` + `sm_120` + Windows, which is where this ecosystem's prebuilt wheels actually exist
-(§S19a). The Sparks keep the work they are good at: deciding *what* to generate, evaluating the result,
+`Anvil` is `x86_64` + `sm_120` + Windows, which is where this ecosystem is actually built and tested.
+That argument was originally about a custom node's hand-built wheel set (§S19a's withdrawn gate 2); the
+native route needs no compiled extensions at all, so it now costs less to satisfy — but it still holds,
+because `aarch64`/`sm_121` remains a target the 3D ecosystem does not ship for. The Sparks keep the work they are good at: deciding *what* to generate, evaluating the result,
 and owning the job's lifecycle. **No mesh inference is planned on Watch or Forge.** If `Anvil` is ever
 retired, this capability goes with it rather than silently falling back to a node that cannot run it.
 
 #### S19a — Stand up `Anvil` (model choice and the real install gates)
 
-**Model: TRELLIS.2 (Microsoft, 4B, image-to-3D), via `visualbruno/ComfyUI-Trellis2`.** Chosen over
-Hunyuan3D 2.1 on licensing and maintenance, both verified against primary sources rather than assumed:
+**Model: TRELLIS.2 (Microsoft, 4B, image-to-3D), via ComfyUI's own native nodes (0.34.0+).**
+Corrected **2026-10-03**, replacing the `visualbruno/ComfyUI-Trellis2` custom-node route this section
+originally specified. [Trellis.2 and Pixal3D went native in ComfyUI 0.34.0 on
+2026-08-31](https://blog.comfy.org/p/trellis2-and-pixal3d-are-now-native) — **four weeks before S19 was
+planned** — and the original research missed it. Upstream's own summary: *"No nvdiffrast, no nvdiffrec,
+no per-configuration wheels, no PyTorch downgrade. If your ComfyUI runs, these models run on your current
+PyTorch."* The 3D post-processing was reimplemented from scratch in PyTorch and SciPy.
 
-- **TRELLIS.2 is MIT, and the MIT terms cover the weights as well as the code** (HF model card tags the
-  4B weights `mit`, ungated). No revenue threshold, no territory clause, no acceptable-use rider.
-- **Hunyuan3D's licence is a Community licence, not a non-commercial one** — a correction worth recording,
+That single fact deletes most of what this section originally said. What it deleted is recorded here
+rather than quietly dropped, because each line was a real finding when it was written:
+
+| Original gate / risk | Why it is gone |
+|---|---|
+| Pin the wheel set to Torch 2.10 / CUDA 13.1; no 2.11 Windows wheels (upstream issue #184) | No compiled extensions left to pin. Independently falsified anyway — `Anvil`'s ComfyUI venv already runs **torch 2.13.0+cu130** on `sm_120` |
+| `cumesh`, `custom_rasterizer`, `flex_gemm`, `nvdiffrast`, `o_voxel`, `natten`, `dcx_pkg` wheels | None required |
+| CuMesh remeshing broken on `sm_120`; apply `blackwell_fix.py`; CPU marching-cubes extraction | No CuMesh on this path. **The CPU fallback — named here as the stage's "least predictable cost" — does not exist on the native route** |
+| DINOv3 gated by Meta (`facebook/dinov3-vitl16-pretrain-lvd1689m`, proprietary licence) | Ships ungated as `clip_vision/dino_v3_vit_l.safetensors` from `Comfy-Org/TRELLIS.2`. The access approved 2026-09-27 is now a spare, not a dependency |
+| An NVIDIA Source Code License (non-commercial) sitting under an MIT top layer | Removed in the native integration. The stack is MIT end to end with nothing gated underneath |
+
+The licensing comparison that chose TRELLIS.2 over Hunyuan3D 2.1 is unchanged and still holds:
+
+- **TRELLIS.2 is MIT, and the MIT terms cover the weights as well as the code.** No revenue threshold,
+  no territory clause, no acceptable-use rider. The native route *strengthens* this — the non-commercial
+  NVIDIA dependency that used to sit underneath it is gone.
+- **Hunyuan3D's licence is a Community licence, not a non-commercial one** — a correction worth keeping,
   since third-party forks' own source headers mislabel it "NON-COMMERCIAL". Commercial use is permitted
   below **1 million MAU** (not 100M, a figure that circulates), but the **Territory excludes the EU, UK,
   and South Korea**. Irrelevant to hobby printing from Virginia; relevant if anything derived is ever
   redistributed, since the agreement must be passed along and stay in-Territory.
-- ComfyUI-Trellis2 is actively maintained (changelog entries through 2026-02-27). The Hunyuan3D Blackwell
-  route requires hand-compiling `custom_rasterizer` for `sm_120` with VS 2022 Build Tools v14.44
-  (explicitly **not** VS 2026), CUDA Toolkit 12.8, a patched `setup.py` with `--allow-unsupported-compiler`
-  and `TORCH_CUDA_ARCH_LIST=12.0`. That is a real, documented, fragile build; TRELLIS.2 ships wheels.
 
-Hunyuan3D 2.1 stays the **documented fallback**, not a dead end — its PBR texture quality is genuinely
-better, and if textured output is ever wanted, that build cost becomes worth paying. Printing does not
-need it (see S19c).
+Hunyuan3D 2.1 remains the **documented fallback**, and its PBR texture quality is still genuinely better.
+Its `sm_120` build cost (hand-compiling `custom_rasterizer` against VS 2022 Build Tools v14.44 — explicitly
+**not** VS 2026 — CUDA Toolkit 12.8, a patched `setup.py` with `--allow-unsupported-compiler` and
+`TORCH_CUDA_ARCH_LIST=12.0`) is unchanged, and is now the *only* such build cost on the table.
 
-Three real install gates, all verified and all of which would otherwise be discovered late:
+#### The real gate is VRAM — and this section originally got it wrong
 
-1. **DINOv3 is gated.** TRELLIS.2 requires `facebook/dinov3-vitl16-pretrain-lvd1689m` cloned into
-   `ComfyUI/models/facebook/`. That HF repo requires agreeing to share contact information and is
-   licensed under Meta's proprietary `dinov3-license` — **not** MIT. So the pipeline is MIT at the
-   TRELLIS.2 layer and proprietary-gated one layer down. Request access **first**; nothing else in this
-   stage can be tested without it. Same class of gate as S11's model-ID discipline: confirm the artifact
-   is actually obtainable before building around it.
-2. **Pin the wheel set to Torch 2.10 / CUDA 13.1, cp311–cp313.** The repo ships Windows wheels
-   (`cumesh`, `custom_rasterizer`, `flex_gemm`, `nvdiffrast`, `o_voxel`, `natten`, `dcx_pkg`) for
-   Torch 2.7.0 and 2.8.0 + cu128 *and* for **Torch 2.10 / CUDA 13.1**, which is the set to use. **There
-   are no Torch 2.11 Windows wheels** — an open upstream request (issue #184). Do not install Torch 2.11
-   on this node and expect the wheels to load; the version ceiling is 2.10, set by someone else's build
-   schedule, not by preference.
-3. **CuMesh's remeshing path is broken on `sm_120` — on this exact GPU class.** The repo ships
-   `blackwell_fix.py` for precisely this: it replaces the CUDA `to_glb()` mesh extraction with a
-   **CPU voxel/marching-cubes path** on RTX 5070/5070 Ti/5080/5090. Related symptom upstream is the
-   classic wrong-arch `NATTEN ... no kernel image is available` (issue #187). **Consequence to size
-   before the first real job: part of the mesh extraction runs on CPU, so wall-clock will not look like
-   a pure-GPU pipeline.** This directly feeds the timeout question in S19b, and it is the single most
-   likely source of an unpleasant surprise in this stage.
+The original text read: *"Upstream documents no figure. Secondary sources say 16GB+, which the 5090 clears
+either way, so this does not gate the stage."* Both halves were wrong.
+[microsoft/TRELLIS.2](https://github.com/microsoft/TRELLIS.2) states plainly: **"An NVIDIA GPU with at
+least 24GB of memory is necessary"**, verified on A100 and H100. `Anvil` has **16GB**. On the research
+repo's own terms, this node does not meet the requirement.
 
-**Unverified and deliberately not guessed:** TRELLIS.2's actual VRAM requirement. Upstream documents no
-figure. Secondary sources say "16GB+", which the 5090 clears either way, so this does not gate the stage —
-but it will be measured on first run rather than asserted here.
+The native route is what closes that gap, because the weights its official workflow uses are **int8**.
+Exact sizes, read from the `Comfy-Org/TRELLIS.2` HF API rather than from a secondary source:
 
-> **Open discrepancy, flagged not silently corrected:** this node was described as a **24GB** 5090. A
-> retail RTX 5090 is **32GB**; 24GB would be a 5080 Super-class card or a misremembered figure. It does
-> not change any decision in S19 (both clear the requirement, and shape-only inference is the cheap path
-> regardless), so it is not worth blocking on — but the real figure should be read off `nvidia-smi` on the
-> node and written in before anyone sizes a batch against it.
+| File | Size |
+|---|---|
+| `diffusion_models/trellis_2_int8_convrot.safetensors` | **5.253 GB** ← what the official workflow uses |
+| `diffusion_models/trellis_2_bf16.safetensors` | 10.338 GB ← what the 24GB figure describes |
+| `vae/trellis_2_shape_vae_bf16.safetensors` | 1.096 GB |
+| `vae/trellis_2_texture_vae_bf16.safetensors` | 0.948 GB |
+| `clip_vision/dino_v3_vit_l.safetensors` | 1.213 GB |
+
+Shape-only on the int8 set — which is the S19c path, since **STL cannot carry materials at all** — is
+**≈7.6GB resident**, leaving roughly 8GB of a 16GB card for activations. The 24GB minimum describes bf16
+with everything resident and no offloading; int8 plus ComfyUI's own offloading is a materially different
+budget, not the same number argued down.
+
+Corroborating evidence from the official repo's issue tracker, chosen because it is incidental rather than
+promotional: [#16100](https://github.com/Comfy-Org/ComfyUI/issues/16100) is a native-TRELLIS.2 bug report
+from a **16GB RTX 4080 Super**, and [#16056](https://github.com/Comfy-Org/ComfyUI/issues/16056) one from a
+**12GB RTX 4070** that *"produces a valid textured GLB"*. Neither is an out-of-memory report — both hit
+unrelated bugs while the model ran. #16056 also records a real knob: `DecimateMesh`'s default
+`target_face_count` of 700000 had to be lowered on 12GB.
+
+**Stated precisely, because this is the figure most likely to be quoted back:** no primary source gives a
+VRAM number for the native int8 route. The ≈7.6GB is weight arithmetic, not a measurement, and peak
+activations at the 1536³ the official workflow targets are unmeasured. This re-prices the risk from *"fails
+the stated minimum"* to *"very likely fits, measure it"*. It does not pre-empt exit gate 2, and nothing
+below should be read as if it had.
+
+**Remaining install gates — the list has shrunk from three to two:**
+
+1. **ComfyUI must be ≥ 0.34.0. Cleared 2026-10-04: `v0.31.0` → `v0.38.2`.** Latest stable rather than the
+   0.34.0 minimum, since 0.34.0 predates the TRELLIS.2 fixes that followed it. The install is
+   StabilityMatrix-managed at `E:\GenAI\StabilityMatrix\Data\Packages\ComfyUI` and shared with a working
+   image/video setup, so it was treated as live work: state recorded for rollback first, then verified
+   after — `--quick-test-for-ci` exits 0 with no import failures, **all 16 custom-node packs still
+   import**, and a real server start reports `0.38.2` on `cuda:0 NVIDIA GeForce RTX 5060 Ti, 16311 MiB`.
+   **`torch` was not touched** (unpinned in ComfyUI's requirements at both ends) — still 2.13.0+cu130,
+   which is exactly the native route's claim holding up in practice. `infra/anvil/README.md` step 2
+   records the commands and the rollback reference.
+2. **Fetch the model files. Cleared 2026-10-04 — 10.2 GB, header-verified, and ComfyUI lists all of
+   them.** Nothing was gated and nothing was compiled, which is the route change paying off exactly as
+   claimed. Two findings worth carrying: the shipped template's `CLIPVisionLoader` wants
+   `dino_v3_L_naf_fp32.safetensors`, which lives in the **Pixal3D** repo rather than TRELLIS.2's and is a
+   **different artifact** from that repo's `dino_v3_vit_l.safetensors` (452 vs 415 tensors), so both are on
+   the node until a real run settles which the shape path uses; and **MoGe and the Pixal3D transformer are
+   not needed**, confirmed from the template's link graph — the MoGe chain feeds only `Pixal3DConditioning`
+   while `Trellis2Conditioning` takes just a `CLIP_VISION` and an `IMAGE`. `infra/anvil/README.md` step 2
+   records the files and their shared-folder locations.
+
+> **Hardware, read off the node instead of remembered (2026-10-03).** `nvidia-smi` on `PMWIN11`:
+> `NVIDIA GeForce RTX 5060 Ti`, **16311 MiB**, driver 610.88, compute capability **(12, 0)**, one GPU.
+> This closes the 24GB-vs-32GB discrepancy this section carried — in the *other* direction from both
+> figures, to the tightest of the three ever written here. What survives from the Blackwell analysis is
+> the architecture: `sm_120` is `sm_120` whether it is a 5060 Ti or a 5090, so every arch-level finding
+> still applies and only the memory budget changed.
 
 Firewall posture is set at install time, not after. **S10 found ComfyUI's port 8188 open to the entire LAN
 on `Kiln` and flagged it rather than silently narrowing it** — `Anvil` does not get to repeat that. Its
@@ -2029,7 +2113,10 @@ a known-in-advance failure mode, and the fleet has already paid for this lesson 
 (1415s) would have been killed mid-generation — a false failure on work that actually succeeds given
 time. Two specifics make mesh jobs the same shape of risk:
 
-- the CPU marching-cubes fallback from S19a means wall-clock is not GPU-bound, and
+- a 16GB card running an int8 model under ComfyUI's offloading is not a fully-resident pipeline, so
+  wall-clock includes weight movement and is not purely GPU-bound. (This bullet originally cited S19a's
+  CPU marching-cubes fallback; that went away with the custom-node route on 2026-10-03, but the shape of
+  the risk did not — only its cause.) And
 - **the broker's claim lease is fleet-wide with no per-type override** — by its own design note — so a
   long mesh job risks having its claim reclaimed out from under it, which is a *different and worse*
   failure than a clean timeout.
@@ -2088,7 +2175,9 @@ thing to adopt wholesale. It was read before being trusted, and **its slicer doe
   so the bed-fit check is a warning, not a fix.
 - **18 commits by its author**, all within 2026-06-05 → 2026-06-08, last activity ~3.5 months ago,
   0 stars, 0 forks; `requirements.txt` pins nothing (`torch` bare, despite the README's version badges);
-  and the README's own tested-hardware row says **RTX 5060 Ti**, not a 5090.
+  and the README's own tested-hardware row says **RTX 5060 Ti**, not a 5090. **As of 2026-10-03 that row
+  describes `Anvil` exactly.** It makes the repo a more useful *reference* for this hardware than it was
+  when this was written — and no more of a dependency.
 
 Its **part segmentation is real implemented code** (P3-SAM + XPart, with fp16/CPU-offload work for 16GB
 cards) and is worth revisiting if cleanly splitting one model into multiple solids ever becomes wanted. But
@@ -2151,17 +2240,25 @@ it.
 
 #### Risks and open questions
 
-1. **The CPU marching-cubes fallback is an unknown cost.** It is a correctness workaround for `sm_120`,
-   not a tuning choice, and on this GPU class there is no way around it today. If wall-clock proves
-   unacceptable, the fallback — not the node — is what to attack: check whether upstream has fixed CuMesh
-   for `sm_120`, or re-price the Hunyuan3D route whose build cost S19a declined.
-2. **DINOv3's gate is a single point of failure.** Access is granted by Meta, not obtainable on demand.
-   If it is refused, TRELLIS.2 is unavailable and Hunyuan3D 2.1 becomes the primary rather than the
-   fallback — a reversal that changes S19a's licensing analysis but not the rest of the stage.
+1. **Peak VRAM on a 16GB card is this stage's real unknown** (S19a). Replaces the risk originally listed
+   here — the CPU marching-cubes fallback — which the native route removed. Weight arithmetic puts the
+   int8 shape-only path at ≈7.6GB with roughly 8GB to spare, and 16GB and 12GB cards are visibly running
+   this model upstream, but activations at 1536³ are unmeasured. If it does not fit, the knobs are
+   resolution, `DecimateMesh`'s face budget, and ComfyUI's offloading flags — in that order, none of
+   which requires changing the model.
+2. **~~DINOv3's gate is a single point of failure.~~ Resolved, 2026-10-03** (S19a): the native route
+   ships DINOv3 ungated from `Comfy-Org/TRELLIS.2`. The Meta access approved 2026-09-27 is kept as a
+   spare. Hunyuan3D 2.1 is therefore a preference-driven fallback now, not a contingency against a
+   refusal that can no longer happen.
 3. **Windows is a first for this fleet.** No `systemd`, no `ufw`, no `hermes-repo-autopull.timer`, no
    bash vault client. Four small gaps, each individually easy and each a place where "it works on the
    Linux nodes" will quietly not be true.
-4. **The 24GB-vs-32GB VRAM figure is unresolved** (S19a). Harmless now, wrong to leave in writing.
+4. **`Anvil` is the operator's own workstation, not a dedicated node** (identified 2026-10-03). This
+   replaces the resolved 24GB-vs-32GB discrepancy, and is the more consequential fact. Unlike `Kiln`, it
+   is a machine someone uses interactively, and its ComfyUI is StabilityMatrix-managed and shared with a
+   working image/video setup. Two consequences to size rather than discover: a mesh job competes for the
+   same 16GB as whatever the operator is doing, and a StabilityMatrix update can move ComfyUI underneath
+   the services `install-anvil.ps1` creates.
 5. **Single-node capability with no failover, accepted deliberately.** Unlike the dispatcher's three-rung
    ladder (S12), mesh generation has exactly one node that can do it, and the Sparks cannot take over.
    This is fine — it is a convenience capability, not control plane — but it should be a stated decision
@@ -2314,3 +2411,7 @@ reference chain across two retired repos settles it in favour of forking.
 | 2.6.0 | 2026-09-27 | S19: everything but the node itself is now built and tested end to end. A mesh job carries `source_job` (a finished render) instead of an image, since TRELLIS.2 is image-to-3D; Anvil fetches it via the broker's existing `/jobs/{id}/artifact`, so text-to-mesh is two ordinary broker jobs. Added `tools/hermes-generate-mesh.py` (ComfyUI over HTTP from an exported workflow with `{{INPUT_IMAGE}}`/`{{SEED}}` placeholders, refuses to run without one, size in the STL's filename, per-phase timings for exit gate 2), `hermes-render-request.sh` 1.4.0 (`--type mesh`, `--source-job`, `--keep-largest`, unknown types refused, `BROKER_TOKEN` env override), worker 1.7.0 (`source_job` passthrough, `.py` scripts via the interpreter for Windows), `hermes-media.py` 1.3.0 (mesh route **off** by default), `skills/mesh-gen/SKILL.md` (marked not-live), and `infra/anvil/README.md` (node recipe, loopback-only ComfyUI, three named operator decisions, go-live order). New tests: `test_mesh_e2e.py` (real broker, workers and client against a fake ComfyUI on a throwaway loopback broker, no Matrix) and `test_media_mesh.py`. All 19 checks across the three suites pass on spark. Still not run on win_amd64; timeouts remain provisional until gate 2. |
 | 2.7.0 | 2026-09-27 | S19d's open Windows decisions made by the operator and built: NSSM (`infra/anvil/install-anvil.ps1`: `HermesComfyUI` loopback-only, `HermesMeshWorker`, 8188 inbound block, `HermesRepoSync` task), native `bw` secrets (`tools/vault-get-secret.ps1` porting `vault-get-secret.sh`'s isolated profile, exact-name lookup and retries; bootstrap credentials DPAPI-bound to the service account via `set-vault-bootstrap.ps1`, in place of systemd-creds), a 30-minute fast-forward-only repo sync that restarts the worker when `HEAD` moves, and STLs stored on NAS2 instead of posted to FleetOps — `mesh` added to `BROKER_QUIET_TYPES`, and `hermes-generate-mesh.py` 1.1.0 makes the NAS2 copy required and hash-verified (exit 8 on failure), since quiet delivery makes NAS2 the only place a human can reach the STL. Found repo drift in the process: the live broker unit already set `BROKER_QUIET_TYPES=embed,wake`, which the repo copy lacked; the repo copy now carries `embed,wake,mesh`, to be installed on spark at go-live. New `test_windows_scripts.ps1` (10 checks) passes under Windows PowerShell 5.1; the e2e suite gained the NAS2 archive checks (5 checks). The NAS2 SMB share name is unverified. |
 | 2.8.0 | 2026-09-27 | S19 pre-node work deployed (`e566338`): all three Linux nodes synced and restarted cleanly; the repo broker unit (`BROKER_QUIET_TYPES=embed,wake,mesh`) installed live on spark, old unit backed up, broker healthy. Mesh route still off. Recorded two pre-existing findings: every pull restarts a node's whole stack (models included), and repo-sync's FleetOps notice already fails from spark-2 and HomeD13. |
+| 3.0.0 | 2026-10-03 | **S19's generation route replaced and its hardware corrected** — major because it reverses S19a's model-delivery decision and resolves two figures that were wrong in writing, not because the stage's shape changed (ordering, job type, broker seams, repair chain and exit gate are all untouched). `Anvil` was identified as the operator's own Windows workstation `PMWIN11`, and reading the machine instead of recalling it corrected two planning assumptions at once. **First, the GPU is an RTX 5060 Ti with 16GB** — `nvidia-smi` reports one GPU, 16311 MiB, driver 610.88, compute capability (12, 0) — not the 32GB 5090 the stage was planned against, and not the 24GB the open discrepancy guessed at either; it resolves *below* both. Every `sm_120` finding survives because the architecture is identical; only the memory budget changed, to the tightest figure ever written here. **Second, TRELLIS.2 went native in ComfyUI 0.34.0 on 2026-08-31 — four weeks before S19 was planned — and S19a's research missed it.** The native integration ships no compiled extensions (upstream: "No nvdiffrast, no nvdiffrec, no per-configuration wheels, no PyTorch downgrade"), which deletes three of S19a's own findings outright: the Torch 2.10/CUDA 13.1 wheel pin (independently falsified anyway — the node already runs torch 2.13.0+cu130 on `sm_120`), the seven custom wheels, and **the CuMesh `sm_120` breakage with its `blackwell_fix.py` CPU marching-cubes fallback, which this plan called the stage's "least predictable cost"**. It also un-gates DINOv3 (`clip_vision/dino_v3_vit_l.safetensors` from `Comfy-Org/TRELLIS.2`), making the approved Meta access a spare rather than a dependency, and removes the non-commercial NVIDIA licence that sat under the MIT top layer. Each deleted finding is kept in a table in S19a rather than dropped, since each was real when written. **The VRAM analysis was rewritten against primary sources, because the original was wrong in both halves**: it claimed upstream documents no figure and that secondary sources' "16GB+" was cleared either way, where microsoft/TRELLIS.2 in fact states "An NVIDIA GPU with at least 24GB of memory is necessary" — above this node. What closes the gap is that the native workflow's weights are int8: 5.253GB for the transformer against 10.338GB for bf16 (exact sizes read from the HF API), putting the shape-only path — the S19c path, since STL cannot carry materials — at ≈7.6GB resident with ~8GB of headroom. Corroborated by incidental rather than promotional evidence: ComfyUI issues #16100 (16GB RTX 4080 Super) and #16056 (12GB RTX 4070, "produces a valid textured GLB") are native-TRELLIS.2 bug reports that are *not* OOM reports, the latter recording that `DecimateMesh`'s default 700000 face budget needed lowering on 12GB. Flagged plainly rather than overclaimed: ≈7.6GB is weight arithmetic, not a measurement, 1536³ activations are unmeasured, and this re-prices the risk from "fails the stated minimum" to "very likely fits, measure it" without pre-empting exit gate 2. Risk list rebalanced accordingly — peak VRAM replaces the vanished CPU fallback at 1, DINOv3's gate is struck as resolved, and a new risk 4 records what is actually the more consequential discovery: `Anvil` is an interactive workstation with a StabilityMatrix-managed ComfyUI shared with a working image/video setup, so mesh jobs compete with the operator for the same 16GB and a StabilityMatrix update can move ComfyUI underneath the NSSM services. Verified on the node and newly recorded: the broker is reachable from it, NAS2's `PMoney` share is real and mounted with `\Private\Hermes` present (closing 2.7.0's unverified-share-name item), and Bambu Studio is installed, so exit gate 4 has its third-party tool. Two install gates remain where there were three: ComfyUI is **0.31.0** and must reach 0.34.0, and the model files must be fetched. Confirmed unaffected by reading rather than by assumption: `hermes-generate-mesh.py` names no node class and discovers mesh outputs structurally, so the route change costs the exported workflow JSON and a comment — the tooling, the repair chain, its pins and the broker seams all survive intact. |
+| 3.1.0 | 2026-10-04 | **S19a install gate 1 cleared: `Anvil`'s ComfyUI updated `v0.31.0` → `v0.38.2`.** Latest stable rather than the 0.34.0 minimum, because 0.34.0 predates the TRELLIS.2 fixes that followed it (including #16100's). Treated as work on a live install rather than a version bump, since the node is the operator's workstation and the install is StabilityMatrix-managed and shared with a working image/video setup: clean tree and tag recorded for rollback first, pip freeze saved, nothing running on 8188 confirmed, then verified after — `main.py --quick-test-for-ci` exits 0 with no `IMPORT FAILED`, **all 16 custom-node packs still import**, 1734 node classes register, and a real server start answers `/system_stats` with `0.38.2` on `cuda:0 NVIDIA GeForce RTX 5060 Ti, 16311 MiB`. Nine packages changed (frontend, workflow-templates, embedded-docs, `comfy-kitchen`, `comfy-aimdo`) and **`torch` was not touched** — unpinned in ComfyUI's requirements at both versions, still 2.13.0+cu130 on `sm_120`, which is 3.0.0's native-route claim ("if your ComfyUI runs, these models run on your current PyTorch") holding up in practice rather than on paper. StabilityMatrix's `settings.json` was updated to match so its UI does not desync from a git-side update. Also newly recorded, read off the running instance rather than guessed: the **eight TRELLIS.2 node classes** 0.38.2 registers, with `Trellis2TextureStage` and `VaeDecodeTextureTrellis` named as the two to omit for the shape-only path — captured to identify what to drop, explicitly not as a verified topology. Remaining before go-live: fetch the model files, export the workflow, then the exit gates. |
+| 3.2.0 | 2026-10-04 | **S19's win_amd64 test gate closed** — the one piece of this stage that was blocked on nothing but the node being reachable. `test_mesh_pipeline.py` passes **10/10** on `Anvil` (win_amd64/cp312), its first run off aarch64, and **all six pins in `requirements-mesh.txt` resolved to the identical versions on both platforms**, so the pin set needs no per-platform split and was deliberately not re-pinned. The venv was built from ComfyUI's own 3.12.11 interpreter because this box has no `py` launcher and its PATH python is 3.13.14 — a small platform gotcha of exactly the kind risk 3 predicted, now recorded in the README's step 4 rather than left to be rediscovered. `test_windows_scripts.ps1` was re-run on the real node too (**10/10**, PowerShell 5.1), replacing a pass measured on a different Windows machine. One item explicitly still open: the post-union PyMeshLab retry loop remains unexercised, since every fixture is synthetic — only a real TRELLIS.2 mesh can reach it, which makes it a thing to watch during exit gate 3 rather than a thing now proven. |
+| 3.3.0 | 2026-10-04 | **S19a install gate 2 cleared: the TRELLIS.2 model set is on `Anvil`** — 10.2 GB, every file header-verified as real safetensors and confirmed visible through ComfyUI's own `/models/<folder>` endpoints rather than assumed from a successful download. Files went into StabilityMatrix's shared model folders, which is what this install resolves through `extra_model_paths.yaml` and survives a package reinstall. Two findings that would each have cost a confusing failure later. **The shipped template's `CLIPVisionLoader` expects `dino_v3_L_naf_fp32.safetensors`, which is in the `Comfy-Org/Pixal3D` repo, not TRELLIS.2's** — the template is a combined Pixal3D/TRELLIS.2 graph sharing one conditioning loader — and it is **not the same artifact** as TRELLIS.2's `dino_v3_vit_l.safetensors` (452 vs 415 tensors), so both are on the node until a real run shows which the shape path wants. The official tutorial's file list names only the first, which is why the discrepancy was worth chasing rather than papering over. **And MoGe plus the Pixal3D transformer are not needed** — established from the template's link graph, where the `LoadMoGeModel` → `MoGeInference` → `MoGeGeometryToFOV` chain feeds only `Pixal3DConditioning` while `Trellis2Conditioning` takes just a `CLIP_VISION` and an `IMAGE` — saving ~6.2 GB and making the real download 10.2 GB rather than 17. Also recorded in the README: the template is `3d_pixal3d_trellis2_image_to_model` (66 nodes), it selects between the two models with a `PrimitiveBoolean` that ships `False`, and its texture half is substantial enough that stripping it is most of step 3's work — the texture-side node list and the traced shape chain are both written down so that work is recognition rather than rediscovery. **With gates 1 and 2 both cleared, every pre-node item except the exported workflow is done**, and that one needs GUI work on the node that cannot be scripted. |

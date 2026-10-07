@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.1.1
+#
+# 1.1.1 (2026-10-03) — comment only: the workflow is now exported from ComfyUI's native TRELLIS.2
+# nodes (0.34.0+), not from the withdrawn visualbruno/ComfyUI-Trellis2 custom node. No code change;
+# this script never named a node class and does not care which produced the graph.
 #
 # 1.1.0 (2026-09-27) — required, hash-verified NAS2 archive copy (MESH_ARCHIVE_DIR, exit 8), per the
 # operator decision that `mesh` is a quiet broker type and STLs are stored on NAS2.
@@ -26,9 +30,10 @@
 #      decision 2026-09-27), so NAS2 is the one place a human can actually get the STL
 #
 # The workflow is NOT hand-written here. Its node graph only exists once TRELLIS.2 is installed on
-# Anvil: build it from ComfyUI-Trellis2's shipped mesh-only example, export with "Save (API
-# Format)", replace the LoadImage filename with the literal string {{INPUT_IMAGE}} (and any seed
-# with {{SEED}}, so a broker retry is a genuinely different attempt), and commit it at MESH_WORKFLOW.
+# Anvil: start from the TRELLIS.2 template shipped with ComfyUI 0.34.0+, strip it to the shape path
+# (STL carries no materials, so texturing is pure cost), export with "Save (API Format)", replace the
+# LoadImage filename with the literal string {{INPUT_IMAGE}} (and any seed with {{SEED}}, so a broker
+# retry is a genuinely different attempt), and commit it at MESH_WORKFLOW.
 # Until then this script refuses to start a job rather than guess at a graph (infra/anvil/README.md).
 #
 # Timings for S19 exit gate 2 (fetch / ComfyUI / repair, in seconds) are written into the repair
