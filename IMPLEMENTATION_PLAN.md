@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.4.0
+**Version:** 3.5.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -32,6 +32,10 @@ summary; this document's own stages above describe the code/content work, which 
 from that repo-level cutover. **S20 is planned, not executed** — a daily model-discovery → role-fit
 comparison → tracked benchmark-backlog pipeline (`hermes-model-scout`), direct request **2026-10-08**,
 also planning the retirement of `HermesAgentV4`'s own duplicate ad-hoc model-watch routine once it ships.
+**S21 is planned, not executed** — `hermes-fleetops-ui`, a direct follow-up request the same day for a
+base process-management web UI: links to the existing RAG approval portal and S20's benchmark backlog,
+plus read-only model usage/state and benchmark-history report pages, on the same stdlib-`http.server`/
+Basic-Auth/tailnet-only pattern `hermes-rag-discovery-portal.py` already proves live.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** described in [`firmament-fleet-target-architecture.md`](firmament-fleet-target-architecture.md)
@@ -2427,6 +2431,114 @@ worth seeding into the new `hermes-memory` state once-off so the first real run 
 
 ---
 
+### S21 — `hermes-fleetops-ui`: a base process-management web UI
+
+**Planned; not executed.** No script, service, or port exists yet.
+
+**Scope, stated up front so it isn't discovered later: this is links and read-only reports, not a
+control plane.** "Process management" names what it's *for* — one home page for the human-facing
+surfaces this fleet already has or is about to have — not a promise that it starts, stops, or
+restarts anything. Starting/stopping a service stays an SSH + `systemctl` operator action, same as
+every other privileged action in this fleet already requires an explicit human step rather than a
+button (`tools/hermes-confirm-gate.sh`'s entire reason to exist). This stage adds **zero** new
+privileged write surface: the two approval flows it surfaces (RAG discovery, S20's benchmark
+backlog) each already have their own write path, built and reasoned about separately, and this UI
+does not duplicate or shortcut either one.
+
+**The gap this closes.** A browser-facing approval UI already exists and works —
+`tools/hermes-rag-discovery-portal.py`, live at `http://100.96.59.79:8093/`, Basic Auth, Phase 33 —
+but it only covers RAG candidates. S20c gives the model-benchmark backlog a tracked state machine,
+but its only interface is a Matrix command grammar; there is no browser view of what's sitting in
+`proposed`/`deferred` state without querying `hermes-memory` by hand. And "is a role's backend
+current" or "did this candidate actually beat the incumbent" both require SSH plus reading a JSON
+log or a jsonl file directly — `hermes-status.py`'s model report, `hermes-usage-report.py`'s weekly
+digest, and `hermes_benchmark_common.py`'s `history.jsonl` all already compute or hold the right
+data, just not anywhere a browser can see it. One home page, following the exact pattern already
+proven live by the RAG portal rather than inventing a new one: stdlib
+`http.server.BaseHTTPRequestHandler`/`ThreadingHTTPServer`, HTTP Basic Auth required to even start
+(same fail-closed check the RAG portal's own `main()` already does), bound to the tailnet IP only,
+no new dependency, no new venv.
+
+#### S21a — Home page: two links
+
+- **RAG approval UI (existing)** — a plain `<a href="http://100.96.59.79:8093/">`, nothing more.
+  Deliberately not iframed or proxied: it's a separate auth realm already working on its own, and
+  embedding it buys nothing but a mixed-content/`X-Frame-Options` problem to solve for zero benefit.
+- **Model benchmark suggestions** — links to S21b below (this UI's own page, not an external one),
+  since S20c's backlog has no browser view today at all.
+
+#### S21b — Model benchmark backlog view (read-only)
+
+A new page reading `hermes-memory`'s `agent="model-scout"` tasks directly (same `GET /tasks` shape
+`hermes-self-repair-status.py` already queries), rendering one row per candidate: role, model id,
+state (`proposed`/`approved`/`rejected`/`deferred`/`done`), and S20b's one-line advisory narrative.
+**No decide buttons here.** Approving, rejecting, or deferring a candidate still goes through the
+Matrix reply `hermes-model-scout-gate.py` watches for — adding a button here would mean a second,
+weaker path to the same privileged decision (shared Basic Auth vs. one specific Matrix sender ID),
+which is exactly the kind of structural shortcut `hermes-confirm-gate.sh`'s whole design refuses to
+allow. The one convenience worth adding: a "copy the benchmark command" button next to an `approved`
+row — it only copies text to the clipboard, it triggers nothing, so it adds no new write path.
+
+#### S21c — Reports: model usage and states
+
+Two existing, already-correct data sources, rendered rather than re-derived:
+
+- **State** — `hermes-status.py`'s `run_model_report()` logic (one GET against the local router's
+  `/v1/models`, which already answers for every role fleet-wide per that file's own 1.3.0 note) —
+  which checkpoint backs each role, where it physically runs, whether it's abliterated.
+- **Usage** — the same `hermes_usage_log.py` data `hermes-usage-report.py` already summarizes
+  (two trailing 7-day windows, deliberately no LLM call — that file's own header gives the reason:
+  a router call to generate commentary would itself be logged, skewing the exact thing being
+  measured, and plain counts need no narration a human can't read directly). This page keeps that
+  same no-narrative rule; it is a view, not a new report generator.
+
+Both are read on page load, no caching, no new state file — this is a live window onto data that
+already exists, not a new copy of it.
+
+#### S21d — Report: benchmark results, current and historical
+
+Reads `tools/hermes_benchmark_common.py`'s `load_history()` directly — the same NAS2
+`history.jsonl` (with its local-fallback path) `hermes-benchmark-compare.py` already reads, so there
+is exactly one history, never a second copy drifting from the first. "Current" groups to each
+`model_id`'s latest run per suite (the same comparison `hermes-benchmark-compare.py --model-id`
+already does, reused rather than reimplemented); "historical" is the full list, newest-first with a
+client-side search box — the same shape the RAG portal's own table uses, including baking in from
+day one the fix that table needed the hard way (1.2.0/1.4.1 there): newest-first ordering and a hard
+cap on anything rendered in one page, not discovered later against a table that's grown too large to
+page through.
+
+#### Where it runs, and what it needs
+
+Deployed on `spark`, alongside the RAG portal — it already has loopback access to its own router
+(`hermes-status.py`'s report needs this) and the NAS2 mount `model-benchmark`'s history already uses;
+nothing here needs `spark-2` or `HomeD13` directly. **Port is not yet picked — verify against a live
+`ss -ltnp` on spark before deploying, not assumed free from a reading of other README's port
+numbers alone** (8093 RAG portal, 8094 `coder`, 8095 `super`, 8096 `guard`, 8097 `dispatch`, 8099
+`coder2`, 8100 broker, 8102 memory are all already taken; 8101 is the obvious next value but must be
+confirmed live, the same discipline that already caught `nano`'s real port drift elsewhere in this
+plan). **Own Vaultwarden credential, not a reuse of the RAG portal's** — same "each service gets its
+own vault item" convention every other credentialed service in this fleet already follows
+(`memory-token`, `email-sintra`), not a shared Basic Auth realm across two independently-reasoned-about
+services.
+
+#### Risks and open questions
+
+1. **Reading three different data sources (router `/v1/models`, usage-log sqlite, benchmark-history
+   jsonl) in one page means three different failure modes to show separately**, not one generic
+   "report unavailable" — `hermes-usage-report.py`'s own 1.0.1 fix (a missing-table crash on first
+   run) is a concrete example of the kind of per-source gap this page must degrade past rather than
+   fail entirely on.
+2. **No decision yet on whether this page should also surface `hermes-fleet-health.py`'s broader
+   health rollup** (broker depth, guard blocks, inter-node comms) — left out of S21a-d because
+   nothing in the request asked for it, but it's the same shape of "already computed, not yet
+   browsable" gap the other three report sources had. Worth a follow-up ask, not assumed here.
+3. **This is the third independent stdlib `http.server` instance on spark** (RAG portal, this one,
+   plus `hermes-clef-server.py` on 8089) — each is simple enough alone, but if a
+   fourth one is ever proposed, a single shared mini-framework (auth, paging, the search-box JS) is
+   worth factoring out then, not pre-built here against only three data points.
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -2452,6 +2564,10 @@ worth seeding into the new `hermes-memory` state once-off so the first real run 
 - S9 (registry)/model-benchmark's existing harness **before** S20 — S20b's role-fit comparison reads
   real prior benchmark history, which must already exist as a capability (not necessarily populated)
   for the comparison step to mean anything; already satisfied.
+- S20 (backlog) **before** S21b — the benchmark-suggestions page has nothing to render without S20c's
+  `hermes-memory` task state existing first. S21c/S21d depend only on already-live capabilities
+  (`hermes-status.py`, `hermes-usage-report.py`'s log, `model-benchmark`'s history) and could ship
+  independently of S20 if ever sequenced separately.
 
 ---
 
@@ -2582,3 +2698,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.2.0 | 2026-10-04 | **S19's win_amd64 test gate closed** — the one piece of this stage that was blocked on nothing but the node being reachable. `test_mesh_pipeline.py` passes **10/10** on `Anvil` (win_amd64/cp312), its first run off aarch64, and **all six pins in `requirements-mesh.txt` resolved to the identical versions on both platforms**, so the pin set needs no per-platform split and was deliberately not re-pinned. The venv was built from ComfyUI's own 3.12.11 interpreter because this box has no `py` launcher and its PATH python is 3.13.14 — a small platform gotcha of exactly the kind risk 3 predicted, now recorded in the README's step 4 rather than left to be rediscovered. `test_windows_scripts.ps1` was re-run on the real node too (**10/10**, PowerShell 5.1), replacing a pass measured on a different Windows machine. One item explicitly still open: the post-union PyMeshLab retry loop remains unexercised, since every fixture is synthetic — only a real TRELLIS.2 mesh can reach it, which makes it a thing to watch during exit gate 3 rather than a thing now proven. |
 | 3.3.0 | 2026-10-04 | **S19a install gate 2 cleared: the TRELLIS.2 model set is on `Anvil`** — 10.2 GB, every file header-verified as real safetensors and confirmed visible through ComfyUI's own `/models/<folder>` endpoints rather than assumed from a successful download. Files went into StabilityMatrix's shared model folders, which is what this install resolves through `extra_model_paths.yaml` and survives a package reinstall. Two findings that would each have cost a confusing failure later. **The shipped template's `CLIPVisionLoader` expects `dino_v3_L_naf_fp32.safetensors`, which is in the `Comfy-Org/Pixal3D` repo, not TRELLIS.2's** — the template is a combined Pixal3D/TRELLIS.2 graph sharing one conditioning loader — and it is **not the same artifact** as TRELLIS.2's `dino_v3_vit_l.safetensors` (452 vs 415 tensors), so both are on the node until a real run shows which the shape path wants. The official tutorial's file list names only the first, which is why the discrepancy was worth chasing rather than papering over. **And MoGe plus the Pixal3D transformer are not needed** — established from the template's link graph, where the `LoadMoGeModel` → `MoGeInference` → `MoGeGeometryToFOV` chain feeds only `Pixal3DConditioning` while `Trellis2Conditioning` takes just a `CLIP_VISION` and an `IMAGE` — saving ~6.2 GB and making the real download 10.2 GB rather than 17. Also recorded in the README: the template is `3d_pixal3d_trellis2_image_to_model` (66 nodes), it selects between the two models with a `PrimitiveBoolean` that ships `False`, and its texture half is substantial enough that stripping it is most of step 3's work — the texture-side node list and the traced shape chain are both written down so that work is recognition rather than rediscovery. **With gates 1 and 2 both cleared, every pre-node item except the exported workflow is done**, and that one needs GUI work on the node that cannot be scripted. |
 | 3.4.0 | 2026-10-08 | Added **S20** (planned, not executed): `hermes-model-scout` — a daily model-discovery pipeline comparing newly published models and newly landed llama.cpp architecture support against each Firmament role's real current backend and benchmark history, proposing candidates into a tracked `hermes-memory` backlog (Done / Rejected / Deferred) gated by an explicit human reply, modeled directly on `hermes-self-repair-promote-gate.py`'s existing confirm-gate pattern. Direct request to move `HermesAgentV4`'s ad-hoc, LLM-driven model-watch routine into V5 properly; S20d plans that routine's retirement once this ships. Reuses `hermes-model-scan.py`/`hermes-model-watch.py`'s existing deterministic discovery and `model-benchmark`'s existing harness unchanged — adds the missing role-fit comparison and tracked-decision layer, nothing else. Minor bump — new stage added, nothing prior reversed. |
+| 3.5.0 | 2026-10-08 | Added **S21** (planned, not executed): `hermes-fleetops-ui` — a base process-management web UI, direct follow-up request the same day as S20. Scope stated deliberately narrow: links out to the existing `hermes-rag-discovery-portal.py` and to a new read-only view of S20c's benchmark backlog (decisions still go through the Matrix gate, not a button), plus two report pages — model usage/state (reusing `hermes-status.py`'s router query and `hermes-usage-report.py`'s usage log, read not regenerated) and benchmark results current/historical (reading `hermes_benchmark_common.py`'s existing `history.jsonl` directly). No process start/stop control plane and no new privileged write surface — follows the same stdlib `http.server`, Basic-Auth-required, tailnet-bound-only pattern the RAG portal already proves live, own Vaultwarden credential, port TBD pending a live port-availability check. Minor bump — new stage added, nothing prior reversed. |
