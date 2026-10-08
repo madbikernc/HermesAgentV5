@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.3.0
+**Version:** 3.4.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -29,7 +29,9 @@ this line used to wait on happened — `HermesAgentV4`'s `tools/`, `skills/`, an
 into this repo and all three nodes (`spark`, `spark-2`, `HomeD13`) were cut over to it. `HermesAgentV4` is
 now superseded, not live; this repo is the deployed checkout.** See `README.md`'s status section for the
 summary; this document's own stages above describe the code/content work, which predates and is separate
-from that repo-level cutover.
+from that repo-level cutover. **S20 is planned, not executed** — a daily model-discovery → role-fit
+comparison → tracked benchmark-backlog pipeline (`hermes-model-scout`), direct request **2026-10-08**,
+also planning the retirement of `HermesAgentV4`'s own duplicate ad-hoc model-watch routine once it ships.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** described in [`firmament-fleet-target-architecture.md`](firmament-fleet-target-architecture.md)
@@ -2266,6 +2268,165 @@ it.
 
 ---
 
+### S20 — `hermes-model-scout`: daily discovery → role-fit comparison → tracked benchmark backlog
+
+**Planned; not executed.** No script, state-store entry, or timer exists yet — this section is the
+design, to be executed in a later session the same way S16/S19 were: built, verified live, and this
+block updated in place with what actually happened.
+
+**The gap this closes.** Three things that touch "is there a better model for a Firmament role"
+already exist, and none of them do what was asked:
+
+- `hermes-model-scan.py` finds new open-weight releases **weekly**, filtered by hardware fit, and
+  emails a summary — but never compares a candidate against a role's own current benchmark scores,
+  and produces no tracked decision, just an email.
+- `hermes-model-watch.py` watches **weekly** for llama.cpp architecture support and named-family GGUF
+  quants (currently `qwen4exp`/`qwen4_flash`/GLM-5.3) — narrow and deterministic by design, but it
+  stops at "this now exists," never "is it worth benchmarking."
+- `infra/model-benchmark` actually scores a candidate, but every evaluation to date started from a
+  **hand-written runbook** (`qwen4-coder-bakeoff-runbook.md`, `coder-reasoning-bakeoff-runbook.md`,
+  `clef-decision-model-bakeoff.md`) — a human noticing a release, writing a markdown plan, and
+  running it by hand. `qwen4-coder-bakeoff-runbook.md` §0 is a live example of the cost of that: it
+  had to independently re-verify which llama.cpp tag actually shipped `qwen4exp` support because
+  this repo's own `alert-state.json` and a sibling V4 file disagreed (PR number vs. build tag
+  `b10760`), and it had to call out by name that `coder2` means something different in V5 than it
+  did in V4 — exactly the kind of drift that accumulates when "did we already decide about this
+  model" lives in a human's memory and scattered markdown instead of one tracked place.
+- Separately, `HermesAgentV4`'s own scheduled routine (`infra/model-watch` there, trigger
+  `trig_01Sr7ypybNp9RmpUsrAgPpxF`) re-implements a rough copy of `hermes-model-watch.py`'s job by
+  having an agent turn do live web search and judgment calls each run, in the **superseded**
+  predecessor repo, alerting by push notification instead of this fleet's email/Matrix conventions.
+  This is the generalizable failure `LESSONS_LEARNED.md` §2g ("the phantom Weaver") already named:
+  an agent's own turn, not a deterministic record, standing in for a fact. S20d below is this
+  routine's planned retirement.
+
+**What's actually new.** Not a replacement for any of the three — `hermes-model-watch`'s
+architecture/quant watch and `hermes-model-scan`'s weekly hardware-fit digest both keep running
+unchanged, and `model-benchmark`'s harness, history, and comparison tool are reused byte-for-byte.
+What's missing is the connective tissue the request actually asked for: a **daily** pass that finds
+what's new, ingests what the publisher itself claims about it, compares that against what each
+Firmament role is running *today* (not a hardcoded assumption of it), and — instead of an email that
+evaporates — writes one tracked backlog entry per candidate that a human disposes of with a single
+reply, the same shape `hermes-self-repair-promote-gate.py` already proved out for "never do the
+privileged thing without an explicit human reply."
+
+#### S20a — Daily discovery and ingestion (deterministic only, no exception)
+
+One new script, `tools/hermes-model-scout.py`, run daily (not weekly) by a new
+`hermes-model-scout.timer`. Every fact it establishes comes from a structured API, never from an
+LLM turn or free-text web search — same discipline `hermes-model-scan.py`'s own header documents and
+the same reason `hermes-model-watch.py` chose a GitHub-API architecture-enum diff over asking a model
+to summarize what it recalls about llama.cpp:
+
+1. **New-today model listings** — HF Hub API, `createdAt`/`lastModified` filtered to the last
+   24h+timer-jitter window, reusing `hermes-model-scan.py`'s existing `ROLE_TARGETS` tag map
+   (vision/text/coding/embeddings/reranking/ASR/TTS/image-video) rather than inventing a second one.
+2. **New-today architecture/support signal** — reuse `hermes-model-watch.py`'s two checks (the local
+   vs. upstream `llama-arch.h` enum diff, and the watched-term PR search) at daily cadence instead of
+   weekly, and promote their *output* — "architecture X just became loadable" — into a scout
+   candidate automatically instead of waiting for a human to notice the weekly email and write a
+   runbook. This is the direct fix for the `qwen4-coder-bakeoff-runbook.md` gap above.
+3. **Ingestion of "published details and predictions"** — for each candidate, pull the HF model
+   card's own front-matter: `pipeline_tag`, `base_model`, declared parameter count/quantization, and
+   — when present — its self-reported `model-index` eval block (HF's standard schema for a model
+   card to declare its own benchmark numbers). These are stored and shown as **the publisher's own
+   claim, explicitly labeled as such and never as this fleet's own measurement** — the same
+   "don't let an outside party's text pose as a verified fact" discipline
+   `hermes-model-scan.py` 1.1.0 already applies to the HF repo IDs/tags it interpolates into its
+   recommendation prompt.
+
+No step above calls a model. Output is one deterministic JSON record per candidate.
+
+#### S20b — Role-fit comparison (deterministic) and a narrative pass (LLM, advisory only)
+
+For each candidate from S20a, deterministically join against two things that already exist and must
+be read live, never assumed:
+
+- `tools/hermes-router.py`'s own `ROLES` table — the real current backend identity and port for
+  every role (`super`, `coder`, `coder2`, `muse`, `omni`, `dispatch`), read fresh each run rather than
+  hardcoded, because it has already drifted mid-project at least once (`coder` moved spark→spark-2 on
+  2026-10-07, `nano` retired entirely in S13).
+- That role's own most recent real score from `tools/hermes-benchmark-compare.py` / the shared
+  `history.jsonl` — not the candidate's self-reported numbers from S20a, the fleet's own prior
+  measurement of the incumbent, when one exists. No history entry for a role yet is reported as
+  exactly that, never papered over with the candidate's own claims standing in for a comparison.
+- `hermes-model-scan.py`'s existing hardware-fit heuristic (§ Hardware-fit heuristic, its own
+  README) to drop anything that can't run on Spark/HomeD13 regardless of how good it looks.
+
+Only *after* all of the above is computed, one short LLM call through the router (`dispatch`, same
+split `hermes-model-scan.py`/`hermes-nfsensei-watch.py` already use) turns the comparison into a
+plain-language "why this might (or might not) be worth benchmarking" paragraph — advisory framing
+only, appended to the record, never the source of any fact already established above.
+
+#### S20c — Tracked backlog: Done / Rejected / Deferred, one gate, no silent auto-run
+
+State lives in `hermes-memory` (already the shared task-state store S2 built, already proven for
+exactly this shape by the self-repair pipeline) under a new `agent="model-scout"` namespace, one task
+per `role:model_id`, rather than inventing a second tracking mechanism:
+
+- **`proposed`** — S20b wrote a new candidate; `hermes-model-scout.py` posts a one-shot offer to the
+  FleetOps Matrix room (`post_promotion_offer()`'s own shape in `hermes-self-repair-apply.py`),
+  never blocks waiting on a reply, and moves on.
+- **A new `hermes-model-scout-gate.py`**, modeled directly on `hermes-self-repair-promote-gate.py`
+  (same strict, whole-message command grammar, same "always re-fetch and re-check real state before
+  acting, never trust the chat message alone" rule), watches for exactly one of:
+  - `benchmark <id>` → state → `approved`. Gate's reply is the **exact**
+    `hermes-benchmark-model.sh` invocation to run **by hand** — this never triggers the run itself.
+    `skills/model-benchmark/SKILL.md`'s own Rules section is explicit that benchmarking "is a
+    foreground, human-attended operation... not something to kick off on your own initiative," and
+    S20 does not get to override that by being a different caller. If unattended benchmark execution
+    is ever wanted, that is a separate, explicit future decision — not assumed here.
+  - `reject <id>` → state → `rejected`, **permanent**. `hermes-model-scout.py` will never re-propose
+    a `rejected` id on a future run. The only way back is an explicit `override <id>` reply from The
+    Boss, logged as its own state transition (`rejected` → `proposed`) — never a quiet re-surface,
+    never an agent's own judgment that "this time is different."
+  - `defer <id>` → state → `deferred`. Stays out of new-candidate noise (won't re-alert on an
+    unchanged `deferred` id every day, same dedup discipline `alert-state.json`'s `glm_5_3_seen`
+    list already established) but stays visible on request — `hermes-self-repair-status.py`'s own
+    `<task_id>` timeline view is the template for a `--backlog` mode listing every non-`rejected`,
+    non-`done` entry.
+- **`done`** is never set by a chat reply or an agent's own claim — only by `hermes-model-scout.py`
+  itself, deterministically, the next time it runs, reading the real `history.jsonl` for a matching
+  `model_id` entry newer than the `approved` transition. This is the direct, structural answer to
+  §2g: "done" means a real row exists in the harness's own history file, not that something said it
+  ran.
+
+#### S20d — Retire the V4 duplicate
+
+Once S20 is built and running one full week on the real fleet: disable `trig_01Sr7ypybNp9RmpUsrAgPpxF`
+(`HermesAgentV4`'s scheduled routine) rather than leaving two systems independently watching the same
+ground with different mechanisms and different alert channels. Not deleted outright until `hermes-
+model-scout`'s first few real runs are confirmed sane — same "prove the replacement before retiring
+the guard" discipline `infra/hermes-memory/README.md` §0 already applies to `hermes-session-cap-
+guard.sh`. `HermesAgentV4/infra/model-watch/alert-state.json`'s accumulated `glm_5_3_seen` history is
+worth seeding into the new `hermes-memory` state once-off so the first real run doesn't re-announce
+~100 already-known repos; not carrying forward the mechanism itself.
+
+#### Risks and open questions
+
+1. **Daily cadence vs. `hermes-model-scan.py`'s weekly one is a real overlap, not fully resolved
+   here.** S20a reuses its `ROLE_TARGETS` logic at daily cadence for scouting; `hermes-model-scan.py`
+   keeps its own weekly timer and email for the broader "what's new this week, period" digest a human
+   reads regardless of role-fit. Running the same HF Hub query twice a week apart on two different
+   schedules is acceptable duplication, not an inconsistency — but if it proves to be the same report
+   twice, retiring `hermes-model-scan.timer` in favor of `hermes-model-scout`'s own weekly rollup
+   email is the likely next step. Left as an operator decision after S20 has run for a while, not
+   decided here.
+2. **`model-index` self-reported eval blocks are inconsistently present and inconsistently trustworthy**
+   across HF model cards — many candidates will have none at all, and S20b must degrade to "no
+   publisher claim available" rather than treating absence as a negative signal.
+3. **The FleetOps Matrix command grammar now has two independent gates parsing similarly-shaped
+   commands** (`promote <id>`/`skip <id>` for self-repair, `benchmark <id>`/`reject <id>`/`defer <id>`/
+   `override <id>` for this). Deliberately disjoint verbs to avoid collision, but both processes
+   should log which one handled a given message, in case a future third gate needs the same room.
+4. **No exit gate measuring real value yet** — S19's "did reranking actually help" number-based gate
+   (+16.7pp recall@5) has no equivalent here before S20 ships, because there is no history to measure
+   against until candidates actually get benchmarked and the backlog has run for a while. First real
+   evidence of this pipeline's own worth is "a candidate `hermes-model-scout` surfaced and a human
+   approved got benchmarked and won" — track the first one explicitly when it happens.
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -2286,6 +2447,11 @@ it.
 - S18a (diagnose: GID index, bond mode) **before** S18b (PFC/ECN) — the recorded failure signature
   has cheaper explanations than lossless-fabric config, and S18b is real new scope. **Resolved
   2026-09-24: this ordering paid for itself — S18a found the bond, and S18b was never needed.**
+- S2 (memory) **before** S20 — S20c's backlog state has nowhere to live without it; already satisfied,
+  since S2 shipped first, but recorded for the same reason the S1-before-S2 constraint above is.
+- S9 (registry)/model-benchmark's existing harness **before** S20 — S20b's role-fit comparison reads
+  real prior benchmark history, which must already exist as a capability (not necessarily populated)
+  for the comparison step to mean anything; already satisfied.
 
 ---
 
@@ -2415,3 +2581,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.1.0 | 2026-10-04 | **S19a install gate 1 cleared: `Anvil`'s ComfyUI updated `v0.31.0` → `v0.38.2`.** Latest stable rather than the 0.34.0 minimum, because 0.34.0 predates the TRELLIS.2 fixes that followed it (including #16100's). Treated as work on a live install rather than a version bump, since the node is the operator's workstation and the install is StabilityMatrix-managed and shared with a working image/video setup: clean tree and tag recorded for rollback first, pip freeze saved, nothing running on 8188 confirmed, then verified after — `main.py --quick-test-for-ci` exits 0 with no `IMPORT FAILED`, **all 16 custom-node packs still import**, 1734 node classes register, and a real server start answers `/system_stats` with `0.38.2` on `cuda:0 NVIDIA GeForce RTX 5060 Ti, 16311 MiB`. Nine packages changed (frontend, workflow-templates, embedded-docs, `comfy-kitchen`, `comfy-aimdo`) and **`torch` was not touched** — unpinned in ComfyUI's requirements at both versions, still 2.13.0+cu130 on `sm_120`, which is 3.0.0's native-route claim ("if your ComfyUI runs, these models run on your current PyTorch") holding up in practice rather than on paper. StabilityMatrix's `settings.json` was updated to match so its UI does not desync from a git-side update. Also newly recorded, read off the running instance rather than guessed: the **eight TRELLIS.2 node classes** 0.38.2 registers, with `Trellis2TextureStage` and `VaeDecodeTextureTrellis` named as the two to omit for the shape-only path — captured to identify what to drop, explicitly not as a verified topology. Remaining before go-live: fetch the model files, export the workflow, then the exit gates. |
 | 3.2.0 | 2026-10-04 | **S19's win_amd64 test gate closed** — the one piece of this stage that was blocked on nothing but the node being reachable. `test_mesh_pipeline.py` passes **10/10** on `Anvil` (win_amd64/cp312), its first run off aarch64, and **all six pins in `requirements-mesh.txt` resolved to the identical versions on both platforms**, so the pin set needs no per-platform split and was deliberately not re-pinned. The venv was built from ComfyUI's own 3.12.11 interpreter because this box has no `py` launcher and its PATH python is 3.13.14 — a small platform gotcha of exactly the kind risk 3 predicted, now recorded in the README's step 4 rather than left to be rediscovered. `test_windows_scripts.ps1` was re-run on the real node too (**10/10**, PowerShell 5.1), replacing a pass measured on a different Windows machine. One item explicitly still open: the post-union PyMeshLab retry loop remains unexercised, since every fixture is synthetic — only a real TRELLIS.2 mesh can reach it, which makes it a thing to watch during exit gate 3 rather than a thing now proven. |
 | 3.3.0 | 2026-10-04 | **S19a install gate 2 cleared: the TRELLIS.2 model set is on `Anvil`** — 10.2 GB, every file header-verified as real safetensors and confirmed visible through ComfyUI's own `/models/<folder>` endpoints rather than assumed from a successful download. Files went into StabilityMatrix's shared model folders, which is what this install resolves through `extra_model_paths.yaml` and survives a package reinstall. Two findings that would each have cost a confusing failure later. **The shipped template's `CLIPVisionLoader` expects `dino_v3_L_naf_fp32.safetensors`, which is in the `Comfy-Org/Pixal3D` repo, not TRELLIS.2's** — the template is a combined Pixal3D/TRELLIS.2 graph sharing one conditioning loader — and it is **not the same artifact** as TRELLIS.2's `dino_v3_vit_l.safetensors` (452 vs 415 tensors), so both are on the node until a real run shows which the shape path wants. The official tutorial's file list names only the first, which is why the discrepancy was worth chasing rather than papering over. **And MoGe plus the Pixal3D transformer are not needed** — established from the template's link graph, where the `LoadMoGeModel` → `MoGeInference` → `MoGeGeometryToFOV` chain feeds only `Pixal3DConditioning` while `Trellis2Conditioning` takes just a `CLIP_VISION` and an `IMAGE` — saving ~6.2 GB and making the real download 10.2 GB rather than 17. Also recorded in the README: the template is `3d_pixal3d_trellis2_image_to_model` (66 nodes), it selects between the two models with a `PrimitiveBoolean` that ships `False`, and its texture half is substantial enough that stripping it is most of step 3's work — the texture-side node list and the traced shape chain are both written down so that work is recognition rather than rediscovery. **With gates 1 and 2 both cleared, every pre-node item except the exported workflow is done**, and that one needs GUI work on the node that cannot be scripted. |
+| 3.4.0 | 2026-10-08 | Added **S20** (planned, not executed): `hermes-model-scout` — a daily model-discovery pipeline comparing newly published models and newly landed llama.cpp architecture support against each Firmament role's real current backend and benchmark history, proposing candidates into a tracked `hermes-memory` backlog (Done / Rejected / Deferred) gated by an explicit human reply, modeled directly on `hermes-self-repair-promote-gate.py`'s existing confirm-gate pattern. Direct request to move `HermesAgentV4`'s ad-hoc, LLM-driven model-watch routine into V5 properly; S20d plans that routine's retirement once this ships. Reuses `hermes-model-scan.py`/`hermes-model-watch.py`'s existing deterministic discovery and `model-benchmark`'s existing harness unchanged — adds the missing role-fit comparison and tracked-decision layer, nothing else. Minor bump — new stage added, nothing prior reversed. |
