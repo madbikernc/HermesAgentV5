@@ -1,4 +1,4 @@
-// Version: 1.2.0
+// Version: 1.3.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -18,6 +18,8 @@
 // Revision History: 1.0.0 | 2026-09-24 | Initial metrics from the 2026-09-23 fleet measurement.
 // 1.1.0 | 2026-09-24 | action_failure_rate (OUTCOME lines) and routine_skips_per_bot_day (ROUTINE_SKIPS).
 // 1.2.0 | 2026-09-25 | failed_eats_per_bot_day and farm_ranch_successes_per_bot_day (farming/ranching fixes).
+// 1.3.0 | 2026-10-07 | access_obstructions_per_bot_day, dig_error_bursts_per_bot_day,
+//   living_spaces_recognised and torch_trail_placements_per_bot_day (access/shelters/tunnelling torches).
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import os from "node:os";
@@ -137,6 +139,35 @@ const METRICS = {
     about: "JS runtime errors and OOMs",
     better: "lower", tolerance: 0.5, floor: 0.5,
     value: (c, ctx) => perBotDay(c(/TypeError|ReferenceError|is not a function|heap out of memory/), ctx),
+  },
+  // 2026-10-07 (access, shelters, tunnelling torches). Two numbers the new rules should push down,
+  // and two that prove the recognition and the trail are running at all -- a fix that silently
+  // does nothing is the failure mode these are here to catch (the home-lighting gate went quiet
+  // for days, twice, before any metric would have shown it).
+  access_obstructions_per_bot_day: {
+    about: "blocks cleared from in front of a chest/bed/door -- should fall as placements stop creating them",
+    better: "lower", tolerance: 0.5, floor: 1,
+    value: (c, ctx) => perBotDay(c(/\] cleared a .* blocking the /), ctx),
+  },
+  dig_error_bursts_per_bot_day: {
+    about: "4+ dig_error resets in 3s, forcing walk-only pathing (§42/§48) -- a route the search kept "
+      + "retrying into a dig that never completes, usually at the crowded base; shell protection "
+      + "should take the wall routes out of the search entirely",
+    better: "lower", tolerance: 0.5, floor: 1,
+    value: (c, ctx) => perBotDay(c(/dig_error burst -- forcing walk-only pathing/), ctx),
+  },
+  living_spaces_recognised: {
+    about: "share of living-space scans that found a real shelter round a bed (0 means the recognition is dead)",
+    better: "higher", tolerance: 0.3, floor: 0.05,
+    value: (c) => {
+      const scans = c(/\] living space: /);
+      return scans ? c(/\] living space: \d+ bed\(s\), [1-9]\d* interior cell/) / scans : null;
+    },
+  },
+  torch_trail_placements_per_bot_day: {
+    about: "torches hung while digging -- 0/day before the trail existed (2026-10-07)",
+    better: "higher", tolerance: 0.5, floor: 0.5,
+    value: (c, ctx) => perBotDay(c(/\] torch trail: lit /), ctx),
   },
 };
 

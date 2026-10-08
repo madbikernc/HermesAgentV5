@@ -1,4 +1,4 @@
-// Version: 1.13.0
+// Version: 1.14.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -32,6 +32,9 @@
 // 1.11.0 | 2026-09-26 | Shelters: build on a site from mixed cobblestone and dirt.
 // 1.12.0 | 2026-09-26 | place_bed with a cow standing on the best spot (the server refuses occupied cells).
 // 1.13.0 | 2026-09-27 | Shelter scenario: a 4x4 shelter from mixed blocks, then a bed placed inside its room.
+// 1.14.0 | 2026-10-07 | Access/shelters/torches: "place" refuses a chest lid, "clear_access" frees a
+//   covered chest and the chest then opens, a bot inside a real shelter leaves by its doorway with
+//   digging ON, and a torch trail down a sealed dark corridor at a measured spacing.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -50,11 +53,13 @@ const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
 process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
 process.env.MC_RAG_DISABLED = "true";
 process.env.MC_BED_CLAIMS_SHARED = "false"; // never write test claims into the fleet's hermes-memory
-const { loadActionPlugins, performAction, checkClaimedBed, loadPenLocation, countInPen, loadClaimedBed, findBedSites } = await import("../actions.js");
+const { loadActionPlugins, performAction, checkClaimedBed, loadPenLocation, countInPen, loadClaimedBed, findBedSites, shelterPositions } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor, installEnchantsFix } = await import("../equipment.js");
 const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
 const { isProtectedBlockName } = await import("../actions.js");
+const { refreshLivingSpace } = await import("../shelter.js");
+const { installTorchTrail, needsTorches, torchCount, TORCH_CARRY_MIN, TORCH_SPACING } = await import("../tunneling.js");
 
 const { pathfinder, Movements, goals } = pathfinderPkg;
 const execFileAsync = promisify(execFile);
@@ -510,6 +515,119 @@ scenario("MB-16 explore: a stocked chest doesn't satisfy scouting for a village"
   assert.equal(result.ok, false, `explore result: ${result.text}`);
   assert.match(result.text, /no sign of a village/);
   assert.equal(logCount(), 0, "nothing withdrawn from the chest");
+});
+
+// Access and shelters (2026-10-07). The offline checks prove the geometry; these prove the server
+// agrees -- that a chest with a block over it really is shut, that a bed's two cells land where
+// findBedSites said, and that a bot given only one walkable way out of a real shelter takes it.
+scenario("Access: \"place\" will not set a furnace down on top of a chest", async () => {
+  restoreFloor();
+  const sides = [[1, 0], [-1, 0], [0, 1]]; // the first three "place" tries; (0,-1) is the fourth
+  await rcon(`give ${TESTER} minecraft:furnace 1`,
+             ...sides.map(([dx, dz]) => `setblock ${x + dx} ${y} ${z + dz} minecraft:chest`));
+  await waitFor(() => held("furnace") >= 1 &&
+    sides.every(([dx, dz]) => bot.blockAt(new Vec3(x + dx, y, z + dz))?.name === "chest"),
+    8000, "a furnace and three chests sunk into the floor");
+  const result = await performAction(bot, { type: "place", item: "furnace" }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  assert.equal(bot.blockAt(new Vec3(x, y + 1, z - 1))?.name, "furnace", "placed over the one side with no chest under it");
+  for (const [dx, dz] of sides) {
+    assert.equal(bot.blockAt(new Vec3(x + dx, y + 1, z + dz))?.name, "air", `nothing on the chest at ${dx},${dz}`);
+  }
+});
+
+scenario("Access: \"clear_access\" digs the block sitting on a chest, and leaves the chest alone", async () => {
+  await placeChest(3, 0, [["bread", 1]]);
+  await rcon(`give ${TESTER} minecraft:diamond_pickaxe`,
+             `setblock ${x + 3} ${y + 2} ${z} minecraft:cobblestone`);
+  await waitFor(() => bot.blockAt(new Vec3(x + 3, y + 2, z))?.name === "cobblestone", 5000, "the chest covered");
+  const result = await performAction(bot, { type: "clear_access" }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  assert.match(result.text, /chest/, result.text);
+  await waitFor(() => bot.blockAt(new Vec3(x + 3, y + 2, z))?.name === "air", 10_000, "the cobblestone gone");
+  assert.equal(bot.blockAt(new Vec3(x + 3, y + 1, z))?.name, "chest", "the chest itself is untouched");
+  // And the chest opens now, which is the whole point.
+  const loot = await performAction(bot, { type: "loot", item: "bread", count: 1 }, TESTER);
+  assert.equal(loot.ok, true, loot.text);
+});
+
+scenario("Shelter walls: with a shelter around her bed, she leaves through the doorway, not the wall", async () => {
+  await rcon(`give ${TESTER} minecraft:cobblestone 50`, `give ${TESTER} minecraft:white_bed`);
+  await waitFor(() => held("cobblestone") >= 50 && held("white_bed") >= 1, 8000, "blocks and a bed");
+  const base = new Vec3(x - 4, y + 1, z - 4);
+  const built = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
+  assert.equal(built.built, true, built.text);
+  const worldSpawn = bot.spawnPoint;
+  bot.spawnPoint = base;
+  scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
+  const bedded = await performAction(bot, { type: "place_bed" }, TESTER);
+  assert.equal(bedded.ok, true, bedded.text);
+
+  // Her real movement setup plus the shell: digging is ON, so a route through a wall is available
+  // to the search and only the shell refusal keeps her out of it.
+  const space = refreshLivingSpace(bot, base);
+  assert(space.inside.size > 0, `the shelter is recognised as a living space: ${JSON.stringify([...space.exits.keys()])}`);
+  const movements = new SwimMovements(bot);
+  movements.canOpenDoors = true;
+  movements.digCost = 15;
+  for (const block of bot.registry.blocksArray) {
+    if (isProtectedBlockName(block.name)) movements.blocksCantBreak.add(block.id);
+  }
+  const previous = bot.pathfinder.movements;
+  bot.pathfinder.setMovements(movements);
+  scenarioCleanup.push(() => bot.pathfinder.setMovements(previous));
+
+  // Counted, not required to be complete: build tolerates up to 20% missing, so the test asserts
+  // that nothing which WAS standing stopped standing.
+  const walls = shelterPositions(base);
+  const standing = walls.filter((p) => bot.blockAt(p)?.boundingBox === "block").length;
+  await rcon(`tp ${TESTER} ${base.x + 1} ${base.y} ${base.z + 1}`); // inside the room
+  await waitFor(() => bot.entity.position.distanceTo(base.offset(1, 0, 1)) < 2, 10_000, "tester inside the shelter");
+  await withTimeoutMs(bot.pathfinder.goto(new goals.GoalBlock(x + 6, y + 1, z + 6)), 45_000,
+    () => bot.pathfinder.setGoal(null));
+  const left = walls.filter((p) => bot.blockAt(p)?.boundingBox === "block").length;
+  assert.equal(left, standing, `every wall block is still standing (${standing} before, ${left} after)`);
+});
+
+scenario("Torches: she makes some from coal, then trails them down a dark tunnel at a real spacing", async () => {
+  // A sealed deepslate corridor inside the arena: the arena's own floor is sea lanterns (light 15),
+  // so the floor goes too, and both ends are capped -- otherwise block.light never reads dark and
+  // there would be nothing for the trail to react to.
+  restoreFloor();
+  const [x0, x1] = [x - 8, x + 8];
+  await rcon(
+    `fill ${x0 - 1} ${y} ${z - 1} ${x1 + 1} ${y + 3} ${z + 1} minecraft:deepslate`,
+    `fill ${x0} ${y + 1} ${z} ${x1} ${y + 2} ${z} minecraft:air`,
+  );
+  scenarioCleanup.push(() => rcon(`fill ${x0 - 1} ${y + 1} ${z - 1} ${x1 + 1} ${y + 3} ${z + 1} minecraft:air`).catch(() => {}));
+
+  await rcon(`give ${TESTER} minecraft:coal 8`, `give ${TESTER} minecraft:oak_planks 8`);
+  await waitFor(() => held("coal") >= 8 && held("oak_planks") >= 8, 8000, "coal and planks");
+  assert.equal(needsTorches(bot), true, `starts short of torches: ${torchCount(bot)}`);
+  const made = await performAction(bot, { type: "craft", item: "torch", count: 4 }, TESTER);
+  assert.equal(made.ok, true, made.text);
+  assert(torchCount(bot) >= TORCH_CARRY_MIN, `carrying ${torchCount(bot)} torches, wanted ${TORCH_CARRY_MIN}`);
+
+  // The trail reacts to a completed dig, so the event is what's driven here -- what the scenario
+  // proves over the offline check is that the server accepts the reference block and face the
+  // trail picks, that a real torch appears there, and that the measured light it creates is what
+  // makes the next few digs skip.
+  const trail = installTorchTrail(bot);
+  scenarioCleanup.push(() => bot.removeAllListeners("diggingCompleted"));
+  const lit = [];
+  for (let step = 0; step <= 16; step += 3) {
+    await rcon(`tp ${TESTER} ${x0 + step} ${y + 1} ${z}`);
+    await waitFor(() => Math.abs(bot.entity.position.x - (x0 + step + 0.5)) < 1.5, 10_000, `tester at step ${step}`);
+    bot.emit("diggingCompleted", bot.blockAt(new Vec3(x0 + step, y, z)));
+    await sleep(800); // the server's light update for a placed torch lands a tick or two later
+    if (trail.last && !lit.some((p) => p.equals(trail.last))) lit.push(trail.last);
+  }
+  assert(lit.length >= 2, `more than one torch down a 17-block tunnel: ${lit.map(String).join(" ")}`);
+  for (let i = 1; i < lit.length; i++) {
+    assert(lit[i].distanceTo(lit[i - 1]) >= TORCH_SPACING - 0.001,
+      `at least ${TORCH_SPACING} blocks apart: ${lit[i - 1]} -> ${lit[i]}`);
+  }
+  for (const at of lit) assert.equal(bot.blockAt(at)?.name, "torch", `a real torch stands at ${at}`);
 });
 
 // ---- runner -------------------------------------------------------------------------------------

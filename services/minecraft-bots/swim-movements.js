@@ -1,4 +1,10 @@
-// Version: 1.4.0
+// Version: 1.5.0
+//
+// 1.5.0 (2026-10-07) -- direct request: "shelters should not be compromised by random digging or
+// by random decisions that don't leverage a door." safeToBreak now refuses any block in a living
+// space's shell (shelter.js), which is the position-based answer three rounds of digCost tuning
+// could not express -- see that file's own header, and MAX_DIG_LABOR_COST below for the tradeoff
+// this finally sidesteps.
 //
 // 1.2.0 (2026-09-25) -- direct report: bots can't get in or out of a building through its doors,
 // "even when the doors are open." Doors and fence gates are now judged by their current state
@@ -38,6 +44,7 @@ import pathfinderPkg from "mineflayer-pathfinder";
 import Move from "mineflayer-pathfinder/lib/move.js";
 import nbt from "prismarine-nbt";
 import { Vec3 } from "vec3";
+import { isLivingSpaceWall } from "./shelter.js";
 
 const { Movements } = pathfinderPkg;
 
@@ -251,6 +258,21 @@ const MAX_DIG_LABOR_COST = 20;
 export class SwimMovements extends Movements {
   getBlock(pos, dx, dy, dz) {
     return applyDoorState(super.getBlock(pos, dx, dy, dz));
+  }
+
+  // Direct request, 2026-10-07: never knock a hole in a shelter. blocksCantBreak answers by block
+  // TYPE, which cannot distinguish the cobblestone in a wall from the identical cobblestone in
+  // the hillside behind it, and digCost answers with a number that has to serve both "go round to
+  // the door" and "you may still leave a room" -- index.js §44/§47/§50 and MAX_DIG_LABOR_COST
+  // above are three failed attempts at exactly that. This answers by POSITION instead, which is
+  // the question actually being asked. The shell is a Set recomputed on a timer (index.js), so
+  // this stays the O(1) lookup a method called thousands of times per search has to be.
+  //
+  // Only the search's own incidental digging is affected: a deliberate "mine"/"clear_access"
+  // never consults this, so a bot that genuinely needs a wall gone still has a way to do it.
+  safeToBreak(block) {
+    if (block?.position && isLivingSpaceWall(this.bot, block.position)) return false;
+    return super.safeToBreak(block);
   }
 
   getMoveDown(node, neighbors) {

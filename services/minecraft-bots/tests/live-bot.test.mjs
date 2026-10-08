@@ -1,4 +1,4 @@
-// Version: 1.1.1
+// Version: 1.1.2
 //
 // Full-bot live tests: runs a REAL bot process (index.js, as "MBProbe") against the bot-sandbox
 // server and drives it the way a player would -- whispers from the MBTester bot, restarts, injected
@@ -27,6 +27,7 @@
 //   after crash-restarts, clean restarts not counted as wedged (stuck state no longer cleared).
 // 1.1.1 | 2026-09-25 | Fight-or-flee: arm the probe first, then summon the mobs beside it and damage it
 //   in one RCON call (it used to flee unarmed out of range before the hit).
+// 1.1.2 | 2026-10-07 | The access sweep and torch top-up are pushed out of this suite's way.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import http from "node:http";
@@ -105,7 +106,11 @@ function startProbe(memoryRoot, env = {}) {
       MC_TEST_USERNAMES: "", MC_MEMORY_ROOT: memoryRoot, MC_RAG_DISABLED: "true",
       BUZZ_URL: FAKE_URL, BUZZ_TOKEN: "test", MEMORY_URL: FAKE_URL, MEMORY_TOKEN: "test",
       MC_SELF_PROPOSE_GOALS: "false", MC_GOAL_TICK_MS: "8000", MC_DUSK_START_TICK: "24000",
-      MC_DUSK_CHECK_MS: "5000", MC_HOME_POS: HOME.join(","), ...env,
+      MC_DUSK_CHECK_MS: "5000", MC_HOME_POS: HOME.join(","),
+      // Pushed out of this suite's way (2026-10-07): neither routine is what these scenarios test,
+      // and a torch top-up or an access sweep taking the arbiter mid-whisper is pure flakiness.
+      // Their own coverage is in live.test.mjs and unit.test.mjs.
+      MC_ACCESS_CHECK_MS: "3600000", MC_TORCH_SUPPLY_CHECK_MS: "3600000", ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

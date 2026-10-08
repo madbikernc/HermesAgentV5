@@ -1,4 +1,12 @@
-// Version: 2.104.0
+// Version: 2.105.0
+//
+// 2.105.0 (2026-10-07, direct request: access, shelters and tunnelling torches) -- a living
+// space's walls are recognised on a timer (shelter.js's roofed flood fill from every bed in
+// sight) and SwimMovements refuses to dig one, which is the position-based answer three rounds of
+// digCost tuning could not express. New checkAccessObstructions clears a block that impedes a
+// chest, bed or door; pathfinder's own scaffolding placements are excluded from creating one
+// (exclusionAreasPlace). New installTorchTrail hangs a torch every 6 blocks while digging, and
+// checkTorchSupply keeps TORCH_CARRY_MIN of them on hand.
 //
 // 2.104.0 (2026-09-27) -- a shelter counts only if its 2x2 room fits a bed (actions.js 1.79.0's
 // shape; a bed already in it still counts). A bot also makes itself a bed when beds exist but none
@@ -1444,6 +1452,8 @@ import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements, installDoorSupport } from "./swim-movements.js";
+import { refreshLivingSpace, findAccessObstructions, wouldBlockAccess, ACCESS_SCAN_RADIUS } from "./shelter.js";
+import { installTorchTrail, needsTorches, torchCount, TORCH_CARRY_MIN } from "./tunneling.js";
 import { findSkill, runSkill, recordSkillOutcome, authorSkillFromGoal } from "./skills.js";
 import { ROLES, BOT_ROLES } from "./roles.js";
 import { Vec3 } from "vec3";
@@ -1764,8 +1774,31 @@ bot.once("spawn", async () => {
       movements.blocksCantBreak.add(block.id);
     }
   }
+  // Direct request, 2026-10-07 ("never place a block that will impede access to a chest or bed or
+  // door"). The actions.js placement sites are the deliberate half; this is the incidental one --
+  // pathfinder's own scaffolding mechanic places a block to bridge a gap or pillar up, chosen by
+  // the search with no idea what sits next to it, and it has already been caught consuming
+  // inventory mid-travel (see §"a real one observed live" above). exclusionAreasPlace is
+  // mineflayer-pathfinder's own documented hook for exactly this: a function per candidate
+  // placement returning a cost, where >= 100 excludes it outright. Guarded rather than assumed --
+  // this process must not fail to spawn over a vendor property that moved, and a missing hook
+  // leaves only the scaffolding path uncovered, not any of the deliberate ones.
+  if (Array.isArray(movements.exclusionAreasPlace)) {
+    movements.exclusionAreasPlace.push((block) => (block?.position && wouldBlockAccess(bot, block.position) ? 100 : 0));
+  } else {
+    console.log(`[${USERNAME}] pathfinder has no exclusionAreasPlace -- scaffolding placements are unguarded`);
+  }
   bot.pathfinder.setMovements(movements);
   installDoorSupport(bot); // swim-movements.js: doorway waypoints, never shut an open door
+  installTorchTrail(bot); // tunneling.js: a torch every TORCH_SPACING blocks while digging
+  // The shell SwimMovements.safeToBreak() reads has to exist before the first path search, not
+  // only after the first timer tick (LIVING_SPACE_REFRESH_MS below) -- a bot spawns inside the
+  // shared base and starts pathing immediately.
+  try {
+    refreshLivingSpace(bot, bot.spawnPoint);
+  } catch (err) {
+    console.error(`[${USERNAME}] initial living-space scan failed:`, err.message);
+  }
   installEnchantsFix(bot); // equipment.js: digging while holding enchanted gear threw
   // Real bug found live 2026-09-11 (direct report: "what's wrong with the bots now" -> repeated
   // "self-defense result: gave up on the fight -- took too long" against drowned specifically).
@@ -5758,6 +5791,115 @@ async function lightHomeOnce() {
 setInterval(() => {
   checkHomeLighting().catch((err) => console.error(`[${USERNAME}] checkHomeLighting error:`, err.message));
 }, HOME_LIGHTING_CHECK_MS);
+
+// Direct request, 2026-10-07 ("recognize walls around living spaces (defined as places where beds
+// are maintained)"). shelter.js does the recognising; this decides how often. Deliberately a
+// timer and not a per-query answer: SwimMovements.safeToBreak() consults the result thousands of
+// times per path search, so it has to already be a Set by then (see shelter.js's own note). The
+// scan is a bounded flood fill (SHELL_MAX_CELLS) from every bed in sight plus spawn, so its cost
+// does not grow with how long the fleet has been building. Synchronous on purpose -- there is no
+// await in it, and a half-updated shell read by a path search in between would be worse than a
+// slightly stale one.
+// The scan reruns every 30s but is only reported when the answer changed, or every ten minutes
+// regardless -- nine bots logging an unchanged shell every half minute is 26k journal lines a day
+// for no information. The periodic line is what keeps the baseline's living_spaces_recognised
+// ratio honest: a bot that finds nothing still says so, so "0 interior cells" is visible rather
+// than silent, which is how this fleet's lighting gate stayed broken for days.
+const LIVING_SPACE_REFRESH_MS = parseInt(process.env.MC_LIVING_SPACE_REFRESH_MS || "30000", 10);
+const LIVING_SPACE_REPORT_MS = 10 * 60_000;
+let lastLivingSpaceReport = "";
+let lastLivingSpaceReportAt = 0;
+
+setInterval(() => {
+  if (!bot.entity) return;
+  try {
+    const space = refreshLivingSpace(bot, bot.spawnPoint);
+    const summary = `${space.anchors.length} bed(s), ${space.inside.size} interior cell(s), ` +
+      `${space.cells.size} wall block(s) protected, ${space.exits.size} way(s) out`;
+    if (summary === lastLivingSpaceReport && Date.now() - lastLivingSpaceReportAt < LIVING_SPACE_REPORT_MS) return;
+    lastLivingSpaceReport = summary;
+    lastLivingSpaceReportAt = Date.now();
+    console.log(`[${USERNAME}] living space: ${summary}`);
+  } catch (err) {
+    console.error(`[${USERNAME}] living-space scan failed:`, err.message);
+  }
+}, LIVING_SPACE_REFRESH_MS);
+
+// Direct request, 2026-10-07 ("allow them to destroy a block that impedes access to a bed or
+// chest or door"). The refusals in actions.js keep a bot from creating the condition; nothing
+// undoes one that already exists, and the fleet's base has had chests pre-stocked by hand
+// (tools/minecraft-chests/) and pits filled by repair_terrain for weeks before this rule landed.
+// Same shape as checkTerrainDamage below: a cheap local scan first so a clean base never acquires
+// the arbiter, then the real verb with what the scan already found.
+const ACCESS_CHECK_MS = parseInt(process.env.MC_ACCESS_CHECK_MS || "90000", 10);
+
+async function checkAccessObstructions() {
+  if (!AUTONOMY_ENABLED || routineBlocked("checkAccessObstructions") || bot.isSleeping || !bot.entity) return;
+  const blocked = findAccessObstructions(bot, bot.entity.position, ACCESS_SCAN_RADIUS,
+                                          (name) => !isProtectedBlockName(name));
+  if (!blocked.length) return;
+
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
+  try {
+    const result = await performAction(bot, { type: "clear_access", targets: blocked }, USERNAME, handle);
+    console.log(`[${USERNAME}] access check: ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] access check failed:`, err.message);
+  } finally {
+    handle.release();
+  }
+}
+
+setInterval(() => {
+  checkAccessObstructions().catch((err) => console.error(`[${USERNAME}] checkAccessObstructions error:`, err.message));
+}, ACCESS_CHECK_MS);
+
+// Direct request, 2026-10-07 ("carry torches when tunneling"). tunneling.js places the trail; this
+// is what keeps there being something to place. Crafting is tried before a chest, which is the
+// reverse of checkHomeLighting's order and deliberately so: that check runs at a dark base where
+// a chest is a few steps away, this one has to work with a bot already underground, where a trip
+// back up costs the whole point of carrying torches in the first place. Coal and a wood source
+// are both common in a miner's inventory, and craft's own auto-chain turns a log into the stick
+// (the 2026-09-21 root cause: this gate used to demand an already-made stick, which nothing
+// keeps). A long backoff on failure, because checkHomeLighting's own history is a string of
+// incidents caused by nine bots retrying the same impossible torch attempt every 90 seconds.
+const TORCH_SUPPLY_CHECK_MS = parseInt(process.env.MC_TORCH_SUPPLY_CHECK_MS || "120000", 10);
+const TORCH_SUPPLY_BACKOFF_MS = 10 * 60_000;
+let torchSupplyBlockedUntil = 0;
+
+async function checkTorchSupply() {
+  if (!AUTONOMY_ENABLED || routineBlocked("checkTorchSupply") || bot.isSleeping || !bot.entity) return;
+  if (Date.now() < torchSupplyBlockedUntil || !needsTorches(bot)) return;
+
+  const fuel = bot.inventory.items().some((i) => i.name === "coal" || i.name === "charcoal");
+  const wood = bot.inventory.items().some((i) => i.name === "stick" || i.name.endsWith("_planks") ||
+    i.name.endsWith("_log") || i.name.endsWith("_stem"));
+
+  // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
+  try {
+    const action = fuel && wood ? { type: "craft", item: "torch", count: 4 }
+      : { type: "loot", item: "torch", count: TORCH_CARRY_MIN };
+    const result = await performAction(bot, action, USERNAME, handle);
+    console.log(`[${USERNAME}] torch supply: ${action.type} -- ${result.text} ` +
+      `(ok=${result.ok}, carrying ${torchCount(bot)}/${TORCH_CARRY_MIN})`);
+    if (!result.ok && !result.cancelled) {
+      torchSupplyBlockedUntil = Date.now() + TORCH_SUPPLY_BACKOFF_MS;
+      console.log(`[${USERNAME}] torch supply: nothing worked -- waiting ${TORCH_SUPPLY_BACKOFF_MS}ms before trying again.`);
+    }
+  } catch (err) {
+    console.error(`[${USERNAME}] torch supply check failed:`, err.message);
+  } finally {
+    handle.release();
+  }
+}
+
+setInterval(() => {
+  checkTorchSupply().catch((err) => console.error(`[${USERNAME}] checkTorchSupply error:`, err.message));
+}, TORCH_SUPPLY_CHECK_MS);
 
 // §15.10: Builder/Artist terrain-repair duty. Deliberately scoped tight (design doc's own [RISK]
 // note on false positives -- filling in an intentional feature like a mine entrance or a

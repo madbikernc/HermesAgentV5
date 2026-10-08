@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 4.0.0
+**Version:** 4.1.0
 
 Mineflayer bot runtime for the Firmament's nine Minecraft bots. **What the bots do and why lives
 in `../../MINECRAFT_BOTS_DESIGN.md`** — this file covers only how to run and configure the
@@ -53,7 +53,9 @@ Everything has a working default; a unit file only sets what it overrides.
 | `MC_EXTENDED_SEARCH_DISTANCE` | `150` | Wander beacon scan (260 on Wade); hop-capped, so safe to raise |
 | `MC_GOAL_TICK_MS` / `MC_IDLE_SELF_GOAL_MS` | `45000` / `600000` | Goal step cadence; idle before self-proposing |
 | `MC_MAYOR_DIRECTIVE_MS` | `300000` | Mayor's assignment cadence |
-| `MC_*_CHECK_MS` | see `index.js` | Per-check intervals: sleep, dusk, hunger, inventory, give, sapling, lighting, home lighting, terrain repair, stuck, self-defense, sleeping-threat |
+| `MC_*_CHECK_MS` | see `index.js` | Per-check intervals: sleep, dusk, hunger, inventory, give, sapling, lighting, home lighting, terrain repair, access, torch supply, stuck, self-defense, sleeping-threat |
+| `MC_LIVING_SPACE_REFRESH_MS` | `30000` | How often the shelter-wall scan reruns. The result is what `safeToBreak` reads, so a longer interval means a staler shell |
+| `MC_TORCH_SPACING` / `MC_TORCH_CARRY_MIN` | `6` / `8` | Blocks between trail torches while digging; how many she tops up to |
 | `MC_MAX_STUCK_NUDGES` / `MC_RESTART_STUCK_*` | `2` / `3`, `2` | Stuck detection before teleport self-rescue |
 | `MEMORY_URL` / `BUZZ_URL` / `MATRIX_*` | spark | Service endpoints; tokens come from `run-bot.sh` |
 | `HERMES_ROUTER_URL` | `127.0.0.1:8080` | Localhost only — the router proxies to whichever node serves a role |
@@ -70,7 +72,9 @@ Everything has a working default; a unit file only sets what it overrides.
 | `skills.js` | Skill library: author, validate, retrieve, replay |
 | `longterm.js` | Per-bot RAG memory and shared world-memory notes |
 | `equipment.js` | `hasWeapon()`, best armor/weapon selection, gear tiers |
-| `swim-movements.js` | `Movements` subclass: water handling, `MAX_DIG_LABOR_COST` cap |
+| `swim-movements.js` | `Movements` subclass: water handling, `MAX_DIG_LABOR_COST` cap, doors, the shelter-wall dig refusal |
+| `shelter.js` | Access cells for chests/beds/doors, and the flood fill that recognises a living space's walls |
+| `tunneling.js` | Torch supply and the trail placed while digging |
 | `persona.js` | Prepends `agents/minecraft-common.md` to the bot's own `PROMPT.md` |
 | `memory.js`, `buzz.js`, `matrix.js`, `router.js` | Thin service clients |
 
@@ -79,6 +83,10 @@ Everything has a working default; a unit file only sets what it overrides.
 - **Adding an action verb means three places**: the `actions.js` switch, `classifyIntent`'s
   vocabulary, and `planNextStep`/`parseGoalStep`'s vocabulary — plus `SKILL_ACTION_VERBS` unless
   its arguments can't be replayed.
+- **Every block placement asks `wouldBlockAccess` first** (`shelter.js`). A new placement site that
+  doesn't is a new way to wall in a chest, a bed, a door, or a shelter's only doorway.
+- **The shelter shell is a cached `Set`, refreshed on a timer.** `safeToBreak` is called thousands
+  of times per path search, so it can only ever be a lookup — never recompute the fill there.
 - **Any mineflayer plugin holding its own `Movements`** (`collectBlock`, `pvp`) must be pointed at
   the shared instance at spawn, or every cost tuning is silently undone for that plugin's calls.
 - **Persona text reaches eight prompt sites**, not just chat — changing `PROMPT.md` or

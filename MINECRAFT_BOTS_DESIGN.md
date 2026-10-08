@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.14.0
+**Version:** 2.15.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -311,10 +311,10 @@ process start if he was never seen), every bot accepts directives from the fallb
 
 ## 9. Action verbs
 
-`attack`, `breed`, `build`, `build_pen`, `craft`, `eat`, `enchant`, `explore`, `fish`, `flee`,
-`follow`, `give`, `gohome`, `goto`, `harvest`, `harvest_hive`, `herd_to_pen`, `light_area`,
-`loot`, `milk`, `mine`, `place`, `place_home`, `plant_sapling`, `recover`, `repair_terrain`, `shear`,
-`sleep`, `smelt`, `stop`, `store`, `trade`. `explore <feature>` (village, bee_nest, mineshaft,
+`attack`, `breed`, `build`, `build_pen`, `clear_access`, `craft`, `eat`, `enchant`, `explore`,
+`fish`, `flee`, `follow`, `give`, `gohome`, `goto`, `harvest`, `harvest_hive`, `herd_to_pen`,
+`light_area`, `loot`, `milk`, `mine`, `place`, `place_home`, `plant_sapling`, `recover`,
+`repair_terrain`, `shear`, `sleep`, `smelt`, `stop`, `store`, `trade`. `explore <feature>` (village, bee_nest, mineshaft,
 stronghold) scouts and succeeds only on a real find; plain `explore` gathers and no longer counts a
 chest withdrawal as exploring.
 
@@ -334,6 +334,18 @@ Behaviour worth knowing before touching a caller:
   (`GEAR_TIER_RANK`). The refusal is a real reported failure with a reason, not a silent no-op.
 - `smelt` collects stranded output before adding input, and treats a full fuel slot as "already
   fuelled," not as an error.
+- **Every verb that places a block asks `wouldBlockAccess` (`shelter.js`) first** — `place`,
+  `place_bed`, `build`, `build_pen`, `repair_terrain`, and pathfinder's own scaffolding via
+  `exclusionAreasPlace`. `place` takes another side, `build`/`build_pen` leave the cell open,
+  `repair_terrain` stops the column, `place_bed` takes the next spot. A new placement site that
+  skips the check is a new way to wall in a chest, a bed, a door, or a shelter's only doorway.
+- `clear_access` is the inverse: it digs out a block already sitting in an access cell. It never
+  breaks a fixture to reach another one, never breaches a living space's wall for a chest (walk in
+  the door), and leaves a door sealed on both sides alone — that one was built into solid ground.
+  Like `light_area`, it is routine-driven (`checkAccessObstructions`, every 90s) and deliberately
+  **not** in `classifyIntent`'s or `planNextStep`'s vocabulary: a planner has no way to know a
+  chest is covered, and the sweep is cheap enough to just run. It is in `SKILL_ACTION_VERBS`,
+  because bare it scans for itself and so replays fine.
 
 ## 10. Operations
 
@@ -398,6 +410,7 @@ the original incident number, still cited throughout the code. Narrative is in g
 | `entityCost` 8 — with 7–9 bots in one shelter, nearly every route touches an occupied square | 53 |
 | 4+ `dig_error` resets in 3s → global `canDig=false` for 15s. The library discards the real dig error and recomputes the identical failing path forever | 42, 48 |
 | `flee` disables digging for its own pathfind, or a cornered bot digs instead of escaping | 42 |
+| A living space's walls are refused **by position**, in `SwimMovements.safeToBreak` — not by block type (`blocksCantBreak` cannot tell a wall's cobblestone from the hillside's) and not by cost. `digCost` was tuned three times and cannot serve both "go round to the door" and "you may still leave a room" at once; this takes the wall routes out of the search instead and leaves `digCost` to the job it is good at. The shell is a flood fill of the roofed air reachable from each bed in sight, recomputed on a timer and read as a `Set`; a bed under open sky has no interior, so bare terrain is never protected. Only incidental pathfinder digging is affected — a deliberate `mine`/`clear_access` still works, and `mine` filters shelter-wall targets out of its own search | 44, 47, 50, 2026-10-07 |
 | On this server version prismarine-item returns enchantments as the raw data component, and mineflayer's dig timing calls `.concat()` on it: every dig while holding enchanted gear failed. `installEnchantsFix` (equipment.js) normalizes it at spawn; the live harvest scenario holds an enchanted sword | 2026-09-25 |
 | Doors and fence gates are judged by their current state (`applyDoorState` in `swim-movements.js`): pathfinder 2.4.5 reads every door/gate as a solid wall from its block type, never opens doors, and treats an open gate as solid. Its path clean-up also lifts a doorway waypoint onto the door (or a closed gate), so `installDoorSupport` puts it back on the floor and never re-toggles an already-open door while pathfinding. Closed doors and gates are opened by `installDoorOpener` just ahead of the bot, never by pathfinder's own "use this block" step: its executor stays in block-placing mode afterwards and crashes the process when the bot carries any placeable block (Babs, three restarts, 2026-09-25). Before this (2026-09-25), bots could not pass any door, open or closed | 2026-09-25 |
 | Bots close doors and gates behind themselves once clear of them (`installDoorCloser`), without turning their head (a mid-walk look steers pathfinder backwards). Not while another player is at the doorway, and not during `herd_to_pen`, which leads an animal through the pen gate and closes it itself | 2026-09-25 |
@@ -417,6 +430,7 @@ the original incident number, still cited throughout the code. Narrative is in g
 | A cancelled action is never a success, and a stale handle never acts — recovery retries, goal counters and skills all depend on it | MB-02, MB-04 |
 | `nearestHostile()` tracks one threat. Swarms are not solvable by per-bot reactive tuning — fix the spawn cause (lighting, gamerules) | 54 |
 | `checkHomeLighting()` has failed live three times, each from a different silent gate. It now loots torches from a chest first, then crafts from *any* wood source, and logs when it genuinely can't | 17, 32, 38, 54 |
+| Tunnels are lit by a trail (`tunneling.js`), hung off `diggingCompleted` — the one moment in a mining trip a bot is reliably between digs, and the reason `checkLighting`'s idle-tick reflex never fired during the activity that creates unlit space. `TORCH_SPACING` 6 is derived, not guessed: a torch is light 14 and falls off 1/block, so the midpoint of two torches 6 apart reads exactly `DARK_LIGHT_LEVEL`. Placement is gated on the measured `block.light`, so a tunnel that breaks into a lit cave costs nothing. `checkTorchSupply` crafts from carried coal before trying a chest — the reverse of `checkHomeLighting`, because a bot already underground cannot afford the trip | 2026-10-07 |
 
 **Server-side, not code**
 

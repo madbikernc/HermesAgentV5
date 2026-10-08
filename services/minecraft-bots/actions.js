@@ -1,4 +1,11 @@
-// Version: 1.80.0
+// Version: 1.81.0
+//
+// 1.81.0 (2026-10-07, direct request: access and shelters) -- a placement is refused when it
+// would impede access to a chest, bed or door, or seal a shelter's doorway: "place",
+// "place_bed", "build", "build_pen" and "repair_terrain" all ask shelter.js's wouldBlockAccess
+// first. New "clear_access" verb destroys a block that already impedes one. "mine" skips a target
+// that is part of a living space's wall. bedHalves/chestHalves moved to shelter.js, which owns
+// the geometry all of the above share.
 //
 // 1.80.0 (2026-10-07, found investigating a fleet-health Critical from spark-2's
 // store_failure_rate regressing to 1.0): logged the one silent candidate-skip left in the
@@ -974,6 +981,8 @@ import { cancelAndRotate, isBusy, holdsControl, releaseControl } from "./arbiter
 import { searchMemory } from "./longterm.js";
 import { listState, setState } from "./memory.js";
 import { holdDoorsOpen } from "./swim-movements.js";
+import { bedHalves, chestHalves, wouldBlockAccess, findAccessObstructions, isLivingSpaceWall,
+         ACCESS_SCAN_RADIUS } from "./shelter.js";
 
 const { goals } = pathfinderPkg;
 
@@ -1192,7 +1201,7 @@ export const SKILL_ACTION_VERBS = new Set([
   "stop", "goto", "follow", "mine", "craft", "loot", "attack", "flee", "eat", "fish", "give",
   "sleep", "smelt", "place", "build", "store", "trade", "harvest", "breed", "enchant", "explore",
   "plant_sapling", "light_area", "harvest_hive", "shear", "milk", "build_pen", "herd_to_pen", "gohome",
-  "get_wool", "place_bed",
+  "get_wool", "place_bed", "clear_access",
 ]);
 
 // minecraft-data has no dedicated smelting-recipe file (confirmed: no equivalent of recipes.json
@@ -1809,22 +1818,14 @@ async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
 // Extracted from "loot" (2026-09-06's own real find, see 1.5.0's history) so "store" (2026-09-07,
 // "do all" -> base/chest storage) can reuse the exact same check instead of a second copy
 // drifting out of sync. Any solid block directly above EITHER half of a double chest blocks the
-// whole thing in vanilla -- scanning cardinal neighbors for the matching paired half (rather than
-// trusting a memorized left/right-to-offset convention) is more robust than computing it from
-// facing+type directly.
+// whole thing in vanilla.
+//
+// 2026-10-07: the half-finding half of this moved to shelter.js as chestHalves() -- the new
+// "never place a block that impedes access to a chest" rule needs the same two positions to
+// decide whether a placement would CREATE this condition, and two copies of a double-chest
+// pairing convention drifting apart is exactly what extracting this helper avoided the first time.
 function chestObstructed(bot, chestBlock) {
-  const halves = [chestBlock];
-  if (chestBlock.getProperties?.().type !== undefined) {
-    const facing = chestBlock.getProperties().facing;
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const neighbor = bot.blockAt(chestBlock.position.offset(dx, 0, dz));
-      if (neighbor?.name === chestBlock.name && neighbor.getProperties?.().facing === facing) {
-        halves.push(neighbor);
-        break;
-      }
-    }
-  }
-  return halves.some((half) => bot.blockAt(half.position.offset(0, 1, 0))?.boundingBox === "block");
+  return chestHalves(bot, chestBlock).some((half) => bot.blockAt(half.offset(0, 1, 0))?.boundingBox === "block");
 }
 
 // Direct request, 2026-09-08 ("the duplicate crafting check should be for all resources as well
@@ -2665,14 +2666,11 @@ async function clearClaimedBed(bot) {
 // unclaimed bed." A bed is two blocks and a claim may name either half (sleep saved whichever
 // block findBlocks returned), so claims are compared against both halves. Vanilla places the head
 // one block along `facing` from the foot.
-const BED_FACING_STEP = { north: [0, -1], south: [0, 1], west: [-1, 0], east: [1, 0] };
-function bedHalves(block) {
-  const props = block.getProperties?.() || {};
-  const [dx, dz] = BED_FACING_STEP[props.facing] || [0, 0];
-  if (!dx && !dz) return [block.position];
-  const head = props.part === "foot" ? block.position.offset(dx, 0, dz) : block.position;
-  return [head, head.offset(-dx, 0, -dz)];
-}
+//
+// 2026-10-07: bedHalves() and its facing table moved to shelter.js (as FACING_STEP, shared with
+// doors and fence gates, which carry the same property) and are imported at the top of this file.
+// The living-space shell and the bed access rules both need a bed's real extent, and this is the
+// same one-definition move chestHalves() just made for chests.
 
 // Every OTHER bot's claim, { username, position }.
 async function loadOtherBedClaims(bot) {
@@ -2872,6 +2870,21 @@ async function performActionAs(bot, action, speaker, token) {
       }
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
       if (!positions.length) return fail(`couldn't find any ${action.block} nearby, even after looking around.`);
+      // Direct request, 2026-10-07 ("recognize walls around living spaces... do not knock holes
+      // in them"): "mine cobblestone 16" standing in the shared base is a perfectly reasonable
+      // step whose nearest 16 matches are the shelter's own walls. Filtered rather than refused
+      // -- the same cobblestone a few blocks further out is a fine answer, and refusing the whole
+      // action would turn a solvable goal step into a dead end. shelter.js's shell is deliberately
+      // not consulted for a DELIBERATE target the way pathfinder's own digging is; this is the one
+      // place a bot picks its own target by name, with no idea what it's pointing at.
+      const inWall = positions.filter((pos) => isLivingSpaceWall(bot, pos)).length;
+      if (inWall) {
+        positions = positions.filter((pos) => !isLivingSpaceWall(bot, pos));
+        console.log(`[${bot.username}] mine: skipped ${inWall} ${action.block} in a shelter wall`);
+        if (!positions.length) {
+          return fail(`the only ${action.block} nearby is part of a shelter wall -- not digging that out.`);
+        }
+      }
       positions = filterAwayFromOtherBots(bot, positions).slice(0, wantCount);
       const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
       // Report what she actually found/collected, not just the name she was originally given --
@@ -3804,17 +3817,31 @@ async function performActionAs(bot, action, speaker, token) {
       // A cardinal-adjacent spot with solid ground and clear air above it -- simpler and more
       // robust than assuming the block directly below her own feet works, since that's
       // literally where she's standing.
+      //
+      // Direct request, 2026-10-07 ("never drop or place a block that will impede access to a
+      // chest or bed or door"): four candidate spots were already being tried in order, so the
+      // access check costs nothing but a skip -- a furnace set down in front of the shelter door
+      // picks the next side instead. Only the LAST spot being blocked is a real refusal, and it
+      // says which fixture it would have shut in rather than "no clear spot nearby" (which was
+      // already this action's only failure message and would have been a lie here).
       const feet = bot.entity.position.floored();
       let referenceBlock = null;
+      let wouldShutIn = null;
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
         const ground = bot.blockAt(feet.offset(dx, -1, dz));
         const space = bot.blockAt(feet.offset(dx, 0, dz));
-        if (ground?.boundingBox === "block" && space && space.boundingBox !== "block") {
-          referenceBlock = ground;
-          break;
-        }
+        if (!(ground?.boundingBox === "block" && space && space.boundingBox !== "block")) continue;
+        const shuts = wouldBlockAccess(bot, feet.offset(dx, 0, dz), action.item);
+        if (shuts) { wouldShutIn = wouldShutIn || shuts; continue; }
+        referenceBlock = ground;
+        break;
       }
-      if (!referenceBlock) return fail("no clear spot nearby to place it.");
+      if (!referenceBlock) {
+        return fail(wouldShutIn
+          ? `nowhere to put the ${action.item} that wouldn't block ${wouldShutIn.reason} ` +
+            `the ${wouldShutIn.fixture} at ${wouldShutIn.at}.`
+          : "no clear spot nearby to place it.");
+      }
 
       try {
         await bot.placeBlock(referenceBlock, new Vec3(0, 1, 0));
@@ -3907,6 +3934,78 @@ async function performActionAs(bot, action, speaker, token) {
       return ok(`lit up ${placed} dark spot(s)${token.cancelled ? ", stopped early" : ""}.`);
     }
 
+    case "clear_access": {
+      // Direct request, 2026-10-07: "allow them to destroy a block that impedes access to a bed
+      // or chest or door." The companion to the refusals above -- those stop a bot creating the
+      // condition, this one undoes it, whether a bot caused it (a pre-fix placement, a filled pit,
+      // a dropped sand column) or the world did (gravel falling into a doorway, a creeper's
+      // crater refilled by a landslide).
+      //
+      // Which cells count, which fixtures are off-limits to dig, and the two restraints on a
+      // doorway built into solid ground all live in shelter.js's findAccessObstructions -- the
+      // same geometry the placement refusals use, read the other way round. action.targets is the
+      // caller's already-scanned list (index.js's checkAccessObstructions, matching
+      // repair_terrain's own shape); bare, it scans for itself, which is what makes it a usable
+      // SKILL_ACTION_VERB where repair_terrain isn't.
+      const CLEAR_ACCESS_BATCH_LIMIT = 6;
+      const targets = (action.targets?.length
+        ? action.targets.map((t) => ({ ...t, position: new Vec3(t.position.x, t.position.y, t.position.z) }))
+        : findAccessObstructions(bot, bot.entity.position, action.radius || ACCESS_SCAN_RADIUS,
+                                 (name) => !isProtectedBlockName(name)))
+        .slice(0, CLEAR_ACCESS_BATCH_LIMIT);
+      if (!targets.length) return ok("nothing's blocking a chest, bed or door around here.");
+
+      let cleared = 0;
+      const stillThere = [];
+      for (const target of targets) {
+        if (token.cancelled) break;
+        // Re-check: another bot may have cleared this one since the scan, and a stale target from
+        // action.targets may describe a block that's already gone.
+        const block = bot.blockAt(target.position);
+        if (!block || block.boundingBox !== "block" || isProtectedBlockName(block.name)) continue;
+
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 3)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        } catch {
+          if (token.cancelled) break;
+          stillThere.push(`${block.name} at ${target.position}`);
+          continue; // couldn't get to this one -- try the next
+        } finally {
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+        }
+        if (token.cancelled) break;
+
+        try {
+          // collectBlock, not bot.dig: the block comes back into inventory instead of being left
+          // on the floor to despawn, and it equips the right tool itself -- the same reasoning
+          // "mine" already relies on. withTimeout/stopDigging per this file's own 2026-09-08 note
+          // on untimed digs.
+          await withTimeout(bot.collectBlock.collect(block, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
+                            () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
+          cleared++;
+          console.log(`[${bot.username}] cleared a ${block.name} at ${target.position} blocking the ${target.fixture}`);
+        } catch (err) {
+          if (token.cancelled) break;
+          stillThere.push(`${block.name} at ${target.position} (${err.message})`);
+        }
+      }
+      if (!token.cancelled) await refreshGear(bot);
+
+      if (token.cancelled) return ok(`stopped clearing access (${cleared} cleared).`);
+      // Nothing cleared and nothing left in the way means another bot got there first -- nine bots
+      // scan the same shared base, so this is the common case, not a failure. Reporting it as one
+      // would put a steady stream of phantom failures into action_failure_rate.
+      if (!cleared) {
+        return stillThere.length
+          ? fail(`couldn't clear what's blocking access: ${stillThere.join("; ")}.`)
+          : ok("whatever was blocking a chest, bed or door is already gone.");
+      }
+      const fixtures = [...new Set(targets.map((t) => t.fixture))].join(", ");
+      return ok(`cleared ${cleared} block(s) blocking access to ${fixtures}` +
+        (stillThere.length ? `, ${stillThere.length} still in the way` : "") + ".");
+    }
+
     case "build": {
       // A small fixed shelter (3x3, walls three high with a doorway, a roof). Rebuilt 2026-09-26:
       // any mix of plain building blocks (isShelterMaterial), only the blocks not already solid
@@ -3934,10 +4033,21 @@ async function performActionAs(bot, action, speaker, token) {
       bot.pathfinder.setMovements(buildMovements);
 
       let placed = 0;
+      let shutIn = 0; // declared out here: the try block below is a real scope, and the result text reads it
       try {
       for (const pos of buildOrder) {
         if (token.cancelled) break;
         if (bot.blockAt(pos)?.boundingBox === "block") continue; // terrain already solid here
+        // 2026-10-07: a shelter site is only checked for fixtures INSIDE its own 4x4 footprint
+        // (findShelterSite's own clear() test); a chest or door just outside it can still fall in
+        // a wall's access cell. A gap in the wall beats a chest nobody can open, and the 80%
+        // completion bar below already tolerates a few missing blocks.
+        const shuts = wouldBlockAccess(bot, pos);
+        if (shuts) {
+          shutIn++;
+          console.log(`build: left ${pos} open -- a wall there would block ${shuts.reason} the ${shuts.fixture}`);
+          continue;
+        }
 
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 4)),
@@ -3976,12 +4086,17 @@ async function performActionAs(bot, action, speaker, token) {
       }
       await refreshGear(bot);
 
-      if (token.cancelled) return ok(`stopped building (${placed} placed, ${missing()} still missing).`);
+      // A cell left open on purpose still counts as missing against the 80% bar, and against
+      // index.js's own hasShelterNearHome() -- the two must not disagree about whether a shelter
+      // stands. It's named in the result instead, so a site that keeps coming out partial for
+      // this reason is visible rather than a mystery.
+      const openedFor = shutIn ? ` (${shutIn} left open so a neighbouring fixture stays reachable)` : "";
+      if (token.cancelled) return ok(`stopped building (${placed} placed, ${missing()} still missing)${openedFor}.`);
       const left = missing();
-      if (!placed && left) return fail(`couldn't place any of the shelter (${left} blocks still missing).`);
+      if (!placed && left) return fail(`couldn't place any of the shelter (${left} blocks still missing)${openedFor}.`);
       const built = left <= Math.floor(buildOrder.length * 0.2); // the same 80% index.js's check accepts
-      return { ...(built ? ok(`built a small shelter (${placed} blocks placed).`)
-        : fail(`built part of a shelter: ${placed} placed, ${left} still missing.`)), built };
+      return { ...(built ? ok(`built a small shelter (${placed} blocks placed)${openedFor}.`)
+        : fail(`built part of a shelter: ${placed} placed, ${left} still missing${openedFor}.`)), built };
     }
 
     case "build_pen": {
@@ -4014,6 +4129,15 @@ async function performActionAs(bot, action, speaker, token) {
       async function placeAt(pos, item) {
         const existing = bot.blockAt(pos);
         if (existing?.boundingBox === "block") { placed++; return true; }
+        // 2026-10-07: a pen perimeter is laid out from where she stands with no site survey at
+        // all (unlike "build", which has findShelterSite) -- it is the placement most likely to
+        // run a fence straight across the shelter door. A gap in a pen leaks animals; a fenced-in
+        // door strands the whole fleet, so the gap wins.
+        const shuts = wouldBlockAccess(bot, pos, item.name);
+        if (shuts) {
+          console.log(`build_pen: skipped ${pos} -- a ${item.name} there would block ${shuts.reason} the ${shuts.fixture}`);
+          return false;
+        }
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
             ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
@@ -4236,6 +4360,15 @@ async function performActionAs(bot, action, speaker, token) {
         const pos = columnBase.offset(0, dy, 0);
         const existing = bot.blockAt(pos);
         if (existing?.boundingBox === "block") continue; // already solid -- a lower layer, or someone beat her to it
+        // 2026-10-07: terrain repair fills bottom-up toward the surrounding grade, which is
+        // exactly how a pit dug right next to a chest gets filled back in over the top of it.
+        // Stop the column here rather than skipping the layer -- everything above it would be
+        // left unsupported anyway (see the `below` check just under this).
+        const shuts = wouldBlockAccess(bot, pos, materialName);
+        if (shuts) {
+          console.log(`repair_terrain: stopped at ${pos} -- filling it would block ${shuts.reason} the ${shuts.fixture}`);
+          break;
+        }
 
         const below = bot.blockAt(pos.offset(0, -1, 0));
         if (!below || below.boundingBox !== "block") break; // nothing to reference off yet -- next visit catches it once the layer below is filled
@@ -4827,8 +4960,15 @@ async function performActionAs(bot, action, speaker, token) {
       const tried = [];
       let site = null;
       for (let attempt = 0; attempt < 4 && !token.cancelled && !site; attempt++) {
+        // 2026-10-07: a bed is two solid blocks, so it impedes access exactly like any other
+        // placement -- and findBedSites prefers the shelter room, which is where the chests and
+        // the door are. Judged inside the predicate, not recorded in `tried`: the four attempts
+        // each re-read the world, and a spot that is blocked now may not be on the next pass
+        // (someone moves a chest, another bot clears the way) -- unlike a spot the SERVER
+        // refused, which is what `tried` is for.
         const candidate = findBedSites(bot, bot.spawnPoint ?? bot.entity.position)
-          .find((c) => !tried.some((t) => t.equals(c.foot)));
+          .find((c) => !tried.some((t) => t.equals(c.foot)) &&
+            !wouldBlockAccess(bot, c.foot) && !wouldBlockAccess(bot, c.head));
         if (!candidate) break;
         tried.push(candidate.foot);
         try {

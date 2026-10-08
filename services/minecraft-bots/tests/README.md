@@ -1,6 +1,6 @@
 # Minecraft bot tests
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.json`).
 
@@ -10,6 +10,13 @@ Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.j
 | `live` — `live.test.mjs` | The real `actions.js`/`arbiter.js`/`equipment.js` against the real server, mobs and items | Spark nodes (needs `node_modules`, the bot server, and `live/rcon.py`'s vault/SSH access) |
 | `livebot` — `live-bot.test.mjs` | A whole bot process (`index.js` as `MBProbe`) driven by whispers, restarts and injected coordination messages: STOP, goal identity, resume, night pause, storing during a goal, Mayor curriculum persistence | Spark nodes |
 | `baseline` — `baseline.mjs` + `monitoring.mjs` | What the deployed fleet on this host actually did over the last 24h vs the committed baseline; every bot unit mirrored into the activity log and visible to triage | Each Spark node, over its own `minecraft-bot-*` journals |
+
+Two things to know before adding to `unit.test.mjs`, both consequences of running module source in
+a `vm` context with no `node_modules`: `Vec3` is the file's own `V3` stub, injected per context; and
+a module's `export const` bindings are lexical, so they are **not** properties of the context —
+read one with `vm.runInContext('NAME', ctx)` (`shelterConst()` does this for `shelter.js`).
+Anything a module imports is injected too, which is why `context()` hands `actions.js` the
+`shelter.js` geometry.
 
 ```bash
 tests/run.sh unit            # offline
@@ -23,7 +30,9 @@ tests/run.sh all             # everything this host can run
 
 `live.test.mjs` joins as `MBTester` (override with `MC_TEST_USERNAME`) and sets up an isolated
 sea-lantern platform at (2000, 200, 2000) over RCON. The platform is far from the fleet's base,
-lit so nothing spawns, and fenced with glass. Before each scenario the tester is cleared, made
+lit so nothing spawns, and fenced with glass. **The floor is a light source**, so any scenario
+about darkness (the torch trail) or about what sits under a bot's feet (a chest's lid) has to
+replace that layer and call `restoreFloor()` to put it back. Before each scenario the tester is cleared, made
 immune to damage and teleported onto the platform. Test mobs are tagged `mbtest` and removed at the end.
 Both live harnesses set `MC_MEMORY_ROOT` to a temp directory and `MC_RAG_DISABLED=true`, so chest
 snapshots, goals, beds and curriculum files never touch the fleet's `/mnt/hermes-data/minecraft-memory`.
@@ -68,3 +77,4 @@ When a change fixes or adds bot behavior:
 | 1.0.0 | 2026-09-24 | Initial unit/live/baseline test system and maintenance rule. |
 | 1.1.0 | 2026-09-25 | Triage unit checks, the full-bot `livebot` suite, chest scenarios under an isolated memory root, and the monitoring coverage check. |
 | 1.2.0 | 2026-09-25 | RAG server checks in the unit suite. |
+| 1.3.0 | 2026-10-07 | Access/shelter/torch layers: how the offline suite stands in for `vec3` and for `export const` bindings. |

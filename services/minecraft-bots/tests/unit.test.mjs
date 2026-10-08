@@ -1,4 +1,4 @@
-// Version: 1.17.0
+// Version: 1.18.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -31,6 +31,10 @@
 // 1.15.0 | 2026-09-26 | Shelters: materials, site, routing, the height-tolerant shelter check, the goal runner.
 // 1.16.0 | 2026-09-26 | Beds: occupied spots skipped and refused spots not retried; wood before crafting.
 // 1.17.0 | 2026-09-27 | Shelters fit a bed (4x4, 2x2 room; the old 3x3 no longer counts); beds prefer the room; the bed-shortage goal trigger.
+// 1.18.0 | 2026-10-07 | Access: chest lids, doorways, the last way up to a bed, falling blocks, the
+//   obstruction scan, "place"/"clear_access"/"mine" and the other four placement sites. Shelter walls:
+//   the covered fill, its cap, an open-sky bed, and pathfinder's refusal to dig one. Torches: trail
+//   spacing, what can hold one, between-digs timing, and the supply top-up's backoff.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -43,6 +47,8 @@ const index = await readFile(root + 'index.js', 'utf8');
 const equipment = await readFile(root + 'equipment.js', 'utf8');
 const skills = await readFile(root + 'skills.js', 'utf8');
 const swim = await readFile(root + 'swim-movements.js', 'utf8');
+const shelterSrc = await readFile(root + 'shelter.js', 'utf8');
+const tunnelSrc = await readFile(root + 'tunneling.js', 'utf8');
 const arbiter = await import(pathToFileURL(root + 'arbiter.js').href);
 
 function between(source, start, end) {
@@ -68,10 +74,28 @@ function makeBot() {
 }
 function context(bot, extras = {}) {
   const quiet = { ...console, log: (l, ...r) => { if (!String(l).includes(' OUTCOME ')) console.log(l, ...r); } };
+  const s = shelter(); // actions.js imports its access/bed/chest geometry from shelter.js (1.81.0)
   return vm.createContext({ bot, console: quiet, setTimeout, clearTimeout, Promise, ...arbiter,
     ACTION_TIMEOUT_MS: 400, equipBestWeapon: async () => {}, refreshGear: async () => {}, holdDoorsOpen: () => () => {},
-    goals: { GoalNear: class {}, GoalFollow: class {} }, ...extras });
+    goals: { GoalNear: class {}, GoalFollow: class {} },
+    bedHalves: s.bedHalves, chestHalves: s.chestHalves, wouldBlockAccess: s.wouldBlockAccess,
+    findAccessObstructions: s.findAccessObstructions, isLivingSpaceWall: s.isLivingSpaceWall,
+    ACCESS_SCAN_RADIUS: shelterConst('ACCESS_SCAN_RADIUS'), ...extras });
 }
+
+// shelter.js / tunneling.js run as source in their own contexts, like every other module here:
+// no node_modules offline, so `Vec3` is the V3 stub below. `export const` bindings are lexical,
+// not context properties, so shelterConst() evaluates them by name (the same trick the shelter
+// geometry checks already use for SHELTER_ROOM).
+let shelterCtx = null;
+function shelter() {
+  if (!shelterCtx) {
+    shelterCtx = vm.createContext({ Vec3: V3 });
+    vm.runInContext(between(shelterSrc, 'export const posKey'), shelterCtx);
+  }
+  return shelterCtx;
+}
+const shelterConst = (name) => vm.runInContext(name, shelter());
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let passed = 0;
 async function check(name, fn) { await fn(); passed++; console.log('PASS: ' + name); }
@@ -1550,6 +1574,422 @@ await check('Beds: the first choice is a spot under a roof -- the shelter room, 
     'foot (0,1) and head (0,0) of the room, placed standing in the doorway');
   const atSpawn = c.findBedSites(bot, base)[0]; // spawn inside the shelter, as at the fleet's home
   assert.deepEqual([atSpawn.foot.x, atSpawn.foot.z], [5, 6], 'the room is still used when it sits on spawn');
+});
+
+// ---- 2026-10-07: access to chests/beds/doors, shelter walls, tunnelling torches --------------
+
+// A flat world: solid stone at y <= groundY, air above, plus blocks placed by name. Beds, doors
+// and chests are solid here because they are solid in the real registry -- the access rules and
+// the covered flood fill both depend on that.
+function blockWorld({ groundY = 63, light = 0 } = {}) {
+  const at = new Map();
+  const bot = {
+    blockAt(p) {
+      if (!p) return null;
+      const spec = at.get(`${p.x},${p.y},${p.z}`);
+      const position = new V3(p.x, p.y, p.z);
+      if (spec) {
+        return { name: spec.name, position, light: spec.light ?? light,
+          boundingBox: spec.name === 'air' ? 'empty' : 'block', getProperties: () => spec.props || {} };
+      }
+      const stone = p.y <= groundY;
+      return { name: stone ? 'stone' : 'air', position, light: stone ? 0 : light,
+        boundingBox: stone ? 'block' : 'empty', getProperties: () => ({}) };
+    },
+    findBlocks({ matching, point, maxDistance = 32, count = 16 }) {
+      const origin = point || bot.entity.position;
+      const out = [];
+      for (const k of at.keys()) {
+        const [bx, by, bz] = k.split(',').map(Number);
+        const pos = new V3(bx, by, bz);
+        if (pos.distanceTo(origin) > maxDistance) continue;
+        const block = bot.blockAt(pos);
+        const hit = typeof matching === 'function' ? matching(block) : [].concat(matching).includes(block.name);
+        if (hit) out.push(pos);
+        if (out.length >= count) break;
+      }
+      return out;
+    },
+    isABed: (b) => !!b?.name?.endsWith('_bed'),
+    username: 'Babs',
+    entity: { position: new V3(0, 64, 0) },
+    entities: {},
+    inventory: { items: () => [] },
+  };
+  const place = ([bx, by, bz], name, props) => at.set(`${bx},${by},${bz}`, { name, props });
+  const open = ([bx, by, bz]) => at.set(`${bx},${by},${bz}`, { name: 'air' });
+  // A bed facing south: the head block carries part:"head", the foot sits one block north of it.
+  const bed = ([bx, by, bz]) => {
+    place([bx, by, bz], 'white_bed', { facing: 'south', part: 'head' });
+    place([bx, by, bz - 1], 'white_bed', { facing: 'south', part: 'foot' });
+  };
+  // A door: the way through it runs along `facing` -- north/south along z, east/west along x.
+  const door = ([bx, by, bz], name = 'oak_door', facing = 'north') => {
+    place([bx, by, bz], name, { facing, half: 'lower', open: false });
+    place([bx, by + 1, bz], name, { facing, half: 'upper', open: false });
+  };
+  return { bot, place, open, bed, door, at };
+}
+
+await check('Access: a block over a chest lid, in a doorway, or on the last way up to a bed is refused', async () => {
+  const c = shelter();
+  const w = blockWorld();
+  w.place([0, 64, 0], 'chest');
+  w.place([3, 64, 0], 'barrel');
+  const lid = c.wouldBlockAccess(w.bot, new V3(0, 65, 0));
+  assert(lid && lid.fixture === 'chest' && /lid/.test(lid.reason), `the chest lid is refused: ${JSON.stringify(lid)}`);
+  assert.equal(c.wouldBlockAccess(w.bot, new V3(3, 65, 0)), null, 'a barrel opens with a block above it');
+
+  w.door([0, 64, 6]);
+  const through = c.wouldBlockAccess(w.bot, new V3(0, 64, 5));
+  assert(through && /way through/.test(through.reason), `in front of the door: ${JSON.stringify(through)}`);
+  assert(c.wouldBlockAccess(w.bot, new V3(0, 65, 7)), 'the far side at head height counts too');
+  assert.equal(c.wouldBlockAccess(w.bot, new V3(1, 64, 6)), null, "the door's own jamb is supposed to be solid");
+
+  w.bed([10, 64, 0]);
+  const around = [[11, 64, 0], [9, 64, 0], [10, 64, 1], [11, 64, -1], [9, 64, -1], [10, 64, -2]];
+  assert.equal(c.wouldBlockAccess(w.bot, new V3(11, 64, 0)), null, 'plenty of room round the bed still');
+  for (const cell of around.slice(0, 5)) w.place(cell, 'cobblestone');
+  const last = c.wouldBlockAccess(w.bot, new V3(10, 64, -2));
+  assert(last && /_bed$/.test(last.fixture) && /last way/.test(last.reason), `the last way up: ${JSON.stringify(last)}`);
+});
+
+await check('Access: a falling block is judged where it lands, not where it leaves her hand', async () => {
+  const c = shelter();
+  const w = blockWorld();
+  w.place([20, 64, 0], 'chest');
+  assert.equal(c.wouldBlockAccess(w.bot, new V3(20, 68, 0), 'cobblestone'), null, 'cobblestone stays where it is put');
+  const fell = c.wouldBlockAccess(w.bot, new V3(20, 68, 0), 'sand');
+  assert(fell && fell.fixture === 'chest', `sand four blocks up lands on the lid: ${JSON.stringify(fell)}`);
+  assert.deepEqual([fell.falls.x, fell.falls.y, fell.falls.z], [20, 65, 0], 'and it says where');
+  assert.equal(c.isFallingBlockName('red_concrete_powder'), true);
+  assert.equal(c.isFallingBlockName('cobblestone'), false);
+});
+
+await check('Access: the obstruction scan finds a blocked lid and both halves of a double chest', async () => {
+  const c = shelter();
+  const w = blockWorld();
+  w.place([0, 64, 0], 'chest', { type: 'left', facing: 'north' });
+  w.place([1, 64, 0], 'chest', { type: 'right', facing: 'north' });
+  w.place([1, 65, 0], 'cobblestone'); // over the far half -- blocks the whole double chest in vanilla
+  const found = c.findAccessObstructions(w.bot, new V3(0, 64, 0), 8, () => true);
+  assert.equal(found.length, 1, `exactly the one block in the way: ${JSON.stringify(found)}`);
+  assert.deepEqual([found[0].position.x, found[0].position.y, found[0].position.z], [1, 65, 0]);
+  assert.equal(found[0].name, 'cobblestone');
+  w.place([0, 65, 0], 'furnace'); // a fixture: never dug out to reach another fixture
+  const policy = c.findAccessObstructions(w.bot, new V3(0, 64, 0), 8, (name) => name !== 'furnace');
+  assert.deepEqual(policy.map((f) => f.name), ['cobblestone'], "the caller's own no-break policy is honoured");
+});
+
+await check('Access: a door sealed on both sides is left alone; one blocked side is cleared', async () => {
+  const c = shelter();
+  const w = blockWorld();
+  w.door([0, 64, 6]);
+  w.place([0, 64, 5], 'cobblestone');
+  w.place([0, 65, 5], 'cobblestone');
+  const oneSide = c.findAccessObstructions(w.bot, new V3(0, 64, 6), 4, () => true);
+  assert.deepEqual(oneSide.map((f) => f.position.z), [5, 5], 'both cells of the blocked side');
+  w.place([0, 64, 7], 'cobblestone');
+  w.place([0, 65, 7], 'cobblestone');
+  assert.deepEqual(c.findAccessObstructions(w.bot, new V3(0, 64, 6), 4, () => true), [],
+    'a door built into solid ground on both sides is not a passage anyone uses');
+});
+
+// The 4x4 shelter from actions.js, with a bed in its room -- the real geometry, not a mock of it.
+function shelterLivingSpace() {
+  const s = shelterFns();
+  const c = shelter();
+  const base = new V3(0, 64, 0);
+  const w = blockWorld();
+  for (const pos of s.shelterPositions(base)) w.place([pos.x, pos.y, pos.z], 'cobblestone');
+  w.bed([base.x, base.y, base.z + 1]); // head at the room's (0,1), foot at (0,0)
+  const space = c.refreshLivingSpace(w.bot, base);
+  return { c, w, base, space };
+}
+
+await check('Shelter walls: the covered fill finds the room, stops at the doorway, and names every wall', async () => {
+  const { c, w, base, space } = shelterLivingSpace();
+  assert.equal(space.anchors.length, 1, 'one bed, not two halves');
+  assert.equal(space.inside.size, 13, '2x2 room x3 high less the two bed blocks, plus the doorway column');
+  assert.equal(c.isInsideLivingSpace(w.bot, base.offset(0, 0, 2)), true, 'the doorway is inside');
+  assert.equal(c.isInsideLivingSpace(w.bot, base.offset(0, 0, 3)), false, 'the step outside it is not -- no roof there');
+
+  assert.equal(c.isLivingSpaceWall(w.bot, base.offset(-1, 1, 0)), true, 'a wall block');
+  assert.equal(c.isLivingSpaceWall(w.bot, base.offset(0, 3, 0)), true, 'the roof');
+  assert.equal(c.isLivingSpaceWall(w.bot, base.offset(0, -1, 0)), true, 'the floor');
+  assert.equal(c.isLivingSpaceWall(w.bot, base.offset(20, -1, 20)), false, 'ordinary terrain well clear of it');
+
+  // The doorway: filling it seals the shelter even though no door hangs there yet.
+  assert.deepEqual([...space.exits.keys()], ['0,2'], 'one way out: the doorway column');
+  const sealed = c.wouldBlockAccess(w.bot, base.offset(0, 0, 2));
+  assert(sealed && /way out/.test(sealed.reason), `the doorway is refused: ${JSON.stringify(sealed)}`);
+  assert.equal(c.wouldBlockAccess(w.bot, base.offset(1, 0, 1)), null, 'a cell deep inside the room is not an exit');
+});
+
+await check('Shelter walls: a hole in a wall is a second way out, so it can be filled back in', async () => {
+  const { c, w, base } = shelterLivingSpace();
+  w.open([base.x - 1, base.y, base.z]); // knock a hole in the west wall at floor level
+  const holed = c.refreshLivingSpace(w.bot, base);
+  assert.deepEqual([...holed.exits.keys()].sort(), ['-1,0', '0,2'], 'the hole counts as a way out too');
+  assert.equal(c.wouldBlockAccess(w.bot, base.offset(-1, 0, 0)), null, 'so repairing it is allowed');
+  assert.equal(c.wouldBlockAccess(w.bot, base.offset(0, 0, 2)), null, 'and the doorway is no longer the only one');
+
+  // Hang a door in the doorway and cap the cell above it (the shelter's doorway column is three
+  // high, a door only two). The fill stops at the door, but the door still counts as the way out
+  // -- otherwise the first hole knocked in a wall would look like the only exit and be protected
+  // from repair, exactly backwards.
+  const d = shelterLivingSpace();
+  d.w.door([d.base.x, d.base.y, d.base.z + 2]);
+  d.w.place([d.base.x, d.base.y + 2, d.base.z + 2], 'cobblestone');
+  const shut = d.c.refreshLivingSpace(d.w.bot, d.base);
+  assert.deepEqual([...shut.exits.keys()], ['0,1'], 'the cell inside the door is the way out');
+  const onlyWay = d.c.wouldBlockAccess(d.w.bot, d.base.offset(0, 1, 1));
+  assert(onlyWay && /_door$/.test(onlyWay.fixture), `walling the door off from inside: ${JSON.stringify(onlyWay)}`);
+  d.w.open([d.base.x - 1, d.base.y, d.base.z]);
+  d.c.refreshLivingSpace(d.w.bot, d.base);
+  assert.equal(d.c.wouldBlockAccess(d.w.bot, d.base.offset(-1, 0, 0)), null, 'with a hole too, the hole can be repaired');
+});
+
+await check('Shelter walls: a bed under open sky protects nothing, and the cell cap bounds the fill', async () => {
+  const c = shelter();
+  const w = blockWorld();
+  w.bed([0, 64, 0]);
+  const space = c.refreshLivingSpace(w.bot, new V3(0, 64, 0));
+  assert.equal(space.anchors.length, 1, 'the bed is still found');
+  assert.equal(space.inside.size, 0, 'nothing overhead, so there is no interior');
+  assert.equal(space.cells.size, 0, 'and no walls to protect -- this can never fence off bare terrain');
+
+  // A roofed field: the fill stops at SHELL_MAX_CELLS instead of running away.
+  const big = blockWorld();
+  for (let bx = -12; bx <= 12; bx++) for (let bz = -12; bz <= 12; bz++) big.place([bx, 68, bz], 'cobblestone');
+  big.bed([0, 64, 0]);
+  const capped = c.refreshLivingSpace(big.bot, new V3(0, 64, 0));
+  assert.equal(capped.inside.size, shelterConst('SHELL_MAX_CELLS'), 'capped, not unbounded');
+});
+
+await check('Shelter walls: pathfinder refuses to dig one, and still digs ordinary terrain', async () => {
+  const { w, base } = shelterLivingSpace();
+  const c = vm.createContext({ Movements: class { safeToBreak() { return true; } }, Move: class {},
+    nbt: { simplify: () => ({}) }, Vec3: V3, isWater: () => false, applyDoorState: (b) => b,
+    isLivingSpaceWall: shelter().isLivingSpaceWall });
+  vm.runInContext(between(swim, 'const MAX_DIG_LABOR_COST'), c);
+  const movements = new (vm.runInContext('SwimMovements', c))();
+  movements.bot = w.bot;
+  assert.equal(movements.safeToBreak(w.bot.blockAt(base.offset(-1, 1, 0))), false, 'a wall of the shelter');
+  assert.equal(movements.safeToBreak(w.bot.blockAt(base.offset(0, 3, 0))), false, 'its roof');
+  assert.equal(movements.safeToBreak(w.bot.blockAt(base.offset(20, -1, 20))), true, 'stone out in the open');
+  assert.equal(movements.safeToBreak({ name: 'stone' }), true, "a block with no position (the library's own null stub)");
+});
+
+await check('Access: "place" takes another side rather than blocking a door, and says so when every side would', async () => {
+  const w = blockWorld();
+  // Standing at (0,64,0). The first side "place" tries is +x, and a door at (1,64,1) facing north
+  // makes (1,64,0) its own way through -- so the furnace has to go on the next side instead.
+  w.door([1, 64, 1]);
+  w.bot.inventory.items = () => [{ name: 'furnace' }];
+  w.bot.equip = async () => {};
+  const placed = [];
+  w.bot.placeBlock = async (ref) => placed.push(`${ref.position.x},${ref.position.y},${ref.position.z}`);
+  const c = context(w.bot, { Vec3: V3, attemptBoatCrossing: async () => false });
+  vm.runInContext(timeoutFn + actionFn, c);
+  const result = await c.performAction(w.bot, { type: 'place', item: 'furnace' }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(placed, ['-1,63,0'], 'placed on the next side, not into the doorway at (1,64,0)');
+
+  // Four doors facing her, two blocks out on each axis: every candidate cell is a way through.
+  const boxed = blockWorld();
+  boxed.door([0, 64, 2]);
+  boxed.door([0, 64, -2]);
+  boxed.door([2, 64, 0], 'spruce_door', 'east');
+  boxed.door([-2, 64, 0], 'spruce_door', 'east');
+  boxed.bot.inventory.items = () => [{ name: 'furnace' }];
+  boxed.bot.equip = async () => {};
+  boxed.bot.placeBlock = async () => { throw new Error('should never place'); };
+  const c2 = context(boxed.bot, { Vec3: V3, attemptBoatCrossing: async () => false });
+  vm.runInContext(timeoutFn + actionFn, c2);
+  const refused = await c2.performAction(boxed.bot, { type: 'place', item: 'furnace' }, 'test');
+  assert.equal(refused.ok, false);
+  assert.match(refused.text, /wouldn't block the way through the \w+_door/, refused.text);
+});
+
+await check('Access: "clear_access" digs what is in the way and reports which fixture it freed', async () => {
+  const w = blockWorld();
+  w.place([0, 64, 0], 'chest');
+  w.place([0, 65, 0], 'cobblestone');
+  w.bot.entity = { position: new V3(2, 64, 0) };
+  w.bot.pathfinder = { goto: async () => {}, setGoal() {}, movements: {} };
+  const dug = [];
+  w.bot.collectBlock = { collect: async (block) => { dug.push(block.name); w.open([0, 65, 0]); }, cancelTask() {} };
+  w.bot.stopDigging = () => {};
+  const c = context(w.bot, { Vec3: V3, isProtectedBlockName: (n) => /chest|furnace/.test(n) });
+  vm.runInContext(timeoutFn + actionFn, c);
+  const result = await c.performAction(w.bot, { type: 'clear_access' }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(dug, ['cobblestone'], 'the obstruction, never the chest');
+  assert.match(result.text, /chest/, result.text);
+  const again = await c.performAction(w.bot, { type: 'clear_access' }, 'test');
+  assert.equal(again.ok, true, again.text);
+  assert.match(again.text, /nothing's blocking/, again.text);
+  assert.deepEqual(dug, ['cobblestone'], 'and it does not go looking for more work');
+});
+
+await check('Shelter walls: "mine" skips a target inside one, and says so when that is all there is', async () => {
+  const walls = new Set(['0,64,0', '0,64,1']);
+  const bot = makeBot();
+  bot.entity = { position: new V3(5, 64, 5) };
+  bot.registry = { blocks: { 1: { name: 'cobblestone' } } };
+  bot.blockAt = (p) => ({ name: 'cobblestone', position: p, harvestTools: null });
+  let positions = [new V3(0, 64, 0), new V3(0, 64, 1), new V3(8, 64, 8)];
+  bot.findBlocks = () => positions;
+  const collected = [];
+  bot.collectBlock = { collect: async (blocks) => collected.push(...blocks.map((b) => `${b.position.x},${b.position.y},${b.position.z}`)), cancelTask() {} };
+  const c = context(bot, { Vec3: V3, resolveBlockFamily: () => [1], itemNamesForMinedBlocks: () => ['cobblestone'],
+    tryTakeFromNearbyChest: async () => null, findRememberedLocation: async () => null,
+    wanderAndRetryFind: async () => [], filterAwayFromOtherBots: (b, p) => p,
+    isProtectedBlockName: () => false, MINE_SEARCH_RADIUS: 32, CONTENTION_SEARCH_OVERFETCH: 3,
+    isLivingSpaceWall: (b, pos) => walls.has(`${pos.x},${pos.y},${pos.z}`) });
+  vm.runInContext(timeoutFn + actionFn, c);
+  const result = await c.performAction(bot, { type: 'mine', block: 'cobblestone', count: 3 }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(collected, ['8,64,8'], 'only the cobblestone that is not a shelter wall');
+
+  positions = [new V3(0, 64, 0), new V3(0, 64, 1)];
+  const nothing = await c.performAction(bot, { type: 'mine', block: 'cobblestone', count: 3 }, 'test');
+  assert.equal(nothing.ok, false);
+  assert.match(nothing.text, /part of a shelter wall/, nothing.text);
+});
+
+await check('Access: the other four placement sites ask first, each in the way that suits it', async () => {
+  const slice = (from, to) => actions.slice(actions.indexOf(from), actions.indexOf(to));
+  const build = slice('case "build": {', 'case "build_pen": {');
+  assert.match(build, /const shuts = wouldBlockAccess\(bot, pos\);/, 'build checks every wall cell');
+  assert.match(build, /shutIn\+\+;[\s\S]{0,200}continue;/, 'and leaves it open rather than abandoning the shelter');
+  assert.match(build, /left open so a neighbouring fixture stays reachable/, 'the result says why it is short');
+
+  const pen = slice('case "build_pen": {', 'case "herd_to_pen": {');
+  assert.match(pen, /wouldBlockAccess\(bot, pos, item\.name\)/, 'build_pen checks, with the fence/gate it would place');
+
+  const repair = slice('case "repair_terrain": {', 'case "store": {');
+  assert.match(repair, /wouldBlockAccess\(bot, pos, materialName\)/);
+  assert.match(repair, /blocking[\s\S]{0,80}\n\s+break;/, 'a pit fill stops at the fixture, it does not skip a layer');
+
+  const bed = slice('case "place_bed": {', 'case "shear": {');
+  assert.match(bed, /!wouldBlockAccess\(bot, c\.foot\) && !wouldBlockAccess\(bot, c\.head\)/, 'both halves of the bed');
+});
+
+// Tunnelling torches (2026-10-07).
+function tunnel(extras = {}) {
+  const c = vm.createContext({ Vec3: V3, process: { env: {} }, console: { log() {}, error() {} },
+    Promise, DARK_LIGHT_LEVEL: 8, isProtectedBlockName: (n) => /chest|furnace|crafting_table/.test(n),
+    fixtureKind: shelter().fixtureKind, ...extras });
+  vm.runInContext(between(tunnelSrc, 'export const TORCH_SPACING'), c);
+  return c;
+}
+
+await check('Torches: a trail torch goes down every 6 blocks of dark tunnel, on the floor before a wall', async () => {
+  const c = tunnel();
+  assert.equal(vm.runInContext('TORCH_SPACING', c), 6, '14 - 6 = 8, exactly DARK_LIGHT_LEVEL at the midpoint');
+  const w = blockWorld({ groundY: 40, light: 0 }); // underground: air around her, stone below
+  w.open([0, 41, 0]);
+  w.bot.entity = { position: new V3(0.5, 41, 0.5) };
+  w.bot.inventory.items = () => [{ name: 'torch', count: 4 }];
+  const first = c.trailTorchSpot(w.bot, null);
+  assert(!first.skip, JSON.stringify(first));
+  assert.deepEqual([first.reference.position.y, first.face.y], [40, 1], 'placed on the floor, facing up');
+
+  assert.match(c.trailTorchSpot(w.bot, new V3(0, 41, -3)).skip, /still close/, 'three blocks back is not far enough');
+  assert(!c.trailTorchSpot(w.bot, new V3(0, 41, -6)).skip, 'six blocks back is');
+
+  const lit = blockWorld({ groundY: 40, light: 12 });
+  lit.bot.entity = w.bot.entity; lit.bot.inventory.items = w.bot.inventory.items;
+  assert.match(c.trailTorchSpot(lit.bot, null).skip, /already lit/, 'a lit cave costs nothing');
+
+  const empty = blockWorld({ groundY: 40 });
+  empty.bot.entity = w.bot.entity; empty.bot.inventory.items = () => [];
+  assert.match(c.trailTorchSpot(empty.bot, null).skip, /no torches/);
+});
+
+await check('Torches: a trail torch never hangs on a chest, glass or leaves -- a wall is used instead', async () => {
+  const c = tunnel();
+  assert.equal(c.canHoldTorch({ name: 'stone', boundingBox: 'block' }), true);
+  for (const name of ['chest', 'white_bed', 'oak_door', 'furnace', 'glass', 'oak_leaves', 'oak_fence', 'ice']) {
+    assert.equal(c.canHoldTorch({ name, boundingBox: 'block' }), false, name);
+  }
+  assert.equal(c.canHoldTorch({ name: 'oak_leaves', boundingBox: 'empty' }), false);
+
+  const w = blockWorld({ groundY: 40 });
+  w.place([0, 40, 0], 'chest');       // standing on a chest: the floor can't hold one
+  w.place([1, 41, 0], 'deepslate');   // but the tunnel wall beside her can
+  w.bot.entity = { position: new V3(0.5, 41, 0.5) };
+  w.bot.inventory.items = () => [{ name: 'torch', count: 4 }];
+  const spot = c.trailTorchSpot(w.bot, null);
+  assert(!spot.skip, JSON.stringify(spot));
+  assert.equal(spot.reference.name, 'deepslate');
+  assert.equal(`${spot.face}`, '(-1, 0, 0)', 'facing out of the wall'); // as a string: -0 is not 0 to strictEqual
+});
+
+await check('Torches: the trail fires between digs, not into one, and remembers where the last went', async () => {
+  const c = tunnel();
+  const w = blockWorld({ groundY: 40 });
+  const bot = new EventEmitter();
+  Object.assign(bot, w.bot, { username: 'Babs', entity: { position: new V3(0.5, 41, 0.5) },
+    inventory: { items: () => [{ name: 'torch', count: 4 }] }, equip: async () => {}, targetDigBlock: null });
+  const placed = [];
+  bot.placeBlock = async (ref, face) => placed.push(`${ref.position.x},${ref.position.y},${ref.position.z}:${face.y}`);
+  const trail = c.installTorchTrail(bot);
+
+  bot.targetDigBlock = { name: 'stone' }; // the next dig already started
+  bot.emit('diggingCompleted');
+  await sleep(10);
+  assert.deepEqual(placed, [], "never equips a torch while a dig is in flight -- that fights collectBlock's own tool");
+
+  bot.targetDigBlock = null;
+  bot.emit('diggingCompleted');
+  await sleep(10);
+  assert.deepEqual(placed, ['0,40,0:1'], 'one torch, on the floor');
+  assert.deepEqual([trail.last.x, trail.last.y, trail.last.z], [0, 41, 0]);
+
+  bot.entity.position = new V3(0.5, 41, 3.5); // three blocks on: too soon
+  bot.emit('diggingCompleted');
+  await sleep(10);
+  assert.equal(placed.length, 1, 'spacing is kept across digs, not reset by each one');
+
+  bot.entity.position = new V3(0.5, 41, 7.5);
+  bot.emit('diggingCompleted');
+  await sleep(10);
+  assert.equal(placed.length, 2, 'and the next one goes down once she is far enough');
+  trail.reset();
+  assert.equal(trail.last, null);
+});
+
+await check('Torches: she tops up from coal she carries, falls back to a chest, and backs off after a failure', async () => {
+  const calls = [];
+  let reply = { ok: true, text: 'crafted 16 torch' };
+  let inv = [{ name: 'torch', count: 2 }, { name: 'coal', count: 4 }, { name: 'oak_log', count: 3 }];
+  const bot = { isSleeping: false, entity: { position: new V3(0, 64, 0) }, inventory: { items: () => inv } };
+  const t = tunnel();
+  const c = vm.createContext({ bot, Date, process: { env: {} }, console: { log() {}, error() {} },
+    USERNAME: 'Babs', AUTONOMY_ENABLED: true, routineBlocked: () => false,
+    arbiter: { OWNERS: { ROUTINE: 1 }, requestControl: async () => ({ release() {} }) },
+    needsTorches: t.needsTorches, torchCount: t.torchCount, TORCH_CARRY_MIN: vm.runInContext('TORCH_CARRY_MIN', t),
+    performAction: async (b, a) => { calls.push(a); return reply; } });
+  vm.runInContext(between(index, 'const TORCH_SUPPLY_CHECK_MS', 'setInterval(() => {\n  checkTorchSupply'), c);
+
+  await c.checkTorchSupply();
+  assert.deepEqual(calls.map((a) => `${a.type}:${a.item}`), ['craft:torch'], 'coal and a log on hand: make them');
+
+  inv = [{ name: 'torch', count: 2 }]; // no coal, no wood
+  await c.checkTorchSupply();
+  assert.equal(calls[1].type, 'loot', 'nothing to craft from: try a chest');
+
+  reply = { ok: false, text: "couldn't find a chest" };
+  await c.checkTorchSupply();
+  const after = calls.length;
+  await c.checkTorchSupply();
+  assert.equal(calls.length, after, 'a failed attempt backs off instead of retrying every two minutes');
+
+  inv = [{ name: 'torch', count: 16 }];
+  assert.equal(t.needsTorches(bot), false, 'a full pouch is left alone');
 });
 
 console.log(`${passed} unit checks passed.`);
