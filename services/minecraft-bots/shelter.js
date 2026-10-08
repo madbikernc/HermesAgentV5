@@ -1,4 +1,8 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-10-07) -- roofed() is exported as isCovered(): tunneling.js needs the same
+// "is this cell indoors" test after block.light turned out to be frozen at chunk-load time
+// (see tunneling.js 1.1.0).
 //
 // Direct request, 2026-10-07, four parts: never drop or place a block that impedes access to a
 // chest, a bed or a door; DO destroy a block that impedes one; recognise the walls around a
@@ -235,8 +239,11 @@ export const SHELL_MAX_ANCHORS = 8;
 export const BED_SEARCH_DISTANCE = 32;
 export const ACCESS_SCAN_RADIUS = 8;
 
-function roofed(bot, pos) {
-  for (let dy = 1; dy <= SHELL_ROOF_SCAN; dy++) {
+// Something solid overhead: what makes a cell "indoors" rather than open sky. Exported because
+// tunneling.js needs the same question answered for a different reason -- a torch trail must not
+// fire while a bot walks across a field in daylight (1.1.0, 2026-10-07).
+export function isCovered(bot, pos, scan = SHELL_ROOF_SCAN) {
+  for (let dy = 1; dy <= scan; dy++) {
     if (solid(bot, pos.offset(0, dy, 0))) return true;
   }
   return false;
@@ -250,7 +257,7 @@ export function coveredInterior(bot, anchor, inside = new Set()) {
   const consider = (cell) => {
     const key = posKey(cell);
     if (inside.has(key) || inside.size >= SHELL_MAX_CELLS) return;
-    if (!passable(bot, cell) || !roofed(bot, cell)) return;
+    if (!passable(bot, cell) || !isCovered(bot, cell)) return;
     inside.add(key);
     queue.push(cell);
   };

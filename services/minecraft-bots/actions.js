@@ -1,4 +1,11 @@
-// Version: 1.81.0
+// Version: 1.82.0
+//
+// 1.82.0 (2026-10-07, found by the new torch-trail live scenario failing on its first step) --
+// craftItem's auto-chain read only `recipe.ingredients`, which minecraft-data populates for
+// SHAPELESS recipes alone; a torch, a stick and a crafting table are all shaped, so the chain
+// could never fire for any of them. Now reads `recipe.delta`, which both shapes carry. This is
+// also the real reason checkHomeLighting's "craft from any wood source" gate never worked, three
+// fixes in -- see recipeInputs()'s own header.
 //
 // 1.81.0 (2026-10-07, direct request: access and shelters) -- a placement is refused when it
 // would impede access to a chest, bed or door, or seal a shelter's doorway: "place",
@@ -1767,6 +1774,33 @@ function simpleSourceFor(bot, itemName) {
   return null;
 }
 
+// Real bug found live 2026-10-07, by the torch-trail live scenario failing on its very first step
+// ("craft torch" with 8 coal and 8 oak_planks in hand -> "don't have the ingredients"). Root cause,
+// confirmed by printing the real recipe objects off this server: `ingredients` is only populated
+// for SHAPELESS recipes. A torch, a stick, and a crafting table are all SHAPED -- they carry
+// `inShape` instead, and `ingredients` is undefined. craftItem's auto-chain loop below read only
+// `ingredients`, so for every shaped recipe it hit the "not an array" guard and skipped the recipe
+// entirely -- meaning the chain could never fire for any of them.
+//
+// That is the same gate checkHomeLighting has now had three separate fixes aimed at (2026-09-17,
+// 2026-09-18, 2026-09-21), the last of which deliberately widened it from "has a stick" to "has
+// any wood source" precisely so craftItem's chain would turn planks into the stick a torch needs.
+// It never could. A bot carrying coal and planks but no loose stick -- the ordinary state after
+// any crafting -- still could not make a torch.
+//
+// `delta` is the fix and the right data to use: every recipe has it, shaped or shapeless, already
+// aggregated per item id, with inputs as negative counts and the output positive (verified live:
+// torch's delta is coal -1, stick -1, torch +4). Returning null for a recipe with no usable delta
+// keeps the protection the old `Array.isArray` guard was added for -- a smelting-only item's
+// recipe object once crashed this loop outright.
+function recipeInputs(recipe) {
+  if (Array.isArray(recipe?.delta)) {
+    const inputs = recipe.delta.filter((d) => d.count < 0).map((d) => ({ id: d.id, count: -d.count }));
+    if (inputs.length) return inputs;
+  }
+  return Array.isArray(recipe?.ingredients) ? recipe.ingredients : null;
+}
+
 // minecraft-data already knows every vanilla recipe correctly (Recipe.ingredients,
 // Recipe.requiresTable, etc., confirmed against prismarine-recipe's own types) -- there is no
 // external recipe data to "teach" it. What's actually missing is this: given a target item and
@@ -1793,11 +1827,14 @@ async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
       // `ingredients` array -- `for...of` over it threw "is not iterable" and crashed the whole
       // craft attempt instead of just skipping that one unusable candidate. Smelting isn't
       // supported by this action at all (bot.craft() is crafting-table/grid only, a furnace is a
-      // separate mineflayer API this doesn't implement) -- skipping non-array ingredients here
-      // means an unsupported smelting-only item now fails cleanly ("don't have the ingredients")
-      // instead of crashing the bot's whole craft/goal step.
-      if (!Array.isArray(recipe.ingredients)) continue;
-      for (const ing of recipe.ingredients) {
+      // separate mineflayer API this doesn't implement) -- skipping a recipe whose inputs can't be
+      // read means an unsupported smelting-only item now fails cleanly ("don't have the
+      // ingredients") instead of crashing the bot's whole craft/goal step. (2026-10-07: that
+      // "can't be read" test moved into recipeInputs(), which also reads SHAPED recipes -- the
+      // original here only looked at `ingredients` and so skipped every shaped one as well.)
+      const inputs = recipeInputs(recipe);
+      if (!inputs) continue;
+      for (const ing of inputs) {
         const ingName = bot.registry.items[ing.id]?.name;
         if (!ingName) continue;
         const have = bot.inventory.count(ingName, null);

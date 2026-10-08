@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 4.1.0
+**Version:** 4.2.0
 
 Mineflayer bot runtime for the Firmament's nine Minecraft bots. **What the bots do and why lives
 in `../../MINECRAFT_BOTS_DESIGN.md`** — this file covers only how to run and configure the
@@ -87,6 +87,13 @@ Everything has a working default; a unit file only sets what it overrides.
   doesn't is a new way to wall in a chest, a bed, a door, or a shelter's only doorway.
 - **The shelter shell is a cached `Set`, refreshed on a timer.** `safeToBreak` is called thousands
   of times per path search, so it can only ever be a lookup — never recompute the fill there.
+- **`block.light` is frozen at chunk-load time.** It never updates after a block change — not for
+  an RCON `fill`, not across a chunk reload, not even for a torch the bot itself places. Anything
+  that needs "is this dark" must use block identity instead (the registry's `emitLight`), the way
+  `tunneling.js` does. `checkLighting` and `light_area` still depend on it; see the design doc's
+  §12 Open.
+- **`craftItem` chains through `recipe.delta`, not `recipe.ingredients`.** `ingredients` is only
+  populated for shapeless recipes; torches, sticks and crafting tables are shaped.
 - **Any mineflayer plugin holding its own `Movements`** (`collectBlock`, `pvp`) must be pointed at
   the shared instance at spawn, or every cost tuning is silently undone for that plugin's calls.
 - **Persona text reaches eight prompt sites**, not just chat — changing `PROMPT.md` or

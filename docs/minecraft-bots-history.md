@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.14.0
+**Version:** 1.15.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -96,12 +96,14 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.12.0 | 2026-09-26 | Shelter goals run directly: site, materials, `build` on the site without scaffolding; the shelter check tolerates ±2 height. |
 | 2.13.0 | 2026-09-26 | Bed goals get wood before crafting; `place_bed` skips occupied spots and tries up to 4 (the server refuses an occupied foot cell). |
 | 2.14.0 | 2026-09-27 | Shelters must fit a bed (4x4, 2x2 room); beds prefer the room and avoid chokepoints; the bed-shortage goal trigger. |
+| 2.16.0 | 2026-10-07 | Two findings from first running the 2.15.0 tests on spark, both recorded as §11 rules: `block.light` is frozen at chunk-load time on this stack (proved three ways — a sealed cell, a chunk reload, and a torch the bot placed itself), so the torch trail gates on `isCovered()` plus a registry-`emitLight` scan instead; and `craftItem`'s auto-chain read `recipe.ingredients`, which minecraft-data fills for shapeless recipes only, so it silently skipped every shaped one — the real reason `checkHomeLighting`'s "craft from any wood source" gate never worked. New §12 Open: `checkLighting`/`light_area` still depend on the frozen field. |
 | 2.15.0 | 2026-10-07 | Access and shelters (direct request, four parts): every placement verb refuses a cell that would impede a chest, bed or door, or seal a shelter's only doorway; new `clear_access` destroys one that already does; a living space's walls are refused by position in `safeToBreak` rather than by cost, which is what three rounds of `digCost` tuning could not express; tunnels are lit by a torch trail at a derived spacing, topped up from carried coal. New `shelter.js` and `tunneling.js`. |
 
 ## services/minecraft-bots/README.md
 
 | Version | Date | Change |
 |---|---|---|
+| 4.2.0 | 2026-10-07 | Two more entries under "things that will bite you": `block.light` is frozen at chunk-load time, and `craftItem` chains through `recipe.delta` rather than `recipe.ingredients`. |
 | 4.1.0 | 2026-10-07 | `shelter.js`/`tunneling.js` in the file table, `MC_LIVING_SPACE_REFRESH_MS`/`MC_TORCH_SPACING`/`MC_TORCH_CARRY_MIN` in the environment table, and two new entries under "things that will bite you": every placement site must ask `wouldBlockAccess`, and the shelter shell is a cached `Set` that `safeToBreak` may only ever look up. |
 | 3.32.0 | 2026-09-11 | Shared resource-location memory across the fleet (direct request: a bot looking for a specific resource should look near itself, ask the others to look near themselves too, and use that shared knowledge before wandering blindly). New `noteNearbyResources()` scans nearby ground for common raw materials and writes a world-memory note per find; called directly when a "mine" step exhausts its local search (before a new "scout" Buzz broadcast asks the rest of the fleet to do the same) and by every other bot on receiving that broadcast. `findRememberedLocation()` tries a remembered position between "mine"'s local search and the existing blind wander fallback -- a direct trip on a hit, no regression on a miss. Non-blocking throughout, matching the existing item-request precedent. |
 | 3.31.0 | 2026-09-11 | Fixed bots unable to reach drowned mobs during attack (direct live report: "what's wrong with the bots now"). Root cause, confirmed against mineflayer-pvp's own source: its `attack()` silently overwrites the bot's swim-aware `SwimMovements` with its own generic default Movements on every call, so a drowned mob living underwater was never actually reachable during attack specifically -- explaining why the "gave up on the fight" pattern only ever showed up against drowned, never land mobs. `bot.pvp.movements` now points at the same SwimMovements instance the rest of the bot already uses. |
@@ -193,3 +195,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.12.0 | 2026-09-26 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.13.0 row. |
 | 1.13.0 | 2026-09-27 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.14.0 row. |
 | 1.14.0 | 2026-10-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.15.0 row and the `services/minecraft-bots/README.md` 4.1.0 row. |
+| 1.15.0 | 2026-10-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.16.0 row and the `services/minecraft-bots/README.md` 4.2.0 row. |

@@ -1,4 +1,4 @@
-// Version: 1.0.0
+// Version: 1.1.0
 //
 // Direct request, 2026-10-07: "carry torches when tunneling, and place them at an appropriate
 // distance to prevent spawns."
@@ -13,24 +13,42 @@
 //
 // So: a trail, hung off `diggingCompleted`, which is the one moment in a mining trip when the
 // bot is reliably between digs. It fires at most every TORCH_SPACING blocks travelled from the
-// last torch it placed, only where the cell actually reads dark, and only onto a block a torch
-// can hold.
+// last torch it placed, only under cover, only where nothing is already shedding light, and only
+// onto a block a torch can hold. (The darkness test does NOT read block.light -- see 1.1.0.)
 //
 // TORCH_SPACING = 6, and it is a real number rather than a guess: a torch is light level 14 at
 // its own cell and falls off 1 per block, so the midpoint between two torches 6 apart still
 // reads 14 - 6 = 8 -- exactly DARK_LIGHT_LEVEL, the threshold the rest of this codebase already
-// uses for "a mob can spawn here" (see actions.js's own note on block.light). Wider spacing
-// leaves a spawnable gap in the middle of the corridor; narrower just burns torches.
+// uses for "a mob can spawn here". Wider spacing leaves a spawnable gap in the middle of the
+// corridor; narrower just burns torches. In a straight shaft the realised spacing is 7, since
+// the last torch is itself a light source within TORCH_SPACING at exactly 6.
 //
-// Placement is gated on the MEASURED block.light, not on geometry alone, so a tunnel that breaks
-// into an already-lit cave, or one another bot has already lit, costs nothing. Equipping a torch
-// mid-dig would fight mineflayer-collectblock's own equipForBlock() (the reason checkLighting was
-// deliberately kept to idle ticks, see its own comment) -- `bot.targetDigBlock` being set means
-// the next dig has already started, and this bails rather than racing it. collectBlock re-equips
-// the right tool before every dig of its own accord, so a torch in hand between two digs is
-// handed back without any bookkeeping here.
+// 1.1.0 (2026-10-07) -- the darkness test does NOT use block.light, and must not. Measured live
+// while the first run of this file's own live scenario placed nothing: block.light is populated
+// when a chunk loads and is never updated afterwards on this stack. Confirmed three ways in the
+// test arena -- a cell sealed inside solid deepslate still read light=10, a chunk unload/reload
+// did not change it, and placing a real torch in that very cell with bot.placeBlock left it at 10.
+// It is not a constant (neighbouring cells read 14 and 10), so it is real data, just frozen.
+//
+// That makes it unusable as a gate: it would answer "already lit" for a tunnel that is pitch dark
+// and "still dark" for one the bot just lit. (The same dependency sits under checkLighting and
+// light_area, which is a separate, pre-existing problem and not fixed here -- see
+// MINECRAFT_BOTS_DESIGN.md §11.) Both replacement gates read data that is always current:
+//
+//   * UNDER COVER (shelter.js's isCovered): something solid overhead. This is what stops the trail
+//     firing while a bot crosses a field at noon -- the job block.light was doing for daylight.
+//   * NO LIGHT SOURCE WITHIN TORCH_SPACING, by block id, from the registry's own emitLight field
+//     (56 blocks carry it; 37 emit DARK_LIGHT_LEVEL or more) rather than a hand-typed list of
+//     names. This is what stops the trail re-lighting a stretch another bot already lit, or a
+//     tunnel that breaks into a lava-lit cave -- the job block.light was doing for brightness.
+//
+// Equipping a torch mid-dig would fight mineflayer-collectblock's own equipForBlock() (the reason
+// checkLighting was deliberately kept to idle ticks, see its own comment) -- `bot.targetDigBlock`
+// being set means the next dig has already started, and this bails rather than racing it.
+// collectBlock re-equips the right tool before every dig of its own accord, so a torch in hand
+// between two digs is handed back without any bookkeeping here.
 import { DARK_LIGHT_LEVEL, isProtectedBlockName } from "./actions.js";
-import { fixtureKind } from "./shelter.js";
+import { fixtureKind, isCovered } from "./shelter.js";
 import { Vec3 } from "vec3";
 
 export const TORCH_SPACING = parseInt(process.env.MC_TORCH_SPACING || "6", 10);
@@ -64,6 +82,36 @@ export function needsTorches(bot) {
   return torchCount(bot) < TORCH_CARRY_MIN;
 }
 
+// Every block that emits real light, straight from the registry's own emitLight field -- 37 of
+// them at DARK_LIGHT_LEVEL or above on this server, from torches and lanterns to lava, froglights
+// and campfires. Resolved once per process; an empty result is never cached, since the registry
+// may not be up on the first call.
+let lightSourceIds = null;
+export function lightSourceBlockIds(bot) {
+  if (lightSourceIds?.length) return lightSourceIds;
+  lightSourceIds = (bot.registry?.blocksArray || [])
+    .filter((block) => (block.emitLight ?? 0) >= DARK_LIGHT_LEVEL)
+    .map((block) => block.id);
+  return lightSourceIds;
+}
+
+// Is this stretch already lit by something? One findBlocks by id, not a hand-rolled cube scan --
+// the trail asks this at most once per TORCH_SPACING blocks travelled, never per dig.
+//
+// [FLAGGED] This is blind to walls: a lantern six blocks away on the far side of solid rock lights
+// nothing here, but still counts. Accepted deliberately, because the alternative is real light
+// propagation and the one field that would have given it (block.light) is frozen -- see this
+// file's 1.1.0 note. The cost is a torch occasionally not placed where a parallel tunnel runs
+// close by; the benefit is never re-lighting a stretch a teammate just lit, which is the case
+// that actually recurs in a nine-bot fleet sharing one mine. The distance gate, not this, is what
+// does the real spacing work, so a false "lit" only ever delays a torch to the next TORCH_SPACING
+// step, it does not skip the stretch for good.
+export function litNearby(bot, pos, radius = TORCH_SPACING) {
+  const ids = lightSourceBlockIds(bot);
+  if (!ids.length) return false; // no registry: better to light it than to skip for a bad reason
+  return (bot.findBlocks({ point: pos, matching: ids, maxDistance: radius, count: 1 }) || []).length > 0;
+}
+
 // Where the next trail torch goes: { reference, face, at }, or { skip } with the reason why not.
 // The floor is tried before a wall -- a torch on the floor of a corridor lights it both ways,
 // where one on a wall wastes half its radius inside the rock.
@@ -74,7 +122,9 @@ export function trailTorchSpot(bot, last, spacing = TORCH_SPACING) {
   if (last && here.distanceTo(last) < spacing) return { skip: "last torch still close" };
   const cell = bot.blockAt(here);
   if (!cell || cell.boundingBox === "block") return { skip: "nowhere to put one" };
-  if (cell.light === undefined || cell.light >= DARK_LIGHT_LEVEL) return { skip: "already lit" };
+  // The two gates that replaced block.light -- see this file's 1.1.0 note for why it cannot be used.
+  if (!isCovered(bot, here)) return { skip: "out in the open" };
+  if (litNearby(bot, here)) return { skip: "already lit" };
 
   const floor = bot.blockAt(here.offset(0, -1, 0));
   if (canHoldTorch(floor)) return { reference: floor, face: new Vec3(0, 1, 0), at: here };

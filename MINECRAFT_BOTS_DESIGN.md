@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.15.0
+**Version:** 2.16.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -430,7 +430,9 @@ the original incident number, still cited throughout the code. Narrative is in g
 | A cancelled action is never a success, and a stale handle never acts — recovery retries, goal counters and skills all depend on it | MB-02, MB-04 |
 | `nearestHostile()` tracks one threat. Swarms are not solvable by per-bot reactive tuning — fix the spawn cause (lighting, gamerules) | 54 |
 | `checkHomeLighting()` has failed live three times, each from a different silent gate. It now loots torches from a chest first, then crafts from *any* wood source, and logs when it genuinely can't | 17, 32, 38, 54 |
-| Tunnels are lit by a trail (`tunneling.js`), hung off `diggingCompleted` — the one moment in a mining trip a bot is reliably between digs, and the reason `checkLighting`'s idle-tick reflex never fired during the activity that creates unlit space. `TORCH_SPACING` 6 is derived, not guessed: a torch is light 14 and falls off 1/block, so the midpoint of two torches 6 apart reads exactly `DARK_LIGHT_LEVEL`. Placement is gated on the measured `block.light`, so a tunnel that breaks into a lit cave costs nothing. `checkTorchSupply` crafts from carried coal before trying a chest — the reverse of `checkHomeLighting`, because a bot already underground cannot afford the trip | 2026-10-07 |
+| Tunnels are lit by a trail (`tunneling.js`), hung off `diggingCompleted` — the one moment in a mining trip a bot is reliably between digs, and the reason `checkLighting`'s idle-tick reflex never fired during the activity that creates unlit space. `TORCH_SPACING` 6 is derived, not guessed: a torch is light 14 and falls off 1/block, so the midpoint of two torches 6 apart reads exactly `DARK_LIGHT_LEVEL`. Realised spacing in a straight shaft is 7, since the last torch is itself a light source at 6. `checkTorchSupply` crafts from carried coal before trying a chest — the reverse of `checkHomeLighting`, because a bot already underground cannot afford the trip | 2026-10-07 |
+| **`block.light` is frozen at chunk-load time on this stack and must not be used as a gate.** Measured three ways in the test arena 2026-10-07: a cell sealed inside solid deepslate still read `light=10`; a chunk unload/reload did not change it; and placing a real torch in that cell with `bot.placeBlock` left it at 10. It is real data, not a constant (neighbouring cells read 14 and 10) — just never updated after a block change. The torch trail therefore gates on `isCovered()` (something solid overhead) plus a `findBlocks` scan for blocks whose registry `emitLight` is >= `DARK_LIGHT_LEVEL`; both read data that is always current. That scan is blind to walls, which is accepted — the distance gate does the real spacing work, so a false "lit" only delays a torch by one step | 2026-10-07 |
+| `craftItem`'s auto-chain reads `recipe.delta`, not `recipe.ingredients`. minecraft-data populates `ingredients` for **shapeless** recipes only; a torch, a stick and a crafting table are all shaped and carry `inShape` instead, so the chain silently skipped every one of them. This is the real reason `checkHomeLighting`'s "craft from any wood source" gate never worked, three fixes in — a bot with coal and planks but no loose stick could not make a torch | 17, 32, 38, 54, 2026-10-07 |
 
 **Server-side, not code**
 
@@ -454,6 +456,13 @@ the original incident number, still cited throughout the code. Narrative is in g
 | The skills directory sits *inside* the memory directory, so the memory corpus's recursive scan must skip it — otherwise every skill description is embedded as a world fact, which is exactly what the separate corpus exists to prevent | — |
 
 ## 12. Open
+
+- **`checkLighting` and `light_area` still gate on `block.light`**, which §11 now records as frozen
+  at chunk-load time. Near the base, where chunks loaded while it was dark, both read "dark"
+  forever — so bots keep sweeping spots they have already lit, and `light_area` can report
+  "already lit" for somewhere genuinely black. Deliberately not fixed alongside the torch trail
+  (2026-10-07): the trail could avoid the field entirely, these two are built around it. The fix
+  is the same substitution — `emitLight` by block id instead of a light level.
 
 - **`planNextStep` model choice.** `dispatch` is fast and occasionally wrong, `coder` is more
   accurate at ~8s, `coder2` is most rule-compliant but unusable per-tick. Evidence gathered, no

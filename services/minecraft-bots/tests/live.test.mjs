@@ -1,4 +1,4 @@
-// Version: 1.14.0
+// Version: 1.15.0
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -35,6 +35,10 @@
 // 1.14.0 | 2026-10-07 | Access/shelters/torches: "place" refuses a chest lid, "clear_access" frees a
 //   covered chest and the chest then opens, a bot inside a real shelter leaves by its doorway with
 //   digging ON, and a torch trail down a sealed dark corridor at a measured spacing.
+// 1.15.0 | 2026-10-07 | First live run of the above: chests must be sunk INTO the arena floor for the
+//   lid rule to apply; the whole floor layer (sea lanterns, emitLight 15) has to go for the torch
+//   scenario, not just the corridor, because litNearby is blind to walls; and the craft step retries,
+//   since bot.craft() intermittently loses a race with the server's inventory update.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -590,12 +594,14 @@ scenario("Shelter walls: with a shelter around her bed, she leaves through the d
 });
 
 scenario("Torches: she makes some from coal, then trails them down a dark tunnel at a real spacing", async () => {
-  // A sealed deepslate corridor inside the arena: the arena's own floor is sea lanterns (light 15),
-  // so the floor goes too, and both ends are capped -- otherwise block.light never reads dark and
-  // there would be nothing for the trail to react to.
+  // A deepslate corridor inside the arena. The arena's whole floor is sea lanterns (emitLight 15),
+  // and litNearby is deliberately blind to walls, so every lantern within TORCH_SPACING of the
+  // corridor -- which at r=10 is all of them -- has to go, not just the ones under the corridor
+  // itself. restoreFloor() puts the lanterns back afterwards.
   restoreFloor();
   const [x0, x1] = [x - 8, x + 8];
   await rcon(
+    `fill ${x - r} ${y} ${z - r} ${x + r} ${y} ${z + r} minecraft:deepslate`,
     `fill ${x0 - 1} ${y} ${z - 1} ${x1 + 1} ${y + 3} ${z + 1} minecraft:deepslate`,
     `fill ${x0} ${y + 1} ${z} ${x1} ${y + 2} ${z} minecraft:air`,
   );
@@ -604,9 +610,17 @@ scenario("Torches: she makes some from coal, then trails them down a dark tunnel
   await rcon(`give ${TESTER} minecraft:coal 8`, `give ${TESTER} minecraft:oak_planks 8`);
   await waitFor(() => held("coal") >= 8 && held("oak_planks") >= 8, 8000, "coal and planks");
   assert.equal(needsTorches(bot), true, `starts short of torches: ${torchCount(bot)}`);
-  const made = await performAction(bot, { type: "craft", item: "torch", count: 4 }, TESTER);
-  assert.equal(made.ok, true, made.text);
-  assert(torchCount(bot) >= TORCH_CARRY_MIN, `carrying ${torchCount(bot)} torches, wanted ${TORCH_CARRY_MIN}`);
+  // Up to three attempts: bot.craft() opens a real window and occasionally loses a race with the
+  // server's inventory update, reporting "missing ingredient" for a chain that is actually
+  // affordable (seen once here, 2026-10-07, and reproducible only intermittently). The chain
+  // itself -- shaped recipes, planks into the stick a torch needs -- is pinned by a unit check.
+  let made = null;
+  for (let attempt = 0; attempt < 3 && !needsTorchesSatisfied(); attempt++) {
+    made = await performAction(bot, { type: "craft", item: "torch", count: 4 }, TESTER);
+    if (!made.ok) await sleep(1500);
+  }
+  function needsTorchesSatisfied() { return torchCount(bot) >= TORCH_CARRY_MIN; }
+  assert(needsTorchesSatisfied(), `carrying ${torchCount(bot)} torches, wanted ${TORCH_CARRY_MIN}: ${made && made.text}`);
 
   // The trail reacts to a completed dig, so the event is what's driven here -- what the scenario
   // proves over the offline check is that the server accepts the reference block and face the

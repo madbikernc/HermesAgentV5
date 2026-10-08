@@ -1,4 +1,4 @@
-// Version: 1.18.0
+// Version: 1.19.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -35,6 +35,10 @@
 //   obstruction scan, "place"/"clear_access"/"mine" and the other four placement sites. Shelter walls:
 //   the covered fill, its cap, an open-sky bed, and pathfinder's refusal to dig one. Torches: trail
 //   spacing, what can hold one, between-digs timing, and the supply top-up's backoff.
+// 1.19.0 | 2026-10-07 | First real run of the above, on spark: `class V3` hoisted (not hoisted by JS,
+//   and the first check now needs it), the place_home stub given a real V3 world, vm-context arrays
+//   spread before deepStrictEqual (different Array prototype), blockWorld given block ids plus a
+//   registry with emitLight, and a check that craftItem chains through shaped recipes.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -50,6 +54,18 @@ const swim = await readFile(root + 'swim-movements.js', 'utf8');
 const shelterSrc = await readFile(root + 'shelter.js', 'utf8');
 const tunnelSrc = await readFile(root + 'tunneling.js', 'utf8');
 const arbiter = await import(pathToFileURL(root + 'arbiter.js').href);
+
+// The `vec3` stand-in for every context below: there is no node_modules in this suite. Declared
+// here rather than beside its first bed/shelter use, because `class` is not hoisted and the very
+// first check() now builds a context that needs it (2026-10-07).
+class V3 {
+  constructor(x, y, z) { Object.assign(this, { x, y, z }); }
+  offset(dx, dy, dz) { return new V3(this.x + dx, this.y + dy, this.z + dz); }
+  equals(o) { return o.x === this.x && o.y === this.y && o.z === this.z; }
+  distanceTo(o) { return Math.hypot(this.x - o.x, this.y - o.y, this.z - o.z); }
+  toString() { return `(${this.x}, ${this.y}, ${this.z})`; }
+  floored() { return new V3(Math.floor(this.x), Math.floor(this.y), Math.floor(this.z)); }
+}
 
 function between(source, start, end) {
   const from = source.indexOf(start);
@@ -390,13 +406,15 @@ await check('MB-02 flee restores shared movements only if its own copy is still 
 
 await check('MB-08 place_home walks home, then places the item', async () => {
   const bot = makeBot(); const steps = [];
-  const pos = { x: 0, y: 64, z: 0, floored() { return this; }, offset(dx, dy, dz) { return { dx, dy, dz }; } };
+  // A real V3 and a coordinate-based world, not a position stub with a fake offset(): "place" now
+  // asks wouldBlockAccess about the candidate cell, which walks the cell's own neighbours.
   bot.spawnPoint = { x: 10, y: 64, z: 10 };
-  bot.entity = { position: pos };
+  bot.entity = { position: new V3(0, 64, 0) };
   bot.inventory.items = () => [{ name: 'furnace' }];
   bot.pathfinder.goto = async () => { steps.push('goto-home'); };
   bot.equip = async () => {};
-  bot.blockAt = (p) => (p.dy === -1 ? { boundingBox: 'block' } : { boundingBox: 'empty' });
+  bot.blockAt = (p) => ({ name: 'stone', position: p, boundingBox: p.y <= 63 ? 'block' : 'empty',
+    getProperties: () => ({}) });
   bot.placeBlock = async () => { steps.push('place'); };
   const c = context(bot, { Vec3: class {}, attemptBoatCrossing: async () => false });
   vm.runInContext(timeoutFn + actionFn, c);
@@ -751,14 +769,6 @@ await check('Fight-or-flee: the mob that just hurt the bot is the threat, not me
 
 // Beds (2026-09-25): a fake world of bed blocks plus a temp claims directory, with the real claim
 // helpers and the real "sleep" action.
-class V3 {
-  constructor(x, y, z) { Object.assign(this, { x, y, z }); }
-  offset(dx, dy, dz) { return new V3(this.x + dx, this.y + dy, this.z + dz); }
-  equals(o) { return o.x === this.x && o.y === this.y && o.z === this.z; }
-  distanceTo(o) { return Math.hypot(this.x - o.x, this.y - o.y, this.z - o.z); }
-  toString() { return `(${this.x}, ${this.y}, ${this.z})`; }
-  floored() { return new V3(Math.floor(this.x), Math.floor(this.y), Math.floor(this.z)); }
-}
 // `shared`: hermes-memory's minecraft-beds rows as { name: value } (mutated by writes); omitted =
 // hermes-memory unreachable, so claims fall back to this host's files.
 async function bedWorld(username, { claims = {}, standAt = new V3(0, 64, 0), shared } = {}) {
@@ -1557,7 +1567,9 @@ await check('Beds: a spot with a bot standing in it is skipped, and a refused sp
   assert(!(next.foot.equals(best.foot) && next.head.equals(best.head)), 'the occupied spot is not offered');
   for (const cell of [next.foot, next.head]) assert(!(cell.x === best.head.x && cell.z === best.head.z), 'nothing standing in it');
   const place = actions.slice(actions.indexOf('case "place_bed": {'), actions.indexOf('case "shear": {'));
-  assert.match(place, /\.find\(\(c\) => !tried\.some\(\(t\) => t\.equals\(c\.foot\)\)\)/, 'each attempt takes a spot not tried yet');
+  // The predicate gained an access clause in 1.81.0, so this only pins the "not tried yet" half;
+  // the access half has its own check further down.
+  assert.match(place, /\.find\(\(c\) => !tried\.some\(\(t\) => t\.equals\(c\.foot\)\)/, 'each attempt takes a spot not tried yet');
 });
 
 await check('Beds: the first choice is a spot under a roof -- the shelter room, entered from its doorway', async () => {
@@ -1581,30 +1593,47 @@ await check('Beds: the first choice is a spot under a roof -- the shelter room, 
 // A flat world: solid stone at y <= groundY, air above, plus blocks placed by name. Beds, doors
 // and chests are solid here because they are solid in the real registry -- the access rules and
 // the covered flood fill both depend on that.
+// Block ids and a minimal registry, so a scan by id (bedAnchors, litNearby) works the way the
+// real one does. emitLight is the registry field tunneling.js derives its light sources from.
+const BLOCK_DEFS = [
+  ['air', 0], ['stone', 0], ['deepslate', 0], ['cobblestone', 0], ['grass_block', 0],
+  ['chest', 0], ['barrel', 0], ['furnace', 0], ['white_bed', 0], ['oak_door', 0],
+  ['spruce_door', 0], ['oak_fence_gate', 0], ['sand', 0], ['gravel', 0],
+  ['torch', 14], ['lantern', 15], ['glowstone', 15], ['lava', 15], ['candle', 0],
+];
+const BLOCK_ID = Object.fromEntries(BLOCK_DEFS.map(([name], i) => [name, i + 1]));
+const TEST_REGISTRY = {
+  blocksArray: BLOCK_DEFS.map(([name, emitLight], i) => ({ name, id: i + 1, emitLight })),
+  blocksByName: Object.fromEntries(BLOCK_DEFS.map(([name, emitLight], i) => [name, { name, id: i + 1, emitLight }])),
+};
+
 function blockWorld({ groundY = 63, light = 0 } = {}) {
   const at = new Map();
   const bot = {
+    registry: TEST_REGISTRY,
     blockAt(p) {
       if (!p) return null;
       const spec = at.get(`${p.x},${p.y},${p.z}`);
       const position = new V3(p.x, p.y, p.z);
       if (spec) {
-        return { name: spec.name, position, light: spec.light ?? light,
+        return { name: spec.name, position, light: spec.light ?? light, type: BLOCK_ID[spec.name] ?? 0,
           boundingBox: spec.name === 'air' ? 'empty' : 'block', getProperties: () => spec.props || {} };
       }
       const stone = p.y <= groundY;
-      return { name: stone ? 'stone' : 'air', position, light: stone ? 0 : light,
+      const name = stone ? 'stone' : 'air';
+      return { name, position, light: stone ? 0 : light, type: BLOCK_ID[name],
         boundingBox: stone ? 'block' : 'empty', getProperties: () => ({}) };
     },
     findBlocks({ matching, point, maxDistance = 32, count = 16 }) {
       const origin = point || bot.entity.position;
+      const ids = typeof matching === 'function' ? null : new Set([].concat(matching));
       const out = [];
       for (const k of at.keys()) {
         const [bx, by, bz] = k.split(',').map(Number);
         const pos = new V3(bx, by, bz);
         if (pos.distanceTo(origin) > maxDistance) continue;
         const block = bot.blockAt(pos);
-        const hit = typeof matching === 'function' ? matching(block) : [].concat(matching).includes(block.name);
+        const hit = ids ? ids.has(block.type) : matching(block);
         if (hit) out.push(pos);
         if (out.length >= count) break;
       }
@@ -1615,6 +1644,12 @@ function blockWorld({ groundY = 63, light = 0 } = {}) {
     entity: { position: new V3(0, 64, 0) },
     entities: {},
     inventory: { items: () => [] },
+    // The same four primitives arbiter.cancelPhysical() touches on every performAction (see
+    // makeBot above) -- a scenario that drives a real action overrides whichever it cares about.
+    pathfinder: { goal: null, setGoal(g) { this.goal = g; }, movements: { canDig: true } },
+    pvp: { target: null, stop() { this.target = null; } },
+    collectBlock: { cancelTask() {} },
+    stopDigging() {},
   };
   const place = ([bx, by, bz], name, props) => at.set(`${bx},${by},${bz}`, { name, props });
   const open = ([bx, by, bz]) => at.set(`${bx},${by},${bz}`, { name: 'air' });
@@ -1678,7 +1713,9 @@ await check('Access: the obstruction scan finds a blocked lid and both halves of
   assert.equal(found[0].name, 'cobblestone');
   w.place([0, 65, 0], 'furnace'); // a fixture: never dug out to reach another fixture
   const policy = c.findAccessObstructions(w.bot, new V3(0, 64, 0), 8, (name) => name !== 'furnace');
-  assert.deepEqual(policy.map((f) => f.name), ['cobblestone'], "the caller's own no-break policy is honoured");
+  // Spread first: an array built inside the vm context has that context's Array prototype, which
+  // deepStrictEqual rejects even when the contents match.
+  assert.deepEqual([...policy].map((f) => f.name), ['cobblestone'], "the caller's own no-break policy is honoured");
 });
 
 await check('Access: a door sealed on both sides is left alone; one blocked side is cleared', async () => {
@@ -1688,10 +1725,10 @@ await check('Access: a door sealed on both sides is left alone; one blocked side
   w.place([0, 64, 5], 'cobblestone');
   w.place([0, 65, 5], 'cobblestone');
   const oneSide = c.findAccessObstructions(w.bot, new V3(0, 64, 6), 4, () => true);
-  assert.deepEqual(oneSide.map((f) => f.position.z), [5, 5], 'both cells of the blocked side');
+  assert.deepEqual([...oneSide].map((f) => f.position.z), [5, 5], 'both cells of the blocked side');
   w.place([0, 64, 7], 'cobblestone');
   w.place([0, 65, 7], 'cobblestone');
-  assert.deepEqual(c.findAccessObstructions(w.bot, new V3(0, 64, 6), 4, () => true), [],
+  assert.deepEqual([...c.findAccessObstructions(w.bot, new V3(0, 64, 6), 4, () => true)], [],
     'a door built into solid ground on both sides is not a passage anyone uses');
 });
 
@@ -1871,26 +1908,87 @@ await check('Access: the other four placement sites ask first, each in the way t
 
   const repair = slice('case "repair_terrain": {', 'case "store": {');
   assert.match(repair, /wouldBlockAccess\(bot, pos, materialName\)/);
-  assert.match(repair, /blocking[\s\S]{0,80}\n\s+break;/, 'a pit fill stops at the fixture, it does not skip a layer');
+  assert.match(repair, /if \(shuts\) \{[\s\S]{0,300}?\n\s+break;\n\s+\}/,
+    'a pit fill stops at the fixture, it does not skip a layer and keep going');
 
   const bed = slice('case "place_bed": {', 'case "shear": {');
   assert.match(bed, /!wouldBlockAccess\(bot, c\.foot\) && !wouldBlockAccess\(bot, c\.head\)/, 'both halves of the bed');
+});
+
+await check('Craft: the auto-chain works for shaped recipes too, so coal + planks makes a torch', async () => {
+  // Real ids and the real recipe shapes, captured off the server 2026-10-07: a torch is SHAPED,
+  // so `ingredients` is undefined and only `delta` describes what it consumes. The old code read
+  // `ingredients` alone and skipped the recipe, so the stick was never crafted.
+  const ITEM = { oak_planks: 41, coal: 897, stick: 946, torch: 322 };
+  const byId = Object.fromEntries(Object.entries(ITEM).map(([name, id]) => [id, { name, id }]));
+  const inv = { oak_planks: 8, coal: 8, stick: 0, torch: 0 };
+  const crafted = [];
+  const shaped = (out, ins) => ({ result: { id: ITEM[out] },
+    delta: [...ins.map(([n, c]) => ({ id: ITEM[n], count: -c })), { id: ITEM[out], count: 4 }] });
+  const RECIPES = { torch: shaped('torch', [['coal', 1], ['stick', 1]]), stick: shaped('stick', [['oak_planks', 2]]) };
+
+  const bot = {
+    registry: { itemsByName: Object.fromEntries(Object.entries(ITEM).map(([n, id]) => [n, { id }])), items: byId },
+    inventory: {
+      items: () => Object.entries(inv).filter(([, c]) => c > 0).map(([name, count]) => ({ name, count })),
+      count: (name) => inv[name] ?? 0,
+    },
+    // Affordable right now only: what recipesFor really does.
+    recipesFor: (id, _m, count, _t) => {
+      const name = byId[id].name;
+      const r = RECIPES[name];
+      if (!r) return [];
+      return r.delta.filter((d) => d.count < 0).every((d) => inv[byId[d.id].name] >= -d.count) ? [r] : [];
+    },
+    recipesAll: (id) => (RECIPES[byId[id].name] ? [RECIPES[byId[id].name]] : []),
+    craft: async (recipe, count) => {
+      for (const d of recipe.delta) inv[byId[d.id].name] += d.count * (count || 1);
+      crafted.push(byId[recipe.result.id].name);
+    },
+  };
+  const c = vm.createContext({ bot, console: { log() {}, error() {} } });
+  // From simpleSourceFor so the chain's own "what makes a stick" helper comes along with it.
+  vm.runInContext(between(actions, 'function simpleSourceFor(', '// Extracted from "loot"'), c);
+
+  assert.deepEqual(c.recipeInputs(RECIPES.torch).map((i) => i.id).sort(), [ITEM.coal, ITEM.stick].sort(),
+    'a shaped recipe\'s inputs come out of delta');
+  assert.equal(c.recipeInputs({ ingredients: [{ id: 1, count: 1 }] })[0].id, 1, 'a shapeless recipe still works');
+  assert.equal(c.recipeInputs({}), null, 'and a recipe with neither is skipped, not crashed on');
+
+  await c.craftItem(bot, 'torch', 1, null);
+  assert.deepEqual(crafted, ['stick', 'torch'], 'the stick was chained first, from her planks');
+  assert(inv.torch >= 4, `she ended up with torches: ${inv.torch}`);
 });
 
 // Tunnelling torches (2026-10-07).
 function tunnel(extras = {}) {
   const c = vm.createContext({ Vec3: V3, process: { env: {} }, console: { log() {}, error() {} },
     Promise, DARK_LIGHT_LEVEL: 8, isProtectedBlockName: (n) => /chest|furnace|crafting_table/.test(n),
-    fixtureKind: shelter().fixtureKind, ...extras });
+    fixtureKind: shelter().fixtureKind, isCovered: shelter().isCovered, ...extras });
   vm.runInContext(between(tunnelSrc, 'export const TORCH_SPACING'), c);
   return c;
 }
 
-await check('Torches: a trail torch goes down every 6 blocks of dark tunnel, on the floor before a wall', async () => {
+await check('Torches: the light test uses the registry and real blocks, never the frozen block.light', async () => {
+  const c = tunnel();
+  const w = blockWorld({ groundY: 40, light: 15 }); // light 15 everywhere: a gate reading it would skip
+  w.place([0, 43, 0], 'deepslate'); // a roof, so she counts as under cover
+  const ids = c.lightSourceBlockIds(w.bot);
+  assert(ids.length >= 4, `light sources come from emitLight: ${ids.length}`);
+  for (const name of ['torch', 'lantern', 'glowstone', 'lava']) assert(ids.includes(BLOCK_ID[name]), name);
+  for (const name of ['candle', 'stone', 'cobblestone']) assert(!ids.includes(BLOCK_ID[name]), name);
+
+  assert.equal(c.litNearby(w.bot, new V3(0, 41, 0)), false, 'nothing shedding light yet');
+  w.place([3, 41, 0], 'torch');
+  assert.equal(c.litNearby(w.bot, new V3(0, 41, 0)), true, "another bot's torch three blocks away");
+  assert.equal(c.litNearby(w.bot, new V3(0, 41, 20)), false, 'and not one twenty blocks away');
+});
+
+await check('Torches: a trail torch goes down every 6 blocks of covered tunnel, on the floor before a wall', async () => {
   const c = tunnel();
   assert.equal(vm.runInContext('TORCH_SPACING', c), 6, '14 - 6 = 8, exactly DARK_LIGHT_LEVEL at the midpoint');
-  const w = blockWorld({ groundY: 40, light: 0 }); // underground: air around her, stone below
-  w.open([0, 41, 0]);
+  const w = blockWorld({ groundY: 40, light: 15 });
+  for (let dz = -8; dz <= 8; dz++) w.place([0, 43, dz], 'deepslate'); // the tunnel roof
   w.bot.entity = { position: new V3(0.5, 41, 0.5) };
   w.bot.inventory.items = () => [{ name: 'torch', count: 4 }];
   const first = c.trailTorchSpot(w.bot, null);
@@ -1900,11 +1998,15 @@ await check('Torches: a trail torch goes down every 6 blocks of dark tunnel, on 
   assert.match(c.trailTorchSpot(w.bot, new V3(0, 41, -3)).skip, /still close/, 'three blocks back is not far enough');
   assert(!c.trailTorchSpot(w.bot, new V3(0, 41, -6)).skip, 'six blocks back is');
 
-  const lit = blockWorld({ groundY: 40, light: 12 });
-  lit.bot.entity = w.bot.entity; lit.bot.inventory.items = w.bot.inventory.items;
-  assert.match(c.trailTorchSpot(lit.bot, null).skip, /already lit/, 'a lit cave costs nothing');
+  w.place([3, 41, 0], 'lantern'); // something already lighting this stretch
+  assert.match(c.trailTorchSpot(w.bot, null).skip, /already lit/, 'a lit stretch costs nothing');
+
+  const open = blockWorld({ groundY: 40 }); // no roof at all: she is out on the surface
+  open.bot.entity = w.bot.entity; open.bot.inventory.items = w.bot.inventory.items;
+  assert.match(c.trailTorchSpot(open.bot, null).skip, /out in the open/, 'no torches dropped across a field');
 
   const empty = blockWorld({ groundY: 40 });
+  empty.place([0, 43, 0], 'deepslate');
   empty.bot.entity = w.bot.entity; empty.bot.inventory.items = () => [];
   assert.match(c.trailTorchSpot(empty.bot, null).skip, /no torches/);
 });
@@ -1920,6 +2022,7 @@ await check('Torches: a trail torch never hangs on a chest, glass or leaves -- a
   const w = blockWorld({ groundY: 40 });
   w.place([0, 40, 0], 'chest');       // standing on a chest: the floor can't hold one
   w.place([1, 41, 0], 'deepslate');   // but the tunnel wall beside her can
+  w.place([0, 43, 0], 'deepslate');   // under cover
   w.bot.entity = { position: new V3(0.5, 41, 0.5) };
   w.bot.inventory.items = () => [{ name: 'torch', count: 4 }];
   const spot = c.trailTorchSpot(w.bot, null);
@@ -1931,11 +2034,16 @@ await check('Torches: a trail torch never hangs on a chest, glass or leaves -- a
 await check('Torches: the trail fires between digs, not into one, and remembers where the last went', async () => {
   const c = tunnel();
   const w = blockWorld({ groundY: 40 });
+  for (let dz = -2; dz <= 12; dz++) w.place([0, 43, dz], 'deepslate'); // roofed corridor
   const bot = new EventEmitter();
   Object.assign(bot, w.bot, { username: 'Babs', entity: { position: new V3(0.5, 41, 0.5) },
     inventory: { items: () => [{ name: 'torch', count: 4 }] }, equip: async () => {}, targetDigBlock: null });
   const placed = [];
-  bot.placeBlock = async (ref, face) => placed.push(`${ref.position.x},${ref.position.y},${ref.position.z}:${face.y}`);
+  // Writes the torch into the world, so litNearby sees it the way it would in game.
+  bot.placeBlock = async (ref, face) => {
+    placed.push(`${ref.position.x},${ref.position.y},${ref.position.z}:${face.y}`);
+    w.place([ref.position.x + face.x, ref.position.y + face.y, ref.position.z + face.z], 'torch');
+  };
   const trail = c.installTorchTrail(bot);
 
   bot.targetDigBlock = { name: 'stone' }; // the next dig already started
@@ -1954,10 +2062,10 @@ await check('Torches: the trail fires between digs, not into one, and remembers 
   await sleep(10);
   assert.equal(placed.length, 1, 'spacing is kept across digs, not reset by each one');
 
-  bot.entity.position = new V3(0.5, 41, 7.5);
+  bot.entity.position = new V3(0.5, 41, 9.5);
   bot.emit('diggingCompleted');
   await sleep(10);
-  assert.equal(placed.length, 2, 'and the next one goes down once she is far enough');
+  assert.equal(placed.length, 2, 'and the next one goes down once she is clear of the last');
   trail.reset();
   assert.equal(trail.last, null);
 });
