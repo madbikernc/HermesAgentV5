@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.15.0
+**Version:** 1.16.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -96,6 +96,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.12.0 | 2026-09-26 | Shelter goals run directly: site, materials, `build` on the site without scaffolding; the shelter check tolerates ±2 height. |
 | 2.13.0 | 2026-09-26 | Bed goals get wood before crafting; `place_bed` skips occupied spots and tries up to 4 (the server refuses an occupied foot cell). |
 | 2.14.0 | 2026-09-27 | Shelters must fit a bed (4x4, 2x2 room); beds prefer the room and avoid chokepoints; the bed-shortage goal trigger. |
+| 2.17.0 | 2026-10-08 | Fresh world and bot-memory wipe on request: new seed `5937977623953150827`, previous world kept as `firmament-bots.bak-20261008185909`. §2 records what the wipe covered and the two traps it hit — camelCase gamerule names are a Brigadier parse error on this build (§20), and `vec_turns` is a `vec0` virtual table that only an interpreter with `sqlite_vec` can delete from, so a plain `python3` wipe of `mc-*` turns orphans their embeddings. Also notes `reinit-world` does not `save-all flush` before backing up. |
 | 2.16.0 | 2026-10-07 | Two findings from first running the 2.15.0 tests on spark, both recorded as §11 rules: `block.light` is frozen at chunk-load time on this stack (proved three ways — a sealed cell, a chunk reload, and a torch the bot placed itself), so the torch trail gates on `isCovered()` plus a registry-`emitLight` scan instead; and `craftItem`'s auto-chain read `recipe.ingredients`, which minecraft-data fills for shapeless recipes only, so it silently skipped every shaped one — the real reason `checkHomeLighting`'s "craft from any wood source" gate never worked. New §12 Open: `checkLighting`/`light_area` still depend on the frozen field. |
 | 2.15.0 | 2026-10-07 | Access and shelters (direct request, four parts): every placement verb refuses a cell that would impede a chest, bed or door, or seal a shelter's only doorway; new `clear_access` destroys one that already does; a living space's walls are refused by position in `safeToBreak` rather than by cost, which is what three rounds of `digCost` tuning could not express; tunnels are lit by a torch trail at a derived spacing, topped up from carried coal. New `shelter.js` and `tunneling.js`. |
 
@@ -196,3 +197,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.13.0 | 2026-09-27 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.14.0 row. |
 | 1.14.0 | 2026-10-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.15.0 row and the `services/minecraft-bots/README.md` 4.1.0 row. |
 | 1.15.0 | 2026-10-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.16.0 row and the `services/minecraft-bots/README.md` 4.2.0 row. |
+| 1.16.0 | 2026-10-08 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.17.0 row (the fresh-world reset). |

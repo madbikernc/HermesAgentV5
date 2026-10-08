@@ -1,4 +1,4 @@
-// Version: 1.3.0
+// Version: 1.3.1
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -20,6 +20,7 @@
 // 1.2.0 | 2026-09-25 | failed_eats_per_bot_day and farm_ranch_successes_per_bot_day (farming/ranching fixes).
 // 1.3.0 | 2026-10-07 | access_obstructions_per_bot_day, dig_error_bursts_per_bot_day,
 //   living_spaces_recognised and torch_trail_placements_per_bot_day (access/shelters/tunnelling torches).
+// 1.3.1 | 2026-10-08 | living_spaces_recognised tracks the log label fix: "anchor(s)", not "bed(s)".
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import os from "node:os";
@@ -161,7 +162,7 @@ const METRICS = {
     better: "higher", tolerance: 0.3, floor: 0.05,
     value: (c) => {
       const scans = c(/\] living space: /);
-      return scans ? c(/\] living space: \d+ bed\(s\), [1-9]\d* interior cell/) / scans : null;
+      return scans ? c(/\] living space: \d+ anchor\(s\), [1-9]\d* interior cell/) / scans : null;
     },
   },
   torch_trail_placements_per_bot_day: {

@@ -1,4 +1,8 @@
-// Version: 2.105.0
+// Version: 2.106.0
+//
+// 2.106.0 (2026-10-08) -- the living-space log line says "anchor(s)", not "bed(s)": bedAnchors()
+// always includes the spawn point, so the fresh world of 2026-10-08 reported "1 bed(s)" with no
+// bed placed anywhere. Label only; the baseline metric tracks the new wording.
 //
 // 2.105.0 (2026-10-07, direct request: access, shelters and tunnelling torches) -- a living
 // space's walls are recognised on a timer (shelter.js's roofed flood fill from every bed in
@@ -5814,7 +5818,10 @@ setInterval(() => {
   if (!bot.entity) return;
   try {
     const space = refreshLivingSpace(bot, bot.spawnPoint);
-    const summary = `${space.anchors.length} bed(s), ${space.inside.size} interior cell(s), ` +
+    // "anchor(s)", not "bed(s)": bedAnchors() always includes the spawn point, so a world with no
+    // beds in it at all still reports one anchor. Read as "bed(s)" that is simply wrong, which it
+    // looked like on the fresh world of 2026-10-08 ("1 bed(s)" with nine bots and no bed placed).
+    const summary = `${space.anchors.length} anchor(s), ${space.inside.size} interior cell(s), ` +
       `${space.cells.size} wall block(s) protected, ${space.exits.size} way(s) out`;
     if (summary === lastLivingSpaceReport && Date.now() - lastLivingSpaceReportAt < LIVING_SPACE_REPORT_MS) return;
     lastLivingSpaceReport = summary;

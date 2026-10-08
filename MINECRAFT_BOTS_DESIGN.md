@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.16.0
+**Version:** 2.17.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -52,7 +52,7 @@ The host split is memory headroom, not design — `spark` carries the LLM stack,
 | | |
 |---|---|
 | Game server | `192.168.1.221:25580`, `minecraft-bots.service`, `/home/zomboid-admin/minecraft-bots/` |
-| World dir | `firmament-bots`, seed `-4028362707405145553` (fresh world and bot memory wipe 2026-09-26; previous world `firmament-bots.bak-20260926025135`) |
+| World dir | `firmament-bots`, seed `5937977623953150827` (fresh world and bot memory wipe 2026-10-08; previous world `firmament-bots.bak-20261008185909`, the one before that `firmament-bots.bak-20260926025135`) |
 | RCON | port `25581`, Vaultwarden item `Hermes - Minecraft Bot RCON` |
 | Build | vanilla `server.jar`, offline mode, MC 26.1.2 — **gamerule names are snake_case** (`mob_griefing`, not `mobGriefing`) |
 | Firewall | LAN/Tailscale only. Offline mode means any client can claim any username; this world is not internet-facing the way the human server is |
@@ -78,6 +78,17 @@ restore. A fresh start also wipes, with the bots stopped and after a tarball bac
 `bots/`, `known_chests.json`, `beds/`, `pen.json`, `mayor-curriculum.json` and `achievements/` on
 both hosts (not `skills/` or logs); the `mc-*` turns (and their `vec_turns` rows) and the
 `minecraft-beds` state in hermes-memory; then a `minecraft` corpus reindex prunes the index.
+
+**Two traps the 2026-10-08 wipe hit, both already documented above and still easy to walk into:**
+`gamerule mobGriefing false` is a Brigadier parse error on this build — the names are snake_case
+(§20), and the camelCase form fails in a way that reads like RCON trouble rather than a bad
+argument. And deleting `mc-*` turns under plain `/usr/bin/python3` leaves their `vec_turns` rows
+orphaned: that table is a `vec0` virtual table, so only an interpreter that can import
+`sqlite_vec` (`/opt/hermes/venvs/rag/bin/python3`, the path `hermes-memory.py`'s own `connect()`
+documents) can touch it. `turns.id` is `AUTOINCREMENT`, so orphans cannot collide with a reused
+id the way §43's incident did, but they are dead embeddings that still answer `/turns/search`.
+`reinit-world` also does **not** `save-all flush` before its backup, so flush by hand first if
+anyone has been building — and it restarts only its own host's bot units.
 
 ## 3. Architecture
 
