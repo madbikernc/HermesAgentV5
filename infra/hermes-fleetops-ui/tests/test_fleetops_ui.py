@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 2.0.0
 #
 # Offline checks for hermes-fleetops-ui.py. No network, no live stores, no server bound.
 #
@@ -10,6 +10,7 @@
 # `{metric, value}`). Both were caught by looking; these checks keep them caught.
 import importlib.util
 import json
+import urllib.error
 import sqlite3
 import sys
 from pathlib import Path
@@ -120,7 +121,9 @@ def check_backlog(ui, tmp):
                  (rows[1][0], "model-scout", "scout",
                   json.dumps({"advisory_narrative": "Worth a run: beats the incumbent on its own "
                                                     "published evals.", "category": "text",
-                              "fit": "fits in 24GB at Q4"}), "1791542494.0"))
+                              "fit": "fits in 24GB at Q4",
+                              "prescribed_benchmark_label": "org__repo-q4"}),
+                 "1791542494.0"))
     conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
                  (rows[2][0], "model-scout", "scout", "{not json", "1791542495.0"))
     conn.commit()
@@ -148,15 +151,31 @@ def check_backlog(ui, tmp):
           ui.split_task_id("something-else") == ("", "something-else"))
 
     print("\n[rendering the backlog]")
+    # The buttons come from the gate's table, so it must be loaded for this render to be
+    # meaningful. With no gate the page correctly shows none, checked in check_gate_contract().
+    ui.load_gate()
     html = ui.render_backlog()
     check("the empty advisory is called out rather than left blank",
           "none recorded" in html)
-    check("an approved row offers a copy-command button", "copy command" in html)
-    check("a proposed row does not", html.count("copy command") == 1, str(html.count("copy")))
-    check("and the page states why there are no decide buttons",
-          "No decide buttons, by design" in html)
-    check("the button only writes to the clipboard — no fetch, no form, no navigation",
-          "clipboard.writeText" in html and "fetch(" not in html and "<form" not in html)
+    check("an approved row offers the copy-command button", "copy command" in html)
+    # 1.0.0 invented `hermes-benchmark-run.py --model-id ... --role ...`, which does not exist.
+    # The real tool takes a LOCAL gguf, and the --model-id must be the prescribed label or the
+    # scout can never mark the task done.
+    check("and the command is the real tool, not an invented one",
+          "hermes-benchmark-model.sh --candidate" in html and
+          "hermes-benchmark-run.py" not in html)
+    check("with the prescribed benchmark label, which the scout matches on",
+          "org__repo-q4" in html, "label missing")
+    check("a proposed row gets decide buttons for its legal transitions",
+          "approve for benchmarking" in html and "defer" in html and
+          "reject permanently" in html)
+    check("each is a POST form, so no GET can decide anything",
+          'method="post" action="/backlog/decide"' in html)
+    check("and carries the CSRF token", f'value="{ui.CSRF_TOKEN}"' in html)
+    check("the permanent action asks for confirmation first",
+          "return confirm(" in html)
+    check("the page says a decision here is the same write as the Matrix reply",
+          "benchmark|defer|reject|override" in html and "fleetops-ui" in html)
 
     print("\n[the store is opened read-only]")
     ro = ui.ro_sqlite(db)
@@ -302,10 +321,14 @@ def check_degradation(ui):
     check("an unparseable timestamp is shown as given", ui.when("whenever") == "whenever")
 
 
-def check_no_write_surface(ui):
-    print("\n[no write surface, by construction]")
+def check_write_surface(ui):
+    print(NL + "[the write surface is exactly one guarded route]")
     src = (TOOLS / "hermes-fleetops-ui.py").read_text(encoding="utf-8")
-    check("the handler defines no do_POST", "def do_POST" not in src)
+    check("there is exactly one write handler", src.count("def do_POST") == 1)
+    check("and it serves only /backlog/decide",
+          '!= "/backlog/decide"' in src)
+    check("a decide answers 303 to a GET, so a refresh cannot replay it",
+          "self.send_response(303)" in src)
     check("nor do_PUT or do_DELETE", "def do_PUT" not in src and "def do_DELETE" not in src)
     check("every sqlite connection goes through the read-only helper",
           src.count("sqlite3.connect(") == 1 and "mode=ro" in src)
@@ -349,6 +372,213 @@ def check_unit_sandbox():
     check("and records that it confers no approval authority",
           "memory.db" in unit and "read-only" in unit)
 
+class FakeGate:
+    """Stands in for hermes-model-scout-gate.py. The transition table is a COPY of the real one and
+    a separate check asserts the real module still agrees with it, so these cases stay meaningful
+    without reaching hermes-memory."""
+
+    AGENT = "model-scout"
+    TRANSITIONS = {
+        "benchmark": ({"proposed", "deferred"}, "approved"),
+        "defer": ({"proposed"}, "deferred"),
+        "reject": ({"proposed", "deferred"}, "rejected"),
+        "override": ({"rejected"}, "proposed"),
+    }
+
+    def __init__(self, tasks, write_ok=True):
+        self.tasks = tasks
+        self.write_ok = write_ok
+        self.state_writes = []
+        self.turns = []
+        self.messages = []
+
+    def fetch_task(self, task_id):
+        if task_id not in self.tasks:
+            raise urllib.error.HTTPError(task_id, 404, "not found", None, None)
+        return self.tasks[task_id]
+
+    def set_task_state(self, task_id, state, topic=None):
+        if not self.write_ok:
+            return False
+        self.state_writes.append((task_id, state, topic))
+        self.tasks[task_id]["state"] = state
+        return True
+
+    def write_turn(self, task_id, payload):
+        self.turns.append((task_id, payload))
+
+    def candidate_facts(self, task_id):
+        return {"model_id": "org/repo", "prescribed_benchmark_label": "org__repo-q4",
+                "gguf_repo": "org/repo-GGUF"}
+
+    def approval_reply(self, task_id, facts):
+        return f"[model-scout] {task_id} approved. label={facts.get('prescribed_benchmark_label')}"
+
+    def send_room_message(self, text):
+        self.messages.append(text)
+
+
+def check_gate_contract(ui):
+    print(NL + "[the decision rules belong to the gate, not to this page]")
+    # Two routes to one decision must not be able to disagree about what the decision means, so
+    # the UI imports the gate rather than restating its table. This asserts the import contract --
+    # the fragile part -- against the real file.
+    gate = ui.load_gate()
+    check("the real gate module imports cleanly", gate is not None, ui.GATE_IMPORT_ERROR)
+    if gate is None:
+        return
+    check("and the UI uses the gate's table verbatim",
+          gate.TRANSITIONS == FakeGate.TRANSITIONS, str(gate.TRANSITIONS))
+    check("every attribute the UI calls on it exists",
+          all(hasattr(gate, a) for a in ("fetch_task", "set_task_state", "write_turn",
+                                         "candidate_facts", "approval_reply", "AGENT",
+                                         "send_room_message")))
+    check("the gate's own agent name is what the UI filters tasks by",
+          gate.AGENT == "model-scout", gate.AGENT)
+
+    print(NL + "[a row only offers transitions that are legal from its state]")
+    ui.GATE = gate
+    check("proposed offers benchmark, defer and reject",
+          sorted(ui.legal_actions("proposed")) == ["benchmark", "defer", "reject"],
+          str(sorted(ui.legal_actions("proposed"))))
+    check("deferred cannot be deferred again",
+          "defer" not in ui.legal_actions("deferred"), str(ui.legal_actions("deferred")))
+    check("rejected offers only the way back",
+          ui.legal_actions("rejected") == ["override"], str(ui.legal_actions("rejected")))
+    check("approved offers nothing — the scout alone marks it done",
+          ui.legal_actions("approved") == [], str(ui.legal_actions("approved")))
+    check("an unknown state offers nothing rather than everything",
+          ui.legal_actions("weird") == [] and ui.legal_actions(None) == [])
+    # Fails closed: no gate, no buttons.
+    ui.GATE = None
+    check("with no gate imported, no action is offered at all",
+          ui.legal_actions("proposed") == [])
+    ui.GATE = gate
+
+
+def check_csrf(ui):
+    print(NL + "[CSRF: the one real difference a browser introduces]")
+    # A browser attaches cached Basic Auth to a cross-origin POST on its own, which the Matrix
+    # path has no equivalent of. The token is the defence; Sec-Fetch-Site is a second line.
+    good = ui.CSRF_TOKEN
+    check("the right token on a same-origin request passes",
+          ui.csrf_ok({"Sec-Fetch-Site": "same-origin"}, good))
+    check("a missing token fails", not ui.csrf_ok({}, ""))
+    check("a wrong token fails", not ui.csrf_ok({}, "x" * len(good)))
+    check("a cross-site request fails even WITH the right token",
+          not ui.csrf_ok({"Sec-Fetch-Site": "cross-site"}, good))
+    check("so does same-site (a sibling subdomain is not us)",
+          not ui.csrf_ok({"Sec-Fetch-Site": "same-site"}, good))
+    check("a client that sends no Sec-Fetch-Site still needs the token",
+          ui.csrf_ok({}, good) and not ui.csrf_ok({}, "nope"))
+    check("the token is long enough to be unguessable", len(good) >= 32, str(len(good)))
+
+
+def check_decisions(ui):
+    print(NL + "[a decision is re-checked against the store, not trusted from the page]")
+    tasks = {
+        "scout:super:org__repo": {"agent": "model-scout", "state": "proposed", "topic": "text"},
+        "scout:muse:other__x": {"agent": "model-scout", "state": "rejected", "topic": "text"},
+        "selfrepair:thing": {"agent": "self-repair", "state": "proposed", "topic": "code"},
+    }
+    g = FakeGate(tasks)
+    ui.GATE = g
+
+    check("a legal transition is applied",
+          ui.apply_decision("scout:super:org__repo", "benchmark") == "ok")
+    check("and the new state was written", g.state_writes[-1][1] == "approved",
+          str(g.state_writes))
+    # The same click again, now that the state has moved on: this is the stale-page case, and the
+    # reason the state is re-read server-side instead of being taken from the rendered row.
+    check("repeating it is refused as stale rather than re-applied",
+          ui.apply_decision("scout:super:org__repo", "benchmark") == "stale")
+    check("no second write happened", len(g.state_writes) == 1, str(g.state_writes))
+
+    check("an illegal transition for the state is refused",
+          ui.apply_decision("scout:muse:other__x", "defer") == "stale")
+    check("but the legal one from that state works",
+          ui.apply_decision("scout:muse:other__x", "override") == "ok")
+    check("a task belonging to another agent is refused",
+          ui.apply_decision("selfrepair:thing", "benchmark") == "foreign")
+    check("a task that does not exist is refused",
+          ui.apply_decision("scout:nope:nope", "benchmark") == "nosuch")
+    check("an unknown action is refused",
+          ui.apply_decision("scout:super:org__repo", "rm -rf") == "badaction")
+    check("and nothing above wrote to a foreign or missing task",
+          [w[0] for w in g.state_writes] == ["scout:super:org__repo", "scout:muse:other__x"],
+          str(g.state_writes))
+
+    print(NL + "[the audit record distinguishes the two routes]")
+    _tid, payload = g.turns[0]
+    check("the turn says which route decided it", payload["decided_by"] == "fleetops-ui",
+          str(payload))
+    check("and records the transition both ways",
+          payload["from"] == "proposed" and payload["to"] == "approved", str(payload))
+    check("the summary names the route too, for anyone reading `presented`",
+          "fleetops-ui" in payload["summary"], payload["summary"])
+    check("a decision made here is still announced in FleetOps",
+          any("approved" in m for m in g.messages), str(g.messages))
+    check("and the approval text is the GATE's, not composed here",
+          "label=org__repo-q4" in g.messages[0], g.messages[0])
+
+    print(NL + "[when the write fails, nothing is claimed]")
+    g2 = FakeGate({"scout:a:b": {"agent": "model-scout", "state": "proposed", "topic": "t"}},
+                  write_ok=False)
+    ui.GATE = g2
+    check("a rejected state write reports failure", ui.apply_decision("scout:a:b", "defer")
+          == "writefail")
+    check("and writes no turn claiming it happened", g2.turns == [], str(g2.turns))
+    check("and sends no FleetOps notice", g2.messages == [], str(g2.messages))
+
+    print(NL + "[with no gate, the route refuses instead of guessing]")
+    ui.GATE = None
+    check("apply_decision fails closed", ui.apply_decision("scout:a:b", "benchmark") == "nogate")
+    check("every outcome code has a message to render",
+          all(c in ui.RESULTS for c in ("ok", "stale", "nosuch", "foreign", "badaction",
+                                        "writefail", "nogate", "csrf")))
+
+
+
+def check_attribution(ui):
+    print(NL + "[who clicked: attribution, never authentication]")
+    # `tailscale serve` injects these. They are strictly better attribution than this page's
+    # shared Basic Auth can give, and they close the one genuine gap the Matrix route had.
+    hdr = {"Tailscale-User-Login": "madbikernc@gmail.com", "Tailscale-User-Name": "Paul"}
+    check("name and login are combined for the record",
+          ui.tailnet_identity(hdr) == "Paul <madbikernc@gmail.com>", ui.tailnet_identity(hdr))
+    check("a login alone still identifies someone",
+          ui.tailnet_identity({"Tailscale-User-Login": "x@y"}) == "x@y")
+    check("no headers means no person, not a crash or a guess",
+          ui.tailnet_identity({}) == "")
+    # Absent identity must not block the decision -- the route still works, the record just
+    # names the route without the person.
+    tasks = {"scout:s:a__b": {"agent": "model-scout", "state": "proposed", "topic": "t"}}
+    g = FakeGate(tasks)
+    ui.GATE = g
+    check("a decision with no identity still applies",
+          ui.apply_decision("scout:s:a__b", "defer") == "ok")
+    check("and records the route with an empty user",
+          g.turns[-1][1]["decided_by"] == "fleetops-ui"
+          and g.turns[-1][1]["decided_by_user"] == "", str(g.turns[-1][1]))
+    tasks2 = {"scout:s:c__d": {"agent": "model-scout", "state": "proposed", "topic": "t"}}
+    g2 = FakeGate(tasks2)
+    ui.GATE = g2
+    ui.apply_decision("scout:s:c__d", "reject", "Paul <madbikernc@gmail.com>")
+    check("with an identity, the turn names the person",
+          g2.turns[-1][1]["decided_by_user"] == "Paul <madbikernc@gmail.com>",
+          str(g2.turns[-1][1]))
+    check("the summary names them too, for anyone reading `presented`",
+          "Paul" in g2.turns[-1][1]["summary"], g2.turns[-1][1]["summary"])
+    check("and so does the FleetOps notice",
+          "Paul" in g2.messages[-1], g2.messages[-1])
+    # The headers arrive on a loopback socket, so any local process could set them. They are
+    # an audit nicety; Basic Auth is what decides whether a request is allowed at all.
+    src = (TOOLS / "hermes-fleetops-ui.py").read_text(encoding="utf-8")
+    check("the code says plainly that identity is not authentication",
+          "never authentication" in src.lower() or "Attribution, never authentication" in src)
+    check("and auth does not consult the identity headers at all",
+          "Tailscale-User" not in src.split("def _authed")[1].split("def ")[0])
+
 def main():
     import tempfile
     ui = load("fleetopsui", "hermes-fleetops-ui.py")
@@ -360,8 +590,12 @@ def main():
         check_models(ui)
         check_escaping(ui)
         check_degradation(ui)
-        check_no_write_surface(ui)
+        check_write_surface(ui)
         check_unit_sandbox()
+        check_gate_contract(ui)
+        check_csrf(ui)
+        check_decisions(ui)
+        check_attribution(ui)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

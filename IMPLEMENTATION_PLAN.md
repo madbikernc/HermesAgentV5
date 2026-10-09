@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.30.0
+**Version:** 3.31.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -2703,18 +2703,15 @@ blob — `value` is the score, which is what `hermes-benchmark-compare.py` reads
 A `0.0` is a real measurement and a `null` is an attempted suite that produced nothing; the first
 draft would have collapsed both into "missing".
 
-**What it deliberately does not do.** No `do_POST`/`do_PUT`/`do_DELETE` exists; every store opens
-`mode=ro` through one helper; the unit adds `ProtectSystem=strict`, `ProtectHome=read-only`,
-`PrivateTmp` and `NoNewPrivileges`, with exactly one writable path — `~/.hermes/state`, which the
-first real start forced and which is documented at the unit and in the README. `/mnt/hermes-data`,
-the repo and `/etc` stay read-only, verified by test, so **the approval state this page surfaces
-(`memory.db` task states, on `/mnt`) remains unwritable by it**. The backlog page carries no decide buttons and says so on the page, because
-a second path to that privileged decision gated by this page's shared Basic Auth would be weaker
-than the Matrix-sender-id path that exists. The one `approved`-row convenience copies a command to
-the clipboard; a test asserts that path contains no `fetch(` and no `<form>`. Everything rendered is
-escaped and responses carry `Content-Security-Policy: default-src 'none'` — these pages show
-Hugging Face repo ids and model-card-derived advisory text, which anyone can publish, plus
-LLM-written digest lines.
+**What it does not do, and the one thing it now does.** Services are still not started or stopped
+from here. As of 2.0.0 there is exactly **one** write route — the backlog's decide buttons, added
+on the operator's decision (S21f below); everything else is read-only, every store opens `mode=ro`
+through one helper, and the unit adds `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`
+and `NoNewPrivileges` with a single writable path, `~/.hermes/state`, which the first real start
+forced. `/mnt/hermes-data`, the repo and `/etc` stay read-only, verified by test. Everything
+rendered is escaped and responses carry `Content-Security-Policy: default-src 'none'` — these
+pages show Hugging Face repo ids and model-card-derived advisory text, which anyone can publish,
+plus LLM-written digest lines.
 
 **Risk 1 implemented as a function.** `section()` renders one source and catches its own failure,
 naming it, so one unreachable store cannot blank the page. Risk 3 (a third stdlib `http.server` on
@@ -3217,6 +3214,77 @@ cursor).
 
 **S21e's own risk 4 called this**: "its first real page-load is also its first live test of the
 schema, not a known-good read." It was. The schema was fine; what fed it was not.
+
+---
+
+#### S21f — decide buttons and TLS, on the operator's decision (2026-10-09)
+
+**Done.** `hermes-fleetops-ui` 2.0.0, 129 offline checks, verified end to end on the live fleet.
+
+**The reversal, and why it is a fair one.** 1.0.0 refused decide buttons, in code, in its README, in
+this plan and in a test, arguing one would be "a second, weaker path to the same privileged decision
+— shared Basic Auth against one specific Matrix sender id." The operator overruled it on the grounds
+that **the Matrix channel is *perceived* to be more secure rather than actually being so**, and that
+reading holds up: the Matrix route authenticates a sender id on a homeserver this fleet runs itself,
+this route authenticates a credential on a service reachable only over the tailnet, and both reduce
+to one credential the operator holds. The prior reasoning is kept in the record rather than deleted,
+so the decision stays legible later.
+
+Three parts of the objection were *not* perceptual, and were built rather than argued about:
+
+1. **CSRF** — a browser replays cached Basic Auth on a cross-origin POST and Matrix has no
+   equivalent. Each decide carries a per-process token an attacker cannot read cross-origin, with
+   `Sec-Fetch-Site` as a second line (allowed only to reject, never to substitute, since curl and
+   old clients omit it). All four verbs are POST and the reply is a 303, so no link, prefetch,
+   crawler or refresh can decide anything.
+2. **TLS** — Basic Auth had been crossing the tailnet in the clear. Now terminated by
+   `tailscale serve` with a real Let's Encrypt certificate for `spark.tail1a534.ts.net` (verified
+   chain, HTTP/2), proxying to a **loopback** backend on 8104, so there is no plaintext way in
+   beside the encrypted one. No cert files, key permissions or renewal timer are added: the fleet
+   already fronts the Matrix homeserver this way. **Port 443 was asked for and declined with a
+   reason** — tailscaled already serves `/` there to that homeserver, and displacing it would break
+   Matrix clients and federation. Removing the port from the URL later means a *path* on 443 plus a
+   base-path prefix in this service, about ten lines, recorded and not done.
+3. **Attribution** — the one genuine edge the Matrix route had, now turned around.
+   `tailscale serve` forwards `Tailscale-User-Login`/`-Name`, so the audit record names a *person*
+   where Matrix names a sender id and shared Basic Auth would name nobody. Treated as attribution
+   and **never** as authentication: those headers arrive on a loopback socket where any local
+   process could set them, so Basic Auth still decides admission, and a test asserts `_authed()`
+   never consults them.
+
+**It imports the gate rather than reimplementing it**, because two routes to one decision must not
+be able to disagree about what the decision means. The transition table, the task write, the turn
+write and the approval text all come from `hermes-model-scout-gate.py`; if that import fails the
+buttons are not rendered and the route refuses, since a UI guessing at a state machine is worse than
+a UI with no buttons. A row offers only what is legal from its state, and **the state is re-read
+from hermes-memory at decide time**, not taken from the rendered row — the stale-page case is a real
+one now that two routes can act on the same candidate. This file adds only
+`decided_by: "fleetops-ui"` plus the clicker's identity, and a FleetOps notice so a browser decision
+still lands where the Matrix route would have announced it.
+
+**One honest cost, stated not buried:** the service now holds write credentials it did not before —
+the shared hermes-memory token and the FleetOps Matrix credential. No new secret was minted, but
+`memory-token` is the fleet's single shared token and is not scoped to model-scout tasks by the
+server. The scoping lives in this code: one transition from the gate's table, on a `model-scout`
+task, after re-reading its state.
+
+**Also corrected while here:** 1.0.0's copy-command button emitted
+`hermes-benchmark-run.py --model-id ... --role ...`, **a command that does not exist** — it was
+composed here rather than taken from the gate. The real invocation is
+`hermes-benchmark-model.sh --candidate <local .gguf> --model-id <prescribed label>`, and the label
+must be the prescribed one or the scout can never mark the task done. A test now pins the real tool
+name and rejects the invented one.
+
+**Verified live, not just in fixtures.** Guard rails first, each confirmed non-mutating against the
+real backlog: no credentials gives 401; missing, wrong and cross-site CSRF all refused; unknown
+action refused; illegal transition refused as stale; absent task refused; `GET /backlog/decide`
+gives 404; and the state distribution stayed 77 proposed / 2 rejected / 1 done throughout. Then one
+real round trip on a single candidate — `defer` then `reject` then `override`, ending back at
+`proposed` where it started — which confirmed the hermes-memory state writes, three audit turns each
+carrying `decided_by=fleetops-ui` with the identity, and three FleetOps notices (found by paging 700
+events back, because that room carries a notice per router call). The identity was passed as
+`claude-code live verification` so the audit trail says what that was rather than implying a human
+decided it.
 
 ---
 
@@ -4269,3 +4337,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.28.0 | 2026-10-09 | **S28 added — optional, planned, not executed.** After evaluating Capital One's VulnHunter (Apache-2.0, released 2026-07-16; three Claude Code skills plus a headless agent and a batch harness, built for Opus-class models), the operator asked for a general security-benchmark capability and a bake-off on the local roster. S28a extends the existing model-benchmark harness rather than adding a tool: a pinned, sandboxed target registry (OWASP Juice Shop, WebGoat), ground truth in VulnHunter's own `ground_truth/<repo>.json` shape, a deterministic-first judge that never scores its own output, new `juiceshop`/`webgoat` suites kept out of `DEFAULT_SUITES` like `swebench`, and the S11 direct-to-`llama-server` bypass — whose consequences (traffic invisible to `hermes-guard-report`, never reusable for real traffic) are written down. Static source analysis ships first; running vulnerable instances waits on S10's still-open network isolation. S28b ports `/vulnhunt` and runs the §4.5 roster (`dispatch`, `muse`, `super`, `coder`, `coder2`, `omni`) with and without the skill, with a decision rule that must be pre-registered before the first scored run and a null result recorded as legitimate. Six risks named, including that these two targets are heavily documented and so scores are an upper bound. §0 row, §5.1 ordering (S28 gates nothing; S28a before S28b; static before dynamic; why S22-before does not apply) and the header status line updated. **Not measured:** no fleet node was reachable, so every node, port and path in S28 is read from this repo. Minor bump — new stage and constraints; no existing stage's status changed. |
 | 3.29.0 | 2026-10-09 | **S21 built and verified — `hermes-fleetops-ui` 1.0.0, five read-only pages, 64 offline checks.** All five fetched live on spark at HTTP 200 with zero section errors and real data (80 backlog candidates, 6 router roles with checkpoint / abliterated / host / residency, 33 benchmark runs across their suites). **Not yet enabled as a service**: it needs its own `fleetops-ui` Vaultwarden item, which requires an unlocked `bw` session and is an operator step (README §2) — the verification ran with a throwaway credential on loopback rather than writing to the vault. **Three plan assumptions corrected against the live system.** The port: S21 called 8101 "the obvious next value but must be confirmed live", and it is `hermes-buzz`; 8103 is referenced nowhere in the repo and is the port — the discipline the plan asked for is what caught it. The backlog source: S21b said `GET /tasks`, but hermes-memory's `/tasks` is POST-only with no list route and `hermes-self-repair-status.py` only ever fetches one task by id, so this follows `list_scout_tasks()`'s already-settled read-only sqlite read and its reason (sqlite-vec is invisible to /usr/bin/python3). The benchmark schema: a row holds a `suites` dict of `{metric, value}`, not one suite with a `scores` blob, so a real 0.0 renders as a number and a null says "no result" — the first draft would have collapsed both. **Zero new privileged write surface**, enforced three ways: no write handlers exist, every store opens `mode=ro` through one helper, and the unit adds `ProtectSystem=strict` with an empty `ReadWritePaths`. No decide buttons on the backlog, stated on the page, because a second path to that decision behind shared Basic Auth would be weaker than the Matrix-sender-id path that exists; the one `approved`-row convenience copies to the clipboard and a test asserts no `fetch(`/`<form>` on it. Risk 1 is implemented as `section()`, which catches each source's own failure and names it. **Risk 4 came true and was worth it**: S21e's empty highlight table is what led to S27g. Minor bump — a stage executed; its three corrected assumptions are recorded in place rather than left to contradict the code. |
 | 3.30.0 | 2026-10-09 | **S21 enabled and serving; the first real start exposed one wrong claim in 3.29.0, corrected here.** The operator created the `fleetops-ui` Vaultwarden item; the unit, a tailnet-scoped ufw rule for 8103 and `systemctl enable --now` followed, and all five pages were re-verified against the **real** credential on `100.96.59.79:8103` — 80 backlog candidates, 6 roles with checkpoint/weights/host/residency, 6 roles of usage with two trailing 7-day windows, 64 benchmark rows, and 401 without credentials. **3.29.0 said the unit ships an empty `ReadWritePaths`. It cannot.** `usage.db` is in WAL mode, and a read-only SQLite connection to a WAL database still takes a read mark in the `-shm` sidecar, which needs write access to the directory — so with the whole tree read-only `/models` rendered `OperationalError: unable to open database file` in its usage section while the router section beside it was fine, which is `section()` doing its job. The asymmetry is instructive: `memory.db` is *also* WAL and read fine, because hermes-memory holds it open so the `-shm` stays live for a read-only joiner, whereas usage.db's writer opens per-write and closes — meaning the failure was **intermittent by nature**, not cleanly broken. Both narrower grants were tried and do not exist: systemd rejects a single FILE in `ReadWritePaths` (226/NAMESPACE), and the sidecars cannot be bind-mounted because SQLite unlinks `-shm` when the last writer closes — the bind target was missing mid-test. The unit therefore grants `~/.hermes/state` and nothing else, with `/mnt/hermes-data`, the repo and `/etc` confirmed unwritable by test. **What that does not confer is authority over approvals**: those are `memory.db` task states under `/mnt` and stay read-only; the granted directory holds a 26-byte last-seen Matrix cursor, the Layer-1 scan log and per-tool state JSONs, all already writable by every other unsandboxed `pmoney` service on the host. Follow-up recorded rather than rushed: relocate `usage.db` under its own directory via `HERMES_USAGE_DB` (which `hermes_usage_log.py` already honours) and bind only that — it means editing the writers' units and moving a live 50MB database. Minor bump — stage completed and a prior claim corrected. |
+| 3.31.0 | 2026-10-09 | **S21f — the decide buttons this plan twice argued against, plus TLS, on the operator's decision.** `hermes-fleetops-ui` 2.0.0. The operator overruled 1.0.0's refusal on the grounds that **the Matrix channel is only *perceived* to be more secure**, which holds up: that route authenticates a sender id on a homeserver this fleet runs itself, this one a credential on a tailnet-only service, and both reduce to one credential the operator holds. The prior reasoning is kept in the record rather than deleted. Three parts of the objection were **not** perceptual and were built instead of argued about. **CSRF**: a browser replays cached Basic Auth cross-origin and Matrix has no equivalent, so every decide carries a per-process token with `Sec-Fetch-Site` as a second line, all four verbs are POST, and the reply is a 303 so a refresh cannot replay one. **TLS**: Basic Auth had been crossing the tailnet in the clear; now terminated by `tailscale serve` with a real Let's Encrypt cert for `spark.tail1a534.ts.net` (verified chain, HTTP/2) proxying to a **loopback** backend on 8104, so no plaintext path exists beside the encrypted one, and no cert files, key permissions or renewal timer are added. **Port 443 was asked for and declined with a reason** — tailscaled already serves `/` there to the Matrix homeserver, and displacing it would break Matrix clients and federation; the path-on-443 alternative needs a base-path prefix in this service and is recorded, not done. **Attribution**: the one real edge Matrix had, turned around — `tailscale serve` forwards `Tailscale-User-Login`, so the audit record names a person where Matrix names a sender id and shared Basic Auth would name nobody; treated as attribution and never authentication, with a test asserting `_authed()` never reads those headers. **The gate is imported, not reimplemented** (transitions, task write, turn write, approval text), failing closed if that import fails, and **the state is re-read at decide time** rather than trusted from the rendered row. Honest cost: the service now holds the shared hermes-memory token and the FleetOps Matrix credential, which 1.0.0 did not — no new secret, but a real change in blast radius, scoped in code to one transition on a `model-scout` task. **Also found and fixed: 1.0.0's copy-command button emitted a command that does not exist** (`hermes-benchmark-run.py`), composed rather than taken from the gate; the real one is `hermes-benchmark-model.sh --candidate <local .gguf> --model-id <prescribed label>`, now pinned by a test. Verified live: every guard rail refused without mutating (state distribution unchanged throughout), then one defer/reject/override round trip ended back at `proposed`, with three audit turns and three FleetOps notices, labelled `claude-code live verification` so the trail does not imply a human decided it. 129 offline checks. Minor bump — a substage added and executed; the reversal it records is the operator's. |

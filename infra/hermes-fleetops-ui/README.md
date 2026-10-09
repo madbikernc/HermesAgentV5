@@ -1,40 +1,105 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 1.1.0
+**Version:** 2.0.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog, which checkpoint backs each role, benchmark results, and the news digest's stored
-highlights. Runs on **Watch (spark)** only, bound to its tailnet IP, Basic Auth required.
+highlights. Runs on **Watch (spark)** only, over **HTTPS**, Basic Auth required.
+
+**<https://spark.tail1a534.ts.net:8103/>**
 
 ## Scope — read this before adding to it
 
-**Links and read-only reports. Not a control plane.** "Process management" names what the page is
-*for*, not a promise that it starts, stops or restarts anything. Starting and stopping services
-stays an SSH + `systemctl` operator action, the same as every other privileged action here already
-requires an explicit human step rather than a button — `tools/hermes-confirm-gate.sh` exists for
-exactly that reason.
+Read-only reports, plus **one** write route: the benchmark backlog's decide buttons.
 
-**It adds zero new privileged write surface.** No `do_POST`/`do_PUT`/`do_DELETE` exists, and every
-store is opened `mode=ro` through one helper. The two approval flows it surfaces each already have
-their own write path, reasoned about separately: RAG candidates through
-`hermes-rag-discovery-portal.py`, and the benchmark backlog through the Matrix reply
-`hermes-model-scout-gate.py` watches for. **A decide button here would be a second, weaker path to
-the same privileged decision** — this page's shared Basic Auth against one specific Matrix sender
-id — which is the structural shortcut this fleet's confirm-gate design refuses. The one convenience
-offered on an `approved` row copies a command to the clipboard and triggers nothing; the offline
-test asserts the page contains no `fetch(` and no `<form>` on that path.
+Services are still not started, stopped or restarted from here. That stays an SSH + `systemctl`
+operator action, like every other privileged action in this fleet
+(`tools/hermes-confirm-gate.sh` exists for that reason).
 
-## 1. Port and bind
+### The decide buttons, and the argument that was had about them
 
-**Port 8103.** Verified live with `ss -ltnp` on spark before being chosen, which mattered: the plan
-had pencilled in **8101 as "the obvious next value" and 8101 is `hermes-buzz`**. Taken on spark as
-of 2026-10-09 — 8080 router, 8092/8093 llama-server (loopback), 8093 RAG portal (tailnet),
-8095/8097 llama-server, 8096 guard, 8100 broker, 8101 buzz, 8102 memory, 8105 minecraft-rag.
-8103 and 8104 are referenced nowhere in the repo; 8103 is this.
+1.0.0 shipped with no decide buttons, arguing one would be "a second, weaker path to the same
+privileged decision — shared Basic Auth against one specific Matrix sender id." **The operator
+overruled that: the Matrix channel is *perceived* to be more secure rather than actually being
+so.** That is a fair reading, and worth writing down rather than relitigating — the Matrix route
+authenticates a sender id on a homeserver this fleet runs itself, this route authenticates a
+credential on a service reachable only over the tailnet. Both reduce to one credential the operator
+holds, and neither is obviously the stronger.
 
-Bind defaults to `100.96.59.79`, spark's own tailnet address. **The service refuses to start on
-`0.0.0.0` or `::`** rather than trusting the firewall alone — S12 established that this fleet's
-bind addresses are the security boundary.
+Three things were done rather than argued about, because they are the parts that were *not*
+perceptual:
+
+1. **CSRF.** A browser replays cached Basic Auth on a cross-origin POST; Matrix has no equivalent.
+   Every decide carries a per-process token that an attacker cannot read cross-origin, and
+   `Sec-Fetch-Site` is checked as a second line (allowed only to reject, never to substitute for
+   the token, since curl and old clients do not send it). All four verbs are POST, so no link,
+   prefetch or crawler can decide anything, and the reply is a 303 so a refresh cannot replay one.
+2. **TLS.** Basic Auth used to cross the tailnet in the clear. See §1.
+3. **Attribution.** This was the one genuine edge the Matrix route had, and it has been closed by
+   turning it around: `tailscale serve` forwards `Tailscale-User-Login`/`-Name`, so the audit
+   record names a **person** (`Paul <…>`) where the Matrix route names a sender id and Basic Auth
+   alone would name nobody. Treated as attribution and never as authentication — the headers arrive
+   on a loopback socket where any local process could set them, so Basic Auth still decides whether
+   a request is allowed. A test asserts `_authed()` never consults them.
+
+**So this service now holds write credentials, which 1.0.0 did not**: the shared hermes-memory
+token and the FleetOps Matrix credential. No new secret was minted, but the blast radius is
+genuinely larger and is stated rather than buried — `memory-token` is the fleet's single shared
+token and is *not* scoped to model-scout tasks by the server. The scoping is in this code instead:
+the only write it can perform is one transition from the gate's own table, on a task whose agent is
+`model-scout`, after re-reading that task's current state.
+
+### Why it imports the gate instead of reimplementing it
+
+Two routes to one decision must not be able to disagree about what the decision means. So the
+transition table, the task write, the turn write and the approval text all come from
+`tools/hermes-model-scout-gate.py` itself, imported at startup. **If that import fails the buttons
+are not rendered and the route refuses** — a UI that guesses at a state machine is worse than a UI
+with no buttons. This file adds exactly two things: `decided_by: "fleetops-ui"` plus the clicker's
+identity in the audit record, and a FleetOps notice so a decision made in a browser still lands
+where the Matrix route would have announced it.
+
+The transitions are therefore the gate's, not this page's, and a row only offers what is legal from
+its state: `proposed` → benchmark/defer/reject, `deferred` → benchmark/reject, `rejected` →
+override (the only way back), `approved` → nothing, because only the scout's own next run can mark
+a task done. **Reject is permanent** and gets a confirmation prompt — a UX speed bump on a crowded
+table, not a security control.
+
+RAG candidates still have their own UI (`hermes-rag-discovery-portal.py`) and are only linked from
+here, never proxied.
+
+## 1. TLS, port and bind
+
+```
+browser --TLS 8103--> tailscaled --plain--> 127.0.0.1:8104 (this service)
+```
+
+**TLS is terminated by `tailscale serve`**, with a real Let's Encrypt certificate for
+`spark.tail1a534.ts.net` (verified chain, HTTP/2, `notAfter` renewed by tailscaled itself). That is
+why there are no certificate files, no key permissions and no renewal timer here: the fleet already
+fronts the Matrix homeserver this way, and reusing the mechanism beats a second, hand-rolled one.
+
+```bash
+sudo tailscale serve --bg --https=8103 http://127.0.0.1:8104
+sudo tailscale serve status          # verify; --https=8103 off  to remove
+```
+
+**Port 443 was asked for and is not available.** tailscaled already serves `/` on 443 to the Matrix
+homeserver on `localhost:6167`; taking that would break Matrix clients and federation, so it was
+left alone. If the port in the URL is ever worth removing, the way to do it is a *path* on 443
+(`tailscale serve --set-path /fleetops …`), which needs this service to learn a base-path prefix
+because serve strips it — about ten lines, not done.
+
+**Port 8103** was verified live with `ss -ltnp` before being chosen, which mattered: the plan had
+pencilled in **8101 as "the obvious next value", and 8101 is `hermes-buzz`**. Taken on spark as of
+2026-10-09 — 8080 router, 8092/8093 llama-server (loopback), 8093 RAG portal (tailnet), 8095/8097
+llama-server, 8096 guard, 8100 broker, 8101 buzz, 8102 memory, 8105 minecraft-rag, 443 tailscaled.
+
+**The service itself binds `127.0.0.1:8104` and must stay there.** If it also listened on the
+tailnet there would be a plaintext way in beside the encrypted one, and Basic Auth would cross the
+wire in the clear for anyone who used it. It **refuses to start on `0.0.0.0` or `::`** rather than
+trusting the firewall alone — S12 established that this fleet's bind addresses are the boundary.
+Verified after deploy: `http://100.96.59.79:8104/health` does not connect.
 
 ## 2. Vaultwarden item — its own, not the RAG portal's
 
@@ -104,7 +169,7 @@ missing-table crash on first run — is the concrete precedent.
 
 | Page | Source | Note |
 |---|---|---|
-| `/backlog` | `tasks`/`turns` in `memory.db`, read-only sqlite3 | **Not `GET /tasks`** — see below |
+| `/backlog` | reads `tasks`/`turns` in `memory.db` read-only; **writes** via hermes-memory's HTTP API | **Not `GET /tasks`** — see below |
 | `/models` | `GET {router}/v1/models`, live per page load | checkpoint, abliterated, host, residency |
 | `/models` | `usage_log` in `usage.db`, counted in SQL | two trailing 7-day windows, no commentary |
 | `/benchmarks` | the NAS `history.jsonl` + local fallback | same two paths the benchmark tooling writes |
@@ -166,3 +231,4 @@ stay distinguishable. Advisories appear on the next scout run.
 |---|---|---|
 | 1.0.0 | 2026-10-09 | Initial version — S21a-e built and verified live on spark: port 8103 chosen against a live `ss -ltnp` after 8101 turned out to be `hermes-buzz`, the backlog source corrected from the plan's `GET /tasks` to a read-only sqlite read, benchmark `suites`/`value` schema corrected from the plan's assumed `scores` blob, and all five pages fetched returning HTTP 200 with zero section errors. 64 offline checks. |
 | 1.1.0 | 2026-10-09 | Service enabled on spark with its `fleetops-ui` vault item; all five pages verified against the real credential on the tailnet address. Records the one sandbox exception the first real start forced — `usage.db` is WAL, so a read-only connection still needs write access for its `-shm` read mark — and why the two narrower grants are not available (systemd rejects a single file in `ReadWritePaths`; SQLite unlinks `-shm` when the last writer closes, so the sidecars cannot be bind-mounted). States what the grant does not confer: the approvals live in `memory.db` under `/mnt`, which stays read-only. |
+| 2.0.0 | 2026-10-09 | **Major — reverses this file's own "no decide buttons" position, on the operator's decision that the Matrix channel is only *perceived* to be more secure, and adds TLS.** The backlog now has approve/defer/reject/un-reject buttons that write the same transition through the same code as the Matrix reply, by importing `hermes-model-scout-gate.py` rather than restating its state machine — failing closed if that import fails. Records the three non-perceptual things that were handled instead of argued about: CSRF (a browser replays Basic Auth cross-origin; Matrix has no equivalent), TLS via `tailscale serve` with a real Let's Encrypt cert, and attribution — `Tailscale-User-Login` now names a person in the audit record, closing the one genuine edge the Matrix route had, while never being used for authentication. States plainly that the service now holds write credentials it did not before. Port 443 was asked for and refused: tailscaled serves the Matrix homeserver there. |

@@ -8,6 +8,17 @@ Wants=network-online.target
 Type=simple
 User=pmoney
 Group=pmoney
+# TLS is terminated by `tailscale serve` on the tailnet, with a real Let's Encrypt certificate for
+# spark.tail1a534.ts.net, which proxies to this loopback socket. So this process must NOT be
+# reachable from the tailnet itself -- otherwise there is a plaintext way in beside the encrypted
+# one, and Basic Auth would cross the wire in the clear for anyone who used it.
+#
+# Port 443 is not available for this: tailscaled already serves `/` there to the Matrix homeserver
+# on localhost:6167, and displacing that would break Matrix clients and federation. The TLS port is
+# 8103 -- the same number this service was already documented on -- and the plain-HTTP backend
+# moved to 8104.
+Environment=FLEETOPS_UI_BIND=127.0.0.1
+Environment=FLEETOPS_UI_PORT=8104
 ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-fleetops-ui-wrapper.sh
 Restart=on-failure
 RestartSec=10s

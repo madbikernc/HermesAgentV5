@@ -1,24 +1,51 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 2.0.0
 #
 # hermes-fleetops-ui — one browser page for the fleet's human-facing surfaces (S21).
 #
-# ── SCOPE, stated here because it is the thing most likely to drift ──
+# ── SCOPE ──
 #
-# This is links and read-only reports. It is NOT a control plane. "Process management" names what
-# the page is *for* — one place to see what this fleet is doing — not a promise that it starts,
-# stops or restarts anything. Starting and stopping services stays an SSH + `systemctl` operator
-# action, the same as every other privileged action here already requires an explicit human step
-# rather than a button (`tools/hermes-confirm-gate.sh` exists for exactly that reason).
+# Read-only reports, plus ONE write route: the model-scout backlog's decide buttons.
 #
-# **This service adds zero new privileged write surface.** It opens every store read-only and makes
-# no POST/PUT routes at all. The two approval flows it surfaces each already have their own write
-# path, reasoned about separately: RAG candidates through `hermes-rag-discovery-portal.py`, and the
-# model-benchmark backlog through the Matrix reply `hermes-model-scout-gate.py` watches for. Adding
-# a decide button here would mean a second, weaker path to the same privileged decision — shared
-# Basic Auth against one specific Matrix sender id — which is the structural shortcut this fleet's
-# confirm-gate design refuses. The one convenience offered on an `approved` row copies a command to
-# the clipboard; it triggers nothing.
+# Services are still not started, stopped or restarted from here. That stays an SSH + `systemctl`
+# operator action, like every other privileged action in this fleet (`tools/hermes-confirm-gate.sh`
+# exists for that reason).
+#
+# ── The decide buttons, and the argument that was had about them ──
+#
+# 1.0.0 deliberately had no decide buttons, on the reasoning that a button here would be "a second,
+# weaker path to the same privileged decision — shared Basic Auth against one specific Matrix
+# sender id." **The operator overruled that, on the grounds that the Matrix channel is *perceived*
+# to be more secure rather than actually being so, and that is a fair reading**: the Matrix path
+# authenticates a sender id on a homeserver this fleet runs itself, and this path authenticates a
+# credential on a tailnet-bound service. Both come down to one credential the operator holds, and
+# neither is obviously the stronger.
+#
+# There is exactly one difference that is NOT perceptual, and it is handled rather than argued
+# about: **a browser replays Basic Auth automatically, so a cross-origin page can cause a POST that
+# Matrix has no equivalent of.** Hence `csrf_ok()` below — a per-process token that an attacker
+# cannot read cross-origin, plus a `Sec-Fetch-Site` check. A decide without both is refused.
+#
+# **So this service does now hold write credentials**, which 1.0.0 did not: a hermes-memory token
+# and the FleetOps Matrix credential. That is a real change in blast radius and is stated plainly
+# rather than buried — the memory token is the fleet's single shared one, so it is not scoped to
+# model-scout tasks by the server. It is scoped *here* instead: the only write this code can
+# perform is a transition drawn from the gate's own table, on a task whose agent is `model-scout`,
+# after re-reading the task's current state.
+#
+# ── Why this imports the gate instead of reimplementing it ──
+#
+# Two paths to one decision must not be able to disagree about what the decision means. So the
+# transitions, the task write, the turn write and the approval text all come from
+# `hermes-model-scout-gate.py` itself, imported at startup. If that import fails, the buttons are
+# not rendered at all and the route refuses — failing closed, because a UI that guesses at a state
+# machine is worse than a UI with no buttons. The only thing this file adds is
+# `decided_by: "fleetops-ui"` in the audit record, so the two paths stay distinguishable
+# afterwards, and a FleetOps notice so a decision made in a browser is still announced where the
+# Matrix path would have announced it.
+#
+# RAG candidates still have their own UI (`hermes-rag-discovery-portal.py`) and are only linked
+# from here, not proxied.
 #
 # ── Every source degrades on its own ──
 #
@@ -43,6 +70,7 @@ import hmac
 import html
 import json
 import os
+import secrets
 import sqlite3
 import sys
 import time
@@ -53,10 +81,14 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-BIND = os.environ.get("FLEETOPS_UI_BIND", "100.96.59.79")
-PORT = int(os.environ.get("FLEETOPS_UI_PORT", "8103"))
+# Loopback by default since 1.2.0: `tailscale serve` terminates TLS for this service on the tailnet
+# and proxies to it here, so the socket itself must not be reachable from the tailnet directly —
+# otherwise there is a plaintext way in beside the encrypted one. See `main()`'s bind check.
+BIND = os.environ.get("FLEETOPS_UI_BIND", "127.0.0.1")
+PORT = int(os.environ.get("FLEETOPS_UI_PORT", "8104"))
 USER = os.environ.get("FLEETOPS_UI_USER", "")
 PASSWORD = os.environ.get("FLEETOPS_UI_PASSWORD", "")
+MEMORY_TOKEN = os.environ.get("MEMORY_TOKEN", "")
 
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
 MEMORY_DB = os.environ.get("MEMORY_DB", "/mnt/hermes-data/memory/memory.db")
@@ -64,14 +96,83 @@ RAG_DB = os.environ.get("HERMES_RAG_DB", "/mnt/hermes-data/rag/vectors.db")
 USAGE_DB = os.environ.get("HERMES_USAGE_DB", str(Path.home() / ".hermes" / "state" / "usage.db"))
 RAG_PORTAL_URL = os.environ.get("RAG_PORTAL_URL", "http://100.96.59.79:8093/")
 
-REPO = Path(__file__).resolve().parent.parent
+TOOLS = Path(__file__).resolve().parent
+REPO = TOOLS.parent
 TOPICS_FILE = REPO / "infra" / "hermes-news-digest" / "topics.yaml"
 
 NAS_HISTORY = Path("/mnt/nas2-hermes-backup/Private/Hermes/Benchmarks/history.jsonl")
 LOCAL_HISTORY = Path.home() / ".hermes" / "state" / "benchmark-history.jsonl"
 
+NEWLINE = chr(10)
 SCOUT_AGENT = "model-scout"
 USAGE_WINDOW_DAYS = 7
+
+# One per process, never persisted. A cross-origin page can make a browser POST here with its
+# cached Basic Auth, but it cannot READ this token out of a page it is not same-origin with, so a
+# POST that carries it came from a page this service served. A restart invalidates open tabs, which
+# costs a reload and is the right trade against storing a long-lived secret for this.
+CSRF_TOKEN = secrets.token_urlsafe(32)
+
+# The decision state machine is NOT defined here. It belongs to hermes-model-scout-gate.py, which
+# the Matrix path uses, and two routes to one decision must not be able to disagree about what the
+# decision means. Imported at startup; on failure `GATE` stays None, the buttons are not rendered
+# and the route refuses — failing closed, because a UI guessing at a state machine is worse than a
+# UI with no buttons.
+GATE = None
+GATE_IMPORT_ERROR = ""
+
+
+def load_gate():
+    """Imports hermes-model-scout-gate.py for its transition table and its task/turn writers.
+
+    Safe to import: that file's module level is constants, regexes and function definitions, with
+    its own `main()` behind an `if __name__` guard. It reads MEMORY_URL/MEMORY_TOKEN from the
+    environment at import time, which is why this is called after the environment is in place."""
+    global GATE, GATE_IMPORT_ERROR
+    import importlib.util
+    path = TOOLS / "hermes-model-scout-gate.py"
+    try:
+        spec = importlib.util.spec_from_file_location("scoutgate", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["scoutgate"] = mod
+        spec.loader.exec_module(mod)
+        for attr in ("TRANSITIONS", "fetch_task", "set_task_state", "write_turn",
+                     "candidate_facts", "approval_reply", "AGENT"):
+            if not hasattr(mod, attr):
+                raise AttributeError(f"hermes-model-scout-gate.py has no {attr!r}")
+        GATE = mod
+        GATE_IMPORT_ERROR = ""
+    except Exception as exc:
+        GATE = None
+        GATE_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+        log(f"decide buttons disabled — could not import the scout gate: {GATE_IMPORT_ERROR}")
+    return GATE
+
+
+# What each action is called on its button, and whether it deserves a confirmation prompt. The
+# verbs and their legality come from the gate; only the labels are this file's business.
+ACTION_LABELS = {
+    "benchmark": ("approve for benchmarking", False),
+    "defer": ("defer", False),
+    "reject": ("reject permanently", True),
+    "override": ("un-reject", True),
+}
+
+# Fixed outcome messages, keyed by code. The decide route redirects back with a code rather than a
+# message, so nothing an attacker puts in a URL is ever rendered as text on the page.
+RESULTS = {
+    "ok": ("ok", "Done — the transition was written and announced in FleetOps."),
+    "stale": ("bad", "Nothing changed: that candidate is no longer in a state where this action "
+                     "is legal. Someone else may have decided it first — this page was stale."),
+    "nosuch": ("bad", "Nothing changed: hermes-memory has no such task."),
+    "foreign": ("bad", "Refused: that task does not belong to the model-scout agent."),
+    "badaction": ("bad", "Refused: unknown action."),
+    "writefail": ("bad", "Nothing changed: hermes-memory rejected the state write."),
+    "nogate": ("bad", "Refused: the scout gate module could not be loaded, so this service will "
+                      "not guess at the transition rules."),
+    "csrf": ("bad", "Refused: that request did not come from a page this service served. "
+                    "Reload and try again."),
+}
 
 # Hard caps on what any one page renders. Baked in from the start rather than discovered later
 # against a table that has grown too large to page through — the RAG portal needed exactly this
@@ -278,6 +379,107 @@ def read_backlog():
         conn.close()
 
 
+def legal_actions(state):
+    """Which buttons a row gets, derived from the gate's table rather than a list kept here. An
+    unknown state yields nothing, which is the safe direction."""
+    if not GATE:
+        return []
+    return [a for a, (legal_from, _to) in GATE.TRANSITIONS.items() if state in legal_from]
+
+
+def csrf_ok(headers, token):
+    """Two checks, because a browser attaches cached Basic Auth to a cross-origin POST on its own.
+
+    The token is the real defence: same-origin policy stops an attacker's page reading it out of
+    ours. `Sec-Fetch-Site` is a cheap second line that modern browsers send unprompted — absent on
+    old clients and on curl, so it is only allowed to *reject*, never to substitute for the token."""
+    site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if site and site not in ("same-origin", "none"):
+        return False
+    return bool(token) and hmac.compare_digest(token, CSRF_TOKEN)
+
+
+def tailnet_identity(headers):
+    """Who clicked, according to the Tailscale proxy in front of this service.
+
+    `tailscale serve` injects `Tailscale-User-Login`/`-Name` (documented at the URL it also sends
+    in `Tailscale-Headers-Info`). Recorded in the audit trail because it is strictly better
+    attribution than this page's shared Basic Auth can give: "Paul <x@y>" rather than "whoever
+    knows the fleetops password". The Matrix route identifies a sender id, so this closes the one
+    genuine gap that route had.
+
+    **Attribution, never authentication.** These headers are only as trustworthy as the loopback
+    socket they arrive on — any local process could set them — so Basic Auth stays the thing that
+    decides whether a request is allowed. If the proxy is bypassed or the headers are absent, this
+    returns "" and the record simply says the route without the person."""
+    login = (headers.get("Tailscale-User-Login") or "").strip()
+    name = (headers.get("Tailscale-User-Name") or "").strip()
+    if login and name:
+        return f"{name} <{login}>"
+    return login or name or ""
+
+
+def apply_decision(task_id, action, who=""):
+    """One guarded transition. Returns a RESULTS key.
+
+    Deliberately the same sequence of checks `hermes-model-scout-gate.py`'s own `handle_command()`
+    makes, in the same order and against the same table: the task must exist, it must belong to the
+    model-scout agent, and the action must be legal **from the state read back now** — not from the
+    state the page was rendered with, which may be minutes old or already acted on by the Matrix
+    path."""
+    if not GATE:
+        return "nogate"
+    if action not in GATE.TRANSITIONS:
+        return "badaction"
+    try:
+        task = GATE.fetch_task(task_id)
+    except urllib.error.HTTPError as exc:
+        return "nosuch" if exc.code == 404 else "writefail"
+    except Exception as exc:
+        log(f"task lookup failed for {task_id!r}: {exc}")
+        return "writefail"
+    if not task:
+        return "nosuch"
+    if task.get("agent") != GATE.AGENT:
+        return "foreign"
+
+    state = task.get("state")
+    legal_from, new_state = GATE.TRANSITIONS[action]
+    if state not in legal_from:
+        return "stale"
+
+    facts = GATE.candidate_facts(task_id) if action == "benchmark" else {}
+    if not GATE.set_task_state(task_id, new_state, topic=task.get("topic")):
+        return "writefail"
+
+    # `decided_by` is the one field this path adds, and the reason it is worth adding: afterwards,
+    # the audit record says which route made the decision. The gate writes "fleetops-reply".
+    whom = f" by {who}" if who else ""
+    GATE.write_turn(task_id, {
+        "phase": "transition", "action": action, "from": state, "to": new_state,
+        "decided_by": "fleetops-ui", "decided_by_user": who, "at": time.time(),
+        "summary": f"{task_id}: {state} -> {new_state} by \"{action}\" (fleetops-ui{whom})",
+    })
+    log(f"{task_id}: {state} -> {new_state} ({action}) via fleetops-ui{whom}")
+
+    # Announce it where the Matrix path would have. A decision made in a browser that left no trace
+    # in FleetOps would be strictly worse than the channel it replaced, so this is not optional --
+    # but it is non-fatal, exactly as the gate treats its own turn write: a Matrix outage must not
+    # undo a transition the operator already asked for and which is already written.
+    try:
+        if action == "benchmark":
+            GATE.send_room_message(
+                GATE.approval_reply(task_id, facts) +
+                f"{NEWLINE}(approved in hermes-fleetops-ui{whom}.)")
+        else:
+            GATE.send_room_message(
+                f"[model-scout] {task_id}: {state} -> {new_state} (\"{action}\"), decided in "
+                f"hermes-fleetops-ui{whom} rather than by reply here.")
+    except Exception as exc:
+        log(f"FleetOps notice failed for {task_id} (transition already applied): {exc}")
+    return "ok"
+
+
 def split_task_id(task_id):
     """`scout:<role>:<model id with / written __>` — the encoding hermes-model-scout.py's
     `task_id_for()` applies. Decoded here rather than displayed raw, since the point of the page
@@ -307,11 +509,40 @@ def render_backlog():
         else:
             advisory = esc(advisory)
         fit = esc(d.get("fit") or "")
-        copy_cell = ""
+
+        actions = []
+        for act in legal_actions(state):
+            label, confirm = ACTION_LABELS.get(act, (act, True))
+            guard = ""
+            if confirm:
+                # A UX guard, not a security control -- the security control is the CSRF token and
+                # the server-side re-check. `reject` is permanent per the gate's own docs, so a
+                # misclick on a crowded table deserves one speed bump.
+                guard = (f' onsubmit="return confirm(\'{esc(label)}: {esc(model_id)}'
+                         f'\\n\\nThis is written to hermes-memory and announced in FleetOps.\')"')
+            actions.append(
+                f'<form method="post" action="/backlog/decide" style="display:inline"{guard}>'
+                f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
+                f'<input type="hidden" name="task_id" value="{esc(t["id"])}">'
+                f'<input type="hidden" name="action" value="{esc(act)}">'
+                f'<button type="submit" title="{esc(act)} {esc(t["id"])}">{esc(label)}</button>'
+                f'</form>')
         if state == "approved":
-            cmd = f"hermes-benchmark-run.py --model-id {model_id} --role {role}"
-            copy_cell = (f'<button onclick="navigator.clipboard.writeText(this.dataset.cmd)" '
-                         f'data-cmd="{esc(cmd)}" title="{esc(cmd)}">copy command</button>')
+            # The command the GATE generates, not one composed here. 1.0.0 invented
+            # `hermes-benchmark-run.py --model-id ... --role ...`, which does not exist: the real
+            # tool is hermes-benchmark-model.sh, it takes `--candidate <local .gguf>` because a
+            # scouted repo is not yet on disk, and the --model-id must be the prescribed label or
+            # the scout can never mark the task done.
+            label = (d.get("prescribed_benchmark_label") or "").strip()
+            if label:
+                cmd = (f"bash tools/hermes-benchmark-model.sh --candidate /path/to/model.gguf "
+                       f"--model-id {label}")
+                actions.append(
+                    f'<button onclick="navigator.clipboard.writeText(this.dataset.cmd)" '
+                    f'data-cmd="{esc(cmd)}" title="{esc(cmd)}">copy command</button>')
+            else:
+                actions.append('<span class="empty">no benchmark label on file</span>')
+        copy_cell = " ".join(actions)
         rows.append([
             f'<span class="pill s-{esc(state)}">{esc(state)}</span>',
             esc(role),
@@ -322,18 +553,33 @@ def render_backlog():
             esc(when(t["updated_at"])),
             copy_cell,
         ])
-    note = (f'{summary}<br>Showing {len(rows)} of at most {MAX_BACKLOG_ROWS}. '
-            f'<b>No decide buttons, by design</b> — approving, rejecting or deferring a candidate '
-            f'goes through the Matrix reply <span class="mono">hermes-model-scout-gate.py</span> '
-            f'watches for. A second path to the same privileged decision, gated only by this '
-            f"page's shared Basic Auth, would be weaker than the one that exists.")
+    if GATE:
+        note = (f'{summary}<br>Showing {len(rows)} of at most {MAX_BACKLOG_ROWS}. '
+                f'Deciding here writes the same transition, through the same code, as replying '
+                f'<span class="mono">benchmark|defer|reject|override &lt;id&gt;</span> in FleetOps '
+                f'— and is announced there too, tagged '
+                f'<span class="mono">fleetops-ui</span> so the two routes stay distinguishable. '
+                f'<b>Reject is permanent</b>; only <span class="mono">un-reject</span> comes back.')
+    else:
+        note = (f'{summary}<br>Showing {len(rows)} of at most {MAX_BACKLOG_ROWS}. '
+                f'<b>Decide buttons are unavailable:</b> the scout gate module could not be '
+                f'imported, and this page will not guess at the transition rules. '
+                f'<span class="mono">{esc(GATE_IMPORT_ERROR)}</span>')
     return (f'<p class="note">{note}</p>' +
-            table(["state", "role", "candidate", "category", "fit", "advisory", "updated", ""],
-                  rows))
+            table(["state", "role", "candidate", "category", "fit", "advisory", "updated",
+                   "decide"], rows))
 
 
-def page_backlog():
-    body = section("Model benchmark backlog", "", render_backlog)
+def page_backlog(query=None):
+    body = ""
+    code = ((query or {}).get("result") or [""])[0]
+    if code in RESULTS:
+        kind, text = RESULTS[code]
+        style = ("border-left:4px solid var(--ok);background:#16241a" if kind == "ok"
+                 else "border-left:4px solid var(--bad);background:#2a1a1a")
+        body += (f'<p style="{style};padding:10px 14px;border-radius:3px;margin:0 0 14px">'
+                 f'{esc(text)}</p>')
+    body += section("Model benchmark backlog", "", render_backlog)
     return shell("Benchmark backlog", body)
 
 
@@ -647,7 +893,7 @@ def page_highlights(query):
 
 ROUTES = {
     "/": lambda q: page_home(),
-    "/backlog": lambda q: page_backlog(),
+    "/backlog": page_backlog,
     "/models": lambda q: page_models(),
     "/benchmarks": lambda q: page_benchmarks(),
     "/highlights": page_highlights,
@@ -698,12 +944,49 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             self._send(200, handler(urllib.parse.parse_qs(parsed.query)))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - see the comment below
             # A whole-page failure is still a page: the nav has to keep working so the operator can
             # reach the sections that are fine.
             log(f"unhandled error rendering {parsed.path}: {type(exc).__name__}: {exc}")
             self._send(500, shell("Error", f'<div class="err"><b>This page failed to render.</b> '
                                            f'{esc(type(exc).__name__)}: {esc(exc)}</div>'))
+
+    def do_POST(self):
+        """The service's only write route.
+
+        A GET never changes state — all four verbs arrive here as a form POST, so a link, a
+        prefetch or a crawler cannot decide anything."""
+        parsed = urllib.parse.urlparse(self.path)
+        if not self._authed():
+            return
+        if parsed.path.rstrip("/") != "/backlog/decide":
+            self._send(404, shell("Not found", '<p class="empty">No such route.</p>'))
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = -1
+        if not 0 <= length <= 8192:
+            self._redirect("/backlog?result=badaction")
+            return
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        if not csrf_ok(self.headers, (form.get("csrf") or [""])[0]):
+            log(f"decide refused: CSRF check failed from {self.address_string()} "
+                f"(Sec-Fetch-Site={self.headers.get('Sec-Fetch-Site')!r})")
+            self._redirect("/backlog?result=csrf")
+            return
+        task_id = (form.get("task_id") or [""])[0]
+        action = (form.get("action") or [""])[0]
+        code = apply_decision(task_id, action, tailnet_identity(self.headers))
+        self._redirect(f"/backlog?result={code}")
+
+    def _redirect(self, location):
+        """POST -> redirect -> GET, so a decision is never replayed by a refresh or a back button.
+        The outcome travels as a fixed code, never as text, so nothing from the URL is rendered."""
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 def main():
@@ -713,9 +996,16 @@ def main():
     if BIND in ("0.0.0.0", "::", ""):
         # The bind address is a real part of this service's security posture, not a default to
         # shrug at: S12 established that this fleet's loopback/tailnet binds are the boundary.
-        sys.exit(f"refusing to bind {BIND!r} — FLEETOPS_UI_BIND must be a specific tailnet or "
-                 f"loopback address")
-    log(f"listening on {BIND}:{PORT} (read-only; no write routes)")
+        sys.exit(f"refusing to bind {BIND!r} — FLEETOPS_UI_BIND must be a specific loopback or "
+                 f"tailnet address")
+    if not MEMORY_TOKEN:
+        # Not fatal: the reports are the bulk of this service and they need no token. But say so
+        # once at startup rather than letting every decide fail with a vague write error.
+        log("WARNING: no MEMORY_TOKEN — the reports work, the decide buttons will not")
+    load_gate()
+    log(f"listening on {BIND}:{PORT} "
+        f"(reports read-only; one write route, /backlog/decide, "
+        f"{'armed' if GATE and MEMORY_TOKEN else 'DISABLED'})")
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
 
 
