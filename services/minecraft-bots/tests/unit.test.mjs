@@ -1,4 +1,4 @@
-// Version: 1.20.0
+// Version: 1.21.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -42,6 +42,9 @@
 // 1.20.0 | 2026-10-09 | attackAsLastResort fights bare-handed when genuinely unable to flee; craft's
 //   tableWouldHelp check against empty hands (recipesAll, not recipesFor); an already-placed utility
 //   block found during a craft attempt gets written to world memory too.
+// 1.21.0 | 2026-10-09 | First live run of the above found tableWouldHelp was still wrong for any
+//   item with a second, unusable no-table recipe (a colored bed's dye-recolor shortcut) -- a check
+//   for that case too.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -1465,6 +1468,40 @@ await check('Craft: a table-needing recipe is detected even with empty hands, so
   assert.equal(result.ok, false);
   assert.equal(result.text, "couldn't craft wooden_pickaxe: don't have the ingredients",
     'a real table was found and used, so the failure should name the actual problem (no planks), not guess at the table');
+});
+
+await check('Craft: a table requirement is detected even when a DIFFERENT, unusable no-table recipe also exists', async () => {
+  // First live run of the check above (2026-10-09) found a second, narrower real bug the mocked
+  // version couldn't have caught: a colored bed has a real no-table RECYCLING recipe (dye + a
+  // different-colour bed) alongside its real wool+planks shaped recipe (which DOES need a
+  // table). "!noTableRecipes.length" treated the mere EXISTENCE of that unrelated, unusable
+  // no-table recipe as proof no table was needed at all -- skipping the search even though she
+  // can't actually use that recipe (no spare bed, no dye). Confirmed live: "craft red_bed" from
+  // wool+planks failed in ~150ms, the same instant-failure signature as the original bug. The
+  // real question is whether a table unlocks MORE recipes than she has without one, not whether
+  // every recipe happens to need one.
+  const ITEM = { red_bed: 1100 };
+  const NO_TABLE_RECIPE = { delta: [] }; // stand-in for the real dye-recolor recipe
+  const WOOL_PLANKS_RECIPE = { delta: [] }; // stand-in for the real shaped recipe
+  const findBlocksCalls = [];
+  const bot = makeBot();
+  Object.assign(bot, {
+    registry: { itemsByName: { red_bed: { id: ITEM.red_bed } }, items: {}, blocksByName: { crafting_table: { id: 10 } } },
+    inventory: { items: () => [], count: () => 0, slots: [] },
+    recipesFor: () => [],
+    recipesAll: (id, _m, table) => (id !== ITEM.red_bed ? [] : table ? [NO_TABLE_RECIPE, WOOL_PLANKS_RECIPE] : [NO_TABLE_RECIPE]),
+    findBlocks: (opts) => { findBlocksCalls.push(opts); return opts.matching === 10 ? [{ x: 5, y: 64, z: 5 }] : []; },
+    blockAt: (pos) => ({ position: pos, name: 'crafting_table' }),
+    craft: async () => {},
+  });
+  bot.pathfinder.goto = async () => {};
+  const c = context(bot, { gearCategoryNames: () => [], tryTakeFromNearbyChest: async () => null,
+    findRememberedLocation: async () => null, gotoRememberedSpot: async () => {} });
+  vm.runInContext(timeoutFn + actionFn + between(actions, 'function simpleSourceFor(', '// Extracted from "loot"'), c);
+
+  await c.performAction(bot, { type: 'craft', item: 'red_bed', count: 1 }, 'test');
+  assert.equal(findBlocksCalls.filter((o) => o.matching === 10).length, 1,
+    'an unrelated, unusable no-table recipe existing should not skip the table search');
 });
 
 await check('Craft: finding an already-placed utility block nearby gets remembered too, not just a freshly-placed one', async () => {

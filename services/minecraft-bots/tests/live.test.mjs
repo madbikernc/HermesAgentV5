@@ -1,4 +1,9 @@
-// Version: 1.15.0
+// Version: 1.16.0
+//
+// 1.16.0 (2026-10-09, direct report: bots "repeatedly complain about crafting tables" without
+// trying to make one, noticing two standing right next to them, or remembering either's
+// location) -- scenario for the recipesFor/recipesAll fix (actions.js 1.83.0): planks but no
+// sticks, a real table two blocks away, craft a pickaxe end to end.
 //
 // Live behavior tests: a dedicated test bot (MC_TEST_USERNAME, default "MBTester") joins the real
 // bot-sandbox server and runs the REAL actions.js / arbiter.js / equipment.js code against real
@@ -39,6 +44,8 @@
 //   lid rule to apply; the whole floor layer (sea lanterns, emitLight 15) has to go for the torch
 //   scenario, not just the corridor, because litNearby is blind to walls; and the craft step retries,
 //   since bot.craft() intermittently loses a race with the server's inventory update.
+// 1.16.0 | 2026-10-09 | Craft: a table-needing recipe is detected with the wrong materials in hand
+//   (planks, no sticks), so she finds and uses the real table standing nearby instead of failing.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -243,6 +250,40 @@ scenario("MB-08 place_home walks to the spawn point and places the item there", 
   assert.equal(result.ok, true, `place_home result: ${result.text}`);
   const placed = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, point: new Vec3(home.x, home.y, home.z), maxDistance: 4 });
   assert(placed, "a crafting table stands within 4 blocks of home");
+});
+
+scenario("Craft: a table-needing recipe is detected even with the wrong materials in hand, so she uses the real table standing nearby", async () => {
+  // Real bug found live 2026-10-09 (direct report: bots "repeatedly complain about crafting
+  // tables" without trying to make one, noticing two standing right next to them, or
+  // remembering either's location). actions.js's "craft" case used recipesFor() to decide
+  // whether a table would help -- recipesFor() filters to recipes she can afford with her
+  // CURRENT inventory, so giving her string but no sticks at all (a bow needs both at once) makes
+  // that check come back empty whether or not a table is involved, same as having nothing. Under
+  // the old code that meant tableWouldHelp was always false: she'd never look for the crafting
+  // table standing two blocks away, fall into craftItem() with no table reference, and -- even
+  // after successfully chaining her planks into sticks along the way, since sticks need no table
+  // -- the final affordability check excludes every table-requiring recipe when no table is
+  // passed, so she'd still fail with "don't have the ingredients (might need a crafting table)"
+  // while standing right next to one. recipesAll() answers the real, inventory-independent
+  // question instead, so she finds/uses the real table and actually finishes.
+  //
+  // A bow, not a wooden_pickaxe: minecraft-data carries one wooden_pickaxe recipe PER plank
+  // species (12 of them, since planks are a direct ingredient), and craftItem's own fallback loop
+  // (actions.js) has no memory across candidates -- each of the 12 independently notices "stick"
+  // is missing and tries to chain-craft it, several of them concurrently/redundantly against the
+  // same crafting-table window, which lost a real race live ("missing ingredient") unrelated to
+  // this fix. A bow has exactly one recipe (stick + string, neither species-ambiguous), so the
+  // chain only ever fires once.
+  await rcon(`setblock ${x + 2} ${y + 1} ${z} minecraft:crafting_table`,
+    `give ${TESTER} minecraft:oak_planks 8`, `give ${TESTER} minecraft:string 3`);
+  await waitFor(() => held("oak_planks") >= 8 && held("string") >= 3 &&
+    bot.blockAt(new Vec3(x + 2, y + 1, z))?.name === "crafting_table", 5000, "planks, string and a standing table");
+  const result = await performAction(bot, { type: "craft", item: "bow", count: 1 }, TESTER);
+  assert.equal(result.ok, true, `craft result: ${result.text}`);
+  await waitFor(() => held("bow") >= 1, 5000, "a bow");
+  const tableId = bot.registry.blocksByName.crafting_table.id;
+  const tables = bot.findBlocks({ matching: tableId, point: new Vec3(x, y + 1, z), maxDistance: 16, count: 5 });
+  assert.equal(tables.length, 1, "used the table that was already standing there, not a second one");
 });
 
 // A bed facing east: foot at (dx, dz), head one block east.

@@ -1,4 +1,14 @@
-// Version: 1.83.0
+// Version: 1.83.1
+//
+// 1.83.1 (2026-10-09, first live run of 1.83.0 below) -- that fix's own tableWouldHelp check,
+// "!noTableRecipes.length && ...", was still wrong for any item with more than one path to it: a
+// colored bed has a real no-table RECYCLING recipe (dye + a different-colour bed) alongside its
+// real wool+planks shaped recipe, which DOES need a table. Confirmed live: "craft red_bed" from
+// wool+planks failed in ~150ms, the same instant-failure signature 1.83.0 was meant to fix,
+// because the mere existence of that unrelated, unusable no-table recipe made noTableRecipes
+// non-empty, so the table search was skipped anyway. The real question is whether a table
+// unlocks MORE recipes than she has without one ("withTableRecipes.length > noTableRecipes.
+// length"), not whether every recipe happens to need one.
 //
 // 1.83.0 (2026-10-09, direct report: bots "repeatedly complain about crafting tables" without
 // ever trying to make one, noticing two standing right next to them, or remembering either's
@@ -3090,8 +3100,17 @@ async function performActionAs(bot, action, speaker, token) {
       // this item EVER need a table -- `true` satisfies its requiresTable check without needing a
       // real Block reference yet, confirmed against mineflayer's own craft.js source; this is
       // only checking whether a table would help, not using one.
+      //
+      // First live run of the above (2026-10-09) found a second, narrower real bug the unit tests
+      // never could: "craft red_bed" (wool + planks, needs a table) STILL skipped the table search,
+      // this time with noTableRecipes genuinely non-empty -- a colored bed ALSO has a real, no-table
+      // *recycling* recipe (dye + an existing bed of another colour, confirmed live against this
+      // server's own recipe data), so "!noTableRecipes.length" was simply the wrong question for any
+      // item with more than one path to it. The real question is whether a table unlocks recipes she
+      // doesn't have without one, not whether EVERY path happens to need one.
       const noTableRecipes = bot.recipesAll(itemDef.id, null, null);
-      const tableWouldHelp = !noTableRecipes.length && bot.recipesAll(itemDef.id, null, true).length > 0;
+      const withTableRecipes = bot.recipesAll(itemDef.id, null, true);
+      const tableWouldHelp = withTableRecipes.length > noTableRecipes.length;
       let tableBlock = null;
       if (tableWouldHelp) {
         const tableType = bot.registry.blocksByName.crafting_table;
