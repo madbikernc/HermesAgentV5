@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.5.0
+**Version:** 3.8.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -19,9 +19,11 @@ planned, which the original research missed. The custom-node route, its wheel pi
 dependency and its `sm_120` CPU fallback are all withdrawn. **2026-10-04: the node's ComfyUI was updated
 `v0.31.0` → `v0.38.2`**, clearing S19a's first install gate with the existing image/video setup verified
 intact. **2026-10-04: the model files are in place and the `win_amd64` test gate is closed** (10/10 on
-the node, all six pins resolving identically to aarch64). The **exported workflow is the one remaining
-pre-node item**, and it needs GUI work on `Anvil` that cannot be scripted. Nothing else is deployed
-on the node. Its
+the node, all six pins resolving identically to aarch64). **2026-10-08: the workflow is built, committed
+and proven to run** — 29 nodes derived from ComfyUI's own shipped template, validated by three real runs
+(85–120 s, peaking at **15,492 MiB of 16,311**). Generation works; **the repair chain does not yet** — it
+fails on real TRELLIS.2 output at a PyMeshLab filter that requires manifoldness. Nothing is deployed on
+the node. Its
 node-independent half is built and
 tested (2026-09-27): the S19c repair chain, the independent viability checker, and the worker's mesh
 screening. **2026-08-30: the "later stage"
@@ -35,7 +37,16 @@ also planning the retirement of `HermesAgentV4`'s own duplicate ad-hoc model-wat
 **S21 is planned, not executed** — `hermes-fleetops-ui`, a direct follow-up request the same day for a
 base process-management web UI: links to the existing RAG approval portal and S20's benchmark backlog,
 plus read-only model usage/state and benchmark-history report pages, on the same stdlib-`http.server`/
-Basic-Auth/tailnet-only pattern `hermes-rag-discovery-portal.py` already proves live.
+Basic-Auth/tailnet-only pattern `hermes-rag-discovery-portal.py` already proves live. **S22, S23 and S24 are planned, not executed** — a re-evaluation on **2026-10-08**, the
+same day S20 and S21 were planned, against three operator-chosen goals: finish the queued stages, bring
+the Minecraft bots into this plan, and run a currency audit. **S22 is the one with teeth**: the Clef
+bake-off measured the *deployed* Layer-2 screener, `Llama-Prompt-Guard-2-22M`, missing **14 of 18**
+injections — every indirect case and every paraphrased one — where the `dispatch` LLM asked the identical
+question missed none, and until now nothing owned a remedy. It is ordered **before S20 and S21**, both of
+which add new ingest surface in front of it. **S23** gives the nine-bot Minecraft fleet — live since
+2026-09-13, and until now absent from this document entirely — a §0 row, a §6 entry, and the two of its
+own open items that are plan-level rather than bot-level. **S24** is S13/S14's method run again six weeks
+on: nine repo-sourced findings, one of which puts S16's own headline recall number back in question.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** described in [`firmament-fleet-target-architecture.md`](firmament-fleet-target-architecture.md)
@@ -71,7 +82,13 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S14 | Ops tooling retarget, rename debt, sync coverage, cross-repo comparability | ✅ Done (2026-08-29) |
 | S15 | `hermes-logs` — the log analyst | ✅ Done (2026-08-29) |
 | S16 | RAG stack: eval harness, reranker, optional OCR (retriever already live, independently built) | ✅ Done (2026-08-31) — recall@5 0.538→0.705 |
-| S19 | `Anvil` — mesh node (native-ComfyUI TRELLIS.2 on a Windows 5060 Ti) + viable-STL repair chain | 🔨 Everything but the node built + tested end to end (2026-09-27); node not stood up. Node identified as `PMWIN11`, route corrected to native ComfyUI (2026-10-03); ComfyUI 0.38.2, models in place and win_amd64 gate closed (2026-10-04); workflow export is the last pre-node item |
+| S18 | RoCE fabric: clear the gate S1 set | ✅ Closed 2026-09-24 with its exit gate deliberately **missed** — RoCE fixed and persistent at 13.0 GB/s (unbonded `f1`, S18a; S18b never needed), but GB10 has no GPUDirect RDMA, so `TP=2` stays non-viable and MiMo does not proceed |
+| S19 | `Anvil` — mesh node (native-ComfyUI TRELLIS.2 on a Windows 5060 Ti) + viable-STL repair chain | 🔨 Everything but the node built + tested end to end (2026-09-27); node not stood up. Node identified as `PMWIN11`, route corrected to native ComfyUI (2026-10-03); models in place and win_amd64 gate closed (2026-10-04); workflow built and generating on the node (2026-10-08) — repair chain fails on real output |
+| S20 | `hermes-model-scout` — daily discovery → role-fit comparison → tracked benchmark backlog | 📋 Planned 2026-10-08, not executed |
+| S21 | `hermes-fleetops-ui` — base process-management web UI | 📋 Planned 2026-10-08, not executed |
+| S22 | Layer 2 re-specified — the deployed screener missed 14 of 18 injections | 📋 Planned 2026-10-08, not executed — **security**; ordered before S20/S21 |
+| S23 | The Minecraft bot fleet enters this plan | 📋 Planned 2026-10-08, not executed (the fleet itself is live since 2026-09-13) |
+| S24 | Currency audit — what S13/S14 would find today | 📋 Planned 2026-10-08, not executed — nine findings, one questions S16's recall number |
 
 ---
 
@@ -282,6 +299,10 @@ this — see S11.
 
 ## 4. Target state for V5
 
+**§4.1–§4.4 are the target as set on 2026-08-29 and are left as written** — they record what was
+planned, which the executed-stage notes below are read against. For what is actually deployed now, see
+**§4.5**, which also lists where reality and this target diverged and why.
+
 ### 4.1 `spark` — **Watch** (control plane, nothing swaps)
 
 | Role | Model | Port | Weights | ~Size |
@@ -328,6 +349,101 @@ sender, which target §5.2 explicitly allows and which already works.
 **Sintra and Amy are retired.** Their `SOUL.md` files stay in `../HermesAgentV4/DesignFiles/` for reference.
 The interactive persona that eventually speaks through the presenter is a separate decision, deferred by
 operator direction — V5 builds the seam, not the voice.
+
+### 4.5 Current distribution — as deployed, 2026-10-08
+
+Refreshed from this repo's own authoritative sources: `tools/hermes-router.py`'s `ROLES` table (both
+`HERMES_NODE` branches) for every routed role, and each `infra/<service>/README.md` for the model-serving
+services the router excludes by design (`guard`, `embed`, the reranker — S13's currency audit confirmed
+that exclusion as deliberate, not drift). **No fleet node was reachable from the session that wrote this**
+— same constraint `infra/model-benchmark/qwen4-coder-bakeoff-runbook.md` records for itself — so nothing
+below is a freshly measured residency number. Re-verify against each node's `/v1/models` and `free -h`
+before acting on it.
+
+#### `spark` — Watch (10.129.1.15)
+
+| Role / service | Model | Port | Routed | Residency |
+|---|---|---|---|---|
+| `dispatch` | Qwen3.6-35B-A3B **stock** Q8 | 8097 | yes | always |
+| `super` | Huihui-GLM-4.7-Flash-abliterated | 8095 | yes | `ROLES` says on-demand, the systemd unit is enabled/always-restart — a real inconsistency flagged 2026-10-07, not fixed |
+| `embed` | Qwen3-Embedding-**8B**-Q8_0 | 8092 | no | always |
+| `rerank` | Qwen3-Reranker-0.6B, `ggml-org`'s own GGUF | 8093 | no | always |
+| `guard` | `Llama-Prompt-Guard-2-22M`, stock, `transformers`/CPU | 8096 | no | always |
+
+Also on Watch, non-model: Continuwuity, `hermes-broker` (8100/8101), `hermes-memory` (8102),
+`hermes-minecraft-rag` (8105), `hermes-presenter`, `hermes-dispatch`, the RAG store.
+
+**Deltas from §4.1's target table.** Three of its five ports moved: `dispatch` is 8097, not 8088 (the
+rename is deferred, not forgotten — S13); `guard` is 8096, not 8092; `embed` is 8092, and **8093 now holds
+the reranker** S16b added. `embed` is the 8B checkpoint, not 0.6B (raised 2026-09-04). `nano` is retired
+(S13), as §4.1 intended. **`asr` was never deployed** — no standalone Parakeet/Whisper exists anywhere on
+the fleet, and the incidental audio capability left with the Nemotron-Omni swap below, so the fleet has no
+speech-to-text today. `coder` is no longer on Watch at all.
+
+#### `spark-2` — Forge (10.129.1.17)
+
+| Role | Model | Port | Residency |
+|---|---|---|---|
+| `muse` | Qwen3.6-35B-A3B-abliterated (huihui-ai) | 8090 | always |
+| `omni` | gemma-4-26B-A4B-it (Google, **stock**) | 8091 | always |
+| `coder` | Qwen3.8-27B-abliterated | 8094 | on-demand — moved here from `spark` 2026-10-07 |
+| `coder2` | Muse-Glimmer-30B (Meta, **stock**, Apache-2.0) | 8099 | on-demand |
+
+**Deltas from §4.2's target table.** `omni` is gemma-4-26B-A4B-it, not Nemotron-3-Nano-Omni-30B-A3B —
+swapped 2026-09-24 on a real bake-off over six genuine Reolink motion frames (all three cameras, night
+through dusk, two checked by eye for ground truth), after finding the incumbent mis-specified twice over:
+an Omni model used only for vision by both of its callers, and a Reasoning variant run with
+`--reasoning off`. `coder2` does not appear in §4.2 at all — it was added 2026-09-05 on its own bake-off,
+which found `coder` and Muse Glimmer **asymmetric, not redundant** (`coder` wins ifeval/mmlu_pro, Muse
+Glimmer wins BFCL 92.00% vs 37.00%). `coder`'s arrival (16.8 GB rsynced over `bond-fabric0` in 38s,
+sha256-verified) puts both coding backends on one node, which §4.2's placement deliberately avoided for
+memory-bandwidth isolation; accepted on evidence rather than assumption — `hermes-dualcoder.py`'s own task
+log showed zero real reviews claimed in the prior 30 days, and its two `security_review()` calls are
+sequential even when it does run. Revisit if dual-coder review becomes real traffic again. `coder` left
+Watch because it was that node's single largest avoidable resident consumer: nominally on-demand but in
+near-continuous use, so its idle-sleep timer never actually stopped it, and `spark` sat at ~97% memory.
+
+**`hermes-tts` (Kokoro-82M, CPU container, 8098) is assigned to Forge but not running** — its own README
+states no container has been started yet. Counted as planned capacity, not current distribution.
+
+#### `HomeD13` — Kiln
+
+Unchanged in shape from §4.3, and still the fleet's only x86_64: ComfyUI with SDXL base 1.0 permanently
+resident, FLUX.2 Klein, Wan2.1 T2V 1.3B; plus `hermes-embed-homed13` — a second, independent
+Qwen3-Embedding-8B-Q8_0 on its own x86_64+CUDA build, **CPU-only** because of the VRAM conflict with the
+resident SDXL checkpoint, and required to track Watch's embedding choice exactly. SWE-bench Docker stays.
+
+#### `Anvil` — mesh node (`PMWIN11`), new since §4 was written
+
+The operator's own Windows workstation (S19), a tooling endpoint with no agent, no persona and no Matrix
+identity, like Kiln. TRELLIS.2 under a StabilityMatrix-managed ComfyUI 0.38.2 — 10.2 GB total:
+
+| File | Size |
+|---|---|
+| `trellis_2_int8_convrot.safetensors` | 5.253 GB |
+| `dino_v3_vit_l.safetensors` | 1.213 GB |
+| `trellis_2_shape_vae_bf16.safetensors` | 1.096 GB |
+| `trellis_2_texture_vae_bf16.safetensors` | 0.948 GB |
+
+The int8 transformer is deliberate over `trellis_2_bf16.safetensors` (10.338 GB) for a 16 GB card; the
+shape-only path is ≈7.6 GB resident.
+
+#### Evaluated, not adopted — so they are not in the tables above
+
+- **Clef-flash** (Cloudflare, 9B, typed-probability decision model) — self-hosted on `spark-2` 2026-10-06
+  and run through `tools/hermes-bakeoff-typesafe.py`. Lost `dispatch` (0.917 vs 0.979) and `rerank` (11/20
+  vs 15/20), was confidently wrong on `mcintent` addressee cases, and ran slower than the llama.cpp
+  incumbents on GB10. Trial environment fully torn down. Its real finding was about an incumbent in the
+  table above, not the candidate: **`Llama-Prompt-Guard-2-22M` missed 14 of 18 injections** where the
+  `dispatch` LLM missed none (`infra/model-benchmark/clef-decision-model-bakeoff.md`).
+- **`Qwen/Qwen3.8-Flash`** (qwen4exp) as a `coder` replacement — possible now that `qwen4exp` support
+  shipped in llama.cpp `v0.4.0`. Runbook written, **unexecuted**
+  (`infra/model-benchmark/qwen4-coder-bakeoff-runbook.md`).
+- **`coder` with reasoning on**, as a `coder2` replacement — runbook written, **unexecuted**
+  (`infra/model-benchmark/coder-reasoning-bakeoff-runbook.md`). The BFCL gate it must close is the 92.00%
+  / 37.00% pair above, and that runbook's own recommendation is to treat a closed gap as necessary but not
+  sufficient: replacing `coder2` removes the only non-abliterated model from the security-review path and
+  collapses cross-review into one checkpoint reviewing its own weights under a different inference mode.
 
 ---
 
@@ -2539,6 +2655,230 @@ services.
 
 ---
 
+### S22 — Layer 2 is failing: re-specify the screener against measured evidence
+
+**Planned; not executed.** No change to `hermes-guard.py`, its checkpoint, or its router wiring yet —
+this section is the design, and S22a is deliberately a measurement with no remedy attached.
+
+**The finding this stage exists for.** The Clef-flash bake-off (2026-10-06,
+`infra/model-benchmark/clef-decision-model-bakeoff.md` §4 finding 1) was run to evaluate a candidate,
+and its most consequential result was about an **incumbent**: `Llama-Prompt-Guard-2-22M` — the Layer-2
+classifier S5 built and deployed, which `hermes-router.py` calls on every non-clean role — scored
+**TP 4 / FP 0 / FN 14** against 18 malicious cases, 0.611 on the n=36 set at 85 ms on CPU. Asked the
+identical yes/no question, the `dispatch` LLM scored **TP 15 / FP 1 / FN 0** (0.970 across 33 answered,
+233 ms). The misses were not scattered: it missed **every indirect injection** — instructions planted in
+retrieved text — and **every paraphrased one**.
+
+Three reasons this is a stage and not a tuning item:
+
+1. **Indirect injection is the case Layer 2 exists for.** `INJECTION_DETECTION.md`'s own core principle
+   is "screen every string a tool returns, not just user input," and it scopes Layer 1 explicitly to
+   *literal attack syntax* — an attacker "who doesn't need semantically convincing text." Layer 2 is the
+   only thing between retrieved text and the dispatcher. A classifier that catches zero of the
+   planted-instruction cases leaves target §8.2 nominally satisfied and actually unmet, which is the
+   failure mode this plan's §2 already flagged once as a security finding.
+2. **The failure tracks the model's documented scope, which nobody has checked.** Prompt Guard 1 carried
+   a separate indirect-injection label; Prompt Guard 2 is understood to have dropped it in favour of
+   explicit jailbreak detection, on false-positive grounds. **If the model card says that, this is a
+   mis-specification at deployment time, not a regression** — the same class of finding as the
+   Nemotron-Omni swap (an Omni model used only for vision, a Reasoning variant run with
+   `--reasoning off`): the tool did exactly what it was built for, and what it was built for is not what
+   S5 needed. That claim is **unverified here on purpose** and is S22a's first item; if it is wrong, the
+   remedy space changes and this stage gets re-planned rather than executed on a guess.
+3. **Nothing owns it.** It lives in the bake-off doc and, since 2026-10-08, as one clause inside §4.5's
+   *evaluated-not-adopted* notes — a finding about a deployed incumbent recorded in a section about a
+   candidate that was torn down. `infra/hermes-guard/README.md` is still 1.0.0 and does not mention it.
+
+#### S22a — Verify the scope claim, measure the composite, build a real-traffic set
+
+Three things the bake-off's number cannot carry on its own, none of which need a remedy chosen first:
+
+1. **Primary-source check on PG2's label set** — the model card and the PG1→PG2 comparison, read, not
+   recalled. Record the result as a table in this section the way S19a's deleted findings are kept, since
+   either answer is worth having in writing: "the tool was mis-specified" and "the tool regressed" lead
+   to different remedies.
+2. **A real-traffic eval set.** The 18 malicious cases are the harness's own **synthetic** set, which the
+   bake-off states plainly. Before a checkpoint is replaced on their strength, the set needs what S11
+   already established as this fleet's standard — cases from real traffic. `hermes-guard.py` has logged
+   every verdict to `hermes-memory` since S5, and that log is the only corpus of genuinely screened text
+   this fleet has ever accumulated; it has never been read back for this purpose. Build the guard eval
+   set from it, keep the synthetic cases labelled as synthetic, and re-measure the incumbent against the
+   combined set. A real-traffic false negative is a finding; a synthetic-only one is a lead.
+3. **The composite number, which is the only one that describes real exposure.** Layer 1 runs on
+   everything and its `instruction_override` and `prompt_exfiltration` categories plausibly catch some of
+   the paraphrase cases Layer 2 missed. What gets through **both** layers has never been measured — only
+   each layer separately. Measure Layer 1 against the same 18, then the pair.
+
+#### S22b — Choose the remedy against the two standing constraints
+
+Constraints, from target §12.1 and the bake-off's own wording: the control plane stays **stock weights**,
+and Layer 2 has a per-call latency budget (85 ms incumbent, 233 ms for the measured LLM arm). Candidates
+in test order — this is a list to measure, not a decision:
+
+1. **`Llama-Prompt-Guard-2-86M`** — same family, stock, same architecture class, and the only option that
+   costs nothing architecturally. Must be measured rather than assumed better: if the label set is the
+   problem, a bigger PG2 inherits it. S22a's finding 1 predicts this outcome before it is spent.
+2. **The `dispatch` LLM as Layer 2** — the measured TP 15 / FN 0 / 0.970 arm, stock weights, already
+   resident, no new checkpoint. The structural objection gets written down rather than waved at: a
+   screener running on the model being protected has no independent failure mode, and the one FP shows it
+   is not free. What the bake-off actually measured was a separate call with a narrow classification
+   prompt, no tools and no conversation state — that is the only form of this option on the table.
+3. **A small stock instruct model with a narrow classification prompt** — §7 risk 6's own stated fallback
+   from the day this plan was written, never needed until now.
+4. **Clef-flash** scored 0.944 with 2 FPs and no FNs on the same task, and is **torn down**. Recorded
+   because the number exists, not as a live candidate: it lost `dispatch` and `rerank`, and re-standing it
+   up for one role is its own stage with its own residency cost.
+
+**Exit gate.** (1) The PG1/PG2 scope question answered from the model card, in writing, either way.
+(2) Layer 1, Layer 2, and the composite each measured against the combined set. (3) The real-traffic half
+of that set committed, or its absence stated with the reason. (4) Zero false negatives on real-traffic
+indirect cases, or the residual named with a reason — not a silent partial pass. (5) Latency inside the
+budget, measured on the node that serves it. (6) `infra/hermes-guard/README.md` bumped past 1.0.0 with the
+outcome, so the 14-of-18 finding is no longer the newest word on the subject.
+
+**Risks.**
+
+1. **Layer 2 fails open by design** (`INJECTION_DETECTION.md`: an unreachable classifier degrades to
+   Layer 1 only, never blocks). So a remedy that is slower or flakier converts into *silently unscreened*
+   traffic rather than an error — availability must be measured alongside accuracy, not after it.
+2. The guard verdict log may be too sparse, or too uniformly benign, to build a real set from. If so, say
+   that and proceed on synthetic cases plus labelled real negatives, rather than calling it a real set.
+3. The incumbent's 85 ms is CPU-only and tiny. Both leading candidates change the residency picture on
+   **Watch** — the node that hit ~97% memory on 2026-10-07 and had to give up `coder` (§4.5).
+
+---
+
+### S23 — The Minecraft bot fleet enters this plan
+
+**Planned; not executed** — as a *plan* change. The fleet itself has been live since 2026-09-13; what
+does not exist is any trace of it in this document.
+
+**The gap this closes.** Nine bots run on `spark` and `spark-2` under systemd, one role each.
+`MINECRAFT_BOTS_DESIGN.md` is at 2.16.0, `docs/minecraft-bots-history.md` carries 120 changelog rows
+across three source documents, `services/minecraft-bots/` is a Node orchestrator with four test suites
+(`unit`, `live`, `livebot`, `baseline`) and committed per-host behavior baselines, and `CLAUDE.md` 1.1.0
+makes a test a **condition** of every behavior fix. None of it appears here: §0's table has no row, §6's
+carry-forward audit has no entry, and the only mention anywhere in this document is S15's incidental RCON
+finding. §6 Category A's "**all game servers** (zomboid, minecraft, muncraft)" line is the *server-admin*
+tooling carried forward from V4 — it predates the bots and is not the same thing. The largest body of work
+this repo has done since S16 is invisible to the document that claims to be the diff between target and
+actual.
+
+**What this stage is not:** a rewrite of the design doc into here. That file is the reference and stays
+authoritative, with its own header's rule intact (code wins where the two disagree; report the drift).
+This stage gives the fleet a place in the plan, and then takes the items from its §12 Open list that are
+**plan-level** — model allocation and shared state — rather than bot-level.
+
+#### S23a — The bookkeeping (cheap, independent of everything else)
+
+A §0 status row; a §6 **Category C** entry naming `services/minecraft-bots/`,
+`MINECRAFT_BOTS_DESIGN.md`, `docs/minecraft-bots-history.md`, `agents/minecraft-*/PROMPT.md`,
+`infra/minecraft-bots*` and `hermes-minecraft-rag`, since all of it was built after V5 started and none of
+it is carried forward from anywhere. Also: `hermes-minecraft-rag` (8105) appears in §4.5's Watch
+non-model service list with no stage anywhere explaining what it is or when it arrived — this stage is
+where that gets a sentence.
+
+#### S23b — `planNextStep`'s model choice, decided (§12 "Open", §26)
+
+The per-tick planner's backend is the fleet's oldest undecided model question: `dispatch` is fast and
+occasionally wrong, `coder` is more accurate at ~8 s, `coder2` is most rule-compliant but unusable
+per-tick. Evidence gathered, no decision made. It belongs in this plan because it is a **model-allocation**
+question, which is §4's and S9's territory, and because **the measurements have expired**: `coder` moved
+to Forge on 2026-10-07 and now sits beside `coder2` there (§4.5), so every figure above was taken against
+a placement that no longer exists. The call is now asymmetric by host — spark's five bots reach both coder
+backends cross-node, spark-2's four reach them locally — which none of the existing numbers account for.
+
+Re-measure per host, then decide. **A split decision is allowed** if the numbers say so; the host split is
+already memory headroom rather than design, so nothing forbids spark's bots and spark-2's bots planning on
+different backends. One thing to settle in the same pass: nine bots planning per tick is this fleet's
+largest **uncounted** source of `dispatch` traffic. §4.5 does not record it and `hermes-usage-report.py`
+should be checked against it before any conclusion about Watch's load is drawn from that section.
+
+#### S23c — spark-2's split shared state
+
+`known_chests.json`, `pen.json` and the per-bot goal files live on each host's local
+`/mnt/hermes-data`, so spark's five bots and spark-2's four **do not share a chest registry**. Both
+precedents for the fix are already in this fleet and both landed 2026-09-25: bed claims went through
+`hermes-memory`, and RAG memory plus the skill library went through `hermes-minecraft-rag`. These three are
+the same shape. The ~91k never-indexed spark-2 local world notes stay where they are — that was a decision,
+and this stage should keep recording it as one rather than let it read as a leftover.
+
+#### S23d — The `block.light` substitution (§12's first item)
+
+`checkLighting` and `light_area` both gate on `block.light`, which §11 records as **frozen at chunk-load
+time**: near the base, where chunks loaded in the dark, both read "dark" forever, so bots re-sweep spots
+they have already lit and `light_area` can report "already lit" for somewhere genuinely black. Included
+here and not left in §12 because it is the only open item with both a known cause and a known remedy —
+`emitLight` by block id, the same substitution the torch trail already used to sidestep the field
+entirely on 2026-10-07. Per `CLAUDE.md` it ships with a `unit.test.mjs` check that fails on the old code
+and a `live.test.mjs` scenario; the torch-trail scenario's floor-replacement machinery
+(`restoreFloor()`) exists for exactly this class of test already.
+
+**Deliberately not in this stage.** The `vec_chunks` UNIQUE-constraint race (200–300× per bot per day,
+spark-hosted bots only) is **shared RAG infrastructure, not bot code** — it goes to S24 with the other RAG
+findings. §12's remaining items (the `beehive` fallback, the multi-dig search budget, `liquidCost`,
+herding round-up) stay in the design doc: they are unprioritized open behavior items, and that file is
+what owns those.
+
+**Exit gate.** (1) §0 row and §6 Category C entry exist, `hermes-minecraft-rag` explained. (2)
+`planNextStep` decided, per-host measurements recorded in the design doc, and the allocation consequence
+reflected in §4.5 — including bot-generated `dispatch` volume, measured not estimated. (3) The three
+shared-state files on a shared path, with spark and spark-2 verified live reading the same chest registry
+— not just pointed at the same URL. (4) The `block.light` fix shipped with its unit and live checks, and
+the host baseline re-recorded per `tests/run.sh baseline --update` after it has run about a day, as that
+README requires.
+
+---
+
+### S24 — Currency audit: what S13/S14 would find today
+
+**Planned; not executed.** S13 and S14 exist because a post-S12 audit found real live drift the first
+twelve stages had not closed. This is the same method run roughly six weeks later, against a fleet that
+has since gained a fourth node, swapped two backends, added a second coder, moved a third, and built a
+nine-bot subsystem. The findings below were established **from the repo** in the session that planned this
+stage (2026-10-08) and **no node was reachable from it** — so every one is a repo-sourced lead to confirm
+live, the same posture §4.5 was written under and labelled with.
+
+| # | Finding | Source | What it needs |
+|---|---|---|---|
+| 1 | **`super`'s residency contradicts itself.** `ROLES`/`WAKE_TARGETS` list it on-demand; its spark unit is enabled with always-restart and its own `Description=` says always-resident; there is no evidence `hermes-super-idle-sleep.timer` has ever stopped it. Reads like an on-demand migration that was never finished. | `infra/hermes-router/README.md` §3, recorded 2026-10-07 | Decide which it is, then make the unit, the table and the timer agree. Memory-relevant on the node that hit ~97%. |
+| 2 | **`asr` was never deployed.** §4.1 lists it; nothing serves it anywhere on the fleet; the incidental audio capability left with the Nemotron-Omni swap. The fleet has **no speech-to-text**. | §4.5 | Deploy it or strike it from §4.1 **with the reason**. A target table carrying a role nothing has ever served is how §1.1's stale placement happened in the first place. |
+| 3 | **`hermes-tts` (Kokoro-82M, 8098) is assigned to Forge and has never been started** — its own README says no container was ever run. | §4.5 | Same choice as 2, same reason. Counted as planned capacity today, which is honest but cannot stay indefinite. |
+| 4 | **The RAG eval set's fleet-docs half is stale** — KNN, the incumbent reranker and Clef all scored **0/24**, and the gold chunk was never in the candidate pool; the `expected_chunk_id`s most likely predate a re-index. On the same run **the reranker showed no gain at all** (0.341 overall, 15/20 podcasts, equal to KNN-only). | bake-off §4 findings 2–3 | Rebuild the set, re-measure. This one reaches further than the others: S16's **0.538→0.705** is quoted in this document's own header status line and §0 row, and it is now under question. Confirm it or correct it there. |
+| 5 | **§0's status table silently stopped tracking stages after S16** — no rows for S18, S20 or S21, while the header status line discussed all three. | this document | Added in this change (3.7.0). Recorded as a finding anyway: the table is what a reader checks first, and it was wrong for six weeks. |
+| 6 | **V4 S6's 77 ported tools have still never been live-smoke-tested** — §7 risk 8, inherited intact, now six weeks older and carried through a repo cutover that rewrote every `REPO_DIR`/`ExecStart` in the tree. | §7 risk 8 | No harness exists. The smallest honest version is an import/`--help` sweep proving each entrypoint loads under the deployed interpreter on the node that owns it. That is not "verified working", and it is strictly more than today's nothing. |
+| 7 | **Repo sync restarts a node's entire stack, models included, on every pull**, and **repo-sync's FleetOps notice already fails from spark-2 and HomeD13**. | recorded 2026-09-27 (S19 pre-node deploy) | Both were written down as findings and neither got an owner. The first is a cost every future commit pays; the second is a silent sync-monitoring gap of exactly the kind S14 closed once already. |
+| 8 | **S10's network isolation half is still an operator checklist** — unexecuted since 2026-08-29, carried as 🟡 in §0 for six weeks. | §0, S10 | Execute it, or re-record it as a deliberate deferral with a reason and a date, the way S12's merged mode is. An indefinite 🟡 is the one status that decays into noise. |
+| 9 | **Target-vs-live port drift is now recorded in two places and resolved in neither.** `dispatch` is 8097 not 8088 (deferred in S13), `guard` 8096 not 8092, `embed` 8092 with 8093 now the reranker. | §4.5, S13 | Pick a direction: correct §4.1–§4.3 to the live ports, or move the ports to the target. One of the two — not a third snapshot next month. |
+
+#### S24a — Order of work, and the boundary
+
+Bookkeeping first (5, 9) because a target table is what every later stage reads. Then the two
+never-deployed roles (2, 3), which are decisions rather than work. Then the RAG eval rebuild (4), because
+this document's most-quoted measurement depends on it. Then 1, 7 and 8. Then 6 last — it is the largest,
+the only one with no existing harness, and the only one whose findings cannot be predicted.
+
+**The boundary matters as much as the list.** S13/S14 bounded themselves by taking one pass's findings and
+shipping them. This stage does the same: the nine rows above are its scope, and whatever the *next* read
+turns up belongs to a later stage, not to this one. An audit stage that absorbs every new finding never
+closes.
+
+**Exit gate.** Every row either fixed or re-recorded as a deliberate deferral with a named reason and a
+date — no row left as a finding. §4.1–§4.3 and §4.5 agree with the live fleet on roles, ports and
+residency. S16's recall number either reconfirmed against a rebuilt set or corrected in both §0 and the
+header status line.
+
+**Risks.**
+
+1. **Finding 4 may unmake a claim this document is built on.** That is the point of running the audit, and
+   the correction belongs in §0 and the status line where the number is quoted — not in a footnote.
+2. **Finding 6's sweep could surface many broken entrypoints at once.** Budget it as triage with a
+   recorded list, not as "fix 77 tools"; the sweep's deliverable is knowing, which nobody does today.
+3. Several rows are decisions rather than tasks (2, 3, 8, 9). Those need the operator, not a session, and
+   should be asked as a batch rather than one at a time across four sessions.
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -2568,6 +2908,25 @@ services.
   `hermes-memory` task state existing first. S21c/S21d depend only on already-live capabilities
   (`hermes-status.py`, `hermes-usage-report.py`'s log, `model-benchmark`'s history) and could ship
   independently of S20 if ever sequenced separately.
+- **S22 (screener) before S20** — S20a ingests publisher-supplied free text (model cards, PR titles)
+  from the open internet on a daily automated pass. That is precisely the case the incumbent Layer 2
+  missed **every** instance of: instructions planted in retrieved text. Adding an internet-fed daily
+  ingest ahead of fixing the screener widens the exact gap the measurement found.
+- **S22 before S21** — same reason at lower weight. The portal is tailnet-only and Basic-Auth'd, so the
+  exposure is far smaller, but it is still new reachable surface in front of a screening layer that is
+  under question.
+- **S22a before S22b** — verify the PG1/PG2 scope claim and get real-traffic numbers *before* choosing a
+  remedy. A larger checkpoint from the same family inherits a label-set problem, and that is cheap to
+  find out and expensive to deploy into.
+- **S24 finding 4 (RAG eval rebuild) before any re-measurement of S16's reranker claim**, and before
+  S20b's role-fit comparison trusts `rerank` history — the same stale set backs both.
+- **S23b before any conclusion about Watch's `dispatch` load** — nine bots planning per tick is
+  unaccounted traffic that §4.5 does not record.
+- **S19's workflow export before S19's exit gates**, stated only because S19 is otherwise complete and
+  that one item is GUI work on `Anvil` that cannot be scripted. Nothing in S20–S24 is blocked on S19, and
+  S19 is blocked on nothing in S20–S24.
+- **S23a and S24's bookkeeping rows (5, 9) are independent of everything** — cheap, and they are what a
+  reader checks first.
 
 ---
 
@@ -2616,7 +2975,7 @@ executed — still needed).
 `hermes-memory.py` + wrapper + `infra/hermes-memory/` (S2) · `hermes-dispatch.py` +
 `infra/hermes-dispatch/` (S6) · `hermes-presenter.py` + `infra/hermes-presenter/` (S7) ·
 `agents/*/PROMPT.md` (S8) · residency controller + model registry (S9) · Kiln VLAN config (S10) ·
-per-role eval sets (S11).
+per-role eval sets (S11) · **the Minecraft bot fleet, entire** — `services/minecraft-bots/`, `MINECRAFT_BOTS_DESIGN.md`, `docs/minecraft-bots-history.md`, `agents/minecraft-*/PROMPT.md`, `infra/minecraft-bots*`, `hermes-minecraft-rag` — live since 2026-09-13, built entirely after V5 started, and **not** the same thing as Category A's game-server admin tooling (S23).
 
 ### Category D — retired
 
@@ -2699,3 +3058,6 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.3.0 | 2026-10-04 | **S19a install gate 2 cleared: the TRELLIS.2 model set is on `Anvil`** — 10.2 GB, every file header-verified as real safetensors and confirmed visible through ComfyUI's own `/models/<folder>` endpoints rather than assumed from a successful download. Files went into StabilityMatrix's shared model folders, which is what this install resolves through `extra_model_paths.yaml` and survives a package reinstall. Two findings that would each have cost a confusing failure later. **The shipped template's `CLIPVisionLoader` expects `dino_v3_L_naf_fp32.safetensors`, which is in the `Comfy-Org/Pixal3D` repo, not TRELLIS.2's** — the template is a combined Pixal3D/TRELLIS.2 graph sharing one conditioning loader — and it is **not the same artifact** as TRELLIS.2's `dino_v3_vit_l.safetensors` (452 vs 415 tensors), so both are on the node until a real run shows which the shape path wants. The official tutorial's file list names only the first, which is why the discrepancy was worth chasing rather than papering over. **And MoGe plus the Pixal3D transformer are not needed** — established from the template's link graph, where the `LoadMoGeModel` → `MoGeInference` → `MoGeGeometryToFOV` chain feeds only `Pixal3DConditioning` while `Trellis2Conditioning` takes just a `CLIP_VISION` and an `IMAGE` — saving ~6.2 GB and making the real download 10.2 GB rather than 17. Also recorded in the README: the template is `3d_pixal3d_trellis2_image_to_model` (66 nodes), it selects between the two models with a `PrimitiveBoolean` that ships `False`, and its texture half is substantial enough that stripping it is most of step 3's work — the texture-side node list and the traced shape chain are both written down so that work is recognition rather than rediscovery. **With gates 1 and 2 both cleared, every pre-node item except the exported workflow is done**, and that one needs GUI work on the node that cannot be scripted. |
 | 3.4.0 | 2026-10-08 | Added **S20** (planned, not executed): `hermes-model-scout` — a daily model-discovery pipeline comparing newly published models and newly landed llama.cpp architecture support against each Firmament role's real current backend and benchmark history, proposing candidates into a tracked `hermes-memory` backlog (Done / Rejected / Deferred) gated by an explicit human reply, modeled directly on `hermes-self-repair-promote-gate.py`'s existing confirm-gate pattern. Direct request to move `HermesAgentV4`'s ad-hoc, LLM-driven model-watch routine into V5 properly; S20d plans that routine's retirement once this ships. Reuses `hermes-model-scan.py`/`hermes-model-watch.py`'s existing deterministic discovery and `model-benchmark`'s existing harness unchanged — adds the missing role-fit comparison and tracked-decision layer, nothing else. Minor bump — new stage added, nothing prior reversed. |
 | 3.5.0 | 2026-10-08 | Added **S21** (planned, not executed): `hermes-fleetops-ui` — a base process-management web UI, direct follow-up request the same day as S20. Scope stated deliberately narrow: links out to the existing `hermes-rag-discovery-portal.py` and to a new read-only view of S20c's benchmark backlog (decisions still go through the Matrix gate, not a button), plus two report pages — model usage/state (reusing `hermes-status.py`'s router query and `hermes-usage-report.py`'s usage log, read not regenerated) and benchmark results current/historical (reading `hermes_benchmark_common.py`'s existing `history.jsonl` directly). No process start/stop control plane and no new privileged write surface — follows the same stdlib `http.server`, Basic-Auth-required, tailnet-bound-only pattern the RAG portal already proves live, own Vaultwarden credential, port TBD pending a live port-availability check. Minor bump — new stage added, nothing prior reversed. |
+| 3.6.0 | 2026-10-08 | Added **§4.5, the current model distribution as deployed** — a dated as-built snapshot alongside the 2026-08-29 target, which is left as written rather than overwritten so the planned-vs-actual record survives. Sourced from `hermes-router.py`'s `ROLES` table (both `HERMES_NODE` branches) and the `infra/<service>/README.md` files for the model-serving services the router excludes by design; **no node was reachable from the session that wrote it**, so it is labelled as repo-sourced, not measured. Real drift it records against §4.1–§4.3: three of Watch's five target ports moved (`dispatch` 8097, `guard` 8096, `embed` 8092, with 8093 now the S16b reranker); `embed` is the 8B checkpoint, not 0.6B; **`asr` was never deployed at all**, and the incidental audio capability left with the Nemotron-Omni swap, so the fleet has no speech-to-text; `omni` is gemma-4-26B-A4B-it, not Nemotron-3-Nano-Omni; `coder2` (Muse-Glimmer-30B) exists and is absent from §4.2; `coder` moved to Forge 2026-10-07, putting both coding backends on one node — the thing §4.2's placement avoided, accepted on a real 30-day dual-coder task-log check; `hermes-tts` is assigned but never started; and `Anvil` (`PMWIN11`, 10.2 GB TRELLIS.2 set) is a fourth node §4 predates. Also records the three evaluated-not-adopted candidates (Clef-flash, torn down; the two unexecuted coder runbooks) so they cannot be misread as deployed, including Clef's real finding about an incumbent: Prompt-Guard-2-22M missed 14 of 18 injections. |
+| 3.7.0 | 2026-10-08 | Re-evaluation against three operator-chosen goals, adding **S22**, **S23** and **S24** (all planned, not executed) and closing a §0 gap found while doing it. **S22 — Layer 2 re-specified.** The 2026-10-06 Clef bake-off's most consequential result was about an incumbent, not the candidate: `Llama-Prompt-Guard-2-22M`, the Layer-2 screener S5 deployed and `hermes-router.py` calls on every non-clean role, scored TP 4 / FP 0 / **FN 14** of 18 malicious cases (0.611, 85 ms CPU), missing every indirect injection and every paraphrased one, where the `dispatch` LLM asked the identical question scored TP 15 / FP 1 / FN 0 (0.970, 233 ms). It was recorded only in the bake-off doc and, since 3.6.0, as one clause in §4.5's *evaluated-not-adopted* notes — a finding about a live incumbent filed under a candidate that had been torn down, with `infra/hermes-guard/README.md` still at 1.0.0 and silent on it. The stage separates measurement from remedy deliberately: S22a verifies against the **model card** whether PG2 dropped PG1's indirect-injection label (which would make this a mis-specification at deployment time — the same class as the Nemotron-Omni finding — rather than a regression), builds the first real-traffic guard eval set from the verdicts `hermes-guard.py` has logged to `hermes-memory` since S5 and that have never been read back, and measures the **composite** Layer-1+Layer-2 number nobody has — only each layer separately. S22b lists four candidates to measure rather than a choice, under the two standing constraints (stock weights, per-call latency budget), and writes down the structural objection to the best-scoring arm: a screener running on the model being protected has no independent failure mode. Its risk 1 is what changes how any swap must be judged — Layer 2 fails **open** by design, so a slower or flakier remedy converts into silently unscreened traffic rather than an error. **S23 — the Minecraft bot fleet enters this plan.** Nine bots live since 2026-09-13, a 2.16.0 design doc, 120 changelog rows, four test suites, committed per-host baselines and a `CLAUDE.md` rule making a test a condition of every behavior fix — and not one row in §0, no §6 entry, and no mention in this document beyond S15's incidental RCON finding (§6 Category A's game-server line is V4's server-admin tooling, which predates the bots and is not the same thing). The stage takes only the plan-level items from the design doc's own §12: `planNextStep`'s undecided backend, whose measurements **expired** when `coder` moved to Forge on 2026-10-07 and the call became asymmetric by host; spark-2's split shared state (`known_chests.json`, `pen.json` and per-bot goals are per-host, so five bots and four do not share a chest registry — and two precedents for the fix already landed 2026-09-25); and the `block.light` substitution, the one open item with both a known cause and a known remedy. The `vec_chunks` UNIQUE race is handed explicitly to S24 as shared RAG infrastructure rather than bot code. **S24 — currency audit**, S13/S14's method run again six weeks on, nine repo-sourced findings with its boundary stated as deliberately as its list: `super`'s unit contradicting its own on-demand config; `asr` **never deployed**, so the fleet has no speech-to-text while §4.1 still lists it; `hermes-tts` assigned and never started; the **stale RAG eval set** whose fleet-docs half scored 0/24 for every retriever and on whose run the reranker showed no gain at all — which puts S16's quoted 0.538→0.705 back in question and requires correcting §0 and the header status line if it does not reproduce; §0's table having silently stopped at S16; the 77 tools still never smoke-tested, now carried through a repo cutover that rewrote every `REPO_DIR`; repo sync restarting whole stacks on every pull while its FleetOps notice already fails from two nodes; S10's isolation checklist at six weeks of 🟡; and port drift now recorded in two places and resolved in neither. Done in this change rather than planned: **§0 gained the missing rows for S18, S20 and S21** — the table had stopped tracking stages after S16 while the header status line discussed all three — plus rows for S22–S24, seven new §5.1 ordering constraints (S22 before S20 and before S21 being the load-bearing ones), and a §6 Category C entry for the bot fleet. Minor bump — new stages and sections added, nothing prior reversed; 3.6.0's §4.5 is built on, not rewritten. |
+| 3.8.0 | 2026-10-08 | **S19's workflow is built and generation is proven on `Anvil`; the repair chain is proven to fail on real output.** `infra/anvil/workflows/trellis2-mesh-only.api.json` (29 nodes) was **derived, not hand-written and not GUI-exported**: every node, link and widget value comes from ComfyUI's shipped 66-node template `3d_pixal3d_trellis2_image_to_model`, every input name from the running instance's `/object_info`, with only three authored changes — select the Trellis2 branch, add a file-writing export, prune to its reachable ancestors — and a builder that asserts no Pixal3D, MoGe or texture node survives. This respects `hermes-generate-mesh.py`'s refusal to guess a node graph: nothing here is guessed, and the result was validated by running it, three times. **The template's one real trap:** its only `Save3DAdvanced` hangs off the texture chain, so stripping texture the obvious way produces no file at all — both shape-path terminals are viewer-only `Preview3DAdvanced`. Also recorded: `PreviewImage#302` is load-bearing (its output feeds `Trellis2Conditioning`), and the template ships `PrimitiveBoolean#316` as **`False` = Pixal3D**, not TRELLIS.2. **First real measurements on the node, which supersede 3.0.0's weight arithmetic: 85.3 s / 12,797 MiB and 120.4 s / 15,492 MiB — the second is 95% of the 16,311 MiB card, 819 MiB spare**, with the raw pre-remesh mesh ranging 12.6M→47.2M faces on seed alone. So S19a's conclusion holds — 16GB does fit — but the honest form is "fits, seed-dependently, with little margin", not "fits with ~8GB to spare"; risk 1 stands and `JOB_TIMEOUT` should be sized against 120 s. One measured tuning change, `sign_mode.drop_inverted_components=true`, isolated in its own run: 24 significant components → 3. **The new finding is a real gap in S19c's own chain:** `hermes-mesh-repair.py` fails on all three real meshes at PyMeshLab's `meshing_re_orient_faces_coherently`, which requires a manifoldness that generated output does not arrive with — it reorients before repairing non-manifold geometry, and needs `meshing_repair_non_manifold_edges`/`_faces` ahead of that step. Exit gate 5 is meanwhile behaving exactly as specified: exit 5, real error surfaced, no artifact. Deliberately **not** fixed yet, because every run used ComfyUI's `example.png` — a flat drawing of a figure plus sky, clouds and a hill, several disconnected subjects — so the component counts are not a fair test and tuning against them would be fitting to a bad input. A real single-object image comes first. Finally, a correction and a vindication in one: ComfyUI on the node is **0.38.0**, not the 0.38.2 installed on 2026-10-04 — StabilityMatrix moved it back on 2026-10-05, which is **risk 4 of this plan occurring within a day of being written down**. |
