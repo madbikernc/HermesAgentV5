@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
 #
 # hermes-model-scout — S20's daily pass: discover what's new, compare it against what each
 # Firmament role is actually running, and write one tracked backlog entry per candidate that a
@@ -574,8 +574,14 @@ def narrative(records):
             "messages": [{"role": "user", "content": build_narrative_prompt(records)}],
             "stream": False,
         }).encode()
-        req = urllib.request.Request(f"{ROUTER_URL}/v1/chat/completions", data=payload,
-                                     method="POST", headers={"Content-Type": "application/json"})
+        # S27f: the payload is publisher-supplied model-card text and tags, sanitized through
+        # hermes-model-scan.py's own _sanitize_hf_text() first. Data by construction, so Layer 2
+        # scans and logs without blocking -- and this is the call S20's own ordering constraint
+        # (S22 before S20) was written about, so the screening of it is deliberately visible
+        # rather than skipped.
+        req = urllib.request.Request(
+            f"{ROUTER_URL}/v1/chat/completions", data=payload, method="POST",
+            headers={"Content-Type": "application/json", "X-Hermes-Screening": "analysis"})
         with urllib.request.urlopen(req, timeout=180) as resp:
             data = json.loads(resp.read().decode())
         err = (data.get("error") or {}).get("message")

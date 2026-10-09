@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
 #
 # 1.2.0 — security-review fix: botnet-feed labels/tags are now sanitized
 # (control characters stripped, length-bounded) before reaching the report
@@ -262,8 +262,13 @@ def ask_llm(summary_text: str, botnet_text: str) -> str:
         "temperature": 0.3,
         "max_tokens": 1536,
     }).encode()
+    # S27f: the payload is canary/honeypot probe events -- attack-shaped by construction, which
+    # is the entire reason target §12.1 puts an abliterated analyst behind this call. Layer 2
+    # scans and logs it; it must not block it. Declaring that is what keeps this report working
+    # now that S22d gave Layer 2 a screener that actually detects injections.
     req = urllib.request.Request(
-        ROUTER_URL, data=body, headers={"Content-Type": "application/json"}
+        ROUTER_URL, data=body,
+        headers={"Content-Type": "application/json", "X-Hermes-Screening": "analysis"},
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
         message = json.loads(resp.read())["choices"][0]["message"]

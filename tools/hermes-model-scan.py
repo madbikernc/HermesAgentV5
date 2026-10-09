@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
 #
 # 1.3.0 (2026-09-24) — two things, one of them a real bug.
 #
@@ -417,9 +417,13 @@ def build_recommendation_prompt(candidates):
 def get_recommendation(candidates):
     if not candidates:
         return "No candidates this week."
+    # S27f: the payload is Hugging Face repo ids, tags and card text -- externally controlled
+    # content this file already sanitizes through _sanitize_hf_text() precisely because anyone can
+    # publish a repo saying anything. It is data being summarized, so Layer 2 scans and logs it
+    # without blocking.
     resp = requests.post(
         f"{ROUTER_URL}/v1/chat/completions",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Hermes-Screening": "analysis"},
         json={
             "model": LLM_MODEL,
             "messages": [{"role": "user", "content": build_recommendation_prompt(candidates)}],

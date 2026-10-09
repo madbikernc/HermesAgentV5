@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
 #
 # 1.4.0 — HermesAgentV5 S13: ROUTER_MODEL switched nano -> dispatch. nano is retired
 # (IMPLEMENTATION_PLAN.md S13); dispatch fills the same "always resident, stock, safe for an
@@ -484,7 +484,11 @@ def ask_llm(summary_text, botnet_text):
         "temperature": 0.3,
         "max_tokens": 1024,
     }).encode()
-    req = urllib.request.Request(ROUTER_URL, data=body, headers={"Content-Type": "application/json"})
+    # S27f: the payload is pfSense firewall log lines -- a real port scan or exploit probe is the
+    # content, not an instruction. Layer 2 scans and logs without blocking.
+    req = urllib.request.Request(
+        ROUTER_URL, data=body,
+        headers={"Content-Type": "application/json", "X-Hermes-Screening": "analysis"})
     with urllib.request.urlopen(req, timeout=180) as resp:
         message = json.loads(resp.read())["choices"][0]["message"]
         content = (message.get("content") or "").strip()

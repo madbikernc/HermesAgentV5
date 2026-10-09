@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.2.1
+# Version: 1.3.0
 #
 # 1.2.1 (2026-08-30) — HermesAgentV5 consolidation: REPO_DIR default repointed from
 # HermesAgentV4 to HermesAgentV5 as part of consolidating the fleet's tools/skills/infra
@@ -201,9 +201,11 @@ find such a sentence, do not include that criterion. If none match, return {{"ma
 
 
 def _call_llm_once(prompt):
+    # S27f: the payload is the text of a fetched third-party blog post, which is data being
+    # evaluated against fixed criteria. Layer 2 scans and logs without blocking.
     resp = requests.post(
         f"{ROUTER_URL}/v1/chat/completions",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Hermes-Screening": "analysis"},
         json={"model": LLM_MODEL, "messages": [{"role": "user", "content": prompt}], "stream": False},
         timeout=120,
     )
