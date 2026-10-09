@@ -1,6 +1,6 @@
 # hermes-guard — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 Layer 2 of screening (HermesAgentV5 S5, `../../HermesAgentV5/IMPLEMENTATION_PLAN.md`) — Meta's
 `Llama-Prompt-Guard-2-22M`, stock weights, permanently (target §12.1: never a candidate for
@@ -60,8 +60,62 @@ curl -s -X POST http://10.129.1.15:8096/classify -H "Authorization: Bearer $T" \
 # {"label": "MALICIOUS", "score": 0.998, "hit": true, ...}
 ```
 
+## What this checkpoint does and does not detect — measured 2026-10-09 (S22a)
+
+**Read this before trusting Layer 2.** `Llama-Prompt-Guard-2-22M` is a **jailbreak detector**, and this
+service was deployed into a slot that needs an **indirect-injection detector**. That is a
+mis-specification made at S5, not a regression or a bug in this service — the checkpoint behaves exactly
+as its own model card documents:
+
+> "No injection sub-labels: Unlike with Prompt Guard 1, we don't include a specific 'injection' label to
+> detect prompts that may cause unintentional instruction-following." — "In practice, we found this
+> objective too broad to be useful."
+
+Measured against the fleet's own 36-case set (`tools/hermes-guard-eval.py`, which calls this live
+service):
+
+| Gate | TP | FP | FN | acc |
+|---|---|---|---|---|
+| Layer 1 alone (role=user, block) | 0 | 0 | 18 | 0.500 |
+| Layer 1 alone (role=tool, block) | 3 | 0 | 15 | 0.583 |
+| Layer 2 alone (this service) | 4 | 0 | 14 | 0.611 |
+| **Composite (L1 tool block OR L2)** | **6** | **0** | **12** | **0.667** |
+
+By attack band: direct 4 of 6, **indirect 1 of 6, paraphrased 1 of 6**.
+
+Four operational consequences:
+
+1. **Twelve of eighteen attacks pass both layers.** Do not treat a clean Layer-2 verdict as evidence
+   that text is safe to feed a model.
+2. **At `role=user`, Layer 1 blocks nothing** — only `role_spoof` and `unicode_smuggling` are
+   always-block. For an ordinary chat turn this service is the *only* gate, and it catches 4 of 18.
+3. **Do not retune `THRESHOLD`.** It will not help, and that is measured rather than assumed: the
+   malicious and benign score distributions overlap almost entirely below 0.063, the best accuracy
+   available at any cutoff is 0.722 (at `t=0.01`, fifty times below the deployed 0.5, still only 9 of 18
+   caught with a false positive already), and catching 17 of 18 costs 9 false positives out of 18 benign.
+4. **Do not "upgrade" to `Llama-Prompt-Guard-2-86M`.** Its card states both PG2 models differ only in
+   parameter count, base model and latency/multilingual trade-offs, "not their classification output
+   structure" — it inherits the same blind spot.
+
+Zero false positives at every gate, including deliberate hard negatives. This service is precise and
+badly under-sensitive. The replacement decision is `IMPLEMENTATION_PLAN.md` S22b; until it lands, Layer 2
+should be understood as catching explicit jailbreak phrasing and nothing else.
+
+## The verdict log is a catch log, not a screening log
+
+`hermes-router.py`'s `memory_log_guard_verdict()` fires only on a non-clean outcome, so the `guard-log`
+task in `hermes-memory` can never contain a false negative — a missed injection is a clean verdict and is
+never written. Measured 2026-10-09 over the 500 most recent rows (2026-09-09 → 2026-10-06): 463 L1 flags,
+21 L1 blocks, 16 L2 blocks, **16 rows carrying the screened text, zero clean verdicts**, and 448 of the
+flags are category-only rows predating router 2.12.0. It is therefore not a tuning corpus, despite
+`memory_log_guard_verdict()`'s own docstring calling it "the training set if Layer 2 is ever tuned."
+Building a real one needs clean verdicts sampled *with* their text, which is a router change plus a
+retention decision about storing screened user text.
+
 ## Revision History
+
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-08-29 | Initial version — S5: `hermes-guard.py` built, weights downloaded (HF gate had already cleared), deployed on Watch, wired into `hermes-router.py` as Layer 2, verdicts logged to `hermes-memory`. |
+| 2.0.0 | 2026-10-09 | **Major — reverses what this file implied about Layer 2's coverage.** Added the S22a measurement: this checkpoint is a jailbreak detector deployed where an indirect-injection detector was needed, per its own model card, and the composite L1+L2 gate catches 6 of 18 attacks (indirect 1/6, paraphrased 1/6) with zero false positives. Records three things not to do — do not trust a clean verdict as safety, do not retune `THRESHOLD` (no cutoff separates the distributions; best achievable accuracy 0.722), do not upgrade to the 86M (same label set per its card) — and that the `guard-log` verdict log is a catch log that can never contain a false negative, contrary to `memory_log_guard_verdict()`'s own docstring. |

