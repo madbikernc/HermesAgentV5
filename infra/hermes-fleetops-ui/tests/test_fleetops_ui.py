@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 2.1.0
+# Version: 2.2.0
 #
 # Offline checks for hermes-fleetops-ui.py. No network, no live stores, no server bound.
 #
@@ -687,6 +687,51 @@ def check_csp(ui):
     check("the nonce is a fixed, sufficient length", nonces == {22}, str(nonces))
 
 
+def check_published(ui):
+    print(NL + "[how old is this candidate]")
+    # Every one of the 51 live candidates had no date: the scout fetched HF's createdAt, used it
+    # for its lookback window, then dropped it before writing the candidate turn. The backlog
+    # could not answer "how long ago was this published" at all.
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    def ago(days):
+        return (now - _dt.timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+    check("a same-day upload reads as today", "(today)" in ui.published(ago(0)),
+          ui.published(ago(0)))
+    check("days for anything recent", "(3d)" in ui.published(ago(3)), ui.published(ago(3)))
+    check("months past a quarter", "(4mo)" in ui.published(ago(120)), ui.published(ago(120)))
+    check("years past two", "(2y)" in ui.published(ago(900)), ui.published(ago(900)))
+    check("the date itself is shown, not only the age",
+          now.strftime("%Y-%m-%d")[:4] in ui.published(ago(0)), ui.published(ago(0)))
+    # New is not bad, but the scout's window is daily: a same-day repo has no download history,
+    # no issues and no corroboration yet, so it is flagged for a second look.
+    check("a week-old or newer candidate is flagged", "--warn" in ui.published(ago(2)))
+    check("an older one is not", "--warn" not in ui.published(ago(60)))
+    check("a missing date says unknown rather than rendering blank",
+          "unknown" in ui.published(None) and "unknown" in ui.published(""))
+    check("an unparseable date is shown as given, not crashed",
+          "not-a-date" in ui.published("not-a-date"), ui.published("not-a-date"))
+    check("a future date does not render as negative", "(today)" in ui.published(ago(-5)),
+          ui.published(ago(-5)))
+
+    print(NL + "[the size note says where the number came from]")
+    # `fit` reads as a measurement either way, so the provenance is shown beside it.
+    check("a gguf-derived size is labelled",
+          "gguf-metadata" in ui.size_note({"size_source": "gguf-metadata"}))
+    check("a safetensors one too", "safetensors" in ui.size_note({"size_source": "safetensors"}))
+    check("no provenance renders nothing", ui.size_note({}) == ""
+          and ui.size_note({"size_source": ""}) == "")
+    check("provenance is escaped like everything else",
+          "<img" not in ui.size_note({"size_source": "<img src=x>"}))
+
+    print(NL + "[the column reaches the rendered table]")
+    ui.load_gate()
+    html = ui.render_backlog()
+    check("the backlog has a published column", ">published<" in html)
+
+
 def main():
     import tempfile
     ui = load("fleetopsui", "hermes-fleetops-ui.py")
@@ -706,6 +751,7 @@ def main():
         check_attribution(ui)
         check_multiselect(ui)
         check_csp(ui)
+        check_published(ui)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 2.1.0
+# Version: 2.3.0
 #
 # hermes-fleetops-ui — one browser page for the fleet's human-facing surfaces (S21).
 #
@@ -211,6 +211,7 @@ def results_banner(query):
 MAX_BACKLOG_ROWS = 400
 MAX_HISTORY_ROWS = 400
 MAX_HIGHLIGHT_ROWS = 100
+MAX_RECOMMENDATION_ROWS = 400
 
 STYLE = """
 :root { --bg:#12141a; --fg:#e7e9ee; --dim:#9aa3b2; --line:#2a2f3a; --accent:#7fb2ff;
@@ -259,7 +260,8 @@ footer { color:var(--dim); padding:18px 20px; border-top:1px solid var(--line); 
 """
 
 NAV = [("/", "Home"), ("/backlog", "Benchmark backlog"), ("/models", "Models &amp; usage"),
-       ("/benchmarks", "Benchmark results"), ("/highlights", "Topic highlights")]
+       ("/benchmarks", "Benchmark results"), ("/highlights", "Topic highlights"),
+       ("/recommendations", "Recommendations")]
 
 
 def log(msg):
@@ -419,6 +421,10 @@ def page_home():
         ("Topic highlights", "/highlights",
          "The news digest's stored highlights per topic and day — including the ones ranked past "
          "the email's cap, which are otherwise never seen."),
+        ("Recommendations", "/recommendations",
+         "Security/integrity findings written to hermes-memory by the fleet's scanners — "
+         "aide/lynis/syft+grype on spark/spark-2/HomeD13, the LinodeMercury watch, and any future "
+         "node that writes the same REC-&lt;node&gt;-&lt;date&gt;-&lt;seq&gt; shape. Read-only."),
     ]
     body = ['<p class="note">Read-only views over data this fleet already produces. '
             'Nothing here starts, stops or approves anything.</p><div class="cards">']
@@ -591,6 +597,44 @@ def split_task_id(task_id):
     return "", str(task_id)
 
 
+def published(created_at):
+    """Publish date plus age, because "how old is this" is a decision input the backlog could not
+    answer at all: every one of the 51 live candidates had no date, since the scout fetched HF's
+    `createdAt`, used it for its lookback window and then dropped it before writing the candidate
+    turn. A repo uploaded four hours ago is a different proposition from one that has been up a
+    year, and several of these turned out to be same-day test uploads."""
+    if not created_at:
+        return '<span class="empty">unknown</span>'
+    try:
+        when_dt = datetime.datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    except ValueError:
+        return esc(str(created_at)[:10])
+    days = (datetime.datetime.now(datetime.timezone.utc) - when_dt).days
+    if days < 0:
+        days = 0
+    if days == 0:
+        age = "today"
+    elif days < 90:
+        age = f"{days}d"
+    elif days < 730:
+        age = f"{days // 30}mo"
+    else:
+        age = f"{days // 365}y"
+    # Anything under a week is flagged, not because new is bad but because the scout's own window
+    # is daily: a same-day upload has no download history, no issues and no corroboration yet.
+    cls = ' style="color:var(--warn)"' if days <= 7 else ""
+    return f'{esc(when_dt.strftime("%Y-%m-%d"))} <span class="mono"{cls}>({esc(age)})</span>'
+
+
+def size_note(detail):
+    """How the size was established, shown because `fit` reads as a measurement either way.
+    `gguf-metadata` is the repo's own published figure; `safetensors` is the listing's."""
+    src = (detail.get("size_source") or "").strip()
+    if not src:
+        return ""
+    return f' <span class="mono" style="color:var(--dim)">[{esc(src)}]</span>'
+
+
 def render_backlog():
     tasks, detail = read_backlog()
     counts = Counter(t["state"] or "?" for t in tasks)
@@ -609,7 +653,7 @@ def render_backlog():
             advisory = '<span class="empty">none recorded</span>'
         else:
             advisory = esc(advisory)
-        fit = esc(d.get("fit") or "")
+        fit = esc(d.get("fit") or "") + size_note(d)
 
         legal = legal_actions(state)
         # One checkbox per actionable row. A row with no legal transition (`approved`, or anything
@@ -643,6 +687,7 @@ def render_backlog():
         rows.append([
             pick,
             f'<span class="pill s-{esc(state)}">{esc(state)}</span>',
+            published(d.get("created_at")),
             esc(role),
             f'<span class="mono">{esc(model_id)}</span>',
             esc(d.get("category") or t["topic"] or ""),
@@ -664,7 +709,8 @@ def render_backlog():
                 f'imported, and this page will not guess at the transition rules. '
                 f'<span class="mono">{esc(GATE_IMPORT_ERROR)}</span>')
     body = f'<p class="note">{note}</p>' + table(
-        ["", "state", "role", "candidate", "category", "fit", "advisory", "updated", "legal"],
+        ["", "state", "published", "role", "candidate", "category", "fit", "advisory",
+         "updated", "legal"],
         rows)
     if not GATE:
         return body
@@ -1009,6 +1055,143 @@ def page_highlights(query):
     return shell("Topic highlights", body)
 
 
+# ── S21h: recommendations (node-baseline, linodemercury-watch, and future producers) ─────────
+#
+# Every recommendation producer in this fleet writes the same REC-<node>-<date>-<seq> id and the
+# same first-turn payload shape ({"node", "status", "finding_id", "tool", "severity",
+# "description", "detail", "suggested_remediation"}) — hermes-node-baseline-scan.py for
+# spark/spark-2/HomeD13 (S17), hermes-linodemercury-watch.py for LinodeMercury (S29). This page
+# keys off the `REC-` id prefix rather than an agent allowlist, so a future fourth producer needs
+# no change here as long as it follows the same convention — the point of the request that built
+# this page ("surface the recommendations, and any others from other nodes").
+
+REC_STATE_ORDER = ["pending", "routed-remediate", "routed-dualcoder", "manual-required",
+                   "rejected", "resolved"]
+# Reuses the existing .pill s-* palette rather than adding new CSS — these states don't map 1:1
+# onto model-scout's vocabulary, but the same four colors (warn/ok/dim) cover the same meanings:
+# awaiting a decision, acted on, needs a human, and closed.
+REC_STATE_STYLE = {
+    "pending": "proposed", "routed-remediate": "approved", "routed-dualcoder": "approved",
+    "manual-required": "deferred", "rejected": "rejected", "resolved": "done",
+}
+REC_SEVERITY_COLOR = {"critical": "var(--bad)", "high": "var(--bad)",
+                       "medium": "var(--warn)", "low": "var(--dim)"}
+
+
+def read_recommendations():
+    """Same read-only stdlib-sqlite approach as read_backlog(), for the same reason (hermes-memory
+    has no task-list route; /usr/bin/python3 cannot load sqlite-vec). Unlike the backlog, a
+    recommendation's turns are not interchangeable: the FIRST turn written
+    (write_recommendation()) carries the finding itself, and a later "resolved" turn
+    (resolve_recommendation()) only adds status/finding_id/resolved_at without repeating it — so
+    turns are merged oldest-first. dict.update() only overwrites keys the later turn actually
+    sets, so a resolved recommendation keeps its original tool/severity/description rather than
+    losing them to a turn that never carried them."""
+    conn = ro_sqlite(MEMORY_DB)
+    try:
+        tasks = conn.execute(
+            "SELECT id, state, topic, agent, created_at, updated_at FROM tasks "
+            "WHERE id LIKE 'REC-%' ORDER BY updated_at DESC LIMIT ?",
+            (MAX_RECOMMENDATION_ROWS,)).fetchall()
+        detail = {}
+        for t in tasks:
+            merged = {}
+            for row in conn.execute(
+                    "SELECT raw FROM turns WHERE task_id=? ORDER BY id ASC", (t["id"],)):
+                if not row["raw"]:
+                    continue
+                try:
+                    payload = json.loads(row["raw"])
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(payload, dict):
+                    merged.update(payload)
+            detail[t["id"]] = merged
+        return [dict(t) for t in tasks], detail
+    finally:
+        conn.close()
+
+
+def render_recommendations(node_filter, state_filter):
+    tasks, detail = read_recommendations()
+    loaded = [(t, detail.get(t["id"], {})) for t in tasks]
+    loaded = [(t, d, d.get("node") or "", t["state"] or "?") for t, d in loaded]
+
+    nodes = sorted({n for _, _, n, _ in loaded if n})
+    counts = Counter(state for _, _, _, state in loaded)
+    summary = " · ".join(
+        f'<span class="pill s-{esc(REC_STATE_STYLE.get(k, "proposed"))}">{esc(k)} {v}</span>'
+        for k, v in sorted(counts.items(),
+                           key=lambda kv: REC_STATE_ORDER.index(kv[0])
+                           if kv[0] in REC_STATE_ORDER else len(REC_STATE_ORDER)))
+
+    nopts = ['<option value="">(every node)</option>']
+    for n in nodes:
+        sel = " selected" if n == node_filter else ""
+        nopts.append(f'<option value="{esc(n)}"{sel}>{esc(n)}</option>')
+    sopts = ['<option value="">(every state)</option>']
+    for s in REC_STATE_ORDER:
+        if s not in counts:
+            continue
+        sel = " selected" if s == state_filter else ""
+        sopts.append(f'<option value="{esc(s)}"{sel}>{esc(s)}</option>')
+    form = (f'<form method="get"><select name="node">{"".join(nopts)}</select> '
+            f'<select name="state">{"".join(sopts)}</select> '
+            f'<button type="submit">show</button></form>')
+
+    rows = []
+    for t, d, node, state in loaded:
+        if node_filter and node != node_filter:
+            continue
+        if state_filter and state != state_filter:
+            continue
+        severity = (d.get("severity") or "").lower()
+        sev_color = REC_SEVERITY_COLOR.get(severity, "var(--dim)")
+        remediation = d.get("suggested_remediation")
+        detail_text = ((remediation.get("detail") if isinstance(remediation, dict) else "")
+                       or d.get("detail") or "")
+        rows.append([
+            f'<span class="mono">{esc(t["id"])}</span>',
+            f'<span class="pill s-{esc(REC_STATE_STYLE.get(state, "proposed"))}">{esc(state)}</span>',
+            esc(node or "?"),
+            esc(d.get("tool") or ""),
+            f'<b style="color:{sev_color}">{esc(severity or "?")}</b>',
+            esc(d.get("description") or ""),
+            esc(detail_text),
+            esc(when(t["updated_at"])),
+        ])
+
+    note = (f'{summary}<br>Showing {len(rows)} of {len(loaded)} loaded (at most '
+            f'{MAX_RECOMMENDATION_ROWS}, newest-updated first). <b>Read-only</b> — authorizing or '
+            f'rejecting one still goes through the FleetOps Matrix reply '
+            f'<span class="mono">authorize|reject &lt;id&gt;</span> that '
+            f'<span class="mono">hermes-baseline-authorize-watch.py</span> watches for. The '
+            f'benchmark backlog page above earns its own write route on a separately-argued '
+            f'decision (S21f); this page does not reopen that argument.')
+    # data-filter rather than an inline oninput: see PAGE_SCRIPT's own note on why that silently
+    # does nothing under this service's CSP.
+    search = (f'<p><input type="search" placeholder="filter rows…" data-filter="#recs">'
+              f'<span class="note">{note}</span></p>')
+    return form + search + '<div id="recs">' + table(
+        ["id", "state", "node", "tool", "severity", "description", "suggested remediation",
+         "updated"], rows) + '</div>'
+
+
+def page_recommendations(query):
+    node_filter = (query.get("node") or [""])[0]
+    state_filter = (query.get("state") or [""])[0]
+    body = section(
+        "Security/integrity recommendations",
+        "Every finding this fleet's scanners have written to hermes-memory as a "
+        "<span class=\"mono\">REC-&lt;node&gt;-&lt;date&gt;-&lt;seq&gt;</span> recommendation — "
+        "aide/lynis/syft+grype from <span class=\"mono\">hermes-node-baseline-scan.py</span> "
+        "(spark, spark-2, HomeD13) and the firewall/package/SSH-log checks from "
+        "<span class=\"mono\">hermes-linodemercury-watch.py</span> (LinodeMercury), plus anything "
+        "else that ever writes the same shape.",
+        lambda: render_recommendations(node_filter, state_filter))
+    return shell("Recommendations", body)
+
+
 # ── server ────────────────────────────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -1017,6 +1200,7 @@ ROUTES = {
     "/models": lambda q: page_models(),
     "/benchmarks": lambda q: page_benchmarks(),
     "/highlights": page_highlights,
+    "/recommendations": page_recommendations,
 }
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
 #
 # 1.3.0 (2026-09-24) — two things, one of them a real bug.
 #
@@ -340,11 +340,89 @@ def has_existing_abliterated_variant(base_id):
 
 # ── hardware fit (deterministic) ────────────────────────────────────────
 
-def estimate_gguf_gb(rec):
-    total_params = (rec.get("safetensors") or {}).get("total")
+def _hf_model(repo, timeout=30, attempts=4):
+    """One model's full record, which the listing endpoint does not return.
+
+    Separate from `_hf_get` because that one is pinned to the /api/models LISTING url and this
+    needs /api/models/<repo>; the 429 backoff is the same and matters for the same reason."""
+    url = f"{HF_API}/{repo}"
+    delay = 5.0
+    for attempt in range(attempts):
+        resp = requests.get(url, timeout=timeout)
+        if resp.status_code == 404:
+            return {}
+        if resp.status_code != 429:
+            resp.raise_for_status()
+            return resp.json()
+        if attempt < attempts - 1:
+            retry_after = resp.headers.get("Retry-After")
+            wait = float(retry_after) if (retry_after or "").isdigit() else delay
+            print(f"  HF 429 on {repo} — backing off {wait:.0f}s", file=sys.stderr)
+            time.sleep(wait)
+            delay *= 2
+    return {}
+
+
+# Architectures llama.cpp has actually failed to load for this fleet, by name, from the two real
+# incidents `has_gguf_build` already records: coder2's `unknown model architecture: 'qwen4exp'`,
+# and Muse Glimmer needing a llama.cpp 290 commits newer. A GGUF repo publishes its architecture
+# in its own metadata, so this is checkable BEFORE a human spends a download and a load attempt on
+# it -- which is the whole point. Not a permanent verdict: llama.cpp gains architectures, so the
+# note says "this build of llama.cpp" rather than "impossible".
+UNLOADABLE_ARCHS = {"qwen4exp"}
+
+
+def resolve_params(rec):
+    """Total parameters for a model the listing endpoint gave no `safetensors` block for.
+
+    WHY THIS EXISTS: `estimate_gguf_gb` reads only `safetensors.total`, so every repo without one
+    produced "size unknown — check manually" AND slipped past MIN_PARAMS_B, which is applied only
+    when params are known. Measured on the live backlog 2026-10-09: 21 of 51 candidates had no
+    size, **14 of those were resolvable from the repo's own `gguf` metadata block**, and **9 of
+    the 14 were under the 7B floor** -- a 0.38B, a 0.41B and two 0.75B OCR models had been
+    proposed as replacements for 27-35B text roles. The file already names this hazard ("they
+    carry no `safetensors`, so MIN_PARAMS_B cannot filter them, and they are numerous") and
+    mitigated it with per-category enrichment caps rather than resolving the number.
+
+    One extra detail call per sizeless candidate, and only for those. Returns the parameter total,
+    where it came from, and the GGUF architecture when the repo publishes one -- so a caller can
+    say which of those three it is acting on rather than presenting a guess as a measurement."""
+    out = {"params": None, "source": None, "architecture": None, "created_at": None}
+    total = (rec.get("safetensors") or {}).get("total")
+    if total:
+        out.update(params=total, source="safetensors")
+        return out
+    try:
+        detail = _hf_model(rec["id"])
+    except Exception as exc:
+        print(f"  size lookup failed for {rec['id']}: {exc}", file=sys.stderr)
+        return out
+    out["created_at"] = detail.get("createdAt")
+    gguf = detail.get("gguf") or {}
+    out["architecture"] = gguf.get("architecture")
+    if gguf.get("total"):
+        out.update(params=gguf["total"], source="gguf-metadata")
+    elif (detail.get("safetensors") or {}).get("total"):
+        out.update(params=detail["safetensors"]["total"], source="safetensors-detail")
+    return out
+
+
+def arch_note(architecture):
+    """A warning, not a verdict -- see UNLOADABLE_ARCHS."""
+    if architecture and architecture.lower() in UNLOADABLE_ARCHS:
+        return (f" — WARNING: architecture {architecture!r} is one this fleet's llama.cpp has "
+                f"failed to load before, so a load test is the first thing to try")
+    return ""
+
+
+def estimate_gb_from_params(total_params):
     if not total_params:
         return None
     return round((total_params / 1e9) * GB_PER_BILLION_Q4, 1)
+
+
+def estimate_gguf_gb(rec):
+    return estimate_gb_from_params((rec.get("safetensors") or {}).get("total"))
 
 
 def spark_fit(rec, est_gb):

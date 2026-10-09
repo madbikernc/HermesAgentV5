@@ -1,6 +1,6 @@
 # hermes-model-scout — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 S20's daily model-scouting pipeline: discover what's new, compare it against what each Firmament
 role is actually running, and write one tracked backlog entry per candidate that a human disposes
@@ -156,8 +156,39 @@ Each of these cost a real failure or a real correction, in the order they were f
 - Test artifacts left in `rejected`/`done` rather than deleted from a live WAL database — S9's own
   orphaned-`vec_turns` incident is why hand-deleting rows there is not worth the risk.
 
+## Candidate sizing, and why "check manually" was hiding a filter failure
+
+`estimate_gguf_gb()` read only `safetensors.total`, and `MIN_PARAMS_B` was applied only
+`if params` — so a repo publishing no `safetensors` block got "size unknown — check manually"
+**and skipped the 7B floor entirely**. This file already named the hazard ("they carry no
+`safetensors`, so MIN_PARAMS_B cannot filter them, and they are numerous") and mitigated it with
+per-category enrichment caps rather than resolving the number.
+
+Measured on the live backlog, 2026-10-09: **21 of 51 candidates had no size. 14 were resolvable
+from the repo's own `gguf` metadata block, and 9 of those were under the floor** — a 0.38B, a
+0.41B and two 0.75B OCR models had been proposed as replacements for 27—35B text roles.
+
+`scan.resolve_params()` now makes **one** extra detail call, and only for a candidate the listing
+gave no size for. It returns the parameter total, **which source it came from**
+(`safetensors` / `gguf-metadata` / `safetensors-detail`), the GGUF architecture, and the publish
+date when the listing lacked one. The floor is then applied to the resolved number. Re-run against
+the live backlog: 9 rejected before reaching the backlog, 5 newly sized, 7 honestly unknown — and
+a lookup that 401s or 404s degrades to unknown rather than crashing, demonstrated by the
+`probe/Fake-Model-7B` test entry.
+
+**Architecture is checked too.** A GGUF repo publishes its architecture, so
+`UNLOADABLE_ARCHS` flags the ones this fleet's llama.cpp has actually failed to load — currently
+`qwen4exp`, from coder2's real `unknown model architecture` incident. Two live candidates carry it.
+The note says "a load test is the first thing to try" rather than "impossible", because llama.cpp
+gains architectures.
+
+**Publish date is carried through.** 1.1.0 fetched HF's `createdAt`, used it for the lookback
+window and then **dropped it** before writing the candidate turn, which is why all 51 live
+candidates had no date. It is now in the payload, and `hermes-fleetops-ui` shows it with an age.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-08 | Initial version — S20 built, deployed and live-verified on `spark`: daily timer, the gate service, the offline test suite, and the eight findings above. S20d (retiring V4's duplicate routine) deliberately still open, gated on a week of real runs. |
+| 1.1.0 | 2026-10-09 | Candidate sizing resolves from the repo's own `gguf` metadata when the listing has no `safetensors` block, so `MIN_PARAMS_B` can finally filter the repos this file already identified as unfilterable: measured 21 of 51 candidates sizeless, 14 resolvable, **9 of them under the 7B floor**. Records the provenance of every size, flags architectures this fleet's llama.cpp has failed on (`qwen4exp`, from coder2's real incident — two live candidates carry it), and carries HF's `createdAt` into the candidate turn, which 1.1.0 fetched and then dropped. |

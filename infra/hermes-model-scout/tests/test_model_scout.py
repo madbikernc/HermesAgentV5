@@ -23,6 +23,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 TOOLS = REPO / "tools"
 
+NL = chr(10)
 FAILURES = []
 CHECKS = [0]
 
@@ -54,6 +55,14 @@ def load(name, filename, stub_siblings=True):
         scan.spark_fit = lambda rec, gb: f"~{gb}GB Q4 (dense) — fits alongside current backends"
         scan.homed13_fit = lambda rec: "text-to-image — verify manually"
         scan.has_gguf_build = lambda mid: f"someone/{mid.split('/')[-1]}-GGUF"
+        # Added with scan 1.5.0. The stub has to carry everything the scout calls on scan,
+        # or a test that exercises discover_hf() fails for the wrong reason.
+        scan.estimate_gb_from_params = lambda n: None if not n else round(n / 1e9 * 0.75, 1)
+        scan.arch_note = lambda a: ""
+        scan.resolve_params = lambda rec: {
+            "params": (rec.get("safetensors") or {}).get("total"),
+            "source": "safetensors" if (rec.get("safetensors") or {}).get("total") else None,
+            "architecture": None, "created_at": None}
         scan.fetch_recent_models = lambda tags: []
         scan._sanitize_hf_text = lambda s, max_len=200: " ".join(str(s).split())[:max_len]
         scan._hf_get = lambda *a, **k: None
@@ -435,6 +444,72 @@ def _fake_urlopen(payload):
     return _open
 
 
+def check_size_resolution(scan):
+    print(NL + "[resolving a size the listing endpoint did not give]")
+    # Measured on the live backlog 2026-10-09: 21 of 51 candidates had no safetensors block, so
+    # they got "size unknown -- check manually" AND skipped MIN_PARAMS_B, which is applied only
+    # when params are known. 14 of the 21 were resolvable from the repo's own gguf metadata, and
+    # 9 of those 14 were under the 7B floor -- a 0.38B, a 0.41B and two 0.75B OCR models proposed
+    # as replacements for 27-35B text roles.
+    calls = []
+
+    def fake_detail(repo, **kw):
+        calls.append(repo)
+        return {
+            "has-gguf": {"gguf": {"total": 406918144, "architecture": "llama"},
+                         "createdAt": "2026-10-09T03:41:23.000Z"},
+            "has-safetensors-only-on-detail": {"safetensors": {"total": 27_320_000_000}},
+            "has-bad-arch": {"gguf": {"total": 4_950_000_000, "architecture": "qwen4exp"}},
+            "has-nothing": {},
+        }.get(repo, {})
+
+    original = scan._hf_model
+    scan._hf_model = fake_detail
+    try:
+        r = scan.resolve_params({"id": "x", "safetensors": {"total": 7_000_000_000}})
+        check("a listing that already has the size makes no extra call",
+              r["params"] == 7_000_000_000 and r["source"] == "safetensors" and not calls,
+              str((r, calls)))
+
+        r = scan.resolve_params({"id": "has-gguf"})
+        check("a gguf repo's own metadata supplies the total",
+              r["params"] == 406918144 and r["source"] == "gguf-metadata", str(r))
+        check("and its architecture comes back too", r["architecture"] == "llama", str(r))
+        check("and the publish date, when the listing lacked it",
+              (r["created_at"] or "").startswith("2026-10-09"), str(r))
+
+        r = scan.resolve_params({"id": "has-safetensors-only-on-detail"})
+        check("a detail-only safetensors block is used and labelled",
+              r["params"] == 27_320_000_000 and r["source"] == "safetensors-detail", str(r))
+
+        r = scan.resolve_params({"id": "has-nothing"})
+        check("a repo that publishes neither stays honestly unknown",
+              r["params"] is None and r["source"] is None, str(r))
+
+        r = scan.resolve_params({"id": "has-bad-arch"})
+        check("an architecture this fleet's llama.cpp has failed on is flagged",
+              "qwen4exp" in scan.arch_note(r["architecture"]), scan.arch_note(r["architecture"]))
+        check("the flag is a warning to load-test, not a verdict of impossible",
+              "load test" in scan.arch_note(r["architecture"]))
+        check("an ordinary architecture gets no note", scan.arch_note("llama") == ""
+              and scan.arch_note(None) == "")
+    finally:
+        scan._hf_model = original
+
+    print(NL + "[the floor can now actually bite]")
+    for params, expected in ((406918144, True), (750_000_000, True), (4_210_000_000, True),
+                             (8_950_000_000, False), (34_660_000_000, False)):
+        below = params / 1e9 < scan.MIN_PARAMS_B
+        check("%.2fB is %s the %dB floor" % (params / 1e9, "below" if expected else "above",
+                                             scan.MIN_PARAMS_B),
+              below == expected, str(below))
+    check("and the estimate is shared by both paths, not computed twice",
+          scan.estimate_gb_from_params(34_660_000_000)
+          == scan.estimate_gguf_gb({"safetensors": {"total": 34_660_000_000}}))
+    check("an unknown size estimates to None rather than zero",
+          scan.estimate_gb_from_params(None) is None)
+
+
 def main():
     saved = []
 
@@ -458,6 +533,18 @@ def main():
     for obj, name, old in reversed(saved):
         if old is not None:
             setattr(obj, name, old)
+
+    # The resolution logic is the real module's, not the stub's -- stubbing it would test
+    # nothing. No network: _hf_model is replaced inside the check.
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("realscan", TOOLS / "hermes-model-scan.py")
+    _real = _ilu.module_from_spec(_spec)
+    try:
+        _spec.loader.exec_module(_real)
+    except Exception as _exc:
+        check("hermes-model-scan.py imports for the size-resolution checks", False, str(_exc))
+    else:
+        check_size_resolution(_real)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
 #
 # hermes-model-scout — S20's daily pass: discover what's new, compare it against what each
 # Firmament role is actually running, and write one tracked backlog entry per candidate that a
@@ -424,16 +424,24 @@ def discover_hf():
         for rec in records:
             if not _created_within_window(rec):
                 continue
-            params = (rec.get("safetensors") or {}).get("total")
             engagement = (rec.get("likes") or 0) + (rec.get("downloads") or 0)
-            if params and params / 1e9 < scan.MIN_PARAMS_B and spec["node"] == "Spark":
-                continue
             if engagement < scan.MIN_ENGAGEMENT:
                 continue
+            # Resolve the size BEFORE applying the floor. Previously the floor was applied only
+            # `if params`, so a repo with no safetensors block skipped it entirely -- which is how
+            # 0.38B-0.75B OCR and test models reached the backlog as candidates for 27-35B text
+            # roles. scan.resolve_params() reads the repo's own gguf metadata when safetensors is
+            # absent, and says which of the two it used.
+            size = scan.resolve_params(rec)
+            params, size_source = size["params"], size["source"]
+            architecture = size["architecture"]
+            if params and params / 1e9 < scan.MIN_PARAMS_B and spec["node"] == "Spark":
+                continue
             cat = "coding" if (category == "text" and scan.is_coding_model(rec)) else category
-            est_gb = scan.estimate_gguf_gb(rec)
+            est_gb = scan.estimate_gb_from_params(params)
             fit = (scan.spark_fit(rec, est_gb) if spec["node"] == "Spark"
                    else scan.homed13_fit(rec))
+            fit += scan.arch_note(architecture)
             if "too large" in fit:
                 continue
             # One extra HF call per survivor, deliberately: hermes-benchmark-model.sh's candidate
@@ -453,8 +461,14 @@ def discover_hf():
                 "category": cat,
                 "source": "hf-new-listing",
                 "pipeline_tag": rec.get("pipeline_tag"),
-                "created_at": rec.get("createdAt"),
+                # createdAt is the HF publish date. It was already fetched and used for the
+                # lookback window, then dropped before the candidate turn was written -- which is
+                # why every one of the 51 live candidates had no date at all. The detail call made
+                # for size resolution answers it too when the listing did not.
+                "created_at": rec.get("createdAt") or size.get("created_at"),
                 "est_gb_q4": est_gb,
+                "size_source": size_source,
+                "architecture": architecture,
                 "fit": fit,
                 "likes": rec.get("likes") or 0,
                 "downloads": rec.get("downloads") or 0,
@@ -638,6 +652,11 @@ def propose(records, dry_run=False):
                 "source": rec["source"],
                 "fit": rec["fit"],
                 "est_gb_q4": rec.get("est_gb_q4"),
+                # Carried through so the backlog can show how old a candidate is and how its size
+                # was established. 1.1.0 computed all three and wrote none of them.
+                "created_at": rec.get("created_at"),
+                "size_source": rec.get("size_source"),
+                "architecture": rec.get("architecture"),
                 "gguf_repo": rec.get("gguf_repo"),
                 "incumbent": rec.get("incumbent"),
                 "incumbent_scores": rec.get("incumbent_scores"),

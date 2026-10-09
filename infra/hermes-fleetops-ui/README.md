@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.1.0
+**Version:** 2.2.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog, which checkpoint backs each role, benchmark results, and the news digest's stored
@@ -191,6 +191,7 @@ missing-table crash on first run — is the concrete precedent.
 | Page | Source | Note |
 |---|---|---|
 | `/backlog` | reads `tasks`/`turns` in `memory.db` read-only; **writes** via hermes-memory's HTTP API | **Not `GET /tasks`** — see below |
+| `/backlog` | `published` column from the candidate turn's `created_at` | date plus age; under a week is flagged |
 | `/models` | `GET {router}/v1/models`, live per page load | checkpoint, abliterated, host, residency |
 | `/models` | `usage_log` in `usage.db`, counted in SQL | two trailing 7-day windows, no commentary |
 | `/benchmarks` | the NAS `history.jsonl` + local fallback | same two paths the benchmark tooling writes |
@@ -271,3 +272,4 @@ stay distinguishable. Advisories appear on the next scout run.
 | 1.1.0 | 2026-10-09 | Service enabled on spark with its `fleetops-ui` vault item; all five pages verified against the real credential on the tailnet address. Records the one sandbox exception the first real start forced — `usage.db` is WAL, so a read-only connection still needs write access for its `-shm` read mark — and why the two narrower grants are not available (systemd rejects a single file in `ReadWritePaths`; SQLite unlinks `-shm` when the last writer closes, so the sidecars cannot be bind-mounted). States what the grant does not confer: the approvals live in `memory.db` under `/mnt`, which stays read-only. |
 | 2.0.0 | 2026-10-09 | **Major — reverses this file's own "no decide buttons" position, on the operator's decision that the Matrix channel is only *perceived* to be more secure, and adds TLS.** The backlog now has approve/defer/reject/un-reject buttons that write the same transition through the same code as the Matrix reply, by importing `hermes-model-scout-gate.py` rather than restating its state machine — failing closed if that import fails. Records the three non-perceptual things that were handled instead of argued about: CSRF (a browser replays Basic Auth cross-origin; Matrix has no equivalent), TLS via `tailscale serve` with a real Let's Encrypt cert, and attribution — `Tailscale-User-Login` now names a person in the audit record, closing the one genuine edge the Matrix route had, while never being used for authentication. States plainly that the service now holds write credentials it did not before. Port 443 was asked for and refused: tailscaled serves the Matrix homeserver there. |
 | 2.1.0 | 2026-10-09 | Multi-select on the backlog, on operator request: checkboxes, a bulk bar above and below, select all/none and a live count — a rendering convenience only, since every selected task still goes through the same per-task guard and a row with no legal transition gets no checkbox. Outcomes return as a count per clause, carried in the URL as codes and integers so nothing from a URL is rendered as text. **Also fixes a defect the CSP had been hiding since 1.0.0**: `default-src 'none'` with no `script-src` blocks inline event handlers, so the copy-command button and the benchmark filter never worked in a browser; all handlers moved into one nonced, delegated script block, with `form-action 'self'` added as a second brake on the write route. 167 offline checks. |
+| 2.2.0 | 2026-10-09 | Backlog shows **how old each candidate is** — publish date plus a relative age, flagged under a week, from the `created_at` the scout now carries (it used to fetch HF's `createdAt`, filter on it and drop it, so all 51 live candidates had no date). The `fit` cell also states how the size was established (`gguf-metadata` vs `safetensors`), since it reads as a measurement either way. |
