@@ -1,0 +1,22 @@
+[Unit]
+Description=hermes-model-scout gate - S20c human decision watcher (FleetOps benchmark/defer/reject/override)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-model-scout/README.md
+After=network-online.target hermes-memory.service continuwuity.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-scout-gate-wrapper.sh
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

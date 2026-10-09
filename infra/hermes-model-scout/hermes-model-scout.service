@@ -1,0 +1,13 @@
+[Unit]
+Description=hermes-model-scout - S20 daily model discovery, role-fit comparison, tracked backlog
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-model-scout/README.md
+After=network-online.target hermes-memory.service hermes-router.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-scout-wrapper.sh
+StandardOutput=journal
+StandardError=journal

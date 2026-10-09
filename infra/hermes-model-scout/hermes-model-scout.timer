@@ -1,0 +1,14 @@
+[Unit]
+Description=Run hermes-model-scout daily (S20)
+
+[Timer]
+# Daily, deliberately offset from hermes-model-scan.timer's Mon 08:00 weekly digest so the two
+# never contend for HF's unauthenticated rate limit. SCOUT_LOOKBACK_HOURS defaults to 26, which
+# covers this window plus RandomizedDelaySec with overlap — a candidate seen twice is deduped by
+# its deterministic task id, a candidate missed is gone until someone notices by hand.
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
