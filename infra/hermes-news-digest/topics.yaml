@@ -1,54 +1,62 @@
 # Phase 31 news-digest topics of interest — one topic per line.
 #
-# Boss-edited directly, not chat-driven: hermes-news-digest.py reads this
-# file verbatim on every run, no NLP or LLM judgment involved in parsing it.
-# Blank lines and lines starting with # are ignored. Despite the .yaml
-# extension (kept for continuity with the original plan), no YAML structure
-# is actually required or parsed — this is deliberately just a flat list.
+# Boss-edited directly, not chat-driven: hermes-news-digest.py reads this file verbatim on every
+# run, no NLP or LLM judgment involved in parsing it. Blank lines and lines starting with # are
+# ignored. Despite the .yaml extension (kept for continuity with the original plan), no YAML
+# structure is actually required or parsed — this is deliberately just a flat list.
 #
-# Each topic becomes a real semantic search against the RAG index (fleet
-# docs, podcast archive, ops snapshots, personal notes, and since S26 the
-# fourteen AI/security feeds in infra/hermes-feed-reader/feeds.yaml),
-# restricted to content added since the last digest run.
+# ── FILE ORDER IS PRIORITY ORDER (S27a/S27b) ─────────────────────────────────────────────────
 #
-# ── Why this list is short, measured 2026-10-08 ──────────────────────────
+# As of hermes-news-digest 2.0.0 each topic gets its OWN email, sent in this file's order. There
+# is no sequencing code anywhere: reordering these lines reorders the morning's emails, and adding
+# a line adds an email. Six topics means six emails a day — that is the shape of the request this
+# list implements, not a fleet-wide convention (S27 risk 1).
 #
-# EVERY TOPIC COSTS ONE `super` LLM CALL PER DAILY RUN, and two topics that
-# mean nearly the same thing retrieve nearly the same chunks — so they do
-# not add coverage, they duplicate a line and pay twice for it.
+# Each topic becomes a real semantic search across every RAG source — fleet docs, the podcast
+# archive, ops snapshots, personal notes, and the 22 AI/security/privacy/standards feeds in
+# infra/hermes-feed-reader/feeds.yaml — restricted to content added since the last digest run.
 #
-# This was measured rather than assumed. An earlier 38-entry version of this
-# file, run against the real store at TOP_K=5 and the 0.85 relevance
-# threshold, produced 22 digest lines that between them cited just FIVE
-# distinct articles — with a single arXiv paper cited by 21 of the 22. Its
-# twenty `artificial intelligence safety *` variants (standards, research,
-# testing, evaluation, assessment, certification, compliance, auditing,
-# monitoring, reporting, and seven incident-* phrasings) returned a
-# byte-identical result set for 11 of them and cited 3 articles in total.
+# ── Every topic costs one `super` call per day, so the list's length is a cost decision ──────
 #
-# The eight below cover the same ground and were measured the same way:
-# 6 lines, 7 distinct articles, worst repeat 4x, 6 LLM calls. Add topics
-# freely — but add ones that would retrieve something the others would not,
-# and consider re-measuring if a new one looks close to an existing line.
+# Measured 2026-10-09, not guessed. An earlier 38-entry version of this file produced 22 digest
+# lines that between them cited just FIVE distinct articles, with a single arXiv paper cited by 21
+# of the 22; its twenty `artificial intelligence safety *` variants returned a byte-identical
+# result set for 11 of them. Two topics that meant nearly the same thing did not add coverage —
+# they duplicated a line and paid twice for it. The six below were each measured against the real
+# index before being written here: all six retrieve, from 11 distinct publishers between them.
 #
-# ── Two that are deliberately silent for now ─────────────────────────────
+# Add topics freely, but add ones that would retrieve something the others would not, and
+# re-measure if a new one looks close to an existing line.
 #
-# The last two topics currently match NOTHING and will stay quiet until a
-# source covering them is added: feeds.yaml has no privacy-law or
-# standards-body source in it, so there is nothing in the index to find.
-# They are kept because they are real interests, and because a quiet topic
-# costs one cheap search and shows up in the digest's own "nothing new on
-# these topics" block rather than failing silently.
+# The six are listed in the requested priority order. Topic 6 carries its own sub-ordering
+# instruction (AI-related first, then ransomware/malware, then other novel methods) inside the
+# topic string itself, since that exact string is what both the RAG query and the summarizer's
+# prompt receive. Nothing in the code enforces that sub-order — S27 risk 2 — so read a real
+# email for that topic before trusting it.
 #
-# ── Security ─────────────────────────────────────────────────────────────
-exploited vulnerabilities and active attack campaigns
-attacker tactics, techniques and procedures
-# ── AI safety and evaluation ─────────────────────────────────────────────
-artificial intelligence alignment and safety research
-artificial intelligence safety evaluation, testing and auditing
-artificial intelligence safety incidents and incident response
-# ── AI governance ────────────────────────────────────────────────────────
-artificial intelligence governance, regulation and policy
-# ── Privacy and standards (no source feeding these yet — see above) ──────
-data privacy law, regulation and compliance
-international security and privacy standards
+Attack and vulnerability methods
+Novel AI model launches
+Novel AI method news
+Ransomware/malware trends
+New/novel vulnerabilities and weaknesses in AI methods, harnesses, and tooling
+Reported breaches, hacks, and impacts tied to AI, ransomware/malware, or novel methods — in that sub-order (AI-related first)
+
+# ── AI model and method news ─────────────────────────────────────────────────────────────────
+# ── Malware ──────────────────────────────────────────────────────────────────────────────────
+# ── AI security ──────────────────────────────────────────────────────────────────────────────
+# The sub-ordering below (AI-related first, then ransomware/malware, then other novel methods) is
+# carried entirely by this topic string, which is what both the RAG query and the summarizer's
+# prompt receive. Nothing in the code enforces it — S27 risk 2 — so it is worth reading a real
+# email for this topic before trusting the order.
+#
+# ── Available but OFF: privacy and standards ─────────────────────────────────────────────────
+#
+# These two were part of the operator's own earlier 38-entry list and were silent for weeks. They
+# are not silent any more: S26 added EDPB, CNIL, NIST CSRC, IETF and W3C as sources, and S27e's
+# rerank-based gate stopped filtering their (short) entries out — the privacy topic then surfaced
+# the Irish DPC's EUR 403,000,000 fine against Google on its first run. They are left commented
+# out only because enabling them makes eight emails a day instead of six, which is the operator's
+# call rather than a default. Uncomment either to turn it back on.
+#
+# data privacy law, regulation and compliance
+# international security and privacy standards

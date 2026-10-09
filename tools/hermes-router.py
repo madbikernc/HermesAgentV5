@@ -1,5 +1,41 @@
 #!/usr/bin/env python3
-# Version: 2.15.0
+# Version: 2.16.0
+#
+# 2.16.0 (2026-10-09) - S27f: ANALYSIS-MODE SCREENING. A caller may send
+# `X-Hermes-Screening: analysis` to say "the payload of this call is gathered data, not a request",
+# and Layer 2 then SCANS AND LOGS but does not block.
+#
+# Why this exists: S22d replaced Layer 2 with a classifier that actually detects injections, and
+# it immediately blocked the fleet's own analysis prompts -- hermes-news-digest's summarization of
+# security articles scored MALICIOUS at 1.000 on all six topics. That is the screener being right
+# about the text and wrong about the situation. hermes-logs.py's own header already states the
+# doctrine this restores: "Screening is asymmetric, deliberately, not an oversight. The caller's
+# request is screened... The data this agent gathers is deliberately NOT run through the same
+# block-on-detection screen before reaching `super` -- that data is attack-shaped by construction."
+# Before S22d that doctrine held by accident, because Prompt-Guard-2 missed almost everything.
+#
+# What the exemption does and does not do:
+#   * Layer 1 still runs and still BLOCKS. It is deterministic, sub-millisecond, and its
+#     always-block set (chat-template control tokens, bidi overrides) has no honest reason to
+#     appear even inside quoted content.
+#   * Layer 2 still runs, still classifies, and the verdict is still logged to hermes-memory --
+#     it just does not return 400. So an analysis payload that WOULD have been blocked is visible
+#     in the journal and in the verdict log, which is also the first time this fleet records Layer-2
+#     verdicts for traffic that was allowed through (S22a item 2 found the log held only catches).
+#   * No Matrix notice or email on an exempt would-have-blocked, deliberately: the digest alone
+#     would fire six a day and the alert would stop meaning anything.
+#
+# The trust model is the honest one: this header is exactly as trustworthy as every other field in
+# a router request, because the router has no bearer auth of its own and its bind address is its
+# entire security boundary (S12 established that, and it is why `:8080` is loopback-only). A
+# process that can reach the router can already choose its own role and prompt; letting it also
+# declare "this is analysis" grants nothing it did not already have. It is logged on every use so
+# the choice is auditable rather than invisible.
+#
+# NOT exempt, and must never be: hermes-dispatch.py, hermes-presenter.py and
+# hermes-minecraft-triage.py. Those carry user- and player-originated REQUESTS, which is precisely
+# what Layer 2 exists to screen -- S6's own 8.2 concern. The exemption is for payloads that are
+# data by construction, not for every caller that finds screening inconvenient.
 #
 # 2.15.0 (2026-10-09) - S22c: the Layer-2 block message no longer hardcodes
 # "Prompt Guard 2". hermes-guard 2.0.0 serves Layer 2 with a stock LLM, so the name is read
@@ -582,6 +618,10 @@ class Handler(BaseHTTPRequestHandler):
              and isinstance(m.get("content"), str) and m["content"].strip()),
             (None, None),
         )
+        # S27f: declared-intent analysis mode. See this file's own changelog for the trust model
+        # and for which callers must never set it.
+        analysis_mode = (self.headers.get("X-Hermes-Screening", "").strip().lower() == "analysis")
+
         guard_hits = []
         if newest is not None:
             hits = hermes_injection_guard.scan(newest["content"])
@@ -634,7 +674,18 @@ class Handler(BaseHTTPRequestHandler):
         # is the same message Layer 1 just scanned above (2.11.0) -- computed once, reused here.
         if newest is not None:
             verdict = guard_classify(newest["content"])
-            if verdict and verdict.get("hit"):
+            if verdict and verdict.get("hit") and analysis_mode:
+                # Scanned, logged, deliberately not blocked. This is the only place in the fleet
+                # that records a Layer-2 hit which was allowed to proceed, so it is logged at the
+                # same detail as a block minus the real-time alerting.
+                snippet = _truncate(newest["content"], 200)
+                log(f"ANALYSIS MODE: Layer 2 would have BLOCKED this call "
+                    f"(label={verdict['label']} score={verdict['score']:.3f}) — forwarded anyway "
+                    f"because the caller declared X-Hermes-Screening: analysis. text={snippet!r}")
+                memory_log_guard_verdict(NODE, "L2", "analysis-allowed",
+                                          {"label": verdict["label"], "score": verdict["score"],
+                                           "text": _truncate(newest["content"], 4000)})
+            elif verdict and verdict.get("hit"):
                 # Layer 2 has no matched substring the way Layer 1 does -- it classifies the
                 # whole message, so the "triggering string" here is the message itself. Log
                 # and alert on it (truncated for the real-time channels; the email below still

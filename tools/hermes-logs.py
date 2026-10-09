@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.3.2
+# Version: 1.4.0
 #
 # 1.3.2 (2026-08-31) — real gap found live testing the previous fix: "pfesense log review" (a
 # typo) correctly declined via the bare-instruction guard, but investigating it surfaced a much
@@ -208,11 +208,19 @@ def _get(url, token=None, timeout=15):
         return json.loads(resp.read().decode())
 
 
-def _post(url, payload, token=None, timeout=15):
+def _post(url, payload, token=None, timeout=15, analysis=False):
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), method="POST",
         headers={"Content-Type": "application/json"},
     )
+    if analysis:
+        # S27f: declares to hermes-router that this call's payload is gathered data, not a
+        # request, so Layer 2 scans and logs it without blocking. This is the mechanism that makes
+        # this file's own documented asymmetric-screening rule actually hold: before S22d gave
+        # Layer 2 a screener that detects injections, it held only because the old classifier
+        # missed almost everything. The analyst's REQUEST is still screened in full -- that is
+        # screened upstream, where it arrives, not here.
+        req.add_header("X-Hermes-Screening", "analysis")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -477,7 +485,7 @@ def ask_super(request_context, source, gathered_text, history=None):
     }
     # super is on-demand (target §4a) — the first call after idle wakes it, same cost
     # hermes-canary-report.py already accepts for real security analysis.
-    result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=180)
+    result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=180, analysis=True)
     return result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.7.0
+# Version: 1.8.0
 #
 # 1.7.0 (2026-09-04) — EMBED_DIMS 1024 -> 4096, matching the embed swap to Qwen3-Embedding-8B
 # (infra/hermes-rag/start-embed.sh). New `_migrate_vec_chunks_dims()`: `vec_chunks` is a sqlite-vec
@@ -340,9 +340,15 @@ def router_chat(messages, model: str = "super", timeout: int = 120) -> str:
     or empty content rather than returning a placeholder, same principle as
     embed()."""
     body = json.dumps({"model": model, "messages": messages, "stream": False}).encode()
+    # S27f: this call's payload is retrieved RAG content being summarized -- data by construction,
+    # not a request. Declaring analysis mode makes the router scan and log Layer 2 without
+    # blocking, which is hermes-logs.py's documented asymmetric-screening doctrine applied to the
+    # same shape of work. Before S22d gave Layer 2 a screener that works, that doctrine held here
+    # only by accident; the first real run after it blocked all six digest topics at score 1.000.
     req = urllib.request.Request(
         f"{ROUTER_URL}/v1/chat/completions", data=body,
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={"Content-Type": "application/json", "X-Hermes-Screening": "analysis"},
+        method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         result = json.loads(resp.read().decode())

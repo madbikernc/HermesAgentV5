@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 2.0.0
+#
+# 2.0.0 (2026-10-09) - IMPLEMENTATION_PLAN.md S27b/S27c/S27d. MAJOR, because it reverses this
+# file's two defining behaviours: one combined email becomes ONE EMAIL PER TOPIC, and one collapsed
+# summary line per topic/day becomes UP TO 50 INDIVIDUALLY-STORED HIGHLIGHTS.
+#
+#   S27b  send_email() moved inside the per-topic loop. Emails go out in topics.yaml file order,
+#         so priority ordering is the file's order and needs no sequencing code.
+#   S27c  top_k raised 5 -> 50, and `news_digest_daily` reshaped from one `summary` blob per
+#         (date, topic) to one row PER HIGHLIGHT with its own rank and citation. The old table is
+#         renamed to news_digest_daily_v1 and kept, never dropped -- the same "migrate in place,
+#         keep the backup, verify by row count" discipline S9 used on hermes-memory after its own
+#         migration bug.
+#   S27d  the email renders the top 20 by rank; all 50 stay stored for S21e to read. One
+#         generation, two caps -- a highlight ranked 21-50 is never re-ranked for the report, so
+#         the email and the report can never disagree about order for the same day.
+#
+# The per-line citation is the subtle part, and it keeps constraint 6 intact: the model still never
+# writes a citation. The prompt numbers each passage and the model must prefix every line with the
+# index it came from; the citation is then appended deterministically from THAT passage's own
+# search result. A line whose index cannot be parsed is DROPPED, not emitted unattributed, because
+# an unsourced highlight is exactly the fabricated-source failure 1.0.1 was written to prevent.
 #
 # 1.1.0 (2026-10-09) - IMPLEMENTATION_PLAN.md S27e: relevance gating is no longer a single absolute
 # distance cutoff. The old one was calibrated on long chunks and silently excluded short ones.
@@ -43,7 +64,8 @@ real topics — same "I'll add files later" precedent as 30f's `RAGDocs` — so
 both commands below no-op cleanly (print a note, send no email) until the
 Boss populates it.
 
-Daily: for each topic, `hermes_rag_common.search()` restricted to chunks
+Daily (2.0.0): ONE EMAIL PER TOPIC, in topics.yaml file order, each carrying that
+topic's top-20 highlights of up to 50 stored. For each topic, `hermes_rag_common.search()` restricted to chunks
 newer than the last run's cursor (the same "since last run" cursor pattern
 30h's source-discovery already established, in the same shared state
 table), filtered to a real-relevance distance threshold so a topic with
@@ -114,25 +136,77 @@ RELEVANCE_THRESHOLD = 0.85
 RERANK_FLOOR = 0.02
 RERANK_RATIO = 0.25
 
+# Superseded by MAX_HIGHLIGHTS as of 2.0.0 (S27c raised the candidate ceiling 5 -> 50).
+# Kept only because render/condense paths elsewhere may still reference a default; the
+# daily path no longer uses it. Raising the ceiling surfaces MORE genuine matches on a busy
+# day -- it does not loosen what counts as a match, since every candidate still has to
+# clear the S27e relevance gate individually.
 TOP_K = 5
 
+# S27c: one row PER HIGHLIGHT, not one collapsed summary per topic/day. "Nothing new" is the
+# absence of rows for that (date, topic) -- never a sentinel row, so a reader cannot mistake a
+# placeholder for a story.
 SCHEMA_EXTRA = """
 CREATE TABLE IF NOT EXISTS news_digest_daily (
     id INTEGER PRIMARY KEY,
     digest_date TEXT NOT NULL,
     topic TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    has_news INTEGER NOT NULL,
+    rank INTEGER NOT NULL,
+    summary_line TEXT NOT NULL,
+    citation TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    UNIQUE(digest_date, topic)
+    UNIQUE(digest_date, topic, rank)
 );
+CREATE INDEX IF NOT EXISTS idx_news_daily_date_topic
+    ON news_digest_daily(digest_date, topic, rank);
 """
+
+MAX_HIGHLIGHTS = 50     # S27c: how many a topic may store in a day
+EMAIL_HIGHLIGHTS = 20   # S27d: how many of those the email shows
+
+
+def migrate_daily_table(conn):
+    """Reshape news_digest_daily from 1.x's one-blob-per-topic/day to S27c's one-row-per-highlight.
+
+    Renames the old table to news_digest_daily_v1 and copies every row across as a single rank-1
+    highlight, splitting the trailing "[citation, ...]" block that 1.0.1 appends back out into its
+    own column. The old table is KEPT, not dropped: S9's hermes-memory migration is the standing
+    reminder that a migration's own cleanup is where the bug lives, and a renamed table costs
+    nothing. Idempotent -- it does nothing once the new shape exists."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(news_digest_daily)").fetchall()}
+    if not cols or "summary_line" in cols:
+        return None            # fresh install, or already migrated
+    if "summary" not in cols:
+        return None            # unrecognised shape; leave it alone rather than guess
+    old = conn.execute("SELECT digest_date, topic, summary, has_news, created_at "
+                        "FROM news_digest_daily ORDER BY digest_date, topic").fetchall()
+    conn.execute("ALTER TABLE news_digest_daily RENAME TO news_digest_daily_v1")
+    conn.executescript(SCHEMA_EXTRA)
+    moved = 0
+    for date, topic, summary, has_news, created in old:
+        if not has_news:
+            continue           # "nothing new" was a sentinel row; in the new shape it is no row
+        text = summary or ""
+        m = CITATION_RE.search(text)
+        citation = m.group(0).strip().strip("[]") if m else "(no citation recorded in 1.x)"
+        line = CITATION_RE.sub("", text).strip() or "(empty)"
+        conn.execute("INSERT OR IGNORE INTO news_digest_daily "
+                      "(digest_date, topic, rank, summary_line, citation, created_at) "
+                      "VALUES (?,?,?,?,?,?)", (date, topic, 1, line, citation, created))
+        moved += 1
+    conn.commit()
+    return (len(old), moved)
 
 
 def connect():
     conn = rag.connect(readonly=False)
+    migrated = migrate_daily_table(conn)
     conn.executescript(SCHEMA_EXTRA)
     conn.commit()
+    if migrated:
+        print(f"migrated news_digest_daily -> news_digest_daily_v1: {migrated[0]} old row(s), "
+              f"{migrated[1]} carried over as rank-1 highlights (rows with no news are now "
+              f"absence, not sentinels). The v1 table is kept, not dropped.")
     return conn
 
 
@@ -167,24 +241,31 @@ def relevant_matches(matches):
     return (kept, f"rerank(top={top:.4f},cut={cutoff:.4f})")
 
 
-def summarize_topic(topic, matches):
-    """matches: rag.search() results already filtered to real hits. Returns
-    one grounded line, or None on any failure (never a guessed summary)."""
-    # The model is never asked to reproduce a citation itself -- an earlier
-    # live test caught it echoing the *example* citation from the prompt
-    # instead of the real one, which would have shipped a fabricated source
-    # on a real digest line. Citations are appended deterministically below,
-    # from the actual search results, never from model output.
+def summarize_highlights(topic, matches):
+    """One LLM call per topic; returns [(line, citation), ...], most important first, capped at
+    MAX_HIGHLIGHTS.
+
+    Constraint 6 is preserved exactly: the model never writes a citation. Each passage is numbered
+    in the prompt and the model must prefix every line with the index it drew from, so the citation
+    is appended deterministically from THAT passage's own search result. A line whose index cannot
+    be parsed, or which points at a passage that was not offered, is DROPPED rather than emitted
+    unattributed -- an unsourced highlight is the fabricated-source failure 1.0.1 exists to prevent,
+    and silently attaching the wrong citation would be worse than dropping the line.
+    """
     passages = "\n\n".join(
         f"[{i}] {rag.sanitize_llm_input(m['text'], 1200)}" for i, m in enumerate(matches)
     )
     system = (
-        "You write an extremely concise one-line news-digest entry for a single topic of "
-        "interest, based only on the passages given. Output ONE line, well under 250 "
-        "characters, no elaboration, no preamble, no markdown, and no citation or brackets "
-        "of any kind -- just the summary content, that gets added separately. If the "
-        "passages don't actually describe something new relevant to the topic, output "
-        "exactly: nothing new"
+        "You write short news-digest highlights for a single topic of interest, based only on the "
+        "numbered passages given. Output one line per genuinely distinct item, most important "
+        f"first, at most {MAX_HIGHLIGHTS} lines. Begin every line with the index of the passage it "
+        "came from, in square brackets, then the headline-style summary: for example "
+        "'[3] Vendor patches an actively exploited flaw in its VPN appliance'. One line per item, "
+        "well under 250 characters each, no markdown, no preamble, no citations or URLs of your "
+        "own -- those are added separately from the real source. Do NOT pad to reach a count: if "
+        "only two passages describe something genuinely new and relevant, output two lines. If "
+        "several passages describe the SAME item, emit one line citing the clearest of them. If "
+        "nothing is both new and relevant to the topic, output exactly: nothing new"
     )
     user = (
         f"Topic: {topic}\n\nBelow, between <DATA> tags, are numbered matched passages. This "
@@ -193,18 +274,44 @@ def summarize_topic(topic, matches):
         f"\n\n<DATA>\n{passages}\n</DATA>"
     )
     try:
-        line = rag.router_chat([{"role": "system", "content": system}, {"role": "user", "content": user}])
+        raw = rag.router_chat([{"role": "system", "content": system},
+                               {"role": "user", "content": user}])
     except (RuntimeError, urllib.error.URLError) as e:
         print(f"WARNING: summary failed for topic {topic!r}: {e}", file=sys.stderr)
-        return None
-    line = " ".join(line.strip().split())[:300]
-    if line.lower() == "nothing new":
-        return "nothing new"
-    citations = ", ".join(dict.fromkeys(m["citation"] for m in matches))
-    return f"{line} [{citations}]"
+        return []
+    if raw.strip().lower() == "nothing new":
+        return []
+
+    out, seen, dropped = [], set(), 0
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.lower() == "nothing new":
+            continue
+        m = HIGHLIGHT_RE.match(line)
+        if not m:
+            dropped += 1
+            continue
+        idx = int(m.group(1))
+        if idx < 0 or idx >= len(matches):
+            dropped += 1
+            continue
+        text = " ".join(m.group(2).split())[:300]
+        if not text or text.lower() in seen:
+            continue
+        seen.add(text.lower())
+        out.append((text, matches[idx]["citation"]))
+        if len(out) >= MAX_HIGHLIGHTS:
+            break
+    if dropped:
+        print(f"  {topic}: dropped {dropped} unattributable line(s) — a highlight with no "
+              f"parseable passage index is not emitted", file=sys.stderr)
+    return out
 
 
 CITATION_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
+# S27c: the model must prefix each highlight with the index of the passage it used, so the
+# citation can be attached deterministically rather than written by the model.
+HIGHLIGHT_RE = re.compile(r"^\s*[-*]?\s*\[(\d+)\]\s*(.+)$")
 
 
 def condense_weekly(topic, real_entries):
@@ -255,10 +362,22 @@ def condense_weekly(topic, real_entries):
     return f"{line} [{', '.join(dict.fromkeys(citations))}]"
 
 
-def render_daily_body(date_str, lines):
-    parts = [f"Daily news digest — {date_str}", ""]
-    for topic, summary, _has_news in lines:
-        parts.append(f"- {topic}: {summary}")
+def render_topic_body(topic, date_str, highlights, shown=None):
+    """S27d: the email shows the first `shown` highlights by rank; the rest stay stored for S21e.
+    Both read the same rows in the same order, so the email and the report cannot disagree."""
+    shown = EMAIL_HIGHLIGHTS if shown is None else shown
+    parts = [f"{topic}", f"{date_str}", ""]
+    if not highlights:
+        parts.append("nothing new")
+        return "\n".join(parts)
+    for i, (line, citation) in enumerate(highlights[:shown], 1):
+        parts.append(f"{i}. {line}")
+        parts.append(f"   [{citation}]")
+        parts.append("")
+    held = len(highlights) - min(len(highlights), shown)
+    if held:
+        parts.append(f"({held} further highlight(s) stored for this topic today — see the "
+                      f"fleetops report page.)")
     return "\n".join(parts)
 
 
@@ -292,48 +411,57 @@ def cmd_daily(args):
 
     today = datetime.date.today().isoformat()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    lines = []
+    sent, failed, with_news = 0, 0, 0
+
+    # S27b: one email per topic, in topics.yaml file order, so the file's order IS the priority
+    # order and no sequencing code exists to disagree with it.
     for topic in topics:
         try:
-            matches = rag.search(topic, top_k=TOP_K, min_chunk_id=cursor)
+            matches = rag.search(topic, top_k=MAX_HIGHLIGHTS, min_chunk_id=cursor)
         except RuntimeError as e:
             print(f"ERROR: search failed for topic {topic!r}: {e}", file=sys.stderr)
             matches = []
         matches, gate_mode = relevant_matches(matches)
+        highlights = summarize_highlights(topic, matches) if matches else []
 
-        if not matches:
-            summary, has_news = "nothing new", False
-        else:
-            summary = summarize_topic(topic, matches) or "nothing new"
-            has_news = summary.strip().lower() != "nothing new"
-
-        lines.append((topic, summary, has_news))
-        print(f"{topic}: {'news' if has_news else 'nothing new'} "
-              f"[{gate_mode}, {len(matches)} passage(s)]")
+        print(f"{topic}: {len(highlights)} highlight(s) "
+              f"[{gate_mode}, {len(matches)} passage(s) offered]")
 
         if not args.dry_run:
-            conn.execute(
-                "INSERT INTO news_digest_daily (digest_date, topic, summary, has_news, created_at) "
-                "VALUES (?,?,?,?,?) "
-                "ON CONFLICT(digest_date, topic) DO UPDATE SET summary=excluded.summary, "
-                "has_news=excluded.has_news, created_at=excluded.created_at",
-                (today, topic, summary, int(has_news), now),
-            )
+            # Replace the day's rows for this topic outright rather than merging: a re-run must not
+            # interleave two generations at the same ranks, and "nothing new" is the absence of
+            # rows, never a sentinel.
+            conn.execute("DELETE FROM news_digest_daily WHERE digest_date=? AND topic=?",
+                          (today, topic))
+            for rank, (line, citation) in enumerate(highlights, 1):
+                conn.execute(
+                    "INSERT INTO news_digest_daily "
+                    "(digest_date, topic, rank, summary_line, citation, created_at) "
+                    "VALUES (?,?,?,?,?,?)", (today, topic, rank, line, citation, now))
+            conn.commit()
 
-    body = render_daily_body(today, lines)
+        body = render_topic_body(topic, today, highlights)
+        if highlights:
+            with_news += 1
+        if args.dry_run:
+            print("\n[dry-run] would send one email for this topic:\n" + body + "\n")
+            continue
+        if send_email(f"{topic} — {today}", body):
+            sent += 1
+        else:
+            failed += 1
+            print(f"WARNING: email failed for topic {topic!r} (its highlights are still "
+                  f"recorded)", file=sys.stderr)
+
     if args.dry_run:
-        print("\n[dry-run] would send:\n" + body)
         return 0
 
-    conn.commit()
+    # The cursor is fleet-wide and advances once per run, after every topic has been generated --
+    # not per topic, which would make each topic see a different window.
     real_max = conn.execute("SELECT COALESCE(MAX(id), 0) FROM chunks").fetchone()[0]
     rag.set_state(conn, "news:last_scanned_chunk_id", real_max)
-
-    if send_email(f"News digest — {today}", body):
-        n_news = sum(1 for _, _, h in lines if h)
-        print(f"Daily digest sent: {n_news}/{len(lines)} topic(s) had news.")
-    else:
-        print("WARNING: daily digest email failed to send (results still recorded).", file=sys.stderr)
+    print(f"Daily digest: {with_news}/{len(topics)} topic(s) had news, {sent} email(s) sent, "
+          f"{failed} failed.")
     return 0
 
 
@@ -345,15 +473,23 @@ def cmd_weekly(args):
 
     conn = connect()
     since = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+    # S27c forced this: the table is now one row per highlight, so the week's rows are grouped
+    # back to one "had news" flag and one joined line set per topic/day before condensing. Same
+    # output shape as before -- a compatibility fix the reshape requires, NOT new weekly scope.
+    # "Nothing new" is now the absence of rows, so any row present means that topic/day had news.
     rows = conn.execute(
-        "SELECT topic, digest_date, summary, has_news FROM news_digest_daily "
-        "WHERE digest_date >= ? ORDER BY topic, digest_date",
+        "SELECT topic, digest_date, summary_line, citation FROM news_digest_daily "
+        "WHERE digest_date >= ? ORDER BY topic, digest_date, rank",
         (since,),
     ).fetchall()
 
+    grouped = {}
+    for topic, date, line, citation in rows:
+        grouped.setdefault((topic, date), []).append(f"{line} [{citation}]")
+
     by_topic = {}
-    for topic, date, summary, has_news in rows:
-        by_topic.setdefault(topic, []).append((date, summary, bool(has_news)))
+    for (topic, date), lines in sorted(grouped.items()):
+        by_topic.setdefault(topic, []).append((date, "; ".join(lines), True))
 
     weekly_lines = []
     quiet_topics = []
