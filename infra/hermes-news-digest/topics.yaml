@@ -7,11 +7,48 @@
 # is actually required or parsed — this is deliberately just a flat list.
 #
 # Each topic becomes a real semantic search against the RAG index (fleet
-# docs, podcast archive, ops snapshots, personal notes), restricted to
-# content added since the last digest run. Empty right now — add real
-# topics whenever you're ready; both `daily` and `weekly` no-op cleanly
-# (print a note, send no email) until this file has at least one real line.
+# docs, podcast archive, ops snapshots, personal notes, and since S26 the
+# fourteen AI/security feeds in infra/hermes-feed-reader/feeds.yaml),
+# restricted to content added since the last digest run.
 #
-# Example (remove the # to activate):
-# artificial intelligence safety research
-# home network security vulnerabilities
+# ── Why this list is short, measured 2026-10-08 ──────────────────────────
+#
+# EVERY TOPIC COSTS ONE `super` LLM CALL PER DAILY RUN, and two topics that
+# mean nearly the same thing retrieve nearly the same chunks — so they do
+# not add coverage, they duplicate a line and pay twice for it.
+#
+# This was measured rather than assumed. An earlier 38-entry version of this
+# file, run against the real store at TOP_K=5 and the 0.85 relevance
+# threshold, produced 22 digest lines that between them cited just FIVE
+# distinct articles — with a single arXiv paper cited by 21 of the 22. Its
+# twenty `artificial intelligence safety *` variants (standards, research,
+# testing, evaluation, assessment, certification, compliance, auditing,
+# monitoring, reporting, and seven incident-* phrasings) returned a
+# byte-identical result set for 11 of them and cited 3 articles in total.
+#
+# The eight below cover the same ground and were measured the same way:
+# 6 lines, 7 distinct articles, worst repeat 4x, 6 LLM calls. Add topics
+# freely — but add ones that would retrieve something the others would not,
+# and consider re-measuring if a new one looks close to an existing line.
+#
+# ── Two that are deliberately silent for now ─────────────────────────────
+#
+# The last two topics currently match NOTHING and will stay quiet until a
+# source covering them is added: feeds.yaml has no privacy-law or
+# standards-body source in it, so there is nothing in the index to find.
+# They are kept because they are real interests, and because a quiet topic
+# costs one cheap search and shows up in the digest's own "nothing new on
+# these topics" block rather than failing silently.
+#
+# ── Security ─────────────────────────────────────────────────────────────
+exploited vulnerabilities and active attack campaigns
+attacker tactics, techniques and procedures
+# ── AI safety and evaluation ─────────────────────────────────────────────
+artificial intelligence alignment and safety research
+artificial intelligence safety evaluation, testing and auditing
+artificial intelligence safety incidents and incident response
+# ── AI governance ────────────────────────────────────────────────────────
+artificial intelligence governance, regulation and policy
+# ── Privacy and standards (no source feeding these yet — see above) ──────
+data privacy law, regulation and compliance
+international security and privacy standards
