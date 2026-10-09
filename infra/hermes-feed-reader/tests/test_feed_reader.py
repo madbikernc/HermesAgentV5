@@ -158,12 +158,16 @@ def test_feed_list(fr, tmp):
 
     real, real_bad = fr.load_feeds(REPO / "infra" / "hermes-feed-reader" / "feeds.yaml")
     check("the committed feeds.yaml parses with no complaints", not real_bad, str(real_bad))
-    check("it holds 14 feeds", len(real) == 14, str(len(real)))
-    check("7 ai + 7 security",
-          sum(f["category"] == "ai" for f in real) == 7
-          and sum(f["category"] == "security" for f in real) == 7)
-    check("every slug is unique", len({f["slug"] for f in real}) == 14)
+    check("it holds 22 feeds", len(real) == 22, str(len(real)))
+    counts = {c: sum(f["category"] == c for f in real) for c in fr.CATEGORIES}
+    check("every declared category is represented", all(counts[c] for c in fr.CATEGORIES), str(counts))
+    check("the privacy and standards topics have sources at all",
+          counts["privacy"] >= 2 and counts["standards"] >= 3, str(counts))
+    check("every slug is unique", len({f["slug"] for f in real}) == len(real),
+          str(len({f["slug"] for f in real})))
     check("every url is https", all(f["url"].startswith("https://") for f in real))
+    check("no feed carries a category outside the declared set",
+          all(f["category"] in fr.CATEGORIES for f in real))
 
 
 def test_parsing(fr):

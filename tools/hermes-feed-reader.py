@@ -107,6 +107,11 @@ import hermes_injection_guard as guard  # noqa: E402
 
 CORPUS = "feeds"
 CONFIDENCE = "high"
+# The first path segment of every chunk's source_path, so these are the slices a query can
+# scope to. `privacy` and `standards` were added 2026-10-09 when topics.yaml's privacy and
+# standards topics turned out to be matching nothing for want of a source, not for want of
+# better wording. A category not in this set is a reported, skipped line rather than a crash.
+CATEGORIES = ("ai", "security", "privacy", "standards")
 
 FEEDS_PATH = Path(os.environ.get(
     "FEEDS_PATH", str(REPO_DIR / "infra" / "hermes-feed-reader" / "feeds.yaml")))
@@ -166,8 +171,9 @@ def load_feeds(path=None):
             bad.append(f"line {lineno}: expected 'category | name | url', got {raw!r}")
             continue
         category, name, url = parts
-        if category not in ("ai", "security"):
-            bad.append(f"line {lineno}: category must be 'ai' or 'security', got {category!r}")
+        if category not in CATEGORIES:
+            bad.append(f"line {lineno}: category must be one of "
+                       f"{', '.join(sorted(CATEGORIES))}, got {category!r}")
             continue
         if not url.startswith(("http://", "https://")):
             bad.append(f"line {lineno}: url must be http(s), got {url!r}")

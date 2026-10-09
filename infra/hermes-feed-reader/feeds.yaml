@@ -6,9 +6,10 @@
 #
 # Format, deliberately flat:   category | name | url
 #
-#   category   `ai` or `security`. Becomes the first path segment of every chunk's source_path,
-#              so `source_path LIKE 'security/%'` scopes a query to one side — the same scoping
-#              hermes-rag-ingest-podcasts.py already does with `source_path LIKE 'ShowName/%'`.
+#   category   `ai`, `security`, `privacy` or `standards`. Becomes the first path segment of
+#              every chunk's source_path, so `source_path LIKE 'privacy/%'` scopes a query to
+#              one slice — the same scoping hermes-rag-ingest-podcasts.py already does with
+#              `source_path LIKE 'ShowName/%'`.
 #   name       Human-readable publisher name. Appears verbatim in every chunk's citation, which
 #              is what a hermes-news-digest email shows a human, so write it the way you want to
 #              read it there.
@@ -45,3 +46,43 @@ security | BleepingComputer | https://www.bleepingcomputer.com/feed/
 security | SANS Internet Storm Center | https://isc.sans.edu/rssfeed_full.xml
 security | CISA — Cybersecurity Advisories | https://www.cisa.gov/cybersecurity-advisories/all.xml
 security | CISA — Alerts (KEV) | https://www.cisa.gov/cybersecurity-advisories/alerts.xml
+
+# ── Privacy ───────────────────────────────────────────────────────────────────
+# Added 2026-10-09 because `topics.yaml`'s privacy topic was matching nothing: there was no source
+# in this file covering privacy law at all, which is a source gap rather than a topic-wording
+# problem. Every candidate below was probed with urllib before being written here, and the ones
+# that failed are recorded at the bottom of this file rather than quietly omitted.
+privacy | EDPB — European Data Protection Board | https://www.edpb.europa.eu/feed/news_en
+# CNIL publishes in FRENCH. Kept deliberately: it is the most active national DPA feed that
+# answers, the embedding model is multilingual so cross-lingual retrieval does work, and EDPB
+# covers the EU-wide English-language side. Expect French text in any chunk it produces, and
+# drop this line if that reads badly in a digest.
+privacy | CNIL (French) | https://www.cnil.fr/fr/rss.xml
+
+# ── Standards bodies ──────────────────────────────────────────────────────────
+# Added 2026-10-09 for `topics.yaml`'s "international security and privacy standards" topic, same
+# reason as above. First-party standards organisations only.
+standards | NIST CSRC — Drafts Open for Comment | https://csrc.nist.gov/CSRC/media/feeds/pubs/drafts-open-for-comment.xml
+standards | IETF RFC Editor | https://www.rfc-editor.org/rfcrss.xml
+standards | W3C News | https://www.w3.org/blog/news/feed/
+
+# ── Security, continued (added 2026-10-09) ────────────────────────────────────
+security | NIST Cybersecurity Insights | https://www.nist.gov/blogs/cybersecurity-insights/rss.xml
+security | NCSC UK | https://www.ncsc.gov.uk/api/1/services/v1/all-rss-feed.xml
+security | Cloud Security Alliance | https://cloudsecurityalliance.org/blog/feed/
+
+# ── Probed 2026-10-09 and NOT added, so nobody re-researches them ─────────────
+# Recorded because "we already checked" is worth more than a shorter file.
+#   FTC            — its own /stay-connected/rss page lists /feeds/press-release.xml and
+#                    /feeds/press-release-consumer-protection.xml, and both are unreachable from
+#                    `spark`: 403 to this reader's user agent, 404 to a full browser header set.
+#                    The feeds exist; this host cannot have them.
+#   ICO (UK)       — no feed discoverable. Four candidate paths 404, and its media-centre page
+#                    declares no <link rel="alternate"> feed at all.
+#   EDPS, ENISA    — same: every candidate path 404s and neither page declares a feed.
+#   IAPP           — no feed; /feed/ and /news/rss both 404.
+#   NIST News (general) — works (40 entries) but deliberately skipped: it is all of NIST, from
+#                    materials science to metrology, and would add volume without serving any
+#                    topic in topics.yaml. NIST's two focused feeds above are in instead.
+#   NCSC News / NCSC Reports — both work, and both are strict subsets of the NCSC UK "all" feed
+#                    above. Taking all three would ingest the same advisory up to three times.

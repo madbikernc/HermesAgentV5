@@ -1,14 +1,15 @@
 # hermes-feed-reader — recreate checklist
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
-S26: pulls the fourteen public AI and security feeds listed in `feeds.yaml` and ingests each new
+S26: pulls the twenty-two public AI, security, privacy and standards feeds listed in `feeds.yaml` and ingests each new
 entry into the existing RAG store, so `hermes-news-digest.py` has something real to search.
 `IMPLEMENTATION_PLAN.md` S26 is the design account; this file is the recipe and the operational
 notes.
 
-**Status: built, deployed and live on `spark` since 2026-10-08.** Timer enabled, first real run
-ingested 185 entries / 263 chunks from all fourteen feeds with zero failures in 41 seconds. It is
+**Status: built, deployed and live on `spark` since 2026-10-08.** Timer enabled; the first run ingested
+185 entries / 263 chunks from the original fourteen feeds with zero failures in 41 seconds, and eight
+privacy/standards feeds added 2026-10-09 brought a further 105 entries / 113 chunks. It is
 a RAG source and nothing else — no digest code lives here, and no LLM call happens anywhere in it.
 
 ## 1. What runs
@@ -55,8 +56,8 @@ the venv because they touch the store.
 
 Edit `feeds.yaml` — one `category | name | url` line, `#` for comments. No code change, no restart.
 A malformed line is reported and skipped rather than fatal, so one bad edit cannot take the other
-thirteen feeds down. `category` must be `ai` or `security`; it becomes the first segment of
-`source_path`, so `source_path LIKE 'security/%'` scopes a query to one side.
+thirteen feeds down. `category` must be one of `ai`, `security`, `privacy`, `standards`; it becomes the first segment of
+`source_path`, so `source_path LIKE 'privacy/%'` scopes a query to one slice.
 
 ## 4. How an entry becomes a chunk
 
@@ -120,6 +121,28 @@ before trusting it.
    (15, newest first) is what keeps a single publisher from consuming the run. CISA advisories are
    the heaviest per entry — 15 entries produced 77 chunks, because the bodies are long.
 
+9. **Adding a source did not make a silent topic speak — the digest's threshold did that.**
+   `topics.yaml`'s privacy and standards topics matched nothing, so eight first-party feeds were
+   probed and added (2026-10-09) to give them sources. They still match nothing. The right
+   documents *are* retrieved and then filtered out: EDPB's Irish DPC item at **0.917**, its CNIL
+   health-breach item at **0.901**, NIST SP 800-78-6 at **0.893**, SP 800-73-6 at **0.897** — all
+   above `hermes-news-digest.py`'s `RELEVANCE_THRESHOLD` of 0.85, whose own comment calls it
+   empirical "in this corpus, with this embedding model." That corpus was podcast transcripts and
+   fleet docs — long chunks. A short feed entry scores systematically further than a long
+   transcript passage on the same subject (finding 4, from the other direction), and the only
+   topics that fire are the ones whose sources publish long bodies: CISA advisories and arXiv
+   abstracts. **Raising the cutoff does not fix it** — for short texts the distances cluster
+   0.87–0.99 regardless of relevance, so a threshold admitting EDPB at 0.917 also admits an
+   unrelated Hugging Face post at 0.918. The two real options are enriching chunks by fetching the
+   linked article body (new scope here) or making the threshold length/corpus-aware (S27 owns that
+   file). Neither is chosen yet.
+10. **Sources probed and deliberately not added** are recorded in `feeds.yaml` itself rather than
+   left for the next person to re-research: FTC (feeds exist per its own RSS page, unreachable from
+   `spark` — 403 to this reader's UA, 404 to a browser header set), ICO/EDPS/ENISA/IAPP (no feed
+   declared anywhere, every candidate path 404s), general NIST News (works, but it is all of NIST
+   from metrology to materials science), and NCSC's separate News/Reports feeds (strict subsets of
+   its "all" feed, so taking all three would ingest each advisory up to three times).
+
 ## 6. Live verification, 2026-10-08
 
 - 65 offline checks pass on `spark` and on an off-fleet Windows box.
@@ -153,3 +176,4 @@ first real send is the 07:10 timer run. See `IMPLEMENTATION_PLAN.md`'s S26 gate 
 |---|---|---|
 | 1.0.0 | 2026-10-08 | Initial version — S26 built, deployed and live-verified on `spark`: `feeds.yaml` (14 sources), `tools/hermes-feed-reader.py`, the daily timer, a 65-check offline suite, and the eight findings above. |
 | 1.1.0 | 2026-10-09 | Added §7, the exit-gate record: met on a confirmed digest line citing a real 2026-10-08 CISA advisory, with its two limits stated alongside (six of eight topics returned `nothing new`, and the evidence came from a dry run that stops before SMTP). |
+| 1.2.0 | 2026-10-09 | Eight first-party privacy/standards feeds added (22 total) with two new categories, and findings 9–10: giving the silent topics sources did not make them speak — the 0.85 relevance threshold, calibrated on long podcast chunks, filters out the short feed entries that correctly match, and raising it does not separate signal. Probed-and-rejected sources now recorded in `feeds.yaml`. |
