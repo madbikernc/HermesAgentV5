@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.8.0
+# Version: 1.9.0
 #
 # 1.7.0 (2026-09-04) — EMBED_DIMS 1024 -> 4096, matching the embed swap to Qwen3-Embedding-8B
 # (infra/hermes-rag/start-embed.sh). New `_migrate_vec_chunks_dims()`: `vec_chunks` is a sqlite-vec
@@ -20,6 +20,13 @@
 # "a hyphenated tools/ filename can't be imported" reasoning that already
 # justified every other function in this file.
 #
+# 1.9.0 — S21 groundwork: search()'s min_chunk_id path is now an EXACT scan (vec_distance_cosine
+# over the chunks above the cursor) instead of a KNN over-fetch trimmed in Python. Measured on 
+# the live store 2026-10-09: 57 chunks newer than the news cursor out of 97,751 indexed, and zero
+# of them in the global nearest 400 for either topic tried -- so the daily digest reported "0/6
+# topics had news" while that morning's headlines sat in the index. The old path's docstring called
+# it "correct regardless, only possibly fewer than top_k results"; at this scale that meant none,
+# and it gets worse as history accumulates, so no value of k fixes it.
 # 1.5.0 — S16b: reranking. search() over-fetches a wider KNN candidate pool (RERANK_WIDEN, default
 # 4x top_k) and reranks it down to the real top_k via a cross-encoder (Qwen3-Reranker-0.6B,
 # infra/hermes-rag/start-rerank.sh, port 8093 — reserved for this since target §4.1's own model
@@ -282,11 +289,15 @@ def search(text: str, corpus: str = None, top_k: int = 5, min_chunk_id: int = No
     factored out once the news digest needed the same search restricted to
     only chunks newer than a cursor (`min_chunk_id`) rather than the whole
     index. sqlite-vec's KNN can't pre-filter by an arbitrary SQL condition,
-    so a `min_chunk_id`/`corpus` filter works by over-fetching (a wider `k`)
-    and trimming in Python — fine at this corpus's real scale, and correct
-    regardless: a caller never sees a chunk older than min_chunk_id or from
-    the wrong corpus, only possibly fewer than top_k results if not enough
-    survive the filter."""
+    so there are two paths:
+
+    - `min_chunk_id` set: an **exact scan** over the chunks above the cursor, scored with
+      `vec_distance_cosine`. The earlier over-fetch-and-trim was measured blind on 2026-10-09 —
+      see the comment at that branch — and is not a tuning choice to revisit.
+    - otherwise: KNN, with `corpus` still trimmed in Python behind a wider `k`, which holds
+      because a corpus is a large fraction of the index rather than one day of it.
+
+    Either way a caller never sees a chunk older than `min_chunk_id` or from the wrong corpus."""
     vec = embed(text)
     conn = connect(readonly=True)
     packed = pack_vec(vec)
@@ -294,25 +305,53 @@ def search(text: str, corpus: str = None, top_k: int = 5, min_chunk_id: int = No
     widen = 1
     if corpus:
         widen *= 4
-    if min_chunk_id is not None:
-        widen *= 8
     if use_rerank:
         widen *= RERANK_WIDEN  # a wider candidate pool for the reranker to actually choose among —
                                 # reranking a pool the same size as top_k can only ever reorder,
                                 # never surface a real KNN-runner-up the initial pass ranked just
                                 # outside top_k
 
-    sql = (
-        "SELECT c.id, c.citation, c.corpus, c.source_path, c.chunk_text, v.distance "
-        "FROM vec_chunks v JOIN chunks c ON c.id = v.chunk_id "
-        "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance"
-    )
-    rows = conn.execute(sql, [packed, top_k * widen]).fetchall()
-
-    if corpus:
-        rows = [r for r in rows if r[2] == corpus]
     if min_chunk_id is not None:
-        rows = [r for r in rows if r[0] > min_chunk_id]
+        # Exact scan over the new-chunk window, NOT a KNN-then-trim.
+        #
+        # This path used to over-fetch the global nearest `top_k * widen` and drop everything at or
+        # below the cursor in Python, which the docstring above called "correct regardless, only
+        # possibly fewer than top_k results." At this corpus's real scale that is wrong in practice,
+        # measured on 2026-10-09: with 57 chunks newer than the cursor out of 97,751 indexed,
+        # **zero** of them appeared in the global nearest 400 for either of two digest topics — so
+        # the 07:10 daily digest reported "0/6 topics had news" while that morning's actual
+        # headlines ("GoBalance Flaw Lets Attackers...", "Three Teams Demonstrate Remote...") sat
+        # in the index, found instantly by the query below. The failure scales with the corpus: the
+        # bigger the index gets, the less likely one day's ingest is to rank in the global top-k,
+        # so a "since last run" digest goes quietly blind as it accumulates history.
+        #
+        # The window is one ingest cycle — tens to hundreds of rows against 97k — so scoring all of
+        # it exactly is both strictly correct and cheaper than the over-fetch it replaces.
+        sql = (
+            "SELECT c.id, c.citation, c.corpus, c.source_path, c.chunk_text, "
+            "       vec_distance_cosine(v.embedding, ?) AS distance "
+            "FROM chunks c JOIN vec_chunks v ON v.chunk_id = c.id "
+            "WHERE c.id > ?"
+        )
+        params = [packed, min_chunk_id]
+        if corpus:
+            sql += " AND c.corpus = ?"
+            params.append(corpus)
+        sql += " ORDER BY distance LIMIT ?"
+        params.append(top_k * widen)
+        rows = conn.execute(sql, params).fetchall()
+    else:
+        sql = (
+            "SELECT c.id, c.citation, c.corpus, c.source_path, c.chunk_text, v.distance "
+            "FROM vec_chunks v JOIN chunks c ON c.id = v.chunk_id "
+            "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance"
+        )
+        rows = conn.execute(sql, [packed, top_k * widen]).fetchall()
+        if corpus:
+            # Still a post-filter, and the same failure mode in principle — but a corpus is a large
+            # fraction of the index rather than one day of it, so the over-fetch actually covers it.
+            # Worth revisiting if a corpus ever becomes a small minority of total chunks.
+            rows = [r for r in rows if r[2] == corpus]
 
     candidates = [
         {"chunk_id": r[0], "citation": r[1], "corpus": r[2], "source_path": r[3], "text": r[4], "distance": r[5]}

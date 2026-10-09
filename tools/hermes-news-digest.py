@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 2.0.0
+# Version: 2.0.1
 #
 # 2.0.0 (2026-10-09) - IMPLEMENTATION_PLAN.md S27b/S27c/S27d. MAJOR, because it reverses this
 # file's two defining behaviours: one combined email becomes ONE EMAIL PER TOPIC, and one collapsed
@@ -427,10 +427,18 @@ def cmd_daily(args):
         print(f"{topic}: {len(highlights)} highlight(s) "
               f"[{gate_mode}, {len(matches)} passage(s) offered]")
 
-        if not args.dry_run:
+        if not args.dry_run and highlights:
             # Replace the day's rows for this topic outright rather than merging: a re-run must not
             # interleave two generations at the same ranks, and "nothing new" is the absence of
             # rows, never a sentinel.
+            #
+            # Guarded by `and highlights` for a reason found in live operation on 2026-10-09: the
+            # DELETE used to run unconditionally, so a later run that found nothing ERASED what an
+            # earlier run that day had found. The 03:26 run stored 26 highlights across 5 topics;
+            # the 07:10 timer found nothing and left the table empty. That silently destroys the
+            # one thing S27d stores these rows for -- the highlights beyond EMAIL_HIGHLIGHTS that
+            # never made the email and are supposed to stay recoverable (S21e). A run finding
+            # nothing new is not evidence that what was found earlier today was wrong.
             conn.execute("DELETE FROM news_digest_daily WHERE digest_date=? AND topic=?",
                           (today, topic))
             for rank, (line, citation) in enumerate(highlights, 1):

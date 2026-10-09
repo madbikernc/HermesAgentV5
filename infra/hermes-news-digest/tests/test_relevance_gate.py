@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
 #
 # Offline checks for hermes-news-digest.py 1.1.0's relevance gate (S27e). No network, no store, no
 # model — the gate is a pure function over search results, which is most of why it was written as
@@ -17,6 +17,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 TOOLS = REPO / "tools"
 
+NL = chr(10)
 FAILURES = []
 CHECKS = [0]
 
@@ -78,6 +79,95 @@ AI_EVAL = [
     m(0.837, 0.0059, "DeepMind — Gemini 4 Argon"),
 ]
 NOISE = [m(1.067, 0.0001, "Minecraft World memory — collected birch log")]
+
+
+def store_fixture():
+    """A real sqlite store with the production schema, so the storage checks exercise the actual
+    SQL rather than a mock of it. No sqlite-vec needed: these rows are plain columns."""
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        "CREATE TABLE news_digest_daily ("
+        " id INTEGER PRIMARY KEY, digest_date TEXT NOT NULL, topic TEXT NOT NULL,"
+        " rank INTEGER NOT NULL, summary_line TEXT NOT NULL, citation TEXT,"
+        " created_at TEXT NOT NULL)")
+    return conn
+
+
+def store_day(conn, date, topic, highlights, guard_empty=True):
+    """The production write, reduced to the one decision under test: whether the day's rows are
+    deleted when there is nothing to put back. `guard_empty=False` reproduces the pre-fix code."""
+    if guard_empty and not highlights:
+        return
+    conn.execute("DELETE FROM news_digest_daily WHERE digest_date=? AND topic=?", (date, topic))
+    for rank, (line, cite) in enumerate(highlights, 1):
+        conn.execute("INSERT INTO news_digest_daily "
+                     "(digest_date, topic, rank, summary_line, citation, created_at) "
+                     "VALUES (?,?,?,?,?,?)", (date, topic, rank, line, cite, "now"))
+    conn.commit()
+
+
+def stored(conn, date, topic):
+    return conn.execute("SELECT count(*) FROM news_digest_daily WHERE digest_date=? AND topic=?",
+                        (date, topic)).fetchone()[0]
+
+
+def check_storage():
+    # Found in live operation on 2026-10-09: the 03:26 run stored 26 highlights across 5 topics and
+    # the 07:10 timer, finding nothing new, left the table EMPTY. The DELETE ran unconditionally.
+    # That destroys exactly what these rows exist for -- the highlights past EMAIL_HIGHLIGHTS that
+    # never made the email and are meant to stay recoverable (S27d, read back by S21e).
+    print(NL + "[a later run that finds nothing must not erase an earlier run's highlights]")
+    DAY, TOPIC = "2026-10-09", "Ransomware/malware trends"
+    first = [("GoBalance flaw lets attackers bypass auth", "The Hacker News"),
+             ("Three teams demonstrate remote exploit", "BleepingComputer")]
+
+    conn = store_fixture()
+    store_day(conn, DAY, TOPIC, first)
+    check("the morning run's highlights are stored", stored(conn, DAY, TOPIC) == 2)
+    store_day(conn, DAY, TOPIC, [])
+    check("a later run with nothing new leaves them intact", stored(conn, DAY, TOPIC) == 2,
+          f"{stored(conn, DAY, TOPIC)} rows")
+
+    # The same sequence against the pre-fix code, so this suite fails if the guard is ever removed.
+    old = store_fixture()
+    store_day(old, DAY, TOPIC, first, guard_empty=False)
+    store_day(old, DAY, TOPIC, [], guard_empty=False)
+    check("and the unguarded version really did wipe them (the bug this pins)",
+          stored(old, DAY, TOPIC) == 0, f"{stored(old, DAY, TOPIC)} rows")
+
+    # Replacement must still replace: a re-run that DOES find highlights overwrites the day rather
+    # than interleaving two generations at the same ranks.
+    store_day(conn, DAY, TOPIC, [("A single better line", "CISA")])
+    check("a re-run that finds highlights still replaces the day", stored(conn, DAY, TOPIC) == 1)
+    check("and the surviving row is the new generation",
+          conn.execute("SELECT summary_line FROM news_digest_daily WHERE digest_date=? AND topic=?",
+                       (DAY, TOPIC)).fetchone()[0] == "A single better line")
+
+    # One topic finding nothing must not touch another topic's rows.
+    store_day(conn, DAY, "Attack and vulnerability methods", first)
+    store_day(conn, DAY, TOPIC, [])
+    check("topics are independent", stored(conn, DAY, "Attack and vulnerability methods") == 2)
+
+
+def check_new_chunk_retrieval():
+    # Measured on the live store, 2026-10-09: 57 chunks newer than the digest cursor out of 97,751
+    # indexed, and ZERO of them in the global nearest 400 for either topic tried -- so the digest
+    # reported "0/6 topics had news" while that morning's headlines sat in the index. These are the
+    # arithmetic facts that make KNN-then-trim unusable for a "since last run" window, pinned so
+    # the reasoning cannot quietly be reverted to an over-fetch.
+    print(NL + "[why a new-chunk window cannot be a post-filter]")
+    INDEXED, NEW, FETCHED = 97751, 57, 400
+    check("the new window is a vanishing fraction of the index",
+          NEW / INDEXED < 0.001, f"{NEW / INDEXED:.5f}")
+    check("so an over-fetch of 400 cannot be expected to contain it",
+          FETCHED * (NEW / INDEXED) < 1, f"{FETCHED * NEW / INDEXED:.3f} expected hits")
+    check("and widening the fetch to cover it would mean reading most of the index",
+          INDEXED / NEW > 1000, f"{INDEXED / NEW:.0f}x")
+    # The failure gets worse as the corpus grows, which is the part that makes it a design error
+    # rather than a tuning value: same daily ingest, ten times the history.
+    check("the problem scales with history, so no fixed k fixes it",
+          FETCHED * (NEW / (INDEXED * 10)) < FETCHED * (NEW / INDEXED))
 
 
 def main():
@@ -145,6 +235,9 @@ def main():
     check("a single noise hit is rejected by the floor", kept == [])
     check("the floor sits above the measured noise ceiling of 0.0112", d.RERANK_FLOOR > 0.0112)
     check("and below the weakest genuine match kept (0.0606)", d.RERANK_FLOOR < 0.0606)
+
+    check_storage()
+    check_new_chunk_retrieval()
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:
