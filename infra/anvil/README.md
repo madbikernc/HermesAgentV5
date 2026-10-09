@@ -1,14 +1,14 @@
 # Anvil — mesh node setup checklist
 
-**Version:** 2.3.0
+**Version:** 2.4.0
 
 Ordered steps to stand up `Anvil`, the fleet's mesh node (IMPLEMENTATION_PLAN.md S19): a Windows box that
 turns a finished render into a viable STL. This file is the recipe; S19 in the plan is the
 reasoning (why not the Sparks, why TRELLIS.2, what "viable" means). Like `Kiln`, Anvil is a **tooling
 endpoint** — no agent, no persona, no Matrix identity. Its only job is pulling `mesh` jobs from the broker.
 
-**Status (2026-10-04): ComfyUI updated, models in place, win_amd64 gate closed. The exported workflow
-is the only remaining pre-node item, and it needs the GUI.** `Anvil` is the operator's own Windows workstation,
+**Status (2026-10-08): the workflow exists and runs. Generation is proven end to end on the node;
+the repair chain is not — it fails on real TRELLIS.2 output (see step 4a).** `Anvil` is the operator's own Windows workstation,
 `PMWIN11` — see "1. The hardware" for what is actually in it. Everything below that does not need the node
 is already built and tested — see "What already exists".
 
@@ -151,41 +151,86 @@ New-NetFirewallRule -DisplayName "ComfyUI 8188 - no inbound (Anvil)" -Direction 
 
 Check from a Spark afterwards that `curl -m 5 http://<anvil-ip>:8188/` fails.
 
-## 3. Export the workflow
+## 3. The workflow — built 2026-10-08, committed, and proven to run
 
-**The template to start from is `3d_pixal3d_trellis2_image_to_model`**, shipped inside the
-`comfyui_workflow_templates_json` package (66 nodes). Two things about it to know before loading:
+`infra/anvil/workflows/trellis2-mesh-only.api.json` (29 nodes) exists. **It was not hand-written and it
+was not exported from the GUI** — it is derived from ComfyUI's own shipped template
+`3d_pixal3d_trellis2_image_to_model` (66 nodes), with every input *name* taken from the running
+instance's `/object_info`, and then validated by actually running it. Three authored changes, nothing else:
 
-- **It serves Pixal3D *and* TRELLIS.2 from one graph**, switched by `ComfySwitchNode`s driven by a
-  `PrimitiveBoolean` titled "Boolean (Switch to Trellis2)" — which ships set to `False`. Check which branch
-  that actually selects before concluding a run used TRELLIS.2 at all.
-- **Its texture half is substantial**, so stripping it is most of the work. The nodes on the texture side,
-  read from the template: `Trellis2TextureStage`, `VaeDecodeTextureTrellis`, `BakeTextureFromVoxel`,
-  `ApplyTextureToMesh`, `PaintMesh`, `BakeNormalMapFromMesh`, `BakeAmbientOcclusion`, `RenderUVAtlas`,
-  `UnwrapMesh`, the texture `VAELoader`, and the Base Color / Metallic / Roughness / Normal / AO
-  `PreviewImage` nodes. The shape side keeps the shape `VAELoader`, `VoxelToMesh`, `RemeshMesh`,
-  `DecimateMesh`, `MeshSmoothNormals` and a `MeshToFile3D` / `Save3DAdvanced` export.
+1. **Trellis2 branch selected.** The template ships `PrimitiveBoolean#316` ("Boolean (Switch to Trellis2)")
+   set to **`False`, which is Pixal3D** — verified from the switch wiring, where `on_false` is
+   `Pixal3DConditioning` / `UNETLoader#319` (pixal3d) and `on_true` is `Trellis2Conditioning` /
+   `UNETLoader#40` (trellis_2). The three switches it drives are resolved statically and elided.
+2. **A file-writing export added on the shape path.** This is the one trap in the template: its only
+   `Save3DAdvanced` hangs off the **texture** chain (`ApplyTextureToMesh` → `MeshSmoothNormals#260` →
+   `MeshToFile3D#285` → `Save3DAdvanced#322`), and the shape path's two terminals are both
+   `Preview3DAdvanced` — viewer only. Strip texture the obvious way and you get no file at all. A new
+   `MeshToFile3D#900` + `Save3DAdvanced#901` are fed from `MeshSmoothNormals#238`.
+3. **Pruned to what that export needs**, which is how the texture half is removed — by reachability
+   rather than by deleting a list of nodes. 29 of 66 survive. Asserted in the builder: no
+   `Pixal3DConditioning`, `MoGe*`, or texture node survives.
 
-Partial wiring verified from the template's links, enough to recognise the shape chain:
-`CLIPVisionLoader` → `Trellis2Conditioning`; `VaeDecodeStructureTrellis2` (VOXEL) + conditioning →
-`Trellis2ShapeStage` → `Trellis2UpsampleStage` (which also takes a `KSampler` LATENT and the shape
-`VAELoader`) → `VaeDecodeShapeTrellis`.
+`PreviewImage#302` **is kept and must stay.** Despite the name it has an `images` output feeding
+`Trellis2Conditioning#299` — it carries the image, it is not a preview.
 
-The eight node classes 0.38.2 actually registers, read off the running instance rather than guessed:
-`EmptyTrellis2LatentStructure`, `Trellis2Conditioning`, `Trellis2ShapeStage`, `Trellis2TextureStage`,
-`Trellis2UpsampleStage`, `VaeDecodeShapeTrellis`, `VaeDecodeStructureTrellis2`, `VaeDecodeTextureTrellis`.
-**For the shape-only path, the two to leave out are `Trellis2TextureStage` and `VaeDecodeTextureTrellis`.**
-Build the graph from the shipped template rather than wiring it from that list — the names are recorded here
-to identify what to drop, not as a verified topology.
+Two serialisation details worth knowing if this is ever rebuilt. ComfyUI's `widgets_values` is positional,
+and three things shift the alignment: the `control_after_generate` pseudo-widget that follows a `seed`,
+`LoadImage`'s trailing `upload` widget, and `COMFY_DYNAMICCOMBO_V3` inputs (`RemeshMesh.sign_mode`,
+`DecimateMesh.placement_mode`), which expand into the selected option's sub-inputs and are named
+`parent.child` in the API format — `comfy_api/latest/_io.py` is the authority for that naming. Non-primitive
+types can still occupy a widget slot (`Save3DAdvanced.viewport_state` is `LOAD_3D`), so mapping by type is
+wrong; declaration order minus link-connected inputs is right.
 
-1. In the ComfyUI GUI (on Anvil itself, at `http://127.0.0.1:8188`), start from the **TRELLIS.2 template
-   that ships with ComfyUI 0.34.0+**, strip it to the shape path (no texturing — see step 2), and run it
-   once by hand on a test image until it produces a `.glb`.
-2. **Workflow → Export (API)**. Save it as `infra/anvil/workflows/trellis2-mesh-only.api.json`.
-3. Edit that file: set the `LoadImage` node's `image` input to the literal string `"{{INPUT_IMAGE}}"`, and
-   every `seed` input to `"{{SEED}}"` (quoted — the script swaps it for a random integer, so a broker retry
-   is a genuinely different attempt, not a replay of the failure).
-4. Commit it. `hermes-generate-mesh.py` refuses to run without it rather than guess a node graph.
+**One tuning change, measured rather than assumed:** `RemeshMesh#241`'s
+`sign_mode.drop_inverted_components` is set **true** (template default is false). It drops the UDF inner
+shell, which is an artifact of the UDF reconstruction, and on the same input it took the repair chain's
+count from **24 significant components to 3**. Isolated in its own run — `drop_enclosed_components` was
+tested too and added almost nothing (64 vs 60 components, same 3 significant), so it is left at the
+template default, where `hermes-mesh-repair.py` can make that judgement honestly instead.
+
+The placeholders are already in place: `{{INPUT_IMAGE}}` once (`LoadImage#122`) and `"{{SEED}}"` three
+times (`KSampler#3/#18/#23`, quoted — `hermes-generate-mesh.py` replaces the quoted token with a bare
+integer). The committed file was re-validated *after* performing that substitution exactly as the worker
+does it.
+
+> The workflow file carries **no `**Version:**` line**: it is consumed by ComfyUI, which treats every
+> top-level JSON key as a node, so a metadata key would break it and JSON admits no comments. It is
+> versioned through this README and the plan instead.
+
+### Measurements (`Anvil`, RTX 5060 Ti 16GB) — for exit gate 2
+
+| Run | Seed | Raw mesh (pre-remesh) | Wall clock | Peak VRAM |
+|---|---|---|---|---|
+| template defaults | 56/42/42 | 12.60M faces | **85.3 s** | **12,797 MiB** |
+| committed config | random | 47.24M faces | **120.4 s** | **15,492 MiB** |
+
+**The second run peaked at 95% of the card — 819 MiB spare.** The raw mesh varies from 12.6M to 47.2M
+faces with the seed alone, and VRAM tracks it, so this does fit on 16GB but **not comfortably, and the
+margin is seed-dependent rather than fixed**. Size `JOB_TIMEOUT` against 120 s, not 85 s, and treat an
+occasional OOM as expected rather than anomalous until more runs exist.
+
+## 4a. Known gap: the repair chain fails on real TRELLIS.2 output
+
+`hermes-mesh-repair.py` has **not** yet turned one of these meshes into a viable STL. Reproduced on three
+different meshes, always the same way:
+
+```
+[mesh-repair] 119 components, 6 significant, 113 fragments dropped
+[mesh-repair] FAILED: PyMeshLab repair failed: Failed to apply filter: meshing_re_orient_faces_coherently
+Details: Mesh has some not 2-manifold faces, Orientability requires manifoldness
+```
+
+The chain reorients faces before it has made the mesh 2-manifold, and real generated output is not
+2-manifold on arrival. It needs a non-manifold repair step (PyMeshLab's own
+`meshing_repair_non_manifold_edges` / `..._faces`) ahead of the reorient. **Exit gate 5 is meanwhile
+behaving exactly as designed** — exit 5, a real error surfaced, no artifact written.
+
+**Do not tune against the current evidence.** Every run above used ComfyUI's `example.png`, which is a
+flat MS-Paint drawing of a figure *plus* sky, clouds and a grass hill — several disconnected subjects and
+nothing like a photograph of one object. A 100+ component mesh is the honest result for that input. Get a
+real single-object image first; only then is it clear how much of this is the repair chain and how much
+was the picture.
 
 ## 4. The mesh worker's Python
 
@@ -338,3 +383,4 @@ In this order, each after the one before it works:
 | 2.1.0 | 2026-10-04 | **ComfyUI updated on the node: `v0.31.0` → `v0.38.2`** — install gate 1 cleared. Step 2 now records exactly what was run (fetch, checkout, `pip install -r requirements.txt`) with the pre-update rollback reference, plus what it verified: `--quick-test-for-ci` exits 0 with no import failures, **all 16 custom-node packs still import** so the existing image/video setup is intact, 1734 node classes register, and a real server start answers `/system_stats` with `0.38.2` and `cuda:0 NVIDIA GeForce RTX 5060 Ti, 16311 MiB`. Nine packages changed and **`torch` was not touched** (unpinned in ComfyUI's requirements at both versions) — still 2.13.0+cu130, which is the native route's whole point. Went to latest stable rather than the 0.34.0 minimum because 0.34.0 predates the TRELLIS.2 fixes that followed it. StabilityMatrix's `settings.json` was updated to match so its UI does not desync from a git-side update. Step 3 now lists the **eight TRELLIS.2 node classes read off the running instance**, naming `Trellis2TextureStage` and `VaeDecodeTextureTrellis` as the two to omit for the shape-only path — recorded to identify what to drop, explicitly not as a verified topology. Remaining before go-live: fetch the model files, then export the workflow. |
 | 2.2.0 | 2026-10-04 | **The win_amd64 test gate is closed.** The mesh venv was built from ComfyUI's own 3.12.11 interpreter (step 4's `py -3.12` does not work here — no `py` launcher) and verified isolated from ComfyUI's packages. **All six pins resolved to the identical versions on win_amd64/cp312 as on aarch64**, so `requirements-mesh.txt` needs no per-platform split and was not re-pinned. `test_mesh_pipeline.py` passes **10/10** on Windows, the suite's first run off aarch64, and `test_windows_scripts.ps1` was re-run on the real node (**10/10**, PowerShell 5.1) rather than trusted from another machine. Step 4 records the exact commands. Noted as still unexercised: the post-union PyMeshLab retry loop, which only a real TRELLIS.2 mesh can reach. |
 | 2.3.0 | 2026-10-04 | **TRELLIS.2 models fetched and verified (10.2 GB); step 3 now names the real template.** Files went into StabilityMatrix's **shared** model folders rather than the package-local tree, since that is what this install resolves via `extra_model_paths.yaml` and it survives a package reinstall. Each was header-verified as real safetensors after download, and ComfyUI's `/models/<folder>` endpoints confirm it lists all of them. **Both DINOv3 files are present deliberately:** the shipped template's `CLIPVisionLoader` defaults to `dino_v3_L_naf_fp32.safetensors`, which lives in the **Pixal3D** repo and not TRELLIS.2's, and the two files are **not** the same artifact (452 vs 415 tensors) — so the template-expected one was fetched rather than assuming interchangeability. **`Comfy-Org/MoGe` and `pixal3d_int8_convrot` were confirmed unnecessary from the template's own link graph**, not assumed: the MoGe chain feeds only `Pixal3DConditioning`, while `Trellis2Conditioning` takes just a `CLIP_VISION` and an `IMAGE` — which is why this was 10.2 GB instead of 17. Step 3 now names the template (`3d_pixal3d_trellis2_image_to_model`, 66 nodes), warns that it serves both models behind a `PrimitiveBoolean` shipping as `False`, and lists the texture-side nodes to strip and the shape-side chain to keep, with the partial wiring that was actually traced. |
+| 2.4.0 | 2026-10-08 | **The workflow is built, committed and proven to run; and the repair chain is proven not to.** `infra/anvil/workflows/trellis2-mesh-only.api.json` (29 nodes) was derived from ComfyUI's shipped 66-node template rather than hand-written or GUI-exported — branch selected, a file-writing export added, then pruned by reachability — and validated by three real runs on the node. Step 3 is rewritten from a GUI instruction into a record of what exists, including the trap that the template's only `Save3DAdvanced` sits on the **texture** chain, so stripping texture the obvious way yields no file at all; that `PreviewImage#302` is load-bearing despite its name; and the `widgets_values` alignment rules (`control_after_generate`, `LoadImage.upload`, and `COMFY_DYNAMICCOMBO_V3` expanding to `parent.child` inputs). One measured tuning change: `sign_mode.drop_inverted_components=true`, isolated in its own run, which took 24 significant components to 3. **First real measurements, for exit gate 2: 85.3 s / 12,797 MiB and 120.4 s / 15,492 MiB — the latter 95% of the card with 819 MiB spare**, with the raw mesh varying 12.6M→47.2M faces on seed alone, so the fit is real but seed-dependent. New §4a records a reproducible gap: `hermes-mesh-repair.py` fails on all three real meshes at PyMeshLab's `meshing_re_orient_faces_coherently`, which requires manifoldness the generated mesh does not have — it needs a non-manifold repair step first. Flagged prominently that every run used ComfyUI's `example.png` (a flat drawing of a figure plus sky and hill), so the component counts are not a fair test and nothing should be tuned against them. Also corrected: ComfyUI on the node is **0.38.0**, not the 0.38.2 of 2026-10-04 — StabilityMatrix moved it back on 2026-10-05, which is risk 4 of the plan happening within a day of being written. |
