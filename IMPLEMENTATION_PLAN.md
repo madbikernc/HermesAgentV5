@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.27.0
+**Version:** 3.28.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -92,6 +92,10 @@ recency cursor. **S25 is deferred, not planned** — operator go-ahead was given
 stopped before any build, because its keyless premise is measured false: RSS-Bridge's timeline call is
 OAuth-signed and needs a real X account's tokens pasted into vendored PHP. `topics.yaml` is still empty,
 so `hermes-news-digest.py` continues to no-op until it has real topics.
+**S28 is planned, not executed, and optional** — a direct request **2026-10-09**, after evaluating Capital
+One's VulnHunter: add a security-benchmark suite family (OWASP Juice Shop and WebGoat as pinned targets) to
+the existing model-benchmark harness, then use it for a VulnHunter bake-off across the local roster against
+a no-skill baseline. It gates nothing and can be skipped without touching any other stage.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** described in [`firmament-fleet-target-architecture.md`](firmament-fleet-target-architecture.md)
@@ -137,6 +141,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S25 | `hermes-x-reader` — X/Twitter posts into the existing RAG/news-digest pipeline, via self-hosted RSS-Bridge | ⛔ **Deferred 2026-10-08 — its keyless premise is measured false.** Operator go-ahead was given and the stage was then stopped before any build: RSS-Bridge's timeline call needs a real X account's OAuth tokens, pasted into vendored PHP. Nothing was built, nothing installed |
 | S26 | `hermes-feed-reader` — public AI/security RSS feeds into the existing RAG/news-digest pipeline | ✅ Built, deployed and live-verified on `spark` 2026-10-08; **exit gate met 2026-10-09** on a confirmed digest line citing a real CISA advisory — daily timer, 65 offline checks, first run 185 entries / 263 chunks from all 14 feeds, 0 failures; eight live findings; the S22-before-S26 constraint was **not** honored |
 | S27 | `hermes-news-digest` re-spec — six fixed priority-ordered topics, top-20-of-50 per email, daily | ✅ **Done 2026-10-09.** Six per-topic emails sent live (5 of 6 with news, 0 failures), 26 individually-cited highlights stored, schema migrated with the v1 table kept. S27f added a router analysis-screening mode after S22d's working screener blocked the fleet's own analysis prompts at score 1.000 |
+| S28 | **Optional** — security-benchmark suites (OWASP Juice Shop, WebGoat) in the existing harness, then a VulnHunter bake-off across the local roster | 📋 Planned 2026-10-09, optional, not executed — gates nothing; written from this repo, no fleet node was reachable |
 
 ---
 
@@ -3834,6 +3839,159 @@ That is a compatibility fix S27c's own change requires, not new weekly scope.
 
 ---
 
+### S28 — Optional: a general security-benchmark capability, then a VulnHunter bake-off on the local roster
+
+**Planned; not executed. Optional — nothing else in this plan depends on it, and skipping it leaves every
+other stage's exit gate untouched.** No fleet node was reachable from the session that wrote this, the same
+constraint §4.5 records for itself: every node, port and path named below is read from this repo, not
+measured.
+
+**The gap this closes.** Direct request **2026-10-09**, after evaluating Capital One's open-source
+**VulnHunter** (Apache-2.0, first release 2026-07-16) for this fleet. It ships as three Claude Code skills —
+`/vulnhunt` (hunt), `/vulnhunter-fix` (fix), `/vulnhunt-fix-verify` (verify) — plus a headless runtime agent
+and a batch/benchmark harness. Its core scanner runs a four-phase pipeline (recon → parallel hunt →
+adversarial disprove → capability filter) that starts from attacker-reachable entry points and tries to
+disprove its own findings. Its README says it depends on frontier Opus-class reasoning, and its headless
+agent calls the Anthropic API directly. This fleet runs local open-weight models only, so whether the
+approach survives on them is an empirical question that nothing here can currently answer, and no
+upstream precision/recall figures turned up in the public coverage read on 2026-10-09 to lean on instead.
+
+That exposes a second, more general gap. `infra/model-benchmark/` measures general capability (MMLU-Pro,
+GPQA Diamond, IFEval, BFCL, SWE-bench) and nothing in it measures **finding real vulnerabilities in real
+code** — a workload this fleet already assigns to models (`security_review()` in `hermes-dualcoder.py`,
+§4.5's note on the security-review path). So S28 is two steps, in this order: the general capability
+first (S28a), then VulnHunter as its first customer (S28b). Doing it the other way round would produce a
+one-off script and a number no later model change could be compared against.
+
+**Read against the existing harness before specifying anything.** `hermes_benchmark_common.py` already
+owns the pieces S28a needs: `ALL_SUITES` / `DEFAULT_SUITES`, a JSONL history (NAS2 canonical, local
+fallback) read by `load_history()` and compared by `hermes-benchmark-compare.py`, and a precedent for an
+opt-in suite kept out of the defaults (`swebench`, which needs hardware the default path lacks). S28a is
+therefore *new suites in an existing tool*, not a new tool — the same shape S11 found for its own work.
+
+#### S28a — A security-benchmark suite family in the existing harness
+
+1. **Target registry.** One entry per target: name, upstream URL, **pinned commit SHA**, licence recorded
+   at pin time, language, a build/run recipe, and a ground-truth file. Two targets to start, both
+   deliberately vulnerable training applications: **OWASP Juice Shop** (Node/TypeScript) and **OWASP
+   WebGoat** (Java). The registry is the general part — a third target is a new entry, not new code. Pin
+   and fetch once; nothing is pulled from the internet at run time.
+2. **Ground truth.** Reuse the `ground_truth/<repo>.json` shape VulnHunter's own harness ships (its
+   `EXAMPLE.json` already maps to Juice Shop, WebGoat and NodeGoat), so results stay comparable with
+   upstream's tooling. Each target's own challenge/lesson catalogue is the starting source; the exact file
+   locations are confirmed at pin time rather than assumed here. Hand-check a sample of the mapping before
+   trusting any score built on it.
+3. **Static first, dynamic later.** VulnHunter and any similar tool read **source**; scoring a finding
+   needs the source tree, not a running application. S28a ships the static path first. Executing a
+   generated exploit against a *running* instance is a separate, later sub-step (S28a-ii) because it adds a
+   reachable vulnerable service to the fleet — and S10's network-isolation half is still an operator
+   checklist, not done. Run instances only on a node whose isolation has been confirmed at that time:
+   loopback or an internal Docker network, no egress, never reachable from the other nodes. `HomeD13` is the
+   fleet's only x86_64 node and already runs Docker for SWE-bench, which makes it the natural candidate —
+   but whether each target's published images support the node's architecture is verified before choosing,
+   not assumed.
+4. **Direct to each role's own `llama-server` port, not through `hermes-router`.** Same bypass, same
+   reasons as S11's MMLU-Pro finding and BFCL's README §3: a benchmark is not an end user and should not be
+   measuring the screening layer. This matters more here than it did there — vulnerability-hunting and
+   exploit-writing prompts are attack-shaped by construction, and S22d/S27f already showed the working
+   screener blocking the fleet's own analysis prompts at score 1.000. Two consequences to write down now:
+   S28 traffic is **invisible to `hermes-guard-report` by design** (it never produces a verdict), and the
+   direct path must never be reused for real traffic.
+5. **Judge.** Deterministic matching first — vulnerability class plus file or endpoint against the ground
+   truth. An LLM judge only for the residue the matcher cannot place, and **never the model being scored in
+   that cell**. Evaluate whether the existing `nous-judge` skill fits before building another. Spot-check a
+   fixed fraction of verdicts by hand and record the agreement rate; an unchecked judge is a second
+   unmeasured model inside the measurement.
+6. **Metrics, recorded per `(model, target, arm, run)`.** Recall, precision and false-positive rate overall
+   and per vulnerability class; completion rate and malformed-tool-call rate; tokens; wall time; and wake
+   latency for on-demand roles. Repeat each cell N times at a fixed temperature and report the spread, not
+   a single run — MoE checkpoints are not deterministic enough to trust one.
+7. **History.** New suite names (`juiceshop`, `webgoat`) join `ALL_SUITES` and are **excluded from
+   `DEFAULT_SUITES`**, like `swebench`. Entries go through the existing `append_entry()`, so
+   `hermes-benchmark-compare.py` and S20b's role-fit comparison read them with no new plumbing. Mind S20's
+   own finding: a history entry's `date` is a full ISO-8601 timestamp, not a date string — any new reader
+   must not assume the latter.
+8. **Offline checks.** The ground-truth loader, the matcher and the metric arithmetic are pinned against
+   recorded model outputs with no network, no node and no model — the same pattern as
+   `infra/hermes-news-digest/tests/test_relevance_gate.py`. Include a case that fails if a finding is
+   credited to the wrong class.
+
+**S28a exit gate.** One role run end to end against one target, recorded in the history, readable by
+`hermes-benchmark-compare.py`, with the judge's hand-checked agreement rate written down. No pass/fail
+threshold on the *model* — S28a validates the instrument, not a checkpoint.
+
+#### S28b — The VulnHunter bake-off, on the local roster
+
+1. **Port, don't wrap.** The skills are prompt-only (`SKILL.md` plus phase files), so the port is mostly
+   translation: Claude Code's subagent, Glob, Grep and Read calls become the Hermes equivalents. Start with
+   `/vulnhunt` alone — hunt is what the bake-off measures; fix and verify come only if hunt earns it. Pin
+   the upstream commit, keep the Apache-2.0 licence text and attribution with the ported files, and **log
+   every deviation from upstream** — a later reader has to be able to tell whether a bad result is the
+   model's or the port's. Audit the skill text before enabling it: third-party skills are a supply-chain
+   surface for any Hermes install, and this one is written to drive code execution.
+2. **Check what upstream's harness can actually do before reusing it.** Its `harness/` has batch scanning
+   and a benchmark mode whose engines are set in `harness/local_harness/config.py`. Whether that points at a
+   local OpenAI-compatible endpoint is read from that file, not assumed. If it cannot, S28a's runner drives
+   the port instead and only the ground-truth format is shared.
+3. **Contenders** — the routed roles in §4.5 that can plausibly do code analysis: `dispatch`
+   (Qwen3.6-35B-A3B stock), `muse` (the same base, abliterated), `super` (Huihui-GLM-4.7-Flash-abliterated),
+   `coder` (Qwen3.8-27B-abliterated), `coder2` (Muse-Glimmer-30B, stock) and `omni` (gemma-4-26B-A4B-it).
+   `embed`, `rerank` and `guard` are not generators and are out. `dispatch` takes part **as a measurement
+   only**: S11's rule that `dispatch` and `guard` stay stock is unchanged, and nothing here proposes
+   changing any role. `dispatch` against `muse` is the free same-base stock-versus-abliterated pair S11
+   already used; `coder2` is the only non-abliterated model on the security-review path, so its result bears
+   directly on §4.5's cross-review concern.
+4. **Arms.** Each contender runs twice per target: **with the ported skill**, and a **no-skill baseline**
+   (a plain "find the exploitable vulnerabilities in this code" prompt with the same context and output
+   schema). The baseline is what makes the result mean anything — without it a poor score cannot be
+   attributed to the pipeline, the port, or the model. Optional reference arm: the same skill under Claude
+   Opus in Claude Code, as a ceiling; it needs Anthropic's Cyber Verification Program enrolment first
+   (upstream's own warning) and is the operator's call.
+5. **Matrix and pilot.** 6 models × 2 targets × 2 arms × 3 runs is 72 runs — arithmetic, not a cost
+   estimate. Pilot **one** cell first to measure wall time, tokens and context behaviour, then decide
+   whether the full matrix is affordable or should be reduced, and say so in the record if it is. Both
+   targets are large repositories: how much of each fits a given role's context is measured, and
+   chunking by entry point is the fallback, because upstream's pipeline starts there anyway.
+6. **Residency discipline.** Wake on-demand roles through the broker one at a time. `coder` and `coder2`
+   share Forge (§4.5), so they never run together. Keep Watch's load to what already lives there — it sat
+   near 97% memory before `coder` moved off it.
+7. **Pre-register the decision.** Before the first scored run, write into this section's execution record
+   what counts as success: a role is "usable for hunt" only if the skill arm beats **its own** baseline arm
+   by a margin stated up front, at a false-positive rate no worse than a ceiling stated up front. The
+   numbers are the operator's to set; the rule is that they exist before any result does. A null result —
+   no local model clears the bar — is a legitimate outcome and is recorded as one.
+8. **Where results go.** History, via S28a; S20's backlog for role-fit follow-ups; and a written verdict per
+   role. Nothing is promoted by this stage: any promotion still goes through S11's rules.
+9. **Stretch, only if the matrix earns it.** Mixed pairings (hunt on one model, disprove on another) to
+   test whether decorrelating the two reduces false positives; and a mutated copy of each target
+   (renamed identifiers, relocated sinks) as a contamination control — see risk 2.
+
+**S28b exit gate.** The matrix, or an honestly reduced one with the reason stated, is complete; every
+cell's runs are in the history; and each contender has a written verdict against the pre-registered bar.
+
+#### Risks and open questions
+
+1. **Dual-use, and scope.** This is vulnerability-discovery tooling. It is pointed at two deliberately
+   vulnerable training applications and nothing else; generated exploits run only inside S28a-ii's sandbox,
+   and never against anything the operator does not own. The fleet's abliterated models are fine for this —
+   that is the reason they are in the roster — but the scope limit is a property of S28, not of the models.
+2. **Contamination.** Juice Shop and WebGoat are the most heavily written-about vulnerable apps there are,
+   solutions and walkthroughs included, so a model may be recalling answers rather than finding them. Scores
+   on these two targets are an **upper bound**. Findings that name a challenge without pointing at supporting
+   code are the tell; the mutated-copy control in S28b-9 is the real fix.
+3. **Ground truth is coarse.** It is a catalogue of intended challenges, so a model that finds a real,
+   unlisted weakness is scored as a false positive. Hand-review a sample of apparent false positives before
+   trusting the precision figures.
+4. **Port fidelity.** Upstream's quality claims are about Opus in Claude Code. A bad local result may be
+   the port, the model, or both; the no-skill baseline and the deviation log are what separate them, and
+   neither is optional.
+5. **Language and context.** The two targets are different languages and both large; a role that handles
+   one may not handle the other. Report per target, never pooled.
+6. **Not a regression test for the screener.** S28 bypasses it on purpose (S28a-4). Do not read a clean
+   S28 run as evidence about S22's screening, and do not read S22's numbers as covering this traffic.
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -3900,6 +4058,15 @@ That is a compatibility fix S27c's own change requires, not new weekly scope.
   S19 is blocked on nothing in S20–S24.
 - **S23a and S24's bookkeeping rows (5, 9) are independent of everything** — cheap, and they are what a
   reader checks first.
+- **S28 is optional and gates nothing** — no other stage reads its output. Inside it, **S28a before S28b**:
+  the bake-off needs the capability to record into, and a one-off script would leave nothing later model
+  changes could be compared against. **S28a's static path before its dynamic path (S28a-ii)** — source
+  analysis needs no running target, and the dynamic path adds a reachable vulnerable service while S10's
+  network-isolation half is still an operator checklist. The existing model-benchmark harness (S9/S11)
+  **before S28a** is already satisfied.
+- **S28 does not trip the S22-before rules**, and the reason is worth stating rather than assuming: it ingests
+  no live internet text — target source is pinned and fetched once. It does deliberately **bypass** the
+  router's screening (S28a-4), which is exactly why that path must never carry real traffic.
 
 ---
 
@@ -4053,3 +4220,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.25.0 | 2026-10-09 | **S22d was silently blocking the Minecraft bot fleet — 351 calls in six hours — and the operator spotted it before any monitoring did.** Counted from the verdict log, 02:08→08:29: **189 blocks on the bots' own `planNextStep`** prompt ("Goal: ... Wearing: ... Inventory: ...", scoring 0.502–0.990) and **162 on `hermes-minecraft-triage`'s own instruction text** ("You are triaging one incident from a Minecraft bot's live log... in EXACTLY this format", 0.587–1.000). Neither involves a player: the first is bot state plus the goal's own action log, the second is `minecraft-bot-*.service` journald lines. The classifier is not malfunctioning — structurally, "do X in exactly this format" IS the shape of an instruction-override, and the 36-case set that justified the swap contained no system-prompt-shaped text and no game state, so this was never measured. **Two corrections to earlier work in this session.** First, S27f excluded `hermes-minecraft-triage` on the stated grounds that it "screens chat from players, which IS a request path" — that was an assumption, the code reads bot journals, and the assumption cost 162 blocked triage calls; it is now exempted (1.7.0). Second, the bots' `callRole()` is a single shared path carrying **both** bot state and verbatim player chat (`<speaker> message`), so a blanket exemption would have unscreened exactly what Layer 2 exists to catch — the same trap `hermes-media` presented. Instead `services/minecraft-bots/router.js` 1.2.0 takes an **opt-in `analysis` flag**, set at the six bot-generated call sites (narrateAction, planNextStep, goal arbitration, the self-prompt, and two bot-to-bot messages) plus `skills.js`, and deliberately **not** at the three chat sites (`classifyIntent`, the chat reply, the chat verdict). Per `CLAUDE.md`'s rule that every bot behavior fix ships with a test, `unit.test.mjs` gained a check that fails on the old code and asserts the half that is easy to break silently: that screening is the default, that an omitted flag never means "skip Layer 2", and that **every call site carrying `<speaker> message` is unflagged** — scanned out of `index.js` itself, so adding a chat path that opts in breaks the suite. 109 unit checks pass. Verified on a real payload rather than a synthetic one: replaying an actual blocked planning prompt from the log returns `400 request blocked by Layer 2 guard` as the bots sent it before and `200 OK` as they send it now. The standing lesson is recorded plainly — **a screener that starts working breaks everything that was relying on it not to**, and the fleet's own instruction and state text is structurally indistinguishable from an attack. Patch/minor bumps only; no stage status changed. |
 | 3.26.0 | 2026-10-09 | **S22e — a blocked call is no longer a silent event.** The operator caught S22d's 351 blocked fleet calls by reading bot journals, then caught spark-2's un-restarted router the same way; both were detectable from data the fleet was already writing, and nothing was watching it. `hermes-guard-report` now runs 07:45 daily on Watch only, groups the day's blocks by caller, posts to FleetOps and exits 1 when one caller is blocked 5+ times. **Attribution is by prompt template because no generic key length works, and real data proved it twice**: a 48-char opening split the planner into 20 "callers" (every planning prompt opens `Goal: ` then diverges) and a 3-word key still split it into six, while shortening further merges components that must stay apart since most fleet prompts open `You are ...` — and the digest opens `Topic: <varies>`, identifiable only further in. The text carries no signal separating "same template, different tail" from "different template, shared opening", so `KNOWN_CALLERS` names the fleet's templates and **an unrecognised opening keeps its own fingerprint and is counted alone**, so a player's injection or an unregistered component stays visible instead of folded into a named row; tests assert both directions. **Each caller's last-blocked age is printed rather than a still-broken verdict** — the first live run called two already-repaired callers `ONGOING` on blocks 31 minutes old, and a 26h window straddles every fix made during the day; how stale is too stale depends on a caller's own call rate, which the reporter cannot know. Per-node splits too, since "which host still needs restarting" was the day's actual question twice. **Two defects found by running it, not reading it**: the 20-way split, and `--no-notify` returning 0 early — the one invocation a human runs by hand was the one reporting success while three callers were blocked. Verified live: 380 blocks over 26h grouped into 12 callers, all three repeated ones last blocked *before* their own fix shipped (planner 08:39 vs fix 08:40, triage 08:42 vs restart 08:45, digest 03:14 vs 03:26, model-scout 06:41 vs 08:13), posted to FleetOps and exited 1 through systemd. 47 offline checks. **One new finding recorded rather than fixed**: `<Mayor> New objective: ...` blocked 3 times — bot-to-bot directives travel the bots' chat path, which is deliberately screened because it also carries verbatim player text, and narrowing that is a security-boundary change on the strength of three events. Minor bump — a substage executed; no prior guidance reversed. |
 | 3.27.0 | 2026-10-09 | **S27g — starting S21e found the digest losing its highlights every day and unable to see new content at all.** S21e browses S27's stored highlights, so step one was checking they existed: `news_digest_daily` held **0 rows** against S27's recorded 26. Two measured defects. (1) The per-topic `DELETE` ran unconditionally and then inserted nothing when a run found no highlights, so the 07:10 timer erased the 26 rows the 03:26 run had stored — destroying exactly what S27d keeps them for, the highlights past `EMAIL_HIGHLIGHTS` that never made the email; the replace-the-day comment was right about two generations and never considered the empty case. (2) `search()`'s `min_chunk_id` path over-fetched the global nearest `top_k*widen` and trimmed below the cursor in Python; its docstring called that "correct regardless, only possibly fewer than top_k results", and the measurement says otherwise — **57 chunks newer than the cursor out of 97,751 indexed, zero of them in the global nearest 400**, expected hits 0.23 — so "0/6 topics had news" was the filter, not a quiet news day, with that morning's real headlines sitting in the index. **A design error, not a tuning value**: one day's ingest is a fixed small number while the index only grows, so every `k` fails eventually and the digest goes blind as it accumulates history. Replaced with an exact `vec_distance_cosine` scan over the above-cursor window, ordered and limited in SQL — strictly correct and cheaper than the over-fetch; the `corpus` post-filter stays, with a note that a corpus is a large fraction of the index rather than one day of it. Verified live on the same store and cursor: 0 passages per topic → 50, and `daily --dry-run` went from 0/6 topics with news to 3/6 on the real 9-chunk cursor. 37 offline checks, including the pre-fix storage path reproduced so the suite fails if the guard is removed and the ratio arithmetic pinned so the post-filter cannot return; all three search paths regression-checked. S21e's own risk 4 predicted this — "its first real page-load is also its first live test of the schema" — and the schema was fine; what fed it was not. Minor bump — defects fixed and a docstring claim corrected; no stage status changed. |
+| 3.28.0 | 2026-10-09 | **S28 added — optional, planned, not executed.** After evaluating Capital One's VulnHunter (Apache-2.0, released 2026-07-16; three Claude Code skills plus a headless agent and a batch harness, built for Opus-class models), the operator asked for a general security-benchmark capability and a bake-off on the local roster. S28a extends the existing model-benchmark harness rather than adding a tool: a pinned, sandboxed target registry (OWASP Juice Shop, WebGoat), ground truth in VulnHunter's own `ground_truth/<repo>.json` shape, a deterministic-first judge that never scores its own output, new `juiceshop`/`webgoat` suites kept out of `DEFAULT_SUITES` like `swebench`, and the S11 direct-to-`llama-server` bypass — whose consequences (traffic invisible to `hermes-guard-report`, never reusable for real traffic) are written down. Static source analysis ships first; running vulnerable instances waits on S10's still-open network isolation. S28b ports `/vulnhunt` and runs the §4.5 roster (`dispatch`, `muse`, `super`, `coder`, `coder2`, `omni`) with and without the skill, with a decision rule that must be pre-registered before the first scored run and a null result recorded as legitimate. Six risks named, including that these two targets are heavily documented and so scores are an upper bound. §0 row, §5.1 ordering (S28 gates nothing; S28a before S28b; static before dynamic; why S22-before does not apply) and the header status line updated. **Not measured:** no fleet node was reachable, so every node, port and path in S28 is read from this repo. Minor bump — new stage and constraints; no existing stage's status changed. |
