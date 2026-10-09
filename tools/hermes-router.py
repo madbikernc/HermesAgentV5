@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.14.0
+# Version: 2.15.0
+#
+# 2.15.0 (2026-10-09) - S22c: the Layer-2 block message no longer hardcodes
+# "Prompt Guard 2". hermes-guard 2.0.0 serves Layer 2 with a stock LLM, so the name is read
+# from the verdict's own `mode` field (falling back to "classifier" for an older guard).
+# No change to the screening logic, the call site, or the fail-open behaviour.
 #
 # 2.14.0 (2026-10-07) — `coder` moved from spark to spark-2 (fleet-health investigation: spark
 # was chronically at ~97% memory, swapping heavily, and coder -- on-demand but in near-continuous
@@ -648,8 +653,13 @@ class Handler(BaseHTTPRequestHandler):
                 memory_log_guard_verdict(NODE, "L2", "block",
                                           {"label": verdict["label"], "score": verdict["score"],
                                            "text": _truncate(newest["content"], 4000)})
+                # The screener's identity comes from the verdict, not a hardcoded name: as of
+                # hermes-guard 2.0.0 (S22c) Layer 2 is a stock LLM, not Prompt Guard 2, and an
+                # error message naming the wrong component sends whoever reads it to the wrong
+                # place. `mode` is absent on a pre-2.0.0 guard, hence the fallback.
                 self._send_json(400, {"error": {
-                    "message": "request blocked by Layer 2 guard (Prompt Guard 2)",
+                    "message": f"request blocked by Layer 2 guard "
+                               f"(mode={verdict.get('mode', 'classifier')})",
                     "score": verdict["score"]}})
                 return
 

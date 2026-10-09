@@ -1,6 +1,6 @@
 # hermes-guard — recreate checklist
 
-**Version:** 2.0.0
+**Version:** 3.0.0
 
 Layer 2 of screening (HermesAgentV5 S5, `../../HermesAgentV5/IMPLEMENTATION_PLAN.md`) — Meta's
 `Llama-Prompt-Guard-2-22M`, stock weights, permanently (target §12.1: never a candidate for
@@ -60,7 +60,39 @@ curl -s -X POST http://10.129.1.15:8096/classify -H "Authorization: Bearer $T" \
 # {"label": "MALICIOUS", "score": 0.998, "hit": true, ...}
 ```
 
-## What this checkpoint does and does not detect — measured 2026-10-09 (S22a)
+## Layer 2 is a stock LLM as of 2026-10-09 (S22c), not Prompt Guard 2
+
+`GUARD_MODE=llm` (pinned in the unit) screens by asking a stock LLM one narrow yes/no question.
+**Measured through this live service: 18 of 18 attacks caught, 1 false positive, all three bands
+(direct, indirect, paraphrased) at 6 of 6** — against the classifier's 4 of 18 and 0 of 6 indirect.
+Verified end to end through the real router path: an indirect injection the classifier scored 0 on
+now returns `400 request blocked by Layer 2 guard (mode=llm)`, and benign traffic passes.
+
+**The arm is `dispatch`, and that is an interim state, not the intended one.** `omni` was chosen
+deliberately because an independent checkpoint answers the standing objection that screening on the
+model being protected has no independent failure mode — and it scored identically, 18/18. It was
+then **measured non-viable**:
+
+| Arm | 6-way concurrency, 72 calls | failures | p50 | wall |
+|---|---|---|---|---|
+| `omni` (dense 26B on spark-2, shared with the vision path) | 4 ok / 68 failed | **94.4%** | 878 ms | 240 s |
+| `dispatch` (35B-A3B, 3B active, loopback) | **72 ok / 0 failed** | **0%** | 1175 ms | 14.7 s |
+
+Layer 2 **fails open** by design, so a 94% timeout rate means screening silently disappears exactly
+when load is highest — strictly worse than the classifier it replaced, which always answered. The
+independence objection is therefore **unresolved and recorded**, not solved. Fixing it properly
+needs either more parallel slots on `omni` (it competes with `hermes-media.py` for the same
+backend) or a small dedicated screening model.
+
+**Cost of this posture, measured:** sequential end-to-end router latency went from ~150 ms to
+~380-460 ms, and under 6-way concurrency screening alone is ~1.2 s p50. Layer 2 runs on **every**
+request `hermes-router.py` proxies, with no clean-role exemption, so every caller pays it —
+including per-tick bot planning.
+
+**Rollback is one line:** `GUARD_MODE=classifier` in the unit, then restart. That restores
+Prompt-Guard-2-22M exactly, with the 4-of-18 coverage documented below.
+
+## What the replaced classifier does and does not detect — measured 2026-10-09 (S22a)
 
 **Read this before trusting Layer 2.** `Llama-Prompt-Guard-2-22M` is a **jailbreak detector**, and this
 service was deployed into a slot that needs an **indirect-injection detector**. That is a
@@ -119,3 +151,4 @@ retention decision about storing screened user text.
 |---|---|---|
 | 1.0.0 | 2026-08-29 | Initial version — S5: `hermes-guard.py` built, weights downloaded (HF gate had already cleared), deployed on Watch, wired into `hermes-router.py` as Layer 2, verdicts logged to `hermes-memory`. |
 | 2.0.0 | 2026-10-09 | **Major — reverses what this file implied about Layer 2's coverage.** Added the S22a measurement: this checkpoint is a jailbreak detector deployed where an indirect-injection detector was needed, per its own model card, and the composite L1+L2 gate catches 6 of 18 attacks (indirect 1/6, paraphrased 1/6) with zero false positives. Records three things not to do — do not trust a clean verdict as safety, do not retune `THRESHOLD` (no cutoff separates the distributions; best achievable accuracy 0.722), do not upgrade to the 86M (same label set per its card) — and that the `guard-log` verdict log is a catch log that can never contain a false negative, contrary to `memory_log_guard_verdict()`'s own docstring. |
+| 3.0.0 | 2026-10-09 | **Major — Layer 2 is no longer Prompt Guard 2.** S22c swapped it for a stock LLM asked a narrow yes/no question: 18/18 on the case set, all three bands 6/6, verified end to end through the router. Records that `omni`, the chosen independent arm, was measured non-viable (94.4% timeout at 6-way concurrency against `dispatch`'s 0%) and that `dispatch` is therefore an interim arm with the independence objection unresolved; the measured latency cost (~150ms to ~380-460ms sequential, ~1.2s p50 under concurrency, paid on every router request); and that rollback is the one-line `GUARD_MODE=classifier`. |

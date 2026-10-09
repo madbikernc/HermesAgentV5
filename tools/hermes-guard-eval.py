@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
 #
 # hermes-guard-eval — S22a's measurement, made repeatable. Scores the fleet's screening layers
 # against a labelled case set and prints the three numbers S22 needs: each layer alone, the
@@ -194,9 +194,18 @@ def classify(url, token, text):
 
 
 def p_malicious(verdict):
-    """Exact for a two-class softmax: the service returns the argmax class and that class's own
-    probability, so the malicious probability is one or its complement. Recovering it is what
-    makes the threshold sweep possible without touching the model."""
+    """Malicious probability, or None when the service does not produce one.
+
+    Classifier mode returns the argmax class and that class's own probability, so the malicious
+    probability is one or its complement -- exact for a two-class softmax, and what makes the
+    threshold sweep possible without touching the model.
+
+    LLM mode (hermes-guard 2.0.0) returns a CATEGORICAL score: 1.0 for YES, 0.0 for NO. The
+    complement is meaningless there, and applying it reported every benign verdict as P=1.0 on
+    this tool's first run against the swapped service. Hence reading the mode rather than
+    assuming it."""
+    if verdict.get("mode") == "llm":
+        return None
     score = float(verdict["score"])
     return score if verdict["label"] == "MALICIOUS" else 1.0 - score
 
@@ -320,32 +329,47 @@ def main():
             if not args.no_layer2 else c1
         print(f"  {band:<14} n={len(sub)}  L1={c1}  L2={c2}  composite={cc}")
 
+    def pm(row):
+        """p_mal is None whenever the service's score is categorical rather than a probability
+        (hermes-guard 2.0.0's llm mode), so every printer has to tolerate its absence."""
+        v = row.get("p_mal")
+        return "" if v is None else f"p_mal={v:.4f} "
+
     if not args.no_layer2:
         mal = [r for r in rows if r["gold"] == 1]
         ben = [r for r in rows if r["gold"] == 0]
-        print("\nP(malicious), malicious cases: "
-              + " ".join(f"{r['p_mal']:.4f}" for r in sorted(mal, key=lambda x: -x["p_mal"])))
-        print("P(malicious), benign cases:    "
-              + " ".join(f"{r['p_mal']:.4f}" for r in sorted(ben, key=lambda x: -x["p_mal"])))
-        print("\nthreshold sweep (Layer 2 alone) — is the incumbent mis-tuned or mis-specified?")
-        best = (None, -1.0)
-        for t in SWEEP:
-            tp = sum(1 for r in mal if r["p_mal"] >= t)
-            fp = sum(1 for r in ben if r["p_mal"] >= t)
-            acc = (tp + (len(ben) - fp)) / len(rows)
-            print(f"  t={t:<6} TP={tp:>2}/{len(mal)}  FP={fp:>2}/{len(ben)}  acc={acc:.3f}")
-            if acc > best[1]:
-                best = (t, acc)
-        print(f"  best achievable over any swept threshold: acc={best[1]:.3f} at t={best[0]}")
+        if any(r.get("p_mal") is None for r in rows):
+            print("\nthreshold sweep skipped: the service reports mode=llm, whose score is "
+                  "categorical (1.0 YES / 0.0 NO). There is no probability to sweep, and "
+                  "treating one as a probability is what made this tool print P=1.0 for every "
+                  "benign verdict on its first run against the swapped service.")
+        else:
+            print("\nP(malicious), malicious cases: "
+                  + " ".join(f"{r['p_mal']:.4f}" for r in sorted(mal, key=lambda x: -x["p_mal"])))
+            print("P(malicious), benign cases:    "
+                  + " ".join(f"{r['p_mal']:.4f}" for r in sorted(ben, key=lambda x: -x["p_mal"])))
+            print("\nthreshold sweep (Layer 2 alone) — mis-tuned, or mis-specified?")
+            best = (None, -1.0)
+            for thr in SWEEP:
+                tp = sum(1 for r in mal if r["p_mal"] >= thr)
+                fp = sum(1 for r in ben if r["p_mal"] >= thr)
+                acc = (tp + (len(ben) - fp)) / len(rows)
+                print(f"  t={thr:<6} TP={tp:>2}/{len(mal)}  FP={fp:>2}/{len(ben)}  acc={acc:.3f}")
+                if acc > best[1]:
+                    best = (thr, acc)
+            print(f"  best achievable over any swept threshold: acc={best[1]:.3f} at t={best[0]}")
 
         print("\nmalicious cases that pass BOTH layers:")
-        for r in rows:
-            if r["gold"] == 1 and r["l1_tool"] != "block" and not r["l2_hit"]:
-                print(f"  p_mal={r['p_mal']:.4f} l1={r['l1_tool']:<5} {r['text'][:84]!r}")
+        passed = [r for r in rows
+                  if r["gold"] == 1 and r["l1_tool"] != "block" and not r["l2_hit"]]
+        for r in passed:
+            print(f"  {pm(r)}l1={r['l1_tool']:<5} {r['text'][:84]!r}")
+        if not passed:
+            print("  none")
         print("\nbenign cases either layer blocks (false positives):")
         fps = [r for r in rows if r["gold"] == 0 and (r["l1_tool"] == "block" or r["l2_hit"])]
         for r in fps:
-            print(f"  p_mal={r['p_mal']:.4f} l1={r['l1_tool']:<5} {r['text'][:84]!r}")
+            print(f"  {pm(r)}l1={r['l1_tool']:<5} {r['text'][:84]!r}")
         if not fps:
             print("  none")
 
