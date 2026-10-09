@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.0.0
+**Version:** 2.1.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog, which checkpoint backs each role, benchmark results, and the news digest's stored
@@ -64,6 +64,27 @@ its state: `proposed` → benchmark/defer/reject, `deferred` → benchmark/rejec
 override (the only way back), `approved` → nothing, because only the scout's own next run can mark
 a task done. **Reject is permanent** and gets a confirmation prompt — a UX speed bump on a crowded
 table, not a security control.
+
+### Multi-select
+
+With 77 candidates sitting in `proposed`, one decision per page load is not a workflow, so the
+table takes checkboxes and a bulk bar (repeated above and below, because it is 80 rows long):
+select all / none, a live count, and one submit button per verb.
+
+**Multi-select is a rendering convenience and deliberately not a bulk write.** Every selected task
+still goes through the same per-task guard — re-read the task, check it belongs to `model-scout`,
+check the verb is legal from the state it is in *now* — so a selection that mixes states does the
+legal part and reports the rest rather than failing whole or forcing anything through. A row with
+no legal transition (`approved`, or anything while the gate is unavailable) gets **no checkbox at
+all**, so it cannot be swept into an action it was never eligible for.
+
+The outcome comes back as a count per clause (`3 applied · 1 skipped, not legal from its current
+state`). It travels in the URL as **codes and integers only**, every value through `int()`, so a
+hand-edited URL can at worst show a wrong number and never put text on the page.
+
+HTML forms cannot nest, which has one visible consequence: there is now **one** form around the
+whole table instead of three buttons per row, each row lists its legal verbs as text, and the
+copy-command button had to become `type="button"` — inside a form, a `<button>` submits by default.
 
 RAG candidates still have their own UI (`hermes-rag-discovery-portal.py`) and are only linked from
 here, never proxied.
@@ -197,7 +218,24 @@ advisory text derived from model cards — anyone can publish a repo saying anyt
 LLM-written digest highlight lines. Responses also carry
 `Content-Security-Policy: default-src 'none'` and `X-Frame-Options: DENY`.
 
-## 5. Tests
+## 5. Content-Security-Policy, and the handlers it was silently blocking
+
+Responses carry `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-<per response>';
+form-action 'self'; base-uri 'none'; frame-ancestors 'none'`, plus `X-Frame-Options: DENY` and
+`Referrer-Policy: no-referrer`.
+
+**That policy was already there in 1.0.0 and it was quietly breaking the page.** With
+`default-src 'none'` and no `script-src`, inline `onclick`/`oninput`/`onsubmit` attributes are
+blocked outright — so the copy-command button and the benchmark filter box did nothing at all in a
+browser, with no error anywhere a human would look. Found by reading the response headers rather
+than by using the page. Attributes cannot carry a nonce (only elements can), so every handler moved
+into **one** delegated `<script>` block that does carry one, and a test asserts no `on*=` attribute
+ever comes back.
+
+`form-action 'self'` is worth noting separately: it is a second, independent brake on the write
+route, since even with a stolen CSRF token a form on someone else's page cannot target this origin.
+
+## 6. Tests
 
 `tests/test_fleetops_ui.py` — 64 offline checks, no network, no live store, no socket bound. The
 fixtures are the real schemas read off the live stores on 2026-10-09, because the first draft got
@@ -211,7 +249,7 @@ empty, and that no write handler exists.
 python3 infra/hermes-fleetops-ui/tests/test_fleetops_ui.py
 ```
 
-## 6. Known state at first deploy
+## 7. Known state at first deploy
 
 `/highlights` renders an explanatory box rather than a table, because `news_digest_daily` is empty.
 That is **not** a bug in this page: S27g found the digest's own unconditional `DELETE` was wiping
@@ -232,3 +270,4 @@ stay distinguishable. Advisories appear on the next scout run.
 | 1.0.0 | 2026-10-09 | Initial version — S21a-e built and verified live on spark: port 8103 chosen against a live `ss -ltnp` after 8101 turned out to be `hermes-buzz`, the backlog source corrected from the plan's `GET /tasks` to a read-only sqlite read, benchmark `suites`/`value` schema corrected from the plan's assumed `scores` blob, and all five pages fetched returning HTTP 200 with zero section errors. 64 offline checks. |
 | 1.1.0 | 2026-10-09 | Service enabled on spark with its `fleetops-ui` vault item; all five pages verified against the real credential on the tailnet address. Records the one sandbox exception the first real start forced — `usage.db` is WAL, so a read-only connection still needs write access for its `-shm` read mark — and why the two narrower grants are not available (systemd rejects a single file in `ReadWritePaths`; SQLite unlinks `-shm` when the last writer closes, so the sidecars cannot be bind-mounted). States what the grant does not confer: the approvals live in `memory.db` under `/mnt`, which stays read-only. |
 | 2.0.0 | 2026-10-09 | **Major — reverses this file's own "no decide buttons" position, on the operator's decision that the Matrix channel is only *perceived* to be more secure, and adds TLS.** The backlog now has approve/defer/reject/un-reject buttons that write the same transition through the same code as the Matrix reply, by importing `hermes-model-scout-gate.py` rather than restating its state machine — failing closed if that import fails. Records the three non-perceptual things that were handled instead of argued about: CSRF (a browser replays Basic Auth cross-origin; Matrix has no equivalent), TLS via `tailscale serve` with a real Let's Encrypt cert, and attribution — `Tailscale-User-Login` now names a person in the audit record, closing the one genuine edge the Matrix route had, while never being used for authentication. States plainly that the service now holds write credentials it did not before. Port 443 was asked for and refused: tailscaled serves the Matrix homeserver there. |
+| 2.1.0 | 2026-10-09 | Multi-select on the backlog, on operator request: checkboxes, a bulk bar above and below, select all/none and a live count — a rendering convenience only, since every selected task still goes through the same per-task guard and a row with no legal transition gets no checkbox. Outcomes return as a count per clause, carried in the URL as codes and integers so nothing from a URL is rendered as text. **Also fixes a defect the CSP had been hiding since 1.0.0**: `default-src 'none'` with no `script-src` blocks inline event handlers, so the copy-command button and the benchmark filter never worked in a browser; all handlers moved into one nonced, delegated script block, with `form-action 'self'` added as a second brake on the write route. 167 offline checks. |

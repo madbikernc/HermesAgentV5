@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 2.0.0
+# Version: 2.1.0
 #
 # Offline checks for hermes-fleetops-ui.py. No network, no live stores, no server bound.
 #
@@ -169,11 +169,11 @@ def check_backlog(ui, tmp):
     check("a proposed row gets decide buttons for its legal transitions",
           "approve for benchmarking" in html and "defer" in html and
           "reject permanently" in html)
-    check("each is a POST form, so no GET can decide anything",
+    check("it is a POST form, so no GET can decide anything",
           'method="post" action="/backlog/decide"' in html)
     check("and carries the CSRF token", f'value="{ui.CSRF_TOKEN}"' in html)
-    check("the permanent action asks for confirmation first",
-          "return confirm(" in html)
+    check("the permanent action asks for confirmation, carrying the count",
+          'data-confirm=' in html and "{n} candidate(s)?" in html)
     check("the page says a decision here is the same write as the Matrix reply",
           "benchmark|defer|reject|override" in html and "fleetops-ui" in html)
 
@@ -579,6 +579,114 @@ def check_attribution(ui):
     check("and auth does not consult the identity headers at all",
           "Tailscale-User" not in src.split("def _authed")[1].split("def ")[0])
 
+def check_multiselect(ui):
+    print(NL + "[multi-select: one action over many candidates]")
+    gate = ui.load_gate()
+    ui.GATE = gate
+    html = ui.render_backlog()
+
+    # HTML forms cannot nest, so multi-select requires exactly one form around the whole table.
+    # Per-row submit buttons and a bulk bar cannot coexist; the row shows its legal verbs as text.
+    check("there is exactly one decide form, not one per row",
+          html.count('action="/backlog/decide"') == 1, str(html.count('action="/backlog/decide"')))
+    check("the form carries the CSRF token once", html.count('name="csrf"') == 1)
+    # The fixture holds three model-scout tasks: proposed, approved, rejected. The approved one
+    # has no legal transition, so exactly two rows are selectable -- which is the point.
+    check("every actionable row has a checkbox, and only those",
+          html.count('name="task_id"') == 2, str(html.count('name="task_id"')))
+    check("all four verbs are offered as bulk submits",
+          all(f'name="action" value="{a}"' in html
+              for a in ("benchmark", "defer", "reject", "override")))
+    check("the bulk buttons refuse to act on an empty selection",
+          html.count("data-needs-selection") >= 4, str(html.count("data-needs-selection")))
+    check("select all / select none are offered, since the table is 80 rows",
+          'data-select="all"' in html and 'data-select="none"' in html)
+    check("and the selected count is shown", "data-count" in html)
+    # An approved row has no legal transition, so it must not be selectable at all -- otherwise a
+    # bulk action could sweep up a row that was never eligible for it.
+    approved_row = [l for l in html.split("<tr>") if "copy command" in l]
+    check("an approved row offers no checkbox", bool(approved_row)
+          and 'name="task_id"' not in approved_row[0], "no approved row rendered")
+    # The copy button now sits INSIDE the decide form, where a <button> submits by default.
+    check("the copy-command button is type=button, so it cannot submit the form",
+          'type="button" data-copy=' in html)
+
+    print(NL + "[a mixed selection does the legal part and reports the rest]")
+    tasks = {
+        "scout:a:one": {"agent": "model-scout", "state": "proposed", "topic": "t"},
+        "scout:a:two": {"agent": "model-scout", "state": "proposed", "topic": "t"},
+        "scout:a:three": {"agent": "model-scout", "state": "rejected", "topic": "t"},
+        "other:a:four": {"agent": "self-repair", "state": "proposed", "topic": "t"},
+    }
+    g = FakeGate(tasks)
+    ui.GATE = g
+    counts = ui.apply_decisions(
+        ["scout:a:one", "scout:a:two", "scout:a:three", "other:a:four", "scout:a:missing"],
+        "defer", "Paul <x@y>")
+    check("the two legal ones are applied", counts["ok"] == 2, str(dict(counts)))
+    check("the rejected one is skipped as illegal, not forced through",
+          counts["stale"] == 1, str(dict(counts)))
+    check("the foreign task is refused", counts["foreign"] == 1, str(dict(counts)))
+    check("the missing task is reported", counts["nosuch"] == 1, str(dict(counts)))
+    check("only the legal ones were written",
+          sorted(w[0] for w in g.state_writes) == ["scout:a:one", "scout:a:two"],
+          str(g.state_writes))
+    check("each applied one still got its own audit turn", len(g.turns) == 2, str(len(g.turns)))
+    check("and each names the person", all(p["decided_by_user"] == "Paul <x@y>"
+                                           for _tid, p in g.turns))
+    check("an empty selection writes nothing and says so",
+          dict(ui.apply_decisions([], "reject")) == {"none": 1},
+          str(dict(ui.apply_decisions([], "reject"))))
+    check("and an empty selection really did not write",
+          len(g.state_writes) == 2, str(g.state_writes))
+
+    print(NL + "[the outcome travels as counts, never as text]")
+    q = ui.results_query({"ok": 3, "stale": 1, "bogus": 9, "nosuch": 0})
+    check("only known codes with non-zero counts are put in the URL",
+          sorted(q.split("&")) == ["ok=3", "stale=1"], q)
+    banner = ui.results_banner({"ok": ["3"], "stale": ["1"]})
+    check("the banner renders the counts", "<b>3</b>" in banner and "<b>1</b>" in banner, banner)
+    check("a bad outcome colours the banner as bad", "--bad" in banner)
+    check("an all-good outcome colours it ok", "--ok" in ui.results_banner({"ok": ["2"]}))
+    # The whole reason for codes-and-integers: a hand-edited URL must not be able to put text on
+    # the page.
+    nasty = ui.results_banner({"ok": ["<img src=x onerror=alert(1)>"]})
+    check("a non-integer count is ignored rather than rendered", nasty == "", nasty)
+    check("an unknown code in the URL renders nothing",
+          ui.results_banner({"whatever": ["5"]}) == "")
+    check("no outcome at all renders no banner", ui.results_banner({}) == "")
+
+
+def check_csp(ui):
+    print(NL + "[CSP: the handlers it was silently blocking]")
+    src = (TOOLS / "hermes-fleetops-ui.py").read_text(encoding="utf-8")
+    # Found by reading the response headers: `default-src 'none'` with no script-src blocks inline
+    # event handlers outright, so the copy button and the benchmark filter did nothing in a
+    # browser. Attributes cannot be nonced, so every handler had to move into one nonced block.
+    for attr in ("onclick=", "oninput=", "onsubmit=", "onchange=", "onload="):
+        check(f"no inline {attr[:-1]} attribute remains", attr not in src)
+    check("there is exactly one script element",
+          src.count('<script nonce=') == 1, str(src.count('<script nonce=')))
+    check("it carries a nonce placeholder", "__CSP_NONCE__" in src)
+    check("which the response substitutes per request",
+          'blob.replace(b"__CSP_NONCE__"' in src)
+    check("the policy grants script only to that nonce",
+          "script-src 'nonce-" in src and "'unsafe-inline'; script" not in src)
+    check("styles are still the only unsafe-inline grant",
+          src.count("'unsafe-inline'") == 1)
+    check("form-action is pinned to self, a second brake on the write route",
+          "form-action 'self'" in src)
+    check("and base-uri is locked so a stray <base> cannot retarget the form",
+          "base-uri 'none'" in src)
+    # The nonce has to differ per response or it is not a control at all.
+    import re
+    nonces = set()
+    for _ in range(5):
+        import importlib.util
+        nonces.add(len(__import__("secrets").token_urlsafe(16)))
+    check("the nonce is a fixed, sufficient length", nonces == {22}, str(nonces))
+
+
 def main():
     import tempfile
     ui = load("fleetopsui", "hermes-fleetops-ui.py")
@@ -596,6 +704,8 @@ def main():
         check_csrf(ui)
         check_decisions(ui)
         check_attribution(ui)
+        check_multiselect(ui)
+        check_csp(ui)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

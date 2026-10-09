@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 2.0.0
+# Version: 2.1.0
 #
 # hermes-fleetops-ui — one browser page for the fleet's human-facing surfaces (S21).
 #
@@ -158,21 +158,52 @@ ACTION_LABELS = {
     "override": ("un-reject", True),
 }
 
-# Fixed outcome messages, keyed by code. The decide route redirects back with a code rather than a
-# message, so nothing an attacker puts in a URL is ever rendered as text on the page.
+# Fixed outcome clauses, keyed by code. A decide redirects back carrying only these codes and
+# integer counts, never a message, so nothing an attacker puts in a URL is rendered as text.
+# Each clause is written to follow a number, because one submission can now produce several
+# outcomes at once -- "3 applied · 1 skipped, not legal from its current state".
 RESULTS = {
-    "ok": ("ok", "Done — the transition was written and announced in FleetOps."),
-    "stale": ("bad", "Nothing changed: that candidate is no longer in a state where this action "
-                     "is legal. Someone else may have decided it first — this page was stale."),
-    "nosuch": ("bad", "Nothing changed: hermes-memory has no such task."),
-    "foreign": ("bad", "Refused: that task does not belong to the model-scout agent."),
-    "badaction": ("bad", "Refused: unknown action."),
-    "writefail": ("bad", "Nothing changed: hermes-memory rejected the state write."),
-    "nogate": ("bad", "Refused: the scout gate module could not be loaded, so this service will "
-                      "not guess at the transition rules."),
-    "csrf": ("bad", "Refused: that request did not come from a page this service served. "
-                    "Reload and try again."),
+    "ok": ("ok", "applied and announced in FleetOps"),
+    "stale": ("bad", "skipped, not legal from its current state — someone may have decided it "
+                     "first, or this page was stale"),
+    "nosuch": ("bad", "skipped, no such task in hermes-memory"),
+    "foreign": ("bad", "refused, not a model-scout task"),
+    "badaction": ("bad", "refused, unknown action"),
+    "writefail": ("bad", "failed, hermes-memory rejected the state write"),
+    "nogate": ("bad", "refused, the scout gate module could not be loaded — this service will not "
+                      "guess at the transition rules"),
+    "csrf": ("bad", "refused, the request did not come from a page this service served — reload "
+                    "and try again"),
+    "none": ("bad", "candidates were selected, so nothing was submitted"),
 }
+
+
+def results_query(counts):
+    """The redirect's query string: codes and integers only."""
+    return "&".join(f"{code}={int(n)}" for code, n in counts.items() if code in RESULTS and n)
+
+
+def results_banner(query):
+    """Renders the outcome from the URL as a count per clause. Every value goes through int(), so
+    a hand-edited URL can at worst show a wrong number -- never injected text."""
+    parts, worst = [], "ok"
+    for code, (kind, clause) in RESULTS.items():
+        raw = (query.get(code) or ["0"])[0]
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if n <= 0:
+            continue
+        parts.append(f"<b>{n}</b> {esc(clause)}")
+        if kind == "bad":
+            worst = "bad"
+    if not parts:
+        return ""
+    style = ("border-left:4px solid var(--ok);background:#16241a" if worst == "ok"
+             else "border-left:4px solid var(--bad);background:#2a1a1a")
+    return (f'<p style="{style};padding:10px 14px;border-radius:3px;margin:0 0 14px">'
+            f'{" · ".join(parts)}</p>')
 
 # Hard caps on what any one page renders. Baked in from the start rather than discovered later
 # against a table that has grown too large to page through — the RAG portal needed exactly this
@@ -242,6 +273,58 @@ def esc(x):
     return html.escape("" if x is None else str(x), quote=True)
 
 
+# Every interactive behaviour on these pages lives here, in ONE delegated block, for a reason
+# found by reading the response headers: this service sends `default-src 'none'` with no
+# `script-src`, so inline `onclick`/`oninput`/`onsubmit` attributes were silently blocked and the
+# copy-command button and the benchmark filter box simply did not work in a browser. Attributes
+# cannot be nonced -- only elements can -- so the handlers move here and the block carries a
+# per-response nonce. No external script is loaded, and nothing here is built from page data.
+PAGE_SCRIPT = """
+function selected() {
+  return document.querySelectorAll('input[name="task_id"]:checked').length;
+}
+function refresh() {
+  var n = selected();
+  document.querySelectorAll('[data-count]').forEach(function (el) { el.textContent = n; });
+  document.querySelectorAll('[data-needs-selection]').forEach(function (b) { b.disabled = !n; });
+}
+document.addEventListener('click', function (e) {
+  var copy = e.target.closest('[data-copy]');
+  if (copy) {
+    navigator.clipboard.writeText(copy.dataset.copy);
+    var was = copy.textContent; copy.textContent = 'copied';
+    setTimeout(function () { copy.textContent = was; }, 1200);
+    return;
+  }
+  var all = e.target.closest('[data-select]');
+  if (all) {
+    var on = all.dataset.select === 'all';
+    document.querySelectorAll('input[name="task_id"]').forEach(function (b) { b.checked = on; });
+    refresh();
+    return;
+  }
+  var act = e.target.closest('button[data-confirm]');
+  if (act) {
+    var n = selected();
+    if (!n) { e.preventDefault(); return; }
+    if (!window.confirm(act.dataset.confirm.replace('{n}', n))) { e.preventDefault(); }
+  }
+});
+document.addEventListener('change', function (e) {
+  if (e.target.name === 'task_id') { refresh(); }
+});
+document.addEventListener('input', function (e) {
+  var box = e.target.closest('[data-filter]');
+  if (!box) { return; }
+  var v = box.value.toLowerCase();
+  document.querySelectorAll(box.dataset.filter + ' tbody tr').forEach(function (r) {
+    r.style.display = r.textContent.toLowerCase().indexOf(v) < 0 ? 'none' : '';
+  });
+});
+refresh();
+"""
+
+
 def shell(title, body, subtitle=""):
     nav = "".join(f'<a href="{p}">{n}</a>' for p, n in NAV)
     return (f"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -250,9 +333,10 @@ def shell(title, body, subtitle=""):
             f"<header><h1>hermes-fleetops</h1><nav>{nav}</nav>"
             f"<span style=\"color:var(--dim);margin-left:auto\">{esc(subtitle)}</span></header>"
             f"<main>{body}</main>"
-            f"<footer>Read-only. Starting, stopping and approving stay operator actions over SSH "
-            f"and Matrix — this page deliberately has no write routes. "
+            f"<footer>Reports are read-only. The backlog's decide buttons are this page's only "
+            f"write route; starting and stopping services stays an SSH + systemctl action. "
             f"Rendered {esc(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}.</footer>"
+            f'<script nonce="__CSP_NONCE__">{PAGE_SCRIPT}</script>'
             f"</body></html>").encode()
 
 
@@ -480,6 +564,23 @@ def apply_decision(task_id, action, who=""):
     return "ok"
 
 
+def apply_decisions(task_ids, action, who=""):
+    """One action over any number of candidates, each guarded on its own.
+
+    Multi-select is a convenience on the rendering side only -- it deliberately does NOT become a
+    bulk write. Every task still goes through `apply_decision`, which re-reads that task, checks
+    it belongs to model-scout and checks the action is legal from the state it is in *now*. So a
+    selection that mixes states does the legal part and reports the rest, rather than failing
+    whole or forcing anything through."""
+    counts = Counter()
+    if not task_ids:
+        counts["none"] += 1
+        return counts
+    for task_id in task_ids:
+        counts[apply_decision(task_id, action, who)] += 1
+    return counts
+
+
 def split_task_id(task_id):
     """`scout:<role>:<model id with / written __>` — the encoding hermes-model-scout.py's
     `task_id_for()` applies. Decoded here rather than displayed raw, since the point of the page
@@ -510,23 +611,17 @@ def render_backlog():
             advisory = esc(advisory)
         fit = esc(d.get("fit") or "")
 
+        legal = legal_actions(state)
+        # One checkbox per actionable row. A row with no legal transition (`approved`, or anything
+        # while the gate is unavailable) gets no checkbox at all, so it cannot be swept up by a
+        # bulk action it was never eligible for.
+        pick = (f'<input type="checkbox" name="task_id" value="{esc(t["id"])}" '
+                f'aria-label="select {esc(model_id)}">' if legal and GATE
+                else '<span class="empty">—</span>')
         actions = []
-        for act in legal_actions(state):
-            label, confirm = ACTION_LABELS.get(act, (act, True))
-            guard = ""
-            if confirm:
-                # A UX guard, not a security control -- the security control is the CSRF token and
-                # the server-side re-check. `reject` is permanent per the gate's own docs, so a
-                # misclick on a crowded table deserves one speed bump.
-                guard = (f' onsubmit="return confirm(\'{esc(label)}: {esc(model_id)}'
-                         f'\\n\\nThis is written to hermes-memory and announced in FleetOps.\')"')
-            actions.append(
-                f'<form method="post" action="/backlog/decide" style="display:inline"{guard}>'
-                f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
-                f'<input type="hidden" name="task_id" value="{esc(t["id"])}">'
-                f'<input type="hidden" name="action" value="{esc(act)}">'
-                f'<button type="submit" title="{esc(act)} {esc(t["id"])}">{esc(label)}</button>'
-                f'</form>')
+        if legal:
+            actions.append('<span class="mono" style="color:var(--dim)">' +
+                           " · ".join(esc(a) for a in legal) + "</span>")
         if state == "approved":
             # The command the GATE generates, not one composed here. 1.0.0 invented
             # `hermes-benchmark-run.py --model-id ... --role ...`, which does not exist: the real
@@ -537,13 +632,16 @@ def render_backlog():
             if label:
                 cmd = (f"bash tools/hermes-benchmark-model.sh --candidate /path/to/model.gguf "
                        f"--model-id {label}")
+                # type="button" matters: this now sits inside the decide form, and a <button>
+                # inside a form submits it by default.
                 actions.append(
-                    f'<button onclick="navigator.clipboard.writeText(this.dataset.cmd)" '
-                    f'data-cmd="{esc(cmd)}" title="{esc(cmd)}">copy command</button>')
+                    f'<button type="button" data-copy="{esc(cmd)}" title="{esc(cmd)}">'
+                    f'copy command</button>')
             else:
                 actions.append('<span class="empty">no benchmark label on file</span>')
         copy_cell = " ".join(actions)
         rows.append([
+            pick,
             f'<span class="pill s-{esc(state)}">{esc(state)}</span>',
             esc(role),
             f'<span class="mono">{esc(model_id)}</span>',
@@ -565,20 +663,42 @@ def render_backlog():
                 f'<b>Decide buttons are unavailable:</b> the scout gate module could not be '
                 f'imported, and this page will not guess at the transition rules. '
                 f'<span class="mono">{esc(GATE_IMPORT_ERROR)}</span>')
-    return (f'<p class="note">{note}</p>' +
-            table(["state", "role", "candidate", "category", "fit", "advisory", "updated",
-                   "decide"], rows))
+    body = f'<p class="note">{note}</p>' + table(
+        ["", "state", "role", "candidate", "category", "fit", "advisory", "updated", "legal"],
+        rows)
+    if not GATE:
+        return body
+    # ONE form around the whole table, because HTML forms cannot nest: that is what makes
+    # multi-select possible, and it is why the copy-command button had to become type="button".
+    bar = bulk_bar()
+    return (f'<form method="post" action="/backlog/decide" data-decide>'
+            f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
+            f'{bar}{body}{bar}</form>')
+
+
+def bulk_bar():
+    """The select/act controls, rendered above and below the table since it is 80 rows long."""
+    buttons = []
+    for act in ("benchmark", "defer", "reject", "override"):
+        label, confirm = ACTION_LABELS.get(act, (act, True))
+        attrs = 'data-needs-selection'
+        if confirm:
+            # A UX speed bump, not a security control -- the controls are the CSRF token and the
+            # per-task server-side re-check. `reject` is permanent per the gate's own docs, and
+            # one click can now carry 77 candidates, so it says how many.
+            attrs += (f' data-confirm="{esc(label)} {{n}} candidate(s)?\n\nWritten to '
+                      f'hermes-memory and announced in FleetOps."')
+        buttons.append(f'<button type="submit" name="action" value="{esc(act)}" {attrs}>'
+                       f'{esc(label)} selected</button>')
+    return ('<p style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0">'
+            '<button type="button" data-select="all">select all</button>'
+            '<button type="button" data-select="none">select none</button>'
+            '<span class="note" style="margin:0"><b data-count>0</b> selected</span>'
+            '<span style="flex:1"></span>' + "".join(buttons) + '</p>')
 
 
 def page_backlog(query=None):
-    body = ""
-    code = ((query or {}).get("result") or [""])[0]
-    if code in RESULTS:
-        kind, text = RESULTS[code]
-        style = ("border-left:4px solid var(--ok);background:#16241a" if kind == "ok"
-                 else "border-left:4px solid var(--bad);background:#2a1a1a")
-        body += (f'<p style="{style};padding:10px 14px;border-radius:3px;margin:0 0 14px">'
-                 f'{esc(text)}</p>')
+    body = results_banner(query or {})
     body += section("Model benchmark backlog", "", render_backlog)
     return shell("Benchmark backlog", body)
 
@@ -781,10 +901,10 @@ def render_history_all():
         ])
     cap = ("" if len(entries) <= MAX_HISTORY_ROWS else
            f' Showing the newest {MAX_HISTORY_ROWS} of {len(entries)}.')
-    search = ('<p><input type="search" id="q" placeholder="filter rows…" '
-              'oninput="var v=this.value.toLowerCase();'
-              'document.querySelectorAll(\'#all tbody tr\').forEach(function(r){'
-              'r.style.display=r.textContent.toLowerCase().indexOf(v)<0?\'none\':\'\';});">'
+    # data-filter rather than an inline oninput: see PAGE_SCRIPT's own note -- with
+    # `default-src 'none'` and no script-src the inline version was blocked outright,
+    # so this box did nothing at all in a browser.
+    search = ('<p><input type="search" placeholder="filter rows…" data-filter="#all">'
               f'<span class="note">{len(shown)} row(s).{cap}</span></p>')
     return search + '<div id="all">' + table(
         ["when", "model", "role", "suite results", "notes"], rows) + "</div>"
@@ -908,11 +1028,24 @@ class Handler(BaseHTTPRequestHandler):
         log(f"{self.address_string()} {fmt % args}")
 
     def _send(self, code, blob, content_type="text/html; charset=utf-8"):
+        # A fresh nonce per response, substituted into the one <script> element the shell emits.
+        # Attributes cannot be nonced, which is why no inline handler exists any more: with
+        # `default-src 'none'` and no script-src they were being blocked outright, so the copy
+        # button and the benchmark filter did nothing at all in a browser.
+        nonce = secrets.token_urlsafe(16)
+        blob = blob.replace(b"__CSP_NONCE__", nonce.encode())
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(blob)))
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            f"script-src 'nonce-{nonce}'; "
+            # form-action is a second, independent brake on the write route: even with a stolen
+            # token, a form on someone else's page cannot target this origin.
+            "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(blob)
 
@@ -973,12 +1106,13 @@ class Handler(BaseHTTPRequestHandler):
         if not csrf_ok(self.headers, (form.get("csrf") or [""])[0]):
             log(f"decide refused: CSRF check failed from {self.address_string()} "
                 f"(Sec-Fetch-Site={self.headers.get('Sec-Fetch-Site')!r})")
-            self._redirect("/backlog?result=csrf")
+            self._redirect("/backlog?csrf=1")
             return
-        task_id = (form.get("task_id") or [""])[0]
+        # Several task_id fields, one action -- multi-select posts the same shape as a single row.
+        task_ids = [i for i in (form.get("task_id") or []) if i]
         action = (form.get("action") or [""])[0]
-        code = apply_decision(task_id, action, tailnet_identity(self.headers))
-        self._redirect(f"/backlog?result={code}")
+        counts = apply_decisions(task_ids, action, tailnet_identity(self.headers))
+        self._redirect("/backlog?" + (results_query(counts) or "none=1"))
 
     def _redirect(self, location):
         """POST -> redirect -> GET, so a decision is never replayed by a refresh or a back button.
