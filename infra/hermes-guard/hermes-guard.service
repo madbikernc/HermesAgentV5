@@ -18,20 +18,26 @@ User=pmoney
 Group=pmoney
 Environment="GUARD_BIND=10.129.1.15"
 Environment="GUARD_PORT=8096"
-# S22c: Layer 2 is a stock LLM asked a narrow yes/no question, not Prompt-Guard-2-22M,
-# which caught 4 of 18 injections and 0 of 6 indirect ones. Pinned here rather than left to
-# the code default so the deployed intent is visible in systemd and ROLLING BACK IS THIS
-# ONE LINE: set GUARD_MODE=classifier and restart. See infra/hermes-guard/README.md.
-Environment="GUARD_MODE=llm"
-# MUST be a backend, never hermes-router (port 8080): the router screens every request it
-# proxies through this service, so a router URL here would screen its own screening calls
-# recursively. hermes-guard.py refuses to start if this looks like the router.
+# S22d: Layer 2 is a small DEDICATED prompt-injection classifier -- proventra/mdeberta-v3-base-
+# prompt-injection (279M, MIT), measured 17/18 with 6/6 on indirect injections where
+# Prompt-Guard-2-22M scored 4/18 and 0/6. Composite with Layer 1 is 18/18 after the role_tag_text
+# fix in hermes_injection_guard 1.5.0.
 #
-# `omni` was the chosen arm (independent checkpoint, 18/18 accuracy) and was MEASURED NON-VIABLE
-# on 2026-10-09: it is a dense 26B already serving the vision path, and at 6-way concurrency
-# 94.4% of screening calls timed out, which fails Layer 2 OPEN exactly when load is highest.
-# `dispatch` is the interim arm -- 35B-A3B (3B active) on loopback, the control-plane model
-# already sized for many small calls. It scores the same 18/18 and loses only independence.
+# Chosen over the stock-LLM arms (S22b/S22c) because it is the only option that is BOTH independent
+# of the model being protected AND free of contention: it runs on CPU in this service's own
+# process, so it cannot queue behind a vision job the way `omni` did (94.4% timeouts at 6-way
+# concurrency) and does not double the load on `dispatch`.
+#
+# ROLLBACK, in order of preference:
+#   1. GUARD_MODE=llm with GUARD_LLM_URL=http://127.0.0.1:8097 / GUARD_LLM_ROLE=dispatch
+#      (18/18, but ~1.2s p50 under concurrency and no independence)
+#   2. GUARD_MODEL_DIR=/mnt/hermes-data/models/prompt-guard-2-22m (the original, 4/18)
+Environment="GUARD_MODE=classifier"
+Environment="GUARD_MODEL_DIR=/mnt/hermes-data/models/mdeberta-prompt-injection"
+# Retained for rollback option 1; ignored while GUARD_MODE=classifier. MUST stay a backend, never
+# hermes-router (port 8080) -- the router screens every request it proxies through this service, so
+# a router URL would screen its own screening calls forever. hermes-guard.py refuses to start if
+# GUARD_LLM_URL looks like the router.
 Environment="GUARD_LLM_URL=http://127.0.0.1:8097"
 Environment="GUARD_LLM_ROLE=dispatch"
 ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-guard-wrapper.sh

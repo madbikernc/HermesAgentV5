@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-# Version: 2.0.0
+# Version: 2.2.0
 #
 # hermes-guard — Layer 2 of the two-layer screening design (HermesAgentV5/IMPLEMENTATION_PLAN.md
 # S5; target architecture §8, §12.1).
+#
+# 2.1.0 (2026-10-09) — S22d: classifier mode resolves the injection class from the model's OWN
+# id2label instead of assuming index 1, and reports `p_malicious` explicitly. Prompted by adopting
+# a dedicated screening checkpoint: the old code hardcoded "index 1 == MALICIOUS", which is right
+# for Prompt-Guard-2 and for the new model but is exactly the assumption that, if ever wrong,
+# produces a screener that confidently inverts every verdict while looking healthy. A survey of
+# four candidates found one (fmops/distilbert-prompt-injection) shipping generic LABEL_0/LABEL_1
+# with no way to tell orientation from the config at all — so this is now read, not assumed, and
+# an unnamed label set is a loud warning rather than a silent guess.
 #
 # 2.0.0 (2026-10-09) — S22c: **Layer 2 is now a stock LLM asked a narrow yes/no question, not
 # Prompt-Guard-2-22M.** The classifier it replaces is retained behind GUARD_MODE=classifier for
@@ -67,14 +76,19 @@
 # Config, all from the environment (injected by hermes-guard-wrapper.sh, which fetches
 # GUARD_TOKEN from Vaultwarden and execs this — secrets never touch disk):
 #   GUARD_TOKEN      required — bearer token callers must present
-#   GUARD_MODE       default llm — "llm" or "classifier" (the retained Prompt-Guard-2 path)
-#   GUARD_LLM_URL    default http://10.129.1.17:8091 — `omni`'s own llama-server. A BACKEND, never
-#                    the router; see the recursion note above.
-#   GUARD_LLM_ROLE   default omni — sent as `model`; informational for a single-model backend
+#   GUARD_MODE       default classifier — "llm" or "classifier" (a local sequence-classification model)
+#   GUARD_LLM_URL    default http://127.0.0.1:8097 — `dispatch`'s own llama-server. A BACKEND,
+#                    never the router; see the recursion note above. NOT `omni`: it was measured
+#                    non-viable (94.4% timeouts at 6-way concurrency), so it must not be a default.
+#   GUARD_LLM_ROLE   default dispatch — sent as `model`; informational for a single-model backend
 #   GUARD_LLM_TIMEOUT default 20 (seconds)
 #   GUARD_LLM_MAX_TOKENS default 8 — the answer is one word
 #   GUARD_SLOW_MS    default 1500 — log any screening call slower than this
-#   GUARD_MODEL_DIR  default /mnt/hermes-data/models/prompt-guard-2-22m (classifier mode only)
+#   GUARD_MODEL_DIR  classifier mode only. Default
+#                    /mnt/hermes-data/models/mdeberta-prompt-injection — proventra/mdeberta-v3-
+#                    base-prompt-injection (279M, MIT), which measured 17/18 with 6/6 on indirect
+#                    injections against Prompt-Guard-2-22M's 4/18 and 0/6. Point it at
+#                    /mnt/hermes-data/models/prompt-guard-2-22m to get the old classifier back.
 #   GUARD_BIND       default 0.0.0.0
 #   GUARD_PORT       default 8096
 #   GUARD_THRESHOLD  default 0.5 — classifier mode only; vestigial in llm mode
@@ -92,12 +106,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 BIND = os.environ.get("GUARD_BIND", "0.0.0.0")
 PORT = int(os.environ.get("GUARD_PORT", "8096"))
 TOKEN = os.environ.get("GUARD_TOKEN", "")
-MODE = os.environ.get("GUARD_MODE", "llm").strip().lower()
-MODEL_DIR = os.environ.get("GUARD_MODEL_DIR", "/mnt/hermes-data/models/prompt-guard-2-22m")
+MODE = os.environ.get("GUARD_MODE", "classifier").strip().lower()
+MODEL_DIR = os.environ.get("GUARD_MODEL_DIR", "/mnt/hermes-data/models/mdeberta-prompt-injection")
 THRESHOLD = float(os.environ.get("GUARD_THRESHOLD", "0.5"))
 
-LLM_URL = os.environ.get("GUARD_LLM_URL", "http://10.129.1.17:8091").rstrip("/")
-LLM_ROLE = os.environ.get("GUARD_LLM_ROLE", "omni")
+LLM_URL = os.environ.get("GUARD_LLM_URL", "http://127.0.0.1:8097").rstrip("/")
+LLM_ROLE = os.environ.get("GUARD_LLM_ROLE", "dispatch")
 LLM_TIMEOUT = int(os.environ.get("GUARD_LLM_TIMEOUT", "20"))
 LLM_MAX_TOKENS = int(os.environ.get("GUARD_LLM_MAX_TOKENS", "8"))
 SLOW_MS = int(os.environ.get("GUARD_SLOW_MS", "1500"))
@@ -177,21 +191,39 @@ def load_model():
 _torch = _tokenizer = _model = None
 
 
+# Words that identify the injection/unsafe class in a classifier's own id2label. Checked against
+# the real label sets of the four candidates surveyed in S22d: {SAFE, INJECTION},
+# {benign, injection}, and PG2's generic {LABEL_0, LABEL_1}.
+_INJECTION_LABEL_WORDS = ("inject", "jailbreak", "malicious", "unsafe", "attack", "harmful")
+_injection_index = None
+
+
+def resolve_injection_index(config):
+    """Which output index means "this is an attack", read from the model's own id2label.
+
+    Returns (index, how) so startup can say which it used. A named label wins; an unnamed label
+    set (PG2 ships {0: LABEL_0, 1: LABEL_1}) falls back to index 1, which is the convention both
+    Meta's card and every candidate surveyed follow — but it is reported as a guess, because an
+    inverted mapping yields a screener that is confidently wrong about everything while looking
+    perfectly healthy."""
+    id2label = {int(k): str(v) for k, v in (dict(getattr(config, "id2label", {}) or {})).items()}
+    for idx, name in sorted(id2label.items()):
+        if any(w in name.lower() for w in _INJECTION_LABEL_WORDS):
+            return idx, f"named {name!r} in id2label"
+    return 1, f"UNNAMED label set {id2label} — assuming index 1, verify against the model card"
+
+
 def classify(text):
-    """Returns (label, score) — label is "BENIGN" or "MALICIOUS", score is that class's own
-    softmax probability. Truncates to the model's 512-token window rather than raising on
-    longer input — a guard that fails closed on long input is worse than one that screens a
-    truncated prefix."""
+    """Returns (label, p_malicious) — label is "BENIGN" or "MALICIOUS", and the probability is the
+    injection class's own, not the argmax's, so THRESHOLD means what it says. Truncates to 512
+    tokens rather than raising on longer input: a guard that fails closed on long input is worse
+    than one that screens a truncated prefix."""
     inputs = _tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
     with _torch.no_grad():
         logits = _model(**inputs).logits
     probs = _torch.softmax(logits, dim=-1)[0]
-    idx = int(probs.argmax().item())
-    label = _model.config.id2label[idx]
-    # Meta's own checkpoint ships generic id2label ({0: "LABEL_0", 1: "LABEL_1"}) rather than
-    # named labels — normalize here so callers never depend on that config detail.
-    label = "MALICIOUS" if idx == 1 else "BENIGN"
-    return label, float(probs[idx].item())
+    p_mal = float(probs[_injection_index].item())
+    return ("MALICIOUS" if p_mal >= THRESHOLD else "BENIGN"), p_mal
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -253,13 +285,18 @@ class Handler(BaseHTTPRequestHandler):
                 hit = label == "MALICIOUS"
             else:
                 label, score = classify(text)
-                hit = label == "MALICIOUS" and score >= THRESHOLD
+                hit = label == "MALICIOUS"
         except GuardUnavailable as exc:
             log(f"UNAVAILABLE: {exc}")
             self._send(502, {"error": str(exc), "mode": MODE})
             return
-        self._send(200, {"label": label, "score": score, "hit": hit,
-                         "threshold": THRESHOLD, "mode": MODE})
+        body = {"label": label, "score": score, "hit": hit,
+                "threshold": THRESHOLD, "mode": MODE}
+        if MODE == "classifier":
+            # Explicit, so a consumer never has to infer the orientation from `label` the way
+            # hermes-guard-eval did before S22d (and got wrong for llm mode).
+            body["p_malicious"] = score
+        self._send(200, body)
 
 
 def main():
@@ -281,8 +318,14 @@ def main():
             f"(timeout {LLM_TIMEOUT}s, slow-call log at {SLOW_MS} ms)")
         log("Prompt-Guard-2 is NOT loaded in this mode; set GUARD_MODE=classifier to roll back")
     else:
+        global _injection_index
         log(f"mode=classifier, loading {MODEL_DIR} ...")
         _torch, _tokenizer, _model = load_model()
+        _injection_index, how = resolve_injection_index(_model.config)
+        log(f"injection class = output index {_injection_index} ({how})")
+        if how.startswith("UNNAMED"):
+            log("WARNING: label orientation was GUESSED, not read — an inverted mapping makes "
+                "this service confidently wrong about every verdict while appearing healthy")
         log(f"model loaded, threshold={THRESHOLD}")
     log(f"listening on {BIND}:{PORT}")
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()

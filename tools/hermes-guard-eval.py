@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
 #
 # hermes-guard-eval — S22a's measurement, made repeatable. Scores the fleet's screening layers
 # against a labelled case set and prints the three numbers S22 needs: each layer alone, the
@@ -206,6 +206,10 @@ def p_malicious(verdict):
     assuming it."""
     if verdict.get("mode") == "llm":
         return None
+    if "p_malicious" in verdict:
+        # hermes-guard 2.1.0 states it outright rather than making every consumer re-derive it
+        # from `label`, which is how this function got llm mode wrong in the first place.
+        return float(verdict["p_malicious"])
     score = float(verdict["score"])
     return score if verdict["label"] == "MALICIOUS" else 1.0 - score
 
