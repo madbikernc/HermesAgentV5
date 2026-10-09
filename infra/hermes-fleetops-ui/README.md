@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog, which checkpoint backs each role, benchmark results, and the news digest's stored
@@ -71,9 +71,30 @@ sudo systemctl enable --now hermes-fleetops-ui
 curl -s -u fleetops:"$PW" http://100.96.59.79:8103/ | head -5
 ```
 
-The unit runs `ProtectSystem=strict`, `ProtectHome=read-only`, `ReadWritePaths=` (empty) and
-`NoNewPrivileges=true`. It reads four stores and writes nowhere, so that is enforced by systemd as
-well as asserted in the code.
+The unit runs `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=true` and
+`NoNewPrivileges=true`, with **one** writable path: `ReadWritePaths=/home/pmoney/.hermes/state`.
+
+That exception is not optional, and it was found by starting the service rather than by reasoning:
+`usage.db` is in **WAL** mode, and a read-only SQLite connection to a WAL database still has to
+take a read mark in the `-shm` sidecar, which needs write access to the directory. With the whole
+tree read-only, `/models` rendered `OperationalError: unable to open database file` in its usage
+section. Narrower grants were tried and genuinely do not work: systemd **rejects a single file** in
+`ReadWritePaths` (exit 226/NAMESPACE), and bind-mounting the sidecars individually is impossible
+because SQLite **unlinks `-shm` when the last writer closes** — the path to bind was absent
+mid-test, which is exactly the flakiness that would have shipped.
+
+Worth being precise about what the grant does and does not confer, since this page's whole premise
+is that it cannot influence an approval. `/mnt/hermes-data` (`memory.db`, `vectors.db`, the RAG
+store), the repo and `/etc` all stay read-only — verified by test, not assumed. **The model-scout
+approval decisions this UI surfaces live in `memory.db`'s task states under `/mnt`**, so they stay
+unwritable. What is in the granted directory is `model-scout-gate/state.json` (26 bytes, "a
+last-seen cursor only" per the gate's own docs), the Layer-1 guard's scan log, and per-tool state
+JSONs — all already writable by every other `pmoney`-owned service here, none of which is
+sandboxed at all.
+
+**Follow-up, not done here:** give `usage.db` its own directory via `HERMES_USAGE_DB`, which
+`hermes_usage_log.py` already honours, and bind only that. It means editing the writers' units and
+relocating a live 50MB database, which is not a change to make in passing.
 
 ## 4. What each page reads, and how it fails
 
@@ -144,3 +165,4 @@ stay distinguishable. Advisories appear on the next scout run.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-09 | Initial version — S21a-e built and verified live on spark: port 8103 chosen against a live `ss -ltnp` after 8101 turned out to be `hermes-buzz`, the backlog source corrected from the plan's `GET /tasks` to a read-only sqlite read, benchmark `suites`/`value` schema corrected from the plan's assumed `scores` blob, and all five pages fetched returning HTTP 200 with zero section errors. 64 offline checks. |
+| 1.1.0 | 2026-10-09 | Service enabled on spark with its `fleetops-ui` vault item; all five pages verified against the real credential on the tailnet address. Records the one sandbox exception the first real start forced — `usage.db` is WAL, so a read-only connection still needs write access for its `-shm` read mark — and why the two narrower grants are not available (systemd rejects a single file in `ReadWritePaths`; SQLite unlinks `-shm` when the last writer closes, so the sidecars cannot be bind-mounted). States what the grant does not confer: the approvals live in `memory.db` under `/mnt`, which stays read-only. |

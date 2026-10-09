@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
 #
 # Offline checks for hermes-fleetops-ui.py. No network, no live stores, no server bound.
 #
@@ -319,6 +319,36 @@ def check_no_write_surface(ui):
             src.index('parsed.path == "/health"') < src.index("if not self._authed()"))
 
 
+def check_unit_sandbox():
+    print(NL + "[the unit's sandbox is pinned, so the one exception cannot widen]")
+    # The first real start forced exactly one writable path: usage.db is WAL, and a read-only
+    # SQLite connection still takes a read mark in its -shm sidecar. That is a real requirement,
+    # but it is also the kind of grant that grows by accident, so the shape is asserted here.
+    unit = (Path(__file__).resolve().parents[1] / "hermes-fleetops-ui.service").read_text(
+        encoding="utf-8")
+    rw = [l.split("=", 1)[1].strip() for l in unit.splitlines()
+          if l.startswith("ReadWritePaths=")]
+    check("there is exactly one ReadWritePaths line", len(rw) == 1, str(rw))
+    check("and it grants only the state directory",
+          rw == ["/home/pmoney/.hermes/state"], str(rw))
+    # The grant must never reach the stores themselves, which is where the approval state lives:
+    # memory.db's task states say whether a candidate is approved, and they are under /mnt.
+    granted = rw[0].split()
+    check("the grant is a single path, not a list that has grown", len(granted) == 1, str(granted))
+    check("it does not reach /mnt, where memory.db and vectors.db live",
+          not any(g.startswith("/mnt") for g in granted), str(granted))
+    check("nor /etc, nor the repo itself",
+          not any(g.startswith("/etc") or "HermesAgentV5" in g for g in granted), str(granted))
+    check("nor the whole home directory",
+          not any(g.rstrip("/") in ("/home/pmoney", "/home") for g in granted), str(granted))
+    for prop in ("ProtectSystem=strict", "ProtectHome=read-only", "NoNewPrivileges=true",
+                 "PrivateTmp=true"):
+        check(f"{prop} is still set", prop in unit)
+    check("the unit explains why the exception exists, not just that it does",
+          "WAL" in unit and "-shm" in unit)
+    check("and records that it confers no approval authority",
+          "memory.db" in unit and "read-only" in unit)
+
 def main():
     import tempfile
     ui = load("fleetopsui", "hermes-fleetops-ui.py")
@@ -331,6 +361,7 @@ def main():
         check_escaping(ui)
         check_degradation(ui)
         check_no_write_surface(ui)
+        check_unit_sandbox()
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

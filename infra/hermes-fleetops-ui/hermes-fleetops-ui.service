@@ -17,7 +17,29 @@ ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
 NoNewPrivileges=true
-ReadWritePaths=
+# The one exception, and it is not optional: ~/.hermes/state/usage.db is in WAL mode, and a
+# read-only SQLite connection to a WAL database still has to take a read mark in the `-shm`
+# sidecar, which needs write access to the directory. With the whole tree read-only the usage
+# section failed with "unable to open database file" -- found on the first real start, not
+# reasoned about in advance.
+#
+# Narrower grants were tried and do not work: systemd rejects a single FILE in ReadWritePaths
+# (exit 226/NAMESPACE), and bind-mounting the sidecars individually is impossible because SQLite
+# unlinks `-shm` when the last writer closes, so the path to bind is often absent at start --
+# observed live, mid-test. /mnt/hermes-data (memory.db, vectors.db, the RAG store), the repo and
+# /etc all stay read-only, verified by test rather than assumed.
+#
+# What this grant does NOT confer: authority over the model-scout approvals this UI surfaces.
+# Those live in memory.db's task states under /mnt, which stays read-only. What is in this
+# directory is a last-seen Matrix cursor (model-scout-gate/state.json, 26 bytes, "a last-seen
+# cursor only" per the gate's own docs), the Layer-1 guard's scan log, and assorted per-tool
+# state JSONs -- all of which every other pmoney-owned service on this host can already write,
+# since none of them is sandboxed at all.
+#
+# The clean fix is to give usage.db its own directory via HERMES_USAGE_DB, which
+# hermes_usage_log.py already honours, and bind only that. It means changing the writers' units
+# and relocating a live 50MB database, so it is recorded as a follow-up rather than done here.
+ReadWritePaths=/home/pmoney/.hermes/state
 StandardOutput=journal
 StandardError=journal
 
