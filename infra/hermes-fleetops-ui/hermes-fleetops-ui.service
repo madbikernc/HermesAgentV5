@@ -1,0 +1,25 @@
+[Unit]
+Description=hermes-fleetops-ui - read-only browser view of the fleet's reports and backlogs
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-fleetops-ui/README.md
+After=network-online.target hermes-router.service hermes-memory.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-fleetops-ui-wrapper.sh
+Restart=on-failure
+RestartSec=10s
+# It opens every store read-only and serves no write routes, so it has no business writing
+# anywhere on this host. Enforced here as well as in the code, rather than only asserted.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
