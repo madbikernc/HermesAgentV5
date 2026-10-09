@@ -1,4 +1,16 @@
-// Version: 1.82.0
+// Version: 1.83.0
+//
+// 1.83.0 (2026-10-09, direct report: bots "repeatedly complain about crafting tables" without
+// ever trying to make one, noticing two standing right next to them, or remembering either's
+// location) -- "craft"'s own tableWouldHelp check used recipesFor(), which filters to recipes she
+// can afford with her CURRENT inventory. With zero planks/sticks on hand (the ordinary state
+// before her first trip for wood) that lookup comes back empty whether or not a table is
+// involved, so tableWouldHelp was always false and the entire table search/remember/auto-make-
+// and-place block below it never ran -- confirmed live, Nell's "craft wooden_pickaxe" failed in
+// 78ms, far too fast to have searched or pathfound anywhere, straight into craftItem()'s own
+// generic "don't have the ingredients (might need a crafting table)" guess. Switched to
+// recipesAll() (the same call craftItem's own fallback chain, and ensureBoat, already use for
+// exactly this), which answers the real, inventory-independent question instead.
 //
 // 1.82.0 (2026-10-07, found by the new torch-trail live scenario failing on its first step) --
 // craftItem's auto-chain read only `recipe.ingredients`, which minecraft-data populates for
@@ -3060,11 +3072,26 @@ async function performActionAs(bot, action, speaker, token) {
         return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to craft it.`);
       }
 
-      // Does this need a table? `true` satisfies recipesFor()'s own requiresTable check
-      // without needing a real Block reference yet -- confirmed against mineflayer's own
-      // craft.js source -- this is only checking whether a table would help, not using one.
-      const noTableRecipes = bot.recipesFor(itemDef.id, null, 1, null);
-      const tableWouldHelp = !noTableRecipes.length && bot.recipesFor(itemDef.id, null, 1, true).length > 0;
+      // Does this need a table? Real bug found live 2026-10-09 (direct report: bots "repeatedly
+      // complain about crafting tables," yet never try to make one, never notice two standing
+      // right next to them, and never remember either's location). Root cause, confirmed against
+      // live logs: this used to call recipesFor(), which -- unlike recipesAll() -- filters to
+      // recipes she can afford with her CURRENT inventory. With zero planks/sticks on hand (the
+      // ordinary state before her first trip for wood), BOTH the no-table and with-table lookups
+      // came back empty regardless of what the item's real recipe needs, tableWouldHelp was
+      // always false, and the entire table search/remember/auto-make-and-place block below never
+      // ran at all. Confirmed live: Nell's "craft wooden_pickaxe" failed in 78ms -- far too fast
+      // to have pathfound anywhere or placed anything -- landing straight in craftItem()'s own
+      // generic "don't have the ingredients (might need a crafting table)" guess, which several
+      // bots then took at face value and self-proposed "gather wood to craft a crafting table"
+      // for, even though a table was never actually the blocker. recipesAll() (the same call
+      // craftItem's own fallback chain just below, and ensureBoat's own header, already use for
+      // exactly this) answers the real, inventory-independent question instead -- does crafting
+      // this item EVER need a table -- `true` satisfies its requiresTable check without needing a
+      // real Block reference yet, confirmed against mineflayer's own craft.js source; this is
+      // only checking whether a table would help, not using one.
+      const noTableRecipes = bot.recipesAll(itemDef.id, null, null);
+      const tableWouldHelp = !noTableRecipes.length && bot.recipesAll(itemDef.id, null, true).length > 0;
       let tableBlock = null;
       if (tableWouldHelp) {
         const tableType = bot.registry.blocksByName.crafting_table;

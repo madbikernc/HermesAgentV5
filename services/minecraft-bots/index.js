@@ -1,4 +1,17 @@
-// Version: 2.106.0
+// Version: 2.107.0
+//
+// 2.107.0 (2026-10-09) -- two direct reports. (1) "if no-one is armed, and they are under attack
+// and for some reason cannot run, they should still try to fight even if it's hopeless":
+// attackAsLastResort() used to also bail on !hasWeapon(bot) -- the one case it exists for. An
+// unarmed bot who failed to flee just stood there and took every hit; she now swings bare-handed
+// instead, same as every other mob FLEE_ONLY_MOBS doesn't cover. decideFightType() still tries
+// fleeing first whenever that's actually possible, armed or not -- this only runs once that's
+// already failed. (2) bots "repeatedly complain about crafting tables" without ever noticing two
+// standing right next to them or remembering either's location: actions.js's own REUSABLE_
+// UTILITY_BLOCKS short-circuit finds an existing one nearby and skips making a duplicate, but
+// nothing ever wrote that real, just-confirmed position down. A successful "craft" step for any
+// CRAFTED_OBJECT_NAMES item now triggers the same noteNearbyResources() sweep mine/explore/scout
+// already use.
 //
 // 2.106.0 (2026-10-08) -- the living-space log line says "anchor(s)", not "bed(s)": bedAnchors()
 // always includes the spawn point, so the fresh world of 2026-10-08 reported "1 bed(s)" with no
@@ -4204,6 +4217,20 @@ async function goalTick() {
       }
     }
 
+    // Direct report, 2026-10-09 ("they don't notice crafting tables already placed nearby, or
+    // remember them"): the block just above only ever fires for a utility block THIS bot just
+    // placed. actions.js's own "craft" case (REUSABLE_UTILITY_BLOCKS) has a separate, older path
+    // that finds an EXISTING crafting_table/furnace within 32 blocks and skips making a
+    // duplicate ("already have a crafting_table nearby, no need to make another") -- a real,
+    // just-confirmed position nobody ever wrote down, so the next bot who needs one starts from
+    // zero again. noteNearbyResources() already does exactly this scan-and-record step for
+    // mine/explore/scout; reusing it here needs no new logic, and its own near-duplicate check
+    // (longterm.js) keeps this cheap on every ordinary "crafted a new one" case too.
+    if (result.ok && parsed.action.type === "craft" && CRAFTED_OBJECT_NAMES.includes(parsed.action.item)) {
+      noteNearbyResources(`after a successful ${parsed.action.type}`).catch((err) =>
+        console.error(`[${USERNAME}] nearby-resource scan failed:`, err.message));
+    }
+
     // Environmental memory (direct follow-up, 2026-09-07: "look for more ways to improve their
     // autonomy"). "even after looking around" is wanderAndRetryFind()'s own signature (actions.js
     // 1.11.0) for "tried the normal search AND wandered, still nothing" -- a real, worth-
@@ -4921,11 +4948,18 @@ function decideFightType(threat) {
 // fix, which makes this a fast, clean failure now instead of an infinite stuck retry) means
 // retreating just isn't working right now, independent of why "flee" was chosen in the first
 // place. Standing there and absorbing hits because running away didn't pan out is strictly worse
-// than fighting back, as long as there's actually a weapon to fight with. Deliberately excludes
-// FLEE_ONLY_MOBS -- a flyer or teleport-evader is still unreachable no matter how desperate this
-// gets, the exact doomed-melee shape FLEE_ONLY_MOBS exists to prevent (actions.js).
+// than fighting back -- including bare-handed: a no-weapon bot who genuinely cannot run is still
+// better off swinging her fists than standing still and taking every hit for free. Direct
+// follow-up, 2026-10-09 ("if no-one is armed, and they are under attack and for some reason
+// cannot run, they should still try to fight even if it's hopeless"): this used to also bail on
+// !hasWeapon(bot), the one case it exists for -- an unarmed bot who failed to flee just stood
+// there. decideFightType() above still tries fleeing FIRST whenever it's an option, armed or not
+// (running away beats a fistfight when running is actually possible); this only ever runs once
+// that's already failed. Deliberately still excludes FLEE_ONLY_MOBS -- a flyer or teleport-evader
+// is still unreachable no matter how desperate this gets, the exact doomed-melee shape
+// FLEE_ONLY_MOBS exists to prevent (actions.js); that's "can't reach it," not "won't try."
 async function attackAsLastResort(threat, label, handle) {
-  if (FLEE_ONLY_MOBS.has(threat.name) || !hasWeapon(bot)) return;
+  if (FLEE_ONLY_MOBS.has(threat.name)) return;
   const result = await performAction(bot, { type: "attack", target: threat }, USERNAME, handle);
   console.log(`[${USERNAME}] ${label}: couldn't get away, fighting instead -- ${result.text} ` +
               `(ok=${result.ok})`);

@@ -1,4 +1,4 @@
-// Version: 1.19.0
+// Version: 1.20.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -39,6 +39,9 @@
 //   and the first check now needs it), the place_home stub given a real V3 world, vm-context arrays
 //   spread before deepStrictEqual (different Array prototype), blockWorld given block ids plus a
 //   registry with emitLight, and a check that craftItem chains through shaped recipes.
+// 1.20.0 | 2026-10-09 | attackAsLastResort fights bare-handed when genuinely unable to flee; craft's
+//   tableWouldHelp check against empty hands (recipesAll, not recipesFor); an already-placed utility
+//   block found during a craft attempt gets written to world memory too.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -792,6 +795,20 @@ await check('Fight-or-flee: 3+ hostiles send a non-Soldier running at any health
   assert.equal(unarmed.c.decideFightType(unarmed.threat), 'flee');
 });
 
+await check('attackAsLastResort: an unarmed bot who failed to flee still fights, bare-handed', async () => {
+  const calls = [];
+  const c = vm.createContext({ bot: {}, USERNAME: 'Mark', console: { log() {}, error() {} },
+    FLEE_ONLY_MOBS: new Set(['phantom', 'ghast', 'enderman']), hasWeapon: () => false,
+    performAction: async (_bot, action) => { calls.push(action); return { ok: true, text: 'took care of it.' }; } });
+  vm.runInContext(between(index, 'async function attackAsLastResort(', 'async function fleeAsLastResort('), c);
+  await c.attackAsLastResort({ name: 'zombie' }, 'self-defense', {});
+  assert.equal(calls.length, 1, 'cannot run + unarmed used to stand there and take every hit for free');
+  assert.equal(calls[0].type, 'attack');
+
+  await c.attackAsLastResort({ name: 'phantom' }, 'self-defense', {});
+  assert.equal(calls.length, 1, 'a genuinely unreachable mob (FLEE_ONLY_MOBS) is still skipped, armed or not');
+});
+
 await check('Fight-or-flee: the mob that just hurt the bot is the threat, not merely the nearest', async () => {
   const { EventEmitter } = await import('node:events');
   const bot = new EventEmitter();
@@ -1405,6 +1422,72 @@ await check('Beds: "bed" is crafted in the colour she has 3 wool of, white when 
   const [makeTable, placeTable, giveUp] = ['{ type: "craft", item: "crafting_table", count: 1 }', '{ type: "place", item: "crafting_table" }', 'need a crafting table nearby for']
     .map((t) => craftCase.indexOf(t));
   assert(makeTable > 0 && makeTable < placeTable && placeTable < giveUp, 'no table around: make one and set it down before giving up');
+});
+
+await check('Craft: a table-needing recipe is detected even with empty hands, so she searches for/uses a real one instead of guessing', async () => {
+  // Real bug found live 2026-10-09 (direct report: bots "repeatedly complain about crafting
+  // tables" without ever trying to make one, noticing two standing right next to them, or
+  // remembering either's location). recipesFor() filters to recipes she can afford RIGHT NOW --
+  // with no planks/sticks on hand it returns nothing for either a no-table or a with-table
+  // lookup, so the old tableWouldHelp check (built on recipesFor) always said "no" regardless of
+  // what the item's real recipe needs, and the whole search/remember/auto-make-and-place block
+  // below it never ran. This reproduces that exact starting state (empty inventory, a real
+  // crafting table standing 5 blocks away) against the full "craft" case, not just craftItem().
+  const ITEM = { oak_planks: 41, stick: 946, wooden_pickaxe: 827 };
+  const PICKAXE_RECIPE = { delta: [{ id: ITEM.stick, count: -2 }, { id: ITEM.oak_planks, count: -3 },
+    { id: ITEM.wooden_pickaxe, count: 1 }] };
+  const findBlocksCalls = [];
+  let gotoCalls = 0;
+  const bot = makeBot();
+  Object.assign(bot, {
+    registry: {
+      itemsByName: { wooden_pickaxe: { id: ITEM.wooden_pickaxe } },
+      items: { [ITEM.oak_planks]: { name: 'oak_planks' }, [ITEM.stick]: { name: 'stick' } },
+      blocksByName: { crafting_table: { id: 10 } },
+    },
+    inventory: { items: () => [], count: () => 0, slots: [] },
+    // Affordable right now only -- what recipesFor really does; empty hands means empty either way.
+    recipesFor: () => [],
+    recipesAll: (id, _m, table) => (id === ITEM.wooden_pickaxe && table ? [PICKAXE_RECIPE] : []),
+    findBlocks: (opts) => { findBlocksCalls.push(opts); return opts.matching === 10 ? [{ x: 5, y: 64, z: 5 }] : []; },
+    blockAt: (pos) => ({ position: pos, name: 'crafting_table' }),
+    craft: async () => {},
+  });
+  bot.pathfinder.goto = async () => { gotoCalls++; };
+  const c = context(bot, { gearCategoryNames: () => [], tryTakeFromNearbyChest: async () => null,
+    findRememberedLocation: async () => null, gotoRememberedSpot: async () => {} });
+  vm.runInContext(timeoutFn + actionFn + between(actions, 'function simpleSourceFor(', '// Extracted from "loot"'), c);
+
+  const result = await c.performAction(bot, { type: 'craft', item: 'wooden_pickaxe', count: 1 }, 'test');
+  assert.equal(findBlocksCalls.filter((o) => o.matching === 10).length, 1,
+    'should search nearby for an existing crafting table instead of skipping straight to "no ingredients"');
+  assert.equal(gotoCalls, 1, 'and actually walk to the one it found');
+  assert.equal(result.ok, false);
+  assert.equal(result.text, "couldn't craft wooden_pickaxe: don't have the ingredients",
+    'a real table was found and used, so the failure should name the actual problem (no planks), not guess at the table');
+});
+
+await check('Craft: finding an already-placed utility block nearby gets remembered too, not just a freshly-placed one', async () => {
+  // Real bug found live 2026-10-09, same direct report as the check above: "craft"'s own
+  // REUSABLE_UTILITY_BLOCKS short-circuit (actions.js) finds an existing crafting_table/furnace
+  // within 32 blocks and skips making a duplicate ("already have a crafting_table nearby, no
+  // need to make another") -- a real, just-confirmed position that used to just vanish, so the
+  // next bot who needed one started from zero again. goalTick now reuses noteNearbyResources()
+  // (the same scan/record step mine/explore/scout already trigger) for any successful "craft"
+  // step on a CRAFTED_OBJECT_NAMES item, whether she made a new one or merely found one standing
+  // there already.
+  const calls = [];
+  const c = vm.createContext({
+    result: { ok: true, text: 'already have a crafting_table nearby, no need to make another.' },
+    parsed: { action: { type: 'craft', item: 'crafting_table' } },
+    CRAFTED_OBJECT_NAMES: ['crafting_table', 'furnace', 'chest', 'trapped_chest', 'beehive', 'bee_nest'],
+    noteNearbyResources: (reason) => { calls.push(reason); return Promise.resolve(); },
+    USERNAME: 'Amy', console: { log() {}, error() {} },
+  });
+  vm.runInContext(between(index, 'if (result.ok && parsed.action.type === "craft"',
+    '// Environmental memory (direct follow-up, 2026-09-07'), c);
+  assert.deepEqual(calls, ['after a successful craft'],
+    'an existing crafting table found nearby during a craft attempt used to go unrecorded');
 });
 
 function bedSiteWorld({ beds = [], doors = [], walls = [] } = {}) {
