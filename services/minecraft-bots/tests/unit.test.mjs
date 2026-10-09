@@ -660,6 +660,49 @@ await check('MB-21 a stalled router call times out instead of hanging', async ()
   assert(Date.now() - started < 2000);
 });
 
+await check('S27f analysis mode is opt-in, and the chat paths never opt in', async () => {
+  // Regression for the 2026-10-09 breakage: S22d gave Layer 2 a screener that actually detects
+  // injections, and it scored the bots' own planning prompt as malicious -- 189 blocked planning
+  // calls in six hours. callRole() can now declare the payload is bot state, but player chat
+  // must keep being screened, which is the half that is easy to get wrong silently.
+  const seen = [];
+  const mkContext = () => vm.createContext({
+    process: { env: {} }, AbortSignal, JSON,
+    fetch: (_url, opts) => { seen.push(opts.headers); return Promise.resolve({
+      ok: true, json: async () => ({ choices: [{ message: { content: 'x' } }] }) }); },
+  });
+
+  const c = mkContext();
+  vm.runInContext(between(router, 'const ROUTER_URL').replace(/export /g, ''), c);
+
+  await c.callRole('dispatch', [], {});
+  assert.equal(seen[0]['X-Hermes-Screening'], undefined,
+    'screening must be the default -- an omitted flag must never mean "skip Layer 2"');
+
+  await c.callRole('dispatch', [], { analysis: true });
+  assert.equal(seen[1]['X-Hermes-Screening'], 'analysis', 'analysis: true must set the header');
+
+  await c.callRole('dispatch', [], { analysis: false });
+  assert.equal(seen[2]['X-Hermes-Screening'], undefined, 'analysis: false must not set it');
+
+  // And the real call sites: every one that carries `<speaker> message` must be unflagged.
+  const src = await readFile(root + 'index.js', 'utf8');
+  const lines = src.split(String.fromCharCode(10));
+  const chatSites = lines
+    .map((l, i) => ({ l, i }))
+    .filter(({ l }) => /\{ role: "user", content: `<\$\{speaker\}>/.test(l));
+  assert(chatSites.length >= 2, 'expected to find the player-chat call sites');
+  for (const { i } of chatSites) {
+    // the options object for a call site sits within ~25 lines after its user message
+    const window = lines.slice(i, i + 25).join(String.fromCharCode(10));
+    const opts = window.match(/\{ *maxTokens:[^}]*\}/);
+    if (opts) {
+      assert(!/analysis/.test(opts[0]),
+        `player chat at index.js line ${i + 1} must stay screened, found: ${opts[0]}`);
+    }
+  }
+});
+
 const ragBackend = await readFile(root + 'rag-backend.js', 'utf8');
 const ragContext = (extras) => {
   const c = vm.createContext({ JSON, Map, AbortSignal, PYTHON: 'py', SEARCH_SCRIPT: 's.py', INGEST_SCRIPT: 'i.py',

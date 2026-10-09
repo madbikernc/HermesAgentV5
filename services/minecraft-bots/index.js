@@ -2497,7 +2497,7 @@ async function narrateAction(text) {
           `without changing its meaning: "${text}"` },
       { role: "user", content: text },
     ],
-    { maxTokens: 40, temperature: 0.9 },
+    { maxTokens: 40, temperature: 0.9, analysis: true },   // narrateAction: the bot's own action text
   );
   return reply.trim().slice(0, MAX_CHAT_LEN) || text;
 }
@@ -2983,7 +2983,7 @@ async function planNextStep(goal) {
     // twice in a row -- a genuinely generous budget is the robust fix instead of a third guess at
     // a slightly bigger number. This runs on local compute with no per-call cost, so there's no
     // real reason to be stingy here.
-    { maxTokens: 500, temperature: 0 },
+    { maxTokens: 500, temperature: 0, analysis: true },   // planNextStep: goal + gear + the bot's own action log
   );
   return reply.trim();
 }
@@ -3029,7 +3029,7 @@ async function arbitrateGoalConflict(proposedDescription) {
         content: `This bot's proposed goal: "${proposedDescription}"\n\nOther bots already ` +
           `active:\n${othersText}`,
       },
-    ], { maxTokens: 100, temperature: 0 });
+    ], { maxTokens: 100, temperature: 0, analysis: true });   // goal arbitration: bot-proposed goals
     if (!/CONFLICT:\s*yes/i.test(reply)) return proposedDescription;
     const goalMatch = reply.match(/GOAL:\s*(.+)/i);
     const alternative = goalMatch ? goalMatch[1].trim().replace(/^["']|["']$/g, "").slice(0, 120) : "";
@@ -3381,7 +3381,7 @@ async function proposeOwnGoal() {
       },
       { role: "user", content: "What's your goal?" },
     ],
-    { maxTokens: 30, temperature: 0.9 },
+    { maxTokens: 30, temperature: 0.9, analysis: true },   // self-prompt, no player input
   );
   // Efficiency pass, 2026-09-24 (measured: ~83% of planner calls fleet-wide produced no action,
   // mostly an instant DONE on a self-proposed goal the bot had already satisfied). The proposal
@@ -4595,7 +4595,7 @@ async function proposeDirectiveForOthers() {
             `two sentences, nothing else -- no quotes, no stage directions.`,
       },
       { role: "user", content: `What do you tell ${target}?` },
-    ], { maxTokens: 60, temperature: 0.9 });
+    ], { maxTokens: 60, temperature: 0.9, analysis: true });   // bot-to-bot message, no player input
     if (reply) {
       bot.chat(reply);
       markRoleAssigned(target);
@@ -4681,7 +4681,7 @@ async function proposeFallbackDirective() {
             `nothing else -- no quotes, no stage directions.`,
       },
       { role: "user", content: `What do you tell ${target}?` },
-    ], { maxTokens: 60, temperature: 0.9 });
+    ], { maxTokens: 60, temperature: 0.9, analysis: true });   // bot-to-bot message, no player input
     if (reply) {
       bot.chat(reply);
       markRoleAssigned(target);

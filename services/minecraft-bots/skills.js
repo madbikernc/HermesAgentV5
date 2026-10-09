@@ -196,7 +196,7 @@ export async function authorSkillFromGoal(goalDescription, actionsTaken) {
           "format, two lines:\nNAME: <a short, filename-safe skill name, 2-4 words>\n" +
           "DESCRIPTION: <one sentence describing what this skill accomplishes and when it's useful>" },
       { role: "user", content: `Goal: ${goalDescription}\nActions taken, in order: ${stepsSummary}` },
-    ], { maxTokens: 100, temperature: 0.3 });
+    ], { maxTokens: 100, temperature: 0.3, analysis: true });  // goal + the bot's own step summary
   } catch (err) {
     console.error("[skills] authoring call failed:", err.message);
     return false;

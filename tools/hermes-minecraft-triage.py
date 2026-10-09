@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.7.0
 #
 # 1.6.0 (2026-09-25) — per-line classification split out of watch_loop into process_message() so
 # services/minecraft-bots/tests/test_triage.py can test MB-19's per-bot dedupe without journalctl.
@@ -254,8 +254,16 @@ def call_role(role, log_line, timeout=150):
         "max_tokens": 900,
         "temperature": 0,
     }).encode()
+    # S27f: this payload is the bots' OWN journald lines plus this file's triage instructions --
+    # bot-generated data, not a player request. hermes-router scans and logs Layer 2 without
+    # blocking it. S27f's first pass wrongly excluded this caller on the assumption that it
+    # handled player chat; it does not, it reads `minecraft-bot-*.service` journals, and the
+    # assumption cost 162 blocked triage calls in six hours. The structure is what trips the
+    # classifier: "You are triaging one incident... in EXACTLY this format" is, structurally, an
+    # instruction-override attempt, and a working screener says so.
     req = urllib.request.Request(ROUTER_URL, data=body, method="POST",
-                                  headers={"Content-Type": "application/json"})
+                                  headers={"Content-Type": "application/json",
+                                           "X-Hermes-Screening": "analysis"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
