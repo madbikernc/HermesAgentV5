@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
 #
 # Checks for the S19 viable-STL pipeline (IMPLEMENTATION_PLAN.md S19c): tools/hermes-mesh-verify.py
 # must catch each named viability failure on its own, and tools/hermes-mesh-repair.py must either
@@ -11,6 +11,9 @@
 #   python3 infra/anvil/tests/test_mesh_pipeline.py
 #
 # Revision History: 1.0.0 | 2026-09-27 | Initial checks, written before Anvil exists.
+#                   1.1.0 | 2026-10-08 | Added the volumetric-fallback check, from the first real
+#                                        TRELLIS.2 output on Anvil: a component that surgical
+#                                        repair cannot close must be rebuilt, not abandoned.
 import importlib.util
 import json
 import os
@@ -65,6 +68,28 @@ def join(*meshes):
         faces.append(np.asarray(m.faces) + base)
         base += len(m.vertices)
     return raw(np.vstack(verts), np.vstack(faces))
+
+
+def open_shell():
+    """A sphere with a large cap removed: one big boundary loop, nothing else wrong with it."""
+    s = trimesh.creation.icosphere(subdivisions=4, radius=5.0)
+    m = raw(s.vertices, s.faces[s.triangles_center[:, 2] < 2.0])
+    m.remove_unreferenced_vertices()
+    return m
+
+
+def finned_sphere():
+    """A sphere with a zero-thickness fin fanning from its centre out to a belt of its own vertices,
+    so every belt edge carries a third face. trimesh splits the fin off as its own component, and a
+    bare fan encloses no volume, so NEITHER surgical repair nor volumetric reconstruction can turn
+    it into a solid -- which is the point: the fallback must not paper over the impossible.
+    """
+    s = trimesh.creation.icosphere(subdivisions=4, radius=5.0)
+    centre = len(s.vertices)
+    belt = np.where(np.abs(s.vertices[:, 2]) < 0.45)[0]
+    belt = belt[np.argsort(np.arctan2(s.vertices[belt, 1], s.vertices[belt, 0]))]
+    fin = [[a, b, centre] for a, b in zip(belt, np.roll(belt, -1))]
+    return raw(np.vstack([s.vertices, [[0, 0, 0]]]), np.vstack([s.faces, fin]))
 
 
 def write(mesh, name, ascii_=False):
@@ -127,6 +152,8 @@ FIXTURES = {
                          "shared_edge.stl"),
     "flat_sheet": write(raw([[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0]], [[0, 1, 2], [0, 2, 3]]),
                         "flat_sheet.stl"),
+    "unclosable_shell": write(open_shell(), "unclosable_shell.stl"),
+    "nonmanifold_fin": write(finned_sphere(), "nonmanifold_fin.stl"),
 }
 _flipped_normals = np.cross(GOOD_SPHERE.triangles[:, 1] - GOOD_SPHERE.triangles[:, 0],
                             GOOD_SPHERE.triangles[:, 2] - GOOD_SPHERE.triangles[:, 0])
@@ -293,6 +320,40 @@ render_worker = importlib.util.module_from_spec(_wspec)
 _wspec.loader.exec_module(render_worker)
 
 
+def repair_rebuilds_what_surgery_cannot_fix():
+    """The 1.1.0 volumetric fallback.
+
+    Real TRELLIS.2 output reaches this state by itself: repairing its thousands of non-manifold
+    edges deletes faces, opening holes that meshing_close_holes then refuses, and manifold3d
+    rejects the manifold-but-open result (measured on Anvil 2026-10-08, and not reproducible
+    compactly in code). `--max-hole-edges 0` induces the same condition from a plain open shell:
+    the surgical path is denied any hole closing and cannot produce a solid.
+    """
+    # --no-reconstruct is the pre-1.1.0 behaviour, and it is still the honest failure it always was.
+    refused = expect_refused("unclosable_shell", 5, "--max-hole-edges", "0", "--no-reconstruct",
+                             reason="not a manifold")
+    assert "reconstructed" not in refused, refused
+
+    # With the fallback the same input becomes a viable STL -- and says so in the report, because a
+    # rebuilt component is an approximation of the input, not the input repaired.
+    report, result = expect_repaired("unclosable_shell", "--max-hole-edges", "0")
+    rebuilt = report.get("reconstructed")
+    assert rebuilt, f"expected a volumetric rebuild, report says: {report}"
+    assert any("not a manifold" in r["reason"] for r in rebuilt), rebuilt
+    assert all(r["faces_out"] > 0 and r["poisson_depth"] >= 1 for r in rebuilt), rebuilt
+    assert result["stats"]["shells"] == 1, result["stats"]
+    assert result["stats"]["volume"] > 0, result["stats"]
+
+
+def repair_fallback_does_not_paper_over_the_impossible():
+    # A zero-thickness fan encloses nothing, so reconstruction cannot rescue it either. The job must
+    # still exit 5 with the real reason and leave no file -- the fallback widens what can be
+    # repaired, it does not lower the bar for what counts as viable.
+    report = expect_refused("nonmanifold_fin", 5, reason="not a manifold")
+    assert "reconstructed" not in report, report
+    assert not report["viable"], report
+
+
 def worker_screens_mesh_by_format():
     screen = render_worker.screen_artifact
     for name in ("good_sphere", "good_ascii", "solid_header_binary"):
@@ -323,6 +384,10 @@ check("repair fills enclosed voids and reports the one it made", repair_fills_en
 check("repair will not silently delete a real part of the model", repair_refuses_to_delete_real_parts)
 check("repair fails honestly with no artifact (exit gate 5)", repair_fails_honestly)
 check("repair of touching solids is honest either way", repair_handles_touching_solids)
+check("repair rebuilds a component surgery cannot fix, and reports that it did",
+      repair_rebuilds_what_surgery_cannot_fix)
+check("the volumetric fallback still fails honestly when reconstruction cannot help",
+      repair_fallback_does_not_paper_over_the_impossible)
 check("render worker screens mesh artifacts by format; other types unchanged",
       worker_screens_mesh_by_format)
 print(f"\n{passed} checks passed (fixtures in {TMP})")

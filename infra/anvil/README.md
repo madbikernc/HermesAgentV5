@@ -1,6 +1,6 @@
 # Anvil — mesh node setup checklist
 
-**Version:** 2.4.0
+**Version:** 2.6.0
 
 Ordered steps to stand up `Anvil`, the fleet's mesh node (IMPLEMENTATION_PLAN.md S19): a Windows box that
 turns a finished render into a viable STL. This file is the recipe; S19 in the plan is the
@@ -194,6 +194,23 @@ times (`KSampler#3/#18/#23`, quoted — `hermes-generate-mesh.py` replaces the q
 integer). The committed file was re-validated *after* performing that substitution exactly as the worker
 does it.
 
+### The GUI copy
+
+`trellis2-mesh-only.ui.json` is the same graph in the **editor's** workflow format, for opening in
+ComfyUI. It exists because loading the stock template in the GUI raises a missing-model dialog for
+`pixal3d_int8_convrot.safetensors` (5.2 GB) and `moge_2_vitl_normal_fp16.safetensors` (631 MB) — the
+Pixal3D branch, which this node deliberately does not have. In this copy those nodes are **gone, not
+merely unused**, so the dialog does not appear; every model it references was checked present on disk.
+
+It is generated, not maintained by hand, and it **self-validates**: the builder converts it back to API
+format and diffs against `trellis2-mesh-only.api.json`, refusing to write unless they match exactly. The
+two files are therefore the same graph. The GUI copy differs only in carrying a real input image
+(`example.png`) and literal seeds where the API copy carries `{{INPUT_IMAGE}}` and `{{SEED}}`.
+
+**The API copy is what the worker runs.** If you edit the graph in the editor, re-export with
+**Workflow → Export (API)**, re-insert the two placeholders, and commit that — the `.ui.json` is a
+convenience for working visually, not the artifact Anvil consumes.
+
 > The workflow file carries **no `**Version:**` line**: it is consumed by ComfyUI, which treats every
 > top-level JSON key as a node, so a metadata key would break it and JSON admits no comments. It is
 > versioned through this README and the plan instead.
@@ -210,27 +227,53 @@ faces with the seed alone, and VRAM tracks it, so this does fit on 16GB but **no
 margin is seed-dependent rather than fixed**. Size `JOB_TIMEOUT` against 120 s, not 85 s, and treat an
 occasional OOM as expected rather than anomalous until more runs exist.
 
-## 4a. Known gap: the repair chain fails on real TRELLIS.2 output
+## 4a. The repair chain and real TRELLIS.2 output — resolved 2026-10-08
 
-`hermes-mesh-repair.py` has **not** yet turned one of these meshes into a viable STL. Reproduced on three
-different meshes, always the same way:
+`hermes-mesh-repair.py` 1.1.0 now produces a viable STL from real generated output. Getting there
+turned up two separate problems, and only the second was the chain's fault.
 
-```
-[mesh-repair] 119 components, 6 significant, 113 fragments dropped
-[mesh-repair] FAILED: PyMeshLab repair failed: Failed to apply filter: meshing_re_orient_faces_coherently
-Details: Mesh has some not 2-manifold faces, Orientability requires manifoldness
-```
+**Framing, not the pipeline.** The first real photo produced a *technically viable* STL that was
+geometrically useless: extents `0.7965 x 0.9888 x 0.0030`, a 1:330 sheet. The raw GLB was already
+flat, so this came out of ComfyUI, not the repair. The birefnet mask spanned `(0,156)-(1071,1599)`
+on a 1072x1600 image — the subject touched the left, right and bottom edges. TRELLIS.2 needs a
+closed silhouette with background margin on all sides; a subject running off the frame collapses to
+a relief. **Reframed with the whole subject inside the frame, z/x went 0.0038 -> 0.98.** This is the
+single most important thing to get right about the input image.
 
-The chain reorients faces before it has made the mesh 2-manifold, and real generated output is not
-2-manifold on arrival. It needs a non-manifold repair step (PyMeshLab's own
-`meshing_repair_non_manifold_edges` / `..._faces`) ahead of the reorient. **Exit gate 5 is meanwhile
-behaving exactly as designed** — exit 5, a real error surfaced, no artifact written.
+**The chain's own gap.** With real geometry it then failed at manifolding, and no parameter fixed
+it. All measured on the node, all failing:
 
-**Do not tune against the current evidence.** Every run above used ComfyUI's `example.png`, which is a
-flat MS-Paint drawing of a figure *plus* sky, clouds and a grass hill — several disconnected subjects and
-nothing like a photograph of one object. A 100+ component mesh is the honest result for that input. Get a
-real single-object image first; only then is it clear how much of this is the repair chain and how much
-was the picture.
+| Attempt | Result |
+|---|---|
+| default `method='Remove Faces'` | Kills all 4,205 non-manifold edges by *deleting faces*, which opens boundary edges 228 -> 2,664; `close_holes` plateaus at 2,118. Manifold but **open** -> manifold3d `NotManifold` |
+| `--max-hole-edges` 20000, 200000 | No change — `close_holes` is *skipping* these holes, not size-limited |
+| `method='Split Vertices'` | Mesh stays non-2-manifold; `close_holes` throws |
+| `selfintersection=False` | Holes close, but non-manifoldness returns; `reorient` throws |
+| upstream `sign_mode='sdf'` | Far worse: 650,049 boundary edges, 660 components. Its tooltip's "needs consistent winding" caveat is real. **UDF is correct** |
+
+So the fix is not a knob. 1.1.0 adds a **volumetric fallback**: a component that cannot be repaired
+surgically is rebuilt with screened-Poisson reconstruction, which is closed by construction rather
+than by repair, then decimated back to its original face count. Two things measured while building
+it and now in the code: Poisson fits a surface only where it has evidence, so a large missing region
+comes back as an open boundary and must be closed afterwards; and it leaves small spurious shells,
+so those below `BUBBLE_FRACTION` of the largest reconstructed shell's volume are dropped and counted.
+
+**It is never silent.** A rebuild is an approximation of the input, not the input repaired — fine
+detail is smoothed — so every one is recorded in the report under `reconstructed`, with the reason,
+the Poisson depth and the face counts. `--no-reconstruct` restores the pre-1.1.0 behaviour.
+
+Result on the real mesh: **688,046 triangles, extents `0.3264 x 1.0 x 0.3208`, viable, 61 s** (34 MB
+STL), with 1 component rebuilt and 6 bubbles dropped, and every independent check passing.
+
+Two things it does **not** do, deliberately:
+
+- It does not lower the bar. A zero-thickness fan encloses no volume, so reconstruction cannot
+  rescue it either, and the job still exits 5 with no artifact. `test_mesh_pipeline.py` covers both
+  directions — the rebuild that works, and the one that must still be refused.
+- It does not catch the flat-billboard case above. Everything S19c names passed on that 3 mm sheet.
+  `hermes-mesh-verify.py` should probably fail, or loudly warn, when the smallest bbox extent is a
+  tiny fraction of the largest, or volume is negligible against the bbox — **still open**, because
+  the threshold is a judgement call. Exit gate 4 (open it in Bambu Studio) is the current answer.
 
 ## 4. The mesh worker's Python
 
@@ -384,3 +427,5 @@ In this order, each after the one before it works:
 | 2.2.0 | 2026-10-04 | **The win_amd64 test gate is closed.** The mesh venv was built from ComfyUI's own 3.12.11 interpreter (step 4's `py -3.12` does not work here — no `py` launcher) and verified isolated from ComfyUI's packages. **All six pins resolved to the identical versions on win_amd64/cp312 as on aarch64**, so `requirements-mesh.txt` needs no per-platform split and was not re-pinned. `test_mesh_pipeline.py` passes **10/10** on Windows, the suite's first run off aarch64, and `test_windows_scripts.ps1` was re-run on the real node (**10/10**, PowerShell 5.1) rather than trusted from another machine. Step 4 records the exact commands. Noted as still unexercised: the post-union PyMeshLab retry loop, which only a real TRELLIS.2 mesh can reach. |
 | 2.3.0 | 2026-10-04 | **TRELLIS.2 models fetched and verified (10.2 GB); step 3 now names the real template.** Files went into StabilityMatrix's **shared** model folders rather than the package-local tree, since that is what this install resolves via `extra_model_paths.yaml` and it survives a package reinstall. Each was header-verified as real safetensors after download, and ComfyUI's `/models/<folder>` endpoints confirm it lists all of them. **Both DINOv3 files are present deliberately:** the shipped template's `CLIPVisionLoader` defaults to `dino_v3_L_naf_fp32.safetensors`, which lives in the **Pixal3D** repo and not TRELLIS.2's, and the two files are **not** the same artifact (452 vs 415 tensors) — so the template-expected one was fetched rather than assuming interchangeability. **`Comfy-Org/MoGe` and `pixal3d_int8_convrot` were confirmed unnecessary from the template's own link graph**, not assumed: the MoGe chain feeds only `Pixal3DConditioning`, while `Trellis2Conditioning` takes just a `CLIP_VISION` and an `IMAGE` — which is why this was 10.2 GB instead of 17. Step 3 now names the template (`3d_pixal3d_trellis2_image_to_model`, 66 nodes), warns that it serves both models behind a `PrimitiveBoolean` shipping as `False`, and lists the texture-side nodes to strip and the shape-side chain to keep, with the partial wiring that was actually traced. |
 | 2.4.0 | 2026-10-08 | **The workflow is built, committed and proven to run; and the repair chain is proven not to.** `infra/anvil/workflows/trellis2-mesh-only.api.json` (29 nodes) was derived from ComfyUI's shipped 66-node template rather than hand-written or GUI-exported — branch selected, a file-writing export added, then pruned by reachability — and validated by three real runs on the node. Step 3 is rewritten from a GUI instruction into a record of what exists, including the trap that the template's only `Save3DAdvanced` sits on the **texture** chain, so stripping texture the obvious way yields no file at all; that `PreviewImage#302` is load-bearing despite its name; and the `widgets_values` alignment rules (`control_after_generate`, `LoadImage.upload`, and `COMFY_DYNAMICCOMBO_V3` expanding to `parent.child` inputs). One measured tuning change: `sign_mode.drop_inverted_components=true`, isolated in its own run, which took 24 significant components to 3. **First real measurements, for exit gate 2: 85.3 s / 12,797 MiB and 120.4 s / 15,492 MiB — the latter 95% of the card with 819 MiB spare**, with the raw mesh varying 12.6M→47.2M faces on seed alone, so the fit is real but seed-dependent. New §4a records a reproducible gap: `hermes-mesh-repair.py` fails on all three real meshes at PyMeshLab's `meshing_re_orient_faces_coherently`, which requires manifoldness the generated mesh does not have — it needs a non-manifold repair step first. Flagged prominently that every run used ComfyUI's `example.png` (a flat drawing of a figure plus sky and hill), so the component counts are not a fair test and nothing should be tuned against them. Also corrected: ComfyUI on the node is **0.38.0**, not the 0.38.2 of 2026-10-04 — StabilityMatrix moved it back on 2026-10-05, which is risk 4 of the plan happening within a day of being written. |
+| 2.5.0 | 2026-10-08 | Added `workflows/trellis2-mesh-only.ui.json`, the same graph in the **editor's** format, after loading the stock template in the GUI raised a missing-model dialog for `pixal3d_int8_convrot.safetensors` and `moge_2_vitl_normal_fp16.safetensors` — the Pixal3D branch this node deliberately lacks. In the GUI copy those nodes are removed rather than left unused, so the dialog does not appear, and every model it references was verified present on disk. It is generated and **self-validating**: the builder round-trips it back to API format and refuses to write unless it matches `trellis2-mesh-only.api.json` exactly, so the two cannot drift. Documented which file is authoritative — the API copy is what the worker runs; the GUI copy is for working visually, and an edit there must be re-exported with Export (API) and have the two placeholders re-inserted. Also recorded while checking this: the template nodes carry `widgets_values_named`, which independently confirmed every widget value in the committed API workflow (the only differences being `control_after_generate` and `upload`, both frontend pseudo-widgets absent from the backend schema, and the two intentional overrides). |
+| 2.6.0 | 2026-10-08 | **§4a rewritten: the repair chain now handles real TRELLIS.2 output.** Two separate problems, only one of them the chain's. First, **framing**: a real photo produced a structurally viable but useless 1:330 sheet, traced to a birefnet mask touching three frame edges — reframing the subject inside the frame took z/x from 0.0038 to 0.98, and that is now written down as the thing to get right about input images. Second, the chain's own gap, with the full table of measured dead ends (`--max-hole-edges` to 200000, `method='Split Vertices'`, `selfintersection=False`, and upstream `sign_mode='sdf'`, which is far worse and confirms UDF is correct). `hermes-mesh-repair.py` 1.1.0's volumetric fallback resolves it: 688,046 triangles, extents `0.3264 x 1.0 x 0.3208`, viable in 61 s, 1 component rebuilt and 6 bubbles dropped. Recorded that a rebuild is reported every time and never silent, that it still refuses the impossible, and that the flat-billboard hole in S19c's "viable" definition remains **open** pending a threshold decision. |
