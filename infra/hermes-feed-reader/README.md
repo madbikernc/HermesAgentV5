@@ -1,6 +1,6 @@
 # hermes-feed-reader — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 S26: pulls the fourteen public AI and security feeds listed in `feeds.yaml` and ingests each new
 entry into the existing RAG store, so `hermes-news-digest.py` has something real to search.
@@ -132,8 +132,24 @@ before trusting it.
 - The oneshot unit ran through systemd itself (`Result=success`, `ExecMainStatus=0`), because a
   script that works by hand and a unit that works are different claims.
 
+## 7. Exit gate — met 2026-10-09
+
+The gate was one line citing one of these feeds that a human confirms was worth surfacing. It is a
+CISA advisory published 2026-10-08, fetched the same evening, retrieved by an operator-written topic
+and summarized with its real MITRE technique ids (`T1595.002`, `T1189`, `T1059.001`) intact:
+
+> **attacker tactics, techniques and procedures:** Table 2 details reconnaissance like T1595.002
+> active scanning. Table 3 details initial access such as T1189 drive-by compromise. Table 4
+> details execution like T1059.001 PowerShell. `[CISA — Cybersecurity Advisories … aa26-281a, …]`
+
+Confirmed by the operator, 2026-10-09. Two limits worth keeping next to it: the same run returned
+`nothing new` for six of eight topics, so this is proof the chain works and **not** a yield figure;
+and the evidence came from a `--dry-run`, which composes the body and stops before SMTP, so the
+first real send is the 07:10 timer run. See `IMPLEMENTATION_PLAN.md`'s S26 gate record.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-08 | Initial version — S26 built, deployed and live-verified on `spark`: `feeds.yaml` (14 sources), `tools/hermes-feed-reader.py`, the daily timer, a 65-check offline suite, and the eight findings above. |
+| 1.1.0 | 2026-10-09 | Added §7, the exit-gate record: met on a confirmed digest line citing a real 2026-10-08 CISA advisory, with its two limits stated alongside (six of eight topics returned `nothing new`, and the evidence came from a dry run that stops before SMTP). |
