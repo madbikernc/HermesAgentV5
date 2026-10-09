@@ -1,0 +1,15 @@
+[Unit]
+Description=hermes-feed-reader - S26 public AI/security RSS feeds into the RAG store
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-feed-reader/README.md
+After=network-online.target hermes-embed.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+# The RAG venv, not /usr/bin/python3: the write half needs sqlite-vec, which the system
+# interpreter cannot see. Same interpreter every other hermes-rag-ingest-*.service uses.
+ExecStart=/opt/hermes/venvs/rag/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-feed-reader.py
+StandardOutput=journal
+StandardError=journal

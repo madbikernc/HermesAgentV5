@@ -1,0 +1,47 @@
+# S26 hermes-feed-reader source list — one feed per line.
+#
+# Boss-edited directly. `tools/hermes-feed-reader.py` reads this file verbatim on every run; no
+# NLP, no LLM judgment, no network lookup is involved in parsing it. Blank lines and lines
+# starting with # are ignored.
+#
+# Format, deliberately flat:   category | name | url
+#
+#   category   `ai` or `security`. Becomes the first path segment of every chunk's source_path,
+#              so `source_path LIKE 'security/%'` scopes a query to one side — the same scoping
+#              hermes-rag-ingest-podcasts.py already does with `source_path LIKE 'ShowName/%'`.
+#   name       Human-readable publisher name. Appears verbatim in every chunk's citation, which
+#              is what a hermes-news-digest email shows a human, so write it the way you want to
+#              read it there.
+#   url        The feed itself.
+#
+# As with infra/hermes-news-digest/topics.yaml, the `.yaml` extension is kept for continuity with
+# the plan and NO YAML structure is parsed or required — this is a flat delimited list on purpose,
+# so the reader needs no PyYAML and therefore no venv.
+#
+# Every feed below answered a real HTTP request before it was written here. Adding a source is a
+# line in this file, never a code change. Anthropic is absent deliberately: it publishes no
+# first-party feed as of 2026-10-08, and the third-party mirrors fail the "first-party or
+# explicitly licensed" bar every other entry here meets.
+#
+# All entries are confidence tier `high` — official publisher and outlet feeds, the same tier
+# hermes_botnet_intel.py gives Spamhaus/Feodo. That tier is implicit for this file rather than a
+# column, because a lower-trust source does not belong in it; S25's scraped X posts were to carry
+# `community` and live in their own corpus, not here.
+
+# ── AI ────────────────────────────────────────────────────────────────────────
+ai | OpenAI News | https://openai.com/news/rss.xml
+ai | Hugging Face Blog | https://huggingface.co/blog/feed.xml
+ai | Google DeepMind Blog | https://deepmind.google/blog/rss.xml
+ai | Google AI Blog | https://blog.google/technology/ai/rss/
+ai | arXiv cs.AI | https://rss.arxiv.org/rss/cs.AI
+ai | MIT Technology Review — AI | https://www.technologyreview.com/topic/artificial-intelligence/feed/
+ai | MarkTechPost | https://www.marktechpost.com/feed/
+
+# ── Security ──────────────────────────────────────────────────────────────────
+security | Krebs on Security | https://krebsonsecurity.com/feed/
+security | Schneier on Security | https://www.schneier.com/feed/atom/
+security | The Hacker News | https://feeds.feedburner.com/TheHackersNews
+security | BleepingComputer | https://www.bleepingcomputer.com/feed/
+security | SANS Internet Storm Center | https://isc.sans.edu/rssfeed_full.xml
+security | CISA — Cybersecurity Advisories | https://www.cisa.gov/cybersecurity-advisories/all.xml
+security | CISA — Alerts (KEV) | https://www.cisa.gov/cybersecurity-advisories/alerts.xml

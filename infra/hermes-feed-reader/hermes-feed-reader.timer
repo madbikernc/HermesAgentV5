@@ -1,0 +1,14 @@
+[Unit]
+Description=Run hermes-feed-reader daily (S26)
+
+[Timer]
+# 06:40, deliberately ahead of hermes-news-digest-daily.timer's 07:10 so the day's entries are in
+# the index before the digest searches "content added since the last run" — the whole point of
+# S26 being a source rather than a digest. Also kept clear of the 06:50/06:57/06:59 RAG ingest
+# cluster, which competes for the same embedder.
+OnCalendar=*-*-* 06:40:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

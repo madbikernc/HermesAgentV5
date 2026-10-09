@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.14.0
+**Version:** 3.15.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -84,7 +84,14 @@ constraint. **Amended the same day**, on direct request: each topic now generate
 distinct highlights per day (a real schema reshape, one row per highlight rather than one blob), the
 email surfaces the top 20 of those, and a new **S21e** report page on `hermes-fleetops-ui` gives a
 browsable history of up to 50 per topic per day — read-only, same posture as S21's other three report
-pages.
+pages. **S26 is executed and live as of 2026-10-08** — `hermes-feed-reader`, fourteen first-party keyless
+AI/security feeds into the existing RAG store on a daily timer (185 entries / 263 chunks on the first
+run, 0 failures), with eight findings including one that matters beyond this stage: these chunks lose an
+unrestricted semantic search to the podcast archive and win only under the digest's own `min_chunk_id`
+recency cursor. **S25 is deferred, not planned** — operator go-ahead was given and the stage was then
+stopped before any build, because its keyless premise is measured false: RSS-Bridge's timeline call is
+OAuth-signed and needs a real X account's tokens pasted into vendored PHP. `topics.yaml` is still empty,
+so `hermes-news-digest.py` continues to no-op until it has real topics.
 
 V5 exists to move The Firmament from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** described in [`firmament-fleet-target-architecture.md`](firmament-fleet-target-architecture.md)
@@ -127,8 +134,8 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S22 | Layer 2 re-specified — the deployed screener missed 14 of 18 injections | 📋 Planned 2026-10-08, not executed — **security**; ordered before S20/S21 |
 | S23 | The Minecraft bot fleet enters this plan | 📋 Planned 2026-10-08, not executed (the fleet itself is live since 2026-09-13) |
 | S24 | Currency audit — what S13/S14 would find today | 📋 Planned 2026-10-08, not executed — nine findings, one questions S16's recall number |
-| S25 | `hermes-x-reader` — X/Twitter posts into the existing RAG/news-digest pipeline, via self-hosted RSS-Bridge | 📋 Planned 2026-10-08, not executed — scraping-based; ToS/operator go/no-go gates S25a; ordered after S22 |
-| S26 | `hermes-feed-reader` — public AI/security RSS feeds into the existing RAG/news-digest pipeline | 📋 Planned 2026-10-08, not executed — first-party/keyless, no ToS exposure; ordered after S22 |
+| S25 | `hermes-x-reader` — X/Twitter posts into the existing RAG/news-digest pipeline, via self-hosted RSS-Bridge | ⛔ **Deferred 2026-10-08 — its keyless premise is measured false.** Operator go-ahead was given and the stage was then stopped before any build: RSS-Bridge's timeline call needs a real X account's OAuth tokens, pasted into vendored PHP. Nothing was built, nothing installed |
+| S26 | `hermes-feed-reader` — public AI/security RSS feeds into the existing RAG/news-digest pipeline | ✅ Built, deployed and live-verified on `spark` 2026-10-08 — daily timer, 65 offline checks, first run 185 entries / 263 chunks from all 14 feeds, 0 failures; eight live findings; the S22-before-S26 constraint was **not** honored |
 | S27 | `hermes-news-digest` re-spec — six fixed priority-ordered topics, top-20-of-50 per email, daily | 📋 Planned 2026-10-08, not executed — behavior + schema change to a live component; sequenced after S25/S26 |
 
 ---
@@ -3100,6 +3107,63 @@ live `ss -ltnp` on spark before deploying, same discipline S21 already states fo
    real evidence this stage is worth its ToS exposure is a `hermes-news-digest` email that cites a real X
    post a human confirms was worth surfacing. Track the first one explicitly when it happens.
 
+#### S25 — stopped before S25a, 2026-10-08: the keyless premise is false
+
+**Operator go-ahead was given, and the stage was then halted on measurement rather than built.**
+Nothing was installed: no PHP, no RSS-Bridge, no `accounts.yaml`, no script, no unit, no Vaultwarden
+item. What follows is the evidence, because the decision this reverses was an explicit one and it
+should not be re-approved on the old basis.
+
+**This section's own "Where it runs" paragraph — "RSS-Bridge needs no credential for public-account
+feeds" — is false for the exact path S25 needs.** Measured from `spark`, in the order taken:
+
+| Step | Result |
+|---|---|
+| `TwitterBridge.php` still shipped upstream? | **Yes** — present among 549 bridges on `master` (GitHub contents API, not a page scrape) |
+| `POST /1.1/guest/activate.json` | **200**, real guest token |
+| `UserByScreenName` with that guest token | **200**, real profile data for a public account |
+| `UserWithProfileTweetsQueryV2` — **the timeline** — with that guest token | **404** |
+
+The bridge's own source explains the 404: `lib/TwitterClient.php` signs the timeline call with
+**OAuth 1.0a**, using Twitter's legacy first-party iPhone consumer key that it ships hardcoded, plus
+these two fields:
+
+```php
+$this->oauth_token = ''; //Fill here
+$this->oauth_token_secret = ''; //Fill here
+```
+
+So the guest token buys the user lookup and not the posts. Making S25 work requires extracting an
+OAuth access-token pair for a **real X account** and pasting it into vendored third-party PHP. That
+is a different proposition from the one this stage described and the one that was approved, in three
+ways worth stating separately:
+
+1. **The suspendable asset becomes an account, not an anonymous request.** Risk 4 anticipated feed
+   mortality; it did not anticipate that the thing dying is a credential.
+2. **It collides with a stated non-negotiable.** `README.md`'s "What isn't changing" keeps credential
+   policy Vaultwarden-exclusive. The bridge reads those values from source, not the environment, so
+   honoring the policy means patching upstream PHP as well as running it.
+3. **It is a materially worse ToS posture** than the public embed endpoint this stage believed it was
+   using — authenticating as the official iPhone client rather than reading what powers tweet embeds.
+
+Two further measurements, both of which close off the softer alternatives:
+
+- **The keyless embed timeline is gone too.** `syndication.twitter.com/srv/timeline-profile/screen-name/<name>`
+  returns **429 "Rate limit exceeded" on the first request**, for two different accounts, from two
+  different egress IPs (`spark` and `PMWIN11`) — so it is gated globally, not rate-limited locally.
+  That endpoint was the mildest unofficial route and it does not work.
+- **Keyword/hashtag search is already dead upstream**, by the bridge's own comment: "Does not work
+  with the recent twitter changes."
+
+**What remains, stated plainly rather than left as an exercise.** The official API is the only
+non-scraping route and X has had no free read tier since February 2026, so S25 reduces to a paid
+integration or an account-credential one. Both are operator decisions, neither is blocked on
+engineering, and the honest status until one is taken is **deferred, not planned** — a stage whose
+stated mechanism has been measured not to work should not sit in this document as though it were
+ready to execute. **S26 was built instead, the same day, by direct decision**, and it covers the
+same underlying want — real AI/security content reaching `hermes-news-digest.py` — with no
+credential, no PHP, and no ToS exposure at all.
+
 ---
 
 ### S26 — `hermes-feed-reader`: public AI/security RSS feeds into the existing RAG/news-digest pipeline
@@ -3179,6 +3243,44 @@ every feed here is public and keyless.
 4. **No exit-gate number exists yet**, same honest gap S20/S25 each name for themselves: first real
    evidence of value is a `hermes-news-digest` email that cites one of these feeds and a human confirms
    was worth surfacing.
+
+#### S26 — executed 2026-10-08, live on `spark`
+
+**Built, deployed and verified against the real fleet.** `tools/hermes-feed-reader.py`,
+`infra/hermes-feed-reader/feeds.yaml` (the fourteen sources), `hermes-feed-reader.timer` (daily
+06:40), and `infra/hermes-feed-reader/tests/test_feed_reader.py` — **65 offline checks** needing no
+network, no RAG database and no embedder, which run off-fleet as well as on. Recipe and operational
+notes: `infra/hermes-feed-reader/README.md`. All fourteen feeds answered `200` before any code was
+written against them. First real run: **185 entries, 263 chunks, 0 failures, 41 seconds** (97 `ai`,
+166 `security`, every chunk with a vector); second run **0 new, 0 chunks**, so dedupe is proven
+against the real store rather than asserted.
+
+**Eight findings. Three of them changed the design, and one of them was nearly a silent hole.**
+
+| # | Finding |
+|---|---|
+| 1 | **S26b's "no venv" is true of the fetch half and false for the script.** The write half calls `hermes_rag_common.connect()`, which loads sqlite-vec, and `/usr/bin/python3` cannot see `sqlite_vec`; the first live run failed exactly there. The unit runs `/opt/hermes/venvs/rag/bin/python3`, like every other `hermes-rag-ingest-*.service`. |
+| 2 | **Never verify a feed with `curl`.** Both `cisa.gov` feeds return **403 to curl and 200 to `urllib`** from the same host and the same egress IP — Akamai fingerprints the client, not the address. A curl-based check (this session made one first) wrongly condemns the two highest-value security feeds in the list. |
+| 3 | **Dedupe is by chunk existence, not by the guid cursor S26b specifies.** A last-seen-guid pointer silently skips any entry that later appears below it, and back-filling is normal here — CISA revises advisories, arXiv re-lists. Each entry gets a deterministic `source_path` instead, so "new" is "no chunk with this path", which is order-independent and restart-safe. |
+| 4 | **The feed chunks lose a global semantic search and win the one the digest actually makes.** On "newly exploited vulnerability added to the KEV catalog", an unrestricted search ranks Security Now show notes (0.711) above the CISA KEV entries (0.772): long jargon-dense chunks beat short precise ones, and the podcast archive is 99.7% of the store's 80k chunks. Under the digest's own `rag.search(topic, min_chunk_id=cursor)` the old chunks are excluded by id and the feed entries are what return — confirmed live across four topics. **S26's "no digest-side code needed" holds, but on the recency restriction, not on relevance.** Anyone reusing this corpus in a query without that restriction should expect it to be invisible. |
+| 5 | **The global chunk ceiling starved the tail of the feed list, invisibly.** The first dry run exhausted a 150-chunk budget at feed 11, so SANS and *both* CISA feeds were never read — and the skip was recorded only in the failure email, never the journal. Fixed three ways: the ceiling is 400 (sized from the real 263-chunk pass, not guessed), skips are logged by name, and the run order **rotates** with its resume point in `discovery_state`, so a starved feed leads the next run. Without rotation, a permanently busy feed at the top of the file means the bottom is never read. |
+| 6 | **A layer-1 injection hit tags the chunk and never drops it.** Every entry is scanned at ingest with `hermes_injection_guard.scan()` — local regex, no network, no model — and a hit lands in the citation as `[layer1: <categories>]`. Dropping would be the wrong failure: half these feeds are security publications whose legitimate articles quote attack strings, and a Krebs piece on a prompt-injection campaign is precisely the article worth surfacing. |
+| 7 | **Pre-existing and not S26's: 250 orphaned `vec_chunks` rows** in the RAG store (80,266 chunks against 80,516 vectors). All 263 feed chunks have a vector and none are orphaned, so this predates the stage — but it is the same class of bug S9 hit in `hermes-memory`, and it belongs with **S24's** RAG findings rather than being left unrecorded. |
+| 8 | **Volume is wildly uneven**: OpenAI lists 1258 entries, Hugging Face 876, arXiv cs.AI 447, while MIT Technology Review and Krebs list 10. The per-feed cap (15, newest first) is what stops one publisher consuming a run. CISA is heaviest per entry — 15 entries, 77 chunks. |
+
+**The S22-before-S26 ordering constraint was not honored**, the second time that has happened to S22
+this day (S20 was the first). The available mitigation was built in rather than noted: finding 6's
+ingest-time layer-1 scan is a local, model-free pass over every entry *before* it enters the index,
+which is strictly more than the unscreened path S22's absence would otherwise leave. It is not a
+substitute for S22 — Layer 1 is regex and the measured gap is semantic — and the residual risk
+stands until S22 ships.
+
+**Still open, deliberately:** risk 4's exit gate is unchanged and unmet — the first real evidence of
+value is a `hermes-news-digest` email citing one of these feeds that a human confirms was worth
+surfacing, and that cannot exist until `topics.yaml` has real topics in it. **`topics.yaml` is still
+empty**, so the digest continues to no-op; populating it is the one remaining step between this
+stage and a daily email, and it is a Boss edit rather than code. Risk 3 (overlap with
+`hermes_botnet_intel.py`'s CISA-adjacent data) is also untested on purpose, pending a week of runs.
 
 ---
 
@@ -3501,3 +3603,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.12.0 | 2026-10-08 | Added **S27** (planned, not executed): a re-spec of the already-live `hermes-news-digest.py` 1.0.2, direct follow-up the same day as S25/S26 — a daily email series of "most important highlights from the previous day" across all RAG sources, six fixed topics in a stated priority order, one email per topic instead of today's single combined digest. Read against the real code first rather than assumed: `rag.search()` already has no `corpus` restriction, so "all RAG sources" is already the default, and `load_topics()`/`cmd_daily()` already iterate `topics.yaml` in file order, so priority ordering is free from the config alone — narrowing this stage to two real gaps, `cmd_daily()` sending one combined email instead of one per topic (S27b), and `summarize_topic()`'s hard one-line cap, loosened to "up to `TOP_K` lines, most important first" now that S25/S26 are about to add 15 new sources to the same index (S27c). Topic 6's AI-first/ransomware-second/other-novel-methods-third sub-ordering is carried entirely in its topic-string wording, the same mechanism the other five topics already use, with no new prompt-plumbing. `cmd_weekly()` is explicitly left untouched — the request named a daily series, and the boundary is stated rather than silently widened, the same discipline S19's slicing exclusion and S24a's audit-scope boundary already use. No new §5.1 ordering constraint: S27 changes presentation of already-ingested, already-screened content, not ingestion itself. Minor bump — new stage added, nothing prior reversed. |
 | 3.13.0 | 2026-10-08 | Amended S27 and S21 on direct request, same day. **S27**: the email's highlight cap rises from 5 to 20 per topic, and — because S21e below needs more than the email ever shows — each topic now generates and stores up to **50** distinct highlights per day, not 20 and not one blob; the email renders the top 20 of those 50 by rank (S27d). This forces the real change: `news_digest_daily`'s one-row-per-topic-per-day/`summary` blob becomes one row **per highlight** (S27c) — which corrects 3.12.0's own claim that the daily table "stays exactly as they are" and that this stage carries "no new §5.1 ordering constraint." Both were true of 3.12.0's narrower design and are superseded here, not silently dropped: the schema does change, and a new constraint (S27 before S21e) is added. `cmd_weekly()`'s *behavior* stays out of scope as 3.12.0 said, but its SQL needs a small forced adjustment to keep reading the reshaped table at all — a compatibility fix, not new weekly scope. **S21**: added **S21e**, a new read-only report page on `hermes-fleetops-ui` — browse up to the full 50 stored highlights per topic per day, same no-decide-buttons posture as S21b, same "exactly one copy, never a second drifting from the first" discipline as S21d, reading S27's reshaped table directly. Minor bump — both changes refine an unexecuted same-day design before any of it has run once; nothing live is reversed. |
 | 3.14.0 | 2026-10-08 | **S20 executed — `hermes-model-scout` is built, deployed and live on `spark`** (`87ff883`). Four new tools (`hermes-model-scout.py`, `hermes-model-scout-gate.py`, two wrappers), a daily timer (06:30 + 600s jitter), an always-restart gate service, `infra/hermes-model-scout/README.md` as the recreate checklist, and `infra/hermes-model-scout/tests/test_model_scout.py` — **92 offline checks** needing no network, no hermes-memory and no model call, which run off-fleet as well as on. Discovery is reused rather than reimplemented: the scout imports `hermes-model-scan.py` and `hermes-model-watch.py` by path, with the same `importlib` idiom `hermes-attention-reminder.py` already uses for hyphenated siblings, and calls their own fetch, relevance bar, fit heuristics and architecture-enum diff; both keep their weekly timers, state files and email paths untouched. **Six findings, each costing a real failure or correction — two of them latent correctness bugs rather than environment friction.** (1) The system interpreter cannot read hermes-memory's database through `hermes-memory.py`: `connect()` loads sqlite-vec and its own docstring says `/usr/bin/python3` cannot see `sqlite_vec`, which is why `hermes-attention-reminder.service` runs under the RAG venv; listing one non-vector table does not justify that coupling, so `list_scout_tasks()` opens the file read-only with stdlib `sqlite3`, accepting a dependency on the `tasks` column names shared with that script. (2) **hermes-memory never unquotes path segments and `urllib.parse.quote()` escapes `:` by default**, so every `GET /tasks/<id>` 404'd — the visible symptom was a refused gate command, the dangerous one was silent: **dedup was broken, so every candidate would have been re-proposed and re-announced daily**; fixed with `safe=':'` in both tools plus a regression check. (3) The benchmark history's `date` is a full ISO-8601 timestamp with an offset (`2026-08-24T18:32:10+00:00`), not the `YYYY-MM-DD` first assumed — comparing those against a UTC-derived date string skipped a same-day match in exactly the window where it matters, evening local time where the UTC date has already rolled over; dates are now parsed to real instants, date-only values still accepted. (4) A benchmark that ran *before* its approval must still count, or a task where the human benchmarked first and replied second sits `approved` forever — bounded 24h backdate slack, with `matched_before_approval` recorded on the `done` turn rather than presenting it as a later run. (5) Role state comes from the router's `/v1/models`, not from importing `hermes-router.py`: S20b's "read `ROLES` live" was right, but that module `sys.exit()`s at import without `HERMES_NODE`, so importing it is a hard exit; the endpoint's `checkpoint`/`abliterated` metadata exists for exactly this, and the consequence is that `embed`/`rerank` have no router-visible incumbent at all. (6) **A candidate with no incumbent is not a swap decision** — 8 of the first 10 candidates were `asr`/`tts`/`media`, the two roles §4.5 records as never deployed plus the one Kiln serves outside the router, so those are counted and reported with the reason instead of proposed; `hermes-model-scan.py`'s weekly digest already owns "what's new, period" (risk 1 anticipated this from the other side), and the architecture signal stays the deliberate exception since "llama.cpp can now load X" has no incumbent by definition. Two design points the build forced: `done` could not be deterministic as specified, because `hermes-benchmark-model.sh` takes a free-form `--model-id`, so the gate now **prescribes** the exact label (the HF repo id verbatim, already this fleet's convention per that script's own usage examples) and `reconcile_done()` matches it exactly — a human using a different label gets "still approved", the honest answer rather than a false one; and the approval reply is deliberately a two-step procedure, since that script's `--role` mode wants a backend the fleet already serves while `--candidate` mode wants a GGUF already on disk, and a scouted model is neither. Verified in order, each from real state rather than a log line: a dry run against live HF/router/history; a real pass proposing `prithivMLmods/LightOnOCR-3-4B-GGUF` for `omni`, with the offer confirmed by reading the room event back; the role-fit join reading the **live** incumbent `gemma-4-26B-A4B-it (Google, stock)` rather than the Nemotron-Omni §4.2's target table still names, which is the "read it fresh, never hardcode it" requirement paying for itself on the first run; dedup confirmed by a second pass (proposed 0, skipped 1, nothing posted); the full gate loop driven by real Matrix replies through every legal transition and every refusal path (wrong state, wrong agent, unknown id); the `done` path driven live with only the history row injected, where an older row and an unrelated row both correctly left the task `approved` — writing a fabricated row into the real `history.jsonl` to satisfy a test would be the exact kind of fake fact this pipeline exists to prevent; and the oneshot unit run through systemd itself (`Result=success`), re-verified after the node pulled the committed copy, since a wrapper that works by hand and a unit that works are different claims. Deployment detail worth keeping: `core.fileMode` is `false` on the authoring checkout, so the four executables were staged with `git add --chmod=+x` — without it both `ExecStart` wrappers would have landed at `644` on every node, which is S14's own recorded executable-bit regression. **The S22-before-S20 ordering constraint was not honored** — S20 shipped first on direct instruction, the same day §5.1 recorded it; both that bullet and S20's execution record now state the residual exposure (S20a/S20c make no model call; S20b's single advisory call is screened by the router's Layer 1 + Layer 2, i.e. by exactly the pipeline S22 exists to fix; the text is bounded by `_sanitize_hf_text()`; the advisory is never the source of any fact) rather than dropping a constraint the first time it bound. **S20d stays open by design** (retire `trig_01Sr7ypybNp9RmpUsrAgPpxF`, seed V4's `glm_5_3_seen`), gated on a week of real runs, and risk 4 stands: there is still no number proving this pipeline's worth and there cannot be until a candidate it surfaced is benchmarked and wins or loses. Minor bump — a planned stage executed as designed with its findings recorded; nothing prior reversed. |
+| 3.15.0 | 2026-10-08 | **S25 deferred on measurement; S26 executed and live on `spark`.** Operator go-ahead for S25 was given and the stage was then **stopped before S25a** — nothing installed, no PHP, no RSS-Bridge, no script, no unit — because its own stated premise is false. Measured from `spark` in this order: `TwitterBridge.php` is still shipped upstream (present among 549 bridges via the GitHub contents API); `POST /1.1/guest/activate.json` returns **200** with a real guest token; `UserByScreenName` returns **200** with real profile data; and `UserWithProfileTweetsQueryV2` — the timeline, the only call that returns posts — returns **404**. `lib/TwitterClient.php` explains it: that call is OAuth 1.0a signed with Twitter's hardcoded legacy first-party iPhone consumer key plus `$this->oauth_token = ''; //Fill here`. So S25's "RSS-Bridge needs no credential for public-account feeds" is false for the exact path S25 uses, and building it would require an OAuth token pair for a real X account pasted into vendored third-party PHP — which moves the suspendable asset from an anonymous request to an account, collides with `README.md`'s Vaultwarden-exclusive credential non-negotiable (the bridge reads those values from source, not the environment), and is a materially worse ToS posture than the public embed endpoint the stage believed it was using. Two measurements close the softer alternatives: the keyless embed timeline (`syndication.twitter.com/srv/timeline-profile/...`) returns **429 on the first request** for two accounts from two different egress IPs, so it is gated globally rather than rate-limited locally; and keyword/hashtag search is already dead by the bridge's own source comment. S25's status is therefore **deferred, not planned** — a stage whose stated mechanism is measured not to work should not sit here as if ready to execute — and what remains is a paid-API or account-credential decision, both the operator's. **S26 was built instead, the same day, by direct decision**, covering the same want with no credential and no ToS exposure: `tools/hermes-feed-reader.py`, `infra/hermes-feed-reader/feeds.yaml` (14 first-party keyless sources, each answering 200 before any code was written against it), a daily 06:40 timer placed ahead of the digest's 07:10 and clear of the 06:50–06:59 ingest cluster, and a **65-check offline suite** that needs no network, database or embedder. First real run: **185 entries, 263 chunks, 0 failures, 41s** (97 `ai` / 166 `security`, every chunk with a vector); second run 0 new, proving dedupe against the real store. **Eight findings, three of which changed the design.** (1) S26b's "no venv" holds for the fetch half only — the write half loads sqlite-vec, which `/usr/bin/python3` cannot see, so the unit runs the RAG venv like every other `hermes-rag-ingest-*.service`; the first live run failed exactly there. (2) **Never verify a feed with `curl`** — both `cisa.gov` feeds return 403 to curl and 200 to `urllib` from the same host and egress IP, Akamai fingerprinting the client rather than the address; this session's own first check was a curl check, and taken at face value it would have condemned the two highest-value security feeds. (3) Dedupe is by chunk existence rather than S26b's specified guid cursor, because a last-seen-guid pointer silently skips entries that later appear below it and back-filling is normal here (CISA revises, arXiv re-lists). (4) **The feed chunks lose a global semantic search and win the one the digest actually makes**: unrestricted, Security Now show notes rank above the CISA KEV entries (0.711 vs 0.772) because long jargon-dense chunks beat short precise ones and the podcast archive is 99.7% of the store's 80k chunks — but under the digest's own `min_chunk_id` cursor the old chunks are excluded by id and the feed entries return, confirmed live across four topics. S26's "no digest-side code needed" therefore holds on the recency restriction, not on relevance, which is the one thing to understand before reusing this corpus elsewhere. (5) **The global chunk ceiling starved the tail of the feed list invisibly** — the first dry run exhausted 150 chunks at feed 11, so SANS and both CISA feeds were never read, and the skip was recorded only in the failure email and never the journal; fixed three ways (ceiling raised to 400, sized from the real 263-chunk pass; skips logged by name; and the run order now **rotates** with its resume point in `discovery_state`, so a starved feed leads the next run). (6) A layer-1 injection hit **tags** the chunk's citation and never drops the entry, because half these feeds are security publications whose legitimate articles quote attack strings and a Krebs piece on a prompt-injection campaign is exactly the article worth surfacing. (7) Pre-existing and explicitly **not** S26's: 250 orphaned `vec_chunks` rows in the RAG store (80,266 chunks, 80,516 vectors), all 263 feed chunks sound — same class as S9's `hermes-memory` orphan bug, handed to **S24**'s RAG findings. (8) Volume is wildly uneven (OpenAI 1258 entries, HF 876, arXiv 447, Krebs 10), which is what the per-feed cap exists for; CISA is heaviest per entry at 77 chunks from 15. **The S22-before-S26 constraint was not honored** — the second S22 ordering breach of the day after S20 — and the mitigation was built in rather than noted: finding 6's ingest-time scan is a local model-free pass over every entry before it enters the index. It is not a substitute, since Layer 1 is regex and the measured gap is semantic, and the residual risk stands until S22 ships. Still open deliberately: `topics.yaml` **remains empty**, so the digest continues to no-op and risk 4's exit gate cannot be met yet — populating it is a Boss edit, and it is the only remaining step between this stage and a daily email. Minor bump — a planned stage executed and a second one deferred on evidence; no prior guidance reversed beyond S25's own falsified premise, which is corrected in place. |
