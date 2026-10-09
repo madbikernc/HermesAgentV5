@@ -1,0 +1,14 @@
+[Unit]
+Description=Run hermes-guard-report daily
+
+[Timer]
+# 07:45, after the morning jobs that generate most screened traffic (feed-reader 06:41, scout
+# 06:32, digest 07:10) so the day's report covers them, and before anyone reads the digest emails.
+# The 26h window overlaps deliberately: a caller blocked around the boundary appears in two
+# reports rather than none.
+OnCalendar=*-*-* 07:45:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

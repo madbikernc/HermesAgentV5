@@ -1,6 +1,6 @@
 # hermes-guard — recreate checklist
 
-**Version:** 4.0.0
+**Version:** 4.1.0
 
 Layer 2 of screening (HermesAgentV5 S5, `../../HermesAgentV5/IMPLEMENTATION_PLAN.md`) — Meta's
 `Llama-Prompt-Guard-2-22M`, stock weights, permanently (target §12.1: never a candidate for
@@ -198,6 +198,41 @@ flags are category-only rows predating router 2.12.0. It is therefore not a tuni
 Building a real one needs clean verdicts sampled *with* their text, which is a router change plus a
 retention decision about storing screened user text.
 
+## Daily blocked-call report — `hermes-guard-report`
+
+`hermes-guard-report.service` + `.timer`, 07:45 daily, **on Watch (spark) only** — the verdict log is
+fleet-wide, so a second copy would only duplicate the notice. Posts to FleetOps and exits 1 when a
+caller has been blocked `ALERT_THRESHOLD` (5) or more times in the window, so the regression is visible
+in `systemctl list-timers` and the journal as well as in chat. Offline checks: `tests/test_guard_report.py`.
+
+**Why it exists.** S22d gave Layer 2 a classifier that actually detects injections, and it began blocking
+the fleet's own analysis prompts: 351 calls over six and a half hours — 189 of the bots' planning calls
+and 162 of `hermes-minecraft-triage`'s — and nothing alerted. A blocked call is an HTTP 400 that each
+caller logs and swallows, and S27f deliberately suppresses real-time notices on *allowed* analysis calls
+so the digest alone would not fire six a day. The only signal was a human reading bot journals.
+
+**Attribution is by prompt shape, not by caller id.** The router cannot know which process called it, and
+threading a caller id through a security path to get a nicer report would be the wrong trade. Instead the
+report matches the screened text against a table of the fleet's known prompt templates
+(`KNOWN_CALLERS` in `tools/hermes-guard-report.py`) — which is how the two broken callers were identified
+within a minute on 2026-10-09. **A new component that starts getting blocked will show up, but under its
+own 48-char opening rather than a name; add it to the table when that happens.** That fallback is
+deliberate: unattributed traffic — a player's injection, or a component nobody has registered — stays
+individually visible instead of folded into someone else's row.
+
+No generic key length can do this job, which is worth stating because it looks like it should. The
+planner's prompts open `Goal: gathering wood` / `Goal: gather some iron ore` — one component, diverging
+at word two, which a 48-char key split into 20 "callers" and a 3-word key still split into six. But
+shortening the key merges what must stay apart, since most fleet prompts open `You are ...`. And the news
+digest opens `Topic: <varies>`, identifiable only further in. The text carries no structural signal that
+separates "same template, different tail" from "different template, shared opening".
+
+**Each caller's last-blocked time is printed, and a 15-minute `ONGOING` hint is only a hint.** A 26h window
+straddles any fix made during the day: measured on the first live run, the two callers repaired by the
+S27f restarts still showed 191 and 164 blocks, every one from before the restart. Whether a caller is
+*still* broken depends on how often it calls at all, which this reporter cannot know — so it reports the
+elapsed time and leaves the judgement to the reader.
+
 ## Revision History
 
 
@@ -207,3 +242,4 @@ retention decision about storing screened user text.
 | 2.0.0 | 2026-10-09 | **Major — reverses what this file implied about Layer 2's coverage.** Added the S22a measurement: this checkpoint is a jailbreak detector deployed where an indirect-injection detector was needed, per its own model card, and the composite L1+L2 gate catches 6 of 18 attacks (indirect 1/6, paraphrased 1/6) with zero false positives. Records three things not to do — do not trust a clean verdict as safety, do not retune `THRESHOLD` (no cutoff separates the distributions; best achievable accuracy 0.722), do not upgrade to the 86M (same label set per its card) — and that the `guard-log` verdict log is a catch log that can never contain a false negative, contrary to `memory_log_guard_verdict()`'s own docstring. |
 | 3.0.0 | 2026-10-09 | **Major — Layer 2 is no longer Prompt Guard 2.** S22c swapped it for a stock LLM asked a narrow yes/no question: 18/18 on the case set, all three bands 6/6, verified end to end through the router. Records that `omni`, the chosen independent arm, was measured non-viable (94.4% timeout at 6-way concurrency against `dispatch`'s 0%) and that `dispatch` is therefore an interim arm with the independence objection unresolved; the measured latency cost (~150ms to ~380-460ms sequential, ~1.2s p50 under concurrency, paid on every router request); and that rollback is the one-line `GUARD_MODE=classifier`. |
 | 4.0.0 | 2026-10-09 | **Major — Layer 2 is now a dedicated prompt-injection classifier**, `proventra/mdeberta-v3-base-prompt-injection` (279M, MIT), replacing the stock-LLM arm S22c deployed hours earlier. 17/18 alone with 6/6 on indirect injections, **18/18 composite at tool role**, and the only option that is both independent of the protected model and contention-free: 0% failures at 6-way concurrency with p50 317ms, against `omni`'s 94.4% failures and `dispatch`'s 1175ms. Records the three measured-and-rejected candidates (including the Hub's most-downloaded, which scored 13/18), that label orientation is now read from `id2label` rather than assumed, the role=tool vs role=user composite distinction, and the two one-line rollbacks. |
+| 4.1.0 | 2026-10-09 | Added the `hermes-guard-report` daily blocked-call report (Watch only, 07:45): why screening could silently stop the bot fleet for six hours with nothing alerting, why attribution is a table of prompt templates rather than a caller id or any generic key length, and why each caller's last-blocked age is printed instead of a still-broken verdict. |

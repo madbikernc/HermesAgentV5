@@ -1,0 +1,16 @@
+[Unit]
+Description=hermes-guard-report - daily account of what the screening layers blocked, by caller
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-guard/README.md
+After=network-online.target hermes-memory.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-guard-report-wrapper.sh
+# A repeatedly-blocked caller exits 1 on purpose, so the regression is visible in
+# `systemctl list-timers` and the journal as well as in chat. Not a crash; a signal.
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal
