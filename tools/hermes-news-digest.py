@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.0.2
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-09) - IMPLEMENTATION_PLAN.md S27e: relevance gating is no longer a single absolute
+# distance cutoff. The old one was calibrated on long chunks and silently excluded short ones.
+# Measured, not assumed: S26's feed entries that correctly match a topic land at distances of
+# 0.893-0.917 (EDPB's Irish DPC item, NIST SP 800-78-6) where the cutoff was 0.85, while an
+# unrelated Hugging Face post on the same query sat at 0.918 - so raising the cutoff could not
+# separate them, because for short texts the distances cluster in 0.87-0.99 regardless of
+# relevance. The cross-encoder does separate them, by two orders of magnitude: 0.9239 for the EDPB
+# item against 0.0036 for that false positive. Gating therefore moved onto the rerank score, which
+# reads the query/passage pair and is not length-scaled. See relevant_matches() below.
 #
 # 1.0.2 (2026-08-30) — HermesAgentV5 consolidation: REPO_DIR repointed from
 # HermesAgentV4 to HermesAgentV5.
@@ -76,13 +86,34 @@ TOPICS_PATH = REPO_DIR / "infra" / "hermes-news-digest" / "topics.yaml"
 EMAIL_TO = "notifications@canislupisnc.net"
 EMAIL_TO_NAME = "Fleet Notifications"
 
-# Empirical: in this corpus, with this embedding model, sqlite-vec distances
-# under ~0.85 have consistently been genuine semantic matches (see the
-# real Phase 30/31 build-log queries); above that, results are unrelated
-# noise a KNN search returns anyway because it always returns *something*.
-# A hard cutoff keeps "nothing new" honest instead of padding with a weak
-# match just because one exists.
+# FALLBACK ONLY as of 1.1.0 - used when no rerank score is available. Empirical: in this corpus,
+# with this embedding model, sqlite-vec distances under ~0.85 have consistently been genuine
+# semantic matches (see the real Phase 30/31 build-log queries); above that, results are unrelated
+# noise a KNN search returns anyway because it always returns *something*. What 1.1.0 found is the
+# limit of that calibration: "this corpus" meant podcast transcripts and fleet docs, i.e. LONG
+# chunks, and a short feed entry on the same subject scores systematically further away. Kept
+# unchanged rather than retuned, because a length-relaxed distance was measured not to separate
+# signal either (0.917 relevant vs 0.918 irrelevant on the same query).
 RELEVANCE_THRESHOLD = 0.85
+
+# Primary gate (1.1.0). Both numbers come from a real measurement against the live store, not
+# taste - the run is recorded in IMPLEMENTATION_PLAN.md S27e:
+#   * RERANK_FLOOR - the noise ceiling. Three deliberately irrelevant queries (sourdough, fishing,
+#     timing belts) topped out at 0.0112, and most noise scored 0.0001. Below the floor a topic is
+#     quiet no matter what its pool looks like, which is what keeps "nothing new" honest.
+#   * RERANK_RATIO - relative, because the absolute scale is not comparable across topics. A
+#     direct-answer match scores ~0.93-0.99 (EDPB's Irish DPC item, CISA's advisory) while a
+#     topically-adjacent but genuinely useful match scores ~0.06-0.24 (the UK AISI benchmark post,
+#     DeepMind's double-blind evaluations). One absolute cutoff cannot hold both, so each topic is
+#     judged against its OWN best hit: keep what is within a quarter of the leader.
+# Verified on seven real queries: the previously-silent privacy topic now yields 2 hits, the two
+# already-firing topics are unchanged and one is slightly tightened (a 0.0059-scoring 'Gemini 4
+# Argon' passage that the old distance gate admitted at 0.837 is now dropped), the
+# standards topic stays quiet because the cross-encoder genuinely rates bare NIST SP titles as weak
+# matches, and all three noise queries stay quiet.
+RERANK_FLOOR = 0.02
+RERANK_RATIO = 0.25
+
 TOP_K = 5
 
 SCHEMA_EXTRA = """
@@ -110,6 +141,30 @@ def load_topics():
         return []
     lines = TOPICS_PATH.read_text(encoding="utf-8").splitlines()
     return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+
+
+
+def relevant_matches(matches):
+    """Filter rag.search() results down to the ones actually worth summarizing.
+
+    Gates on the cross-encoder's rerank score when it is present, because that score reads the
+    query and the passage together and so is not scaled by passage length - which is the whole
+    defect in the old absolute-distance cutoff. Falls back to RELEVANCE_THRESHOLD when no rerank
+    score is available (the reranker is unreachable, or there was only one candidate and
+    rag.search() skipped reranking) - the pre-1.1.0 behaviour, kept deliberately: when the
+    cross-encoder is down, short-entry sources go quiet rather than loud, which is the conservative
+    direction and matches this file's own "keep 'nothing new' honest" rule.
+
+    Returns a (matches, mode) pair so the caller can log which gate actually ran; a silent switch
+    between two different relevance regimes is exactly the thing that should be visible in a
+    journal when a digest later looks wrong."""
+    scored = [m for m in matches if m.get("rerank_score") is not None]
+    if not scored:
+        return ([m for m in matches if m["distance"] < RELEVANCE_THRESHOLD], "distance-fallback")
+    top = max(m["rerank_score"] for m in scored)
+    cutoff = max(RERANK_FLOOR, top * RERANK_RATIO)
+    kept = [m for m in scored if m["rerank_score"] >= cutoff]
+    return (kept, f"rerank(top={top:.4f},cut={cutoff:.4f})")
 
 
 def summarize_topic(topic, matches):
@@ -244,7 +299,7 @@ def cmd_daily(args):
         except RuntimeError as e:
             print(f"ERROR: search failed for topic {topic!r}: {e}", file=sys.stderr)
             matches = []
-        matches = [m for m in matches if m["distance"] < RELEVANCE_THRESHOLD]
+        matches, gate_mode = relevant_matches(matches)
 
         if not matches:
             summary, has_news = "nothing new", False
@@ -253,7 +308,8 @@ def cmd_daily(args):
             has_news = summary.strip().lower() != "nothing new"
 
         lines.append((topic, summary, has_news))
-        print(f"{topic}: {'news' if has_news else 'nothing new'}")
+        print(f"{topic}: {'news' if has_news else 'nothing new'} "
+              f"[{gate_mode}, {len(matches)} passage(s)]")
 
         if not args.dry_run:
             conn.execute(
