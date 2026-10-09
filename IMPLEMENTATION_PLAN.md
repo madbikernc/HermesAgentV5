@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.13.0
+**Version:** 3.14.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -32,9 +32,21 @@ this line used to wait on happened — `HermesAgentV4`'s `tools/`, `skills/`, an
 into this repo and all three nodes (`spark`, `spark-2`, `HomeD13`) were cut over to it. `HermesAgentV4` is
 now superseded, not live; this repo is the deployed checkout.** See `README.md`'s status section for the
 summary; this document's own stages above describe the code/content work, which predates and is separate
-from that repo-level cutover. **S20 is planned, not executed** — a daily model-discovery → role-fit
-comparison → tracked benchmark-backlog pipeline (`hermes-model-scout`), direct request **2026-10-08**,
-also planning the retirement of `HermesAgentV4`'s own duplicate ad-hoc model-watch routine once it ships.
+from that repo-level cutover. **S20 is executed and live as of 2026-10-08** (`87ff883`) — the daily
+model-discovery → role-fit comparison → tracked benchmark-backlog pipeline (`hermes-model-scout`),
+requested and built the same day: daily timer, a decision gate watching FleetOps, 92 offline checks, and a
+first real candidate proposed and awaiting an operator reply. Six findings only a live run could produce,
+two of which were latent correctness bugs rather than environment friction: hermes-memory never unquotes
+path segments while `quote()` escapes `:` by default, which had **silently broken dedup** so every
+candidate would have been re-announced daily; and the benchmark history's `date` is a full ISO-8601
+timestamp rather than a date string, which skipped a same-day `done` match in exactly the evening window
+where UTC has already rolled over. Also found: the system interpreter cannot read hermes-memory through
+`hermes-memory.py` (sqlite-vec), `hermes-router.py` cannot be imported to read `ROLES` because it
+`sys.exit()`s without `HERMES_NODE`, and **8 of the first 10 candidates were for roles this fleet has no
+incumbent for at all**. `S20d` (retiring V4's duplicate routine) stays open by design, gated on a week of
+real runs. **The S22-before-S20 ordering constraint in §5.1 was not honored** — S20 shipped first on
+direct instruction, the same day the constraint was written; S20's own execution record states the
+residual exposure rather than dropping the point.
 **S21 is planned, not executed** — `hermes-fleetops-ui`, a direct follow-up request the same day for a
 base process-management web UI: links to the existing RAG approval portal and S20's benchmark backlog,
 plus read-only model usage/state and benchmark-history report pages, on the same stdlib-`http.server`/
@@ -110,7 +122,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S16 | RAG stack: eval harness, reranker, optional OCR (retriever already live, independently built) | ✅ Done (2026-08-31) — recall@5 0.538→0.705 |
 | S18 | RoCE fabric: clear the gate S1 set | ✅ Closed 2026-09-24 with its exit gate deliberately **missed** — RoCE fixed and persistent at 13.0 GB/s (unbonded `f1`, S18a; S18b never needed), but GB10 has no GPUDirect RDMA, so `TP=2` stays non-viable and MiMo does not proceed |
 | S19 | `Anvil` — mesh node (native-ComfyUI TRELLIS.2 on a Windows 5060 Ti) + viable-STL repair chain | 🔨 Everything but the node built + tested end to end (2026-09-27); node not stood up. Node identified as `PMWIN11`, route corrected to native ComfyUI (2026-10-03); models in place and win_amd64 gate closed (2026-10-04); workflow built and generating on the node, and the repair chain now yields a viable STL from real output (2026-10-08) |
-| S20 | `hermes-model-scout` — daily discovery → role-fit comparison → tracked benchmark backlog | 📋 Planned 2026-10-08, not executed |
+| S20 | `hermes-model-scout` — daily discovery → role-fit comparison → tracked benchmark backlog | ✅ Built, deployed and live-verified on `spark` 2026-10-08 (`87ff883`) — daily timer + decision gate running, 92 offline checks, one real candidate open; six live findings; **S20d still open by design** (gated on a week of runs), and the S22-before-S20 constraint was **not** honored |
 | S21 | `hermes-fleetops-ui` — base process-management web UI | 📋 Planned 2026-10-08, not executed |
 | S22 | Layer 2 re-specified — the deployed screener missed 14 of 18 injections | 📋 Planned 2026-10-08, not executed — **security**; ordered before S20/S21 |
 | S23 | The Minecraft bot fleet enters this plan | 📋 Planned 2026-10-08, not executed (the fleet itself is live since 2026-09-13) |
@@ -2551,6 +2563,85 @@ guard.sh`. `HermesAgentV4/infra/model-watch/alert-state.json`'s accumulated `glm
 worth seeding into the new `hermes-memory` state once-off so the first real run doesn't re-announce
 ~100 already-known repos; not carrying forward the mechanism itself.
 
+#### S20 — executed 2026-10-08, live on `spark`; S20d deliberately still open
+
+**Built, deployed, and verified against the real fleet**, not just written: `tools/hermes-model-scout.py`
+(S20a+S20b+S20c's proposal and `done` halves), `tools/hermes-model-scout-gate.py` (S20c's decision gate),
+both wrappers, `hermes-model-scout.timer` (daily, 06:30 + 600s jitter), `hermes-model-scout-gate.service`
+(`Restart=always`), and `infra/hermes-model-scout/tests/test_model_scout.py` — **92 offline checks, no
+network, no hermes-memory, no model call**, which also run on an off-fleet Windows box. Full recipe,
+operator loop and finding list: `infra/hermes-model-scout/README.md`. `S20d` is **not done** and that is by
+its own design — it is gated on a full week of real runs first.
+
+Discovery is reused, not reimplemented: the scout imports `hermes-model-scan.py` and
+`hermes-model-watch.py` by path (the `importlib` idiom `hermes-attention-reminder.py` and
+`hermes-status.py` already use for hyphenated siblings) and calls their own `fetch_recent_models()`,
+relevance bar, fit heuristics and architecture-enum diff. Both keep their own weekly timers, their own
+state files, and their own email paths, untouched.
+
+**Six findings, each of which cost a real failure or a real correction.** They are the reason this stage
+was worth executing live rather than declaring done on a code read.
+
+| # | Found | What it was |
+|---|---|---|
+| 1 | first live dry run | **The system interpreter cannot read hermes-memory through `hermes-memory.py`.** `connect()` loads sqlite-vec, and its own docstring says `/usr/bin/python3` cannot see `sqlite_vec` — which is why `hermes-attention-reminder.service` runs under `/opt/hermes/venvs/rag/bin/python3`. Listing one non-vector table does not justify pinning this service to the RAG venv, so `list_scout_tasks()` opens the file read-only with stdlib `sqlite3`. Cost: a direct dependency on the `tasks` column names, shared with `hermes-attention-reminder.py`. |
+| 2 | first live gate probe | **hermes-memory never unquotes path segments, and `urllib.parse.quote()` escapes `:` by default.** `GET /tasks/<id>` resolves as `parsed.path.split("/")[2]`, raw, so every task lookup 404'd. The visible symptom was a refused gate command; the dangerous one was silent — **dedup would have broken**, re-proposing and re-announcing every candidate daily. Both tools now pass `safe=':'` and the suite asserts the colon survives. |
+| 3 | first live `done` run | **The benchmark history's `date` is a full ISO-8601 timestamp with an offset** (`2026-08-24T18:32:10+00:00`), not the `YYYY-MM-DD` this first assumed. Comparing those against a UTC-derived date string skipped a same-day match, in exactly the window where it matters — evening local time, where the UTC date has already rolled over. Dates are now parsed to real instants; date-only values still work. |
+| 4 | reasoning through 3 | **A benchmark that ran *before* its approval must still count**, or a task where the human benchmarked first and replied second sits `approved` forever. Bounded 24h backdate slack, and when the slack is what matched, the `done` turn records `matched_before_approval` instead of quietly presenting it as a later run. |
+| 5 | writing S20b | **Role state must come from the router's `/v1/models`, not from importing `hermes-router.py`.** S20b's instruction to read `ROLES` live was right, but that module calls `sys.exit()` at import without `HERMES_NODE`, so importing it is a hard exit rather than a read. `/v1/models` carries the `checkpoint`/`abliterated` metadata 2.9.0 added for exactly this. Consequence: `embed` and `rerank` are not in that table at all, so no candidate for those roles has a named incumbent to compare against. |
+| 6 | first live run | **A candidate with no incumbent is not a swap decision, and proposing one is noise.** 10 candidates in the window, of which **8 were `asr`/`tts`/`media`** — the two roles §4.5 records as never deployed, plus the one served outside the router by Kiln's ComfyUI. Those are now counted and reported with the reason, never proposed, because `hermes-model-scan.py`'s weekly digest already owns "what's new this week, period" (risk 1 anticipated this overlap from the other side). The architecture signal is the deliberate exception — "llama.cpp can now load X" has no incumbent by definition, and promoting it is the entire point of S20a's second source. |
+
+**Two design points that came out of the build and are worth keeping in this document, not just the
+README.** First, `done` could not be made deterministic as originally specified: `hermes-benchmark-model.sh`
+takes a free-form `--model-id`, so a history row for a candidate is not reliably equal to its repo id.
+Rather than fuzzy-match and hope, the gate's approval reply **prescribes** the exact label (the HF repo id
+verbatim — already this fleet's convention, per `hermes-benchmark-model.py`'s own `--model-id` help and
+`.sh`'s own examples), stores it on the task, and `reconcile_done()` matches it exactly. A human who uses
+a different label gets "still approved", which is the honest answer rather than a false one. Second, that
+same reply is deliberately a **two-step** procedure: `hermes-benchmark-model.sh` has a `--role` mode for
+backends the fleet already serves and a `--candidate` mode for a GGUF already on disk, and a scouted
+model is neither — so the reply names the GGUF fetch as the human's first step rather than printing a
+one-liner that silently assumes a local path.
+
+**Live verification, in order.** 92 offline checks on `spark`. A real dry run against live HF, the live
+router and the real benchmark history. A real pass that proposed one candidate
+(`prithivMLmods/LightOnOCR-3-4B-GGUF` for `omni`), wrote the task, and posted the offer — confirmed by
+reading the room event back, not by trusting the log line. The role-fit join read the **live** incumbent,
+`gemma-4-26B-A4B-it (Google, stock)`, rather than the Nemotron-Omni §4.2's target table still names — the
+"read it fresh, never hardcode it" requirement paying for itself on the first run. Dedup confirmed by a
+second real pass: proposed 0, skipped 1, posted nothing. The full gate loop driven by real Matrix replies
+through every legal transition and every refusal path (wrong state, wrong agent, unknown id). The `done`
+path driven live with only the history row injected — an older row and an unrelated row both correctly
+left the task `approved`, the matching row moved it to `done` with the real suite scores in its turn and
+a real notice posted, and a second pass did not re-announce it. Finally the oneshot unit itself ran
+through systemd (`Result=success`, `ExecMainStatus=0`), since a wrapper that works by hand and a unit that
+works are not the same claim.
+
+**One real candidate is open and awaiting an operator decision** — that is the stage's working state, not
+an unfinished step. Test artifacts were left in `rejected`/`done` rather than deleted from a live WAL
+database: S9's own orphaned-`vec_turns` incident in this very service is why hand-deleting rows there is
+not worth the risk, and the same posture S8 took with its dormant test room.
+
+**The S22-before-S20 ordering constraint was not honored, and that is recorded here rather than quietly
+dropped.** §5.1 says S22 (fixing the Layer-2 screener) should precede S20, because S20a ingests
+publisher-supplied free text from the open internet and that is exactly the indirect-injection class the
+incumbent classifier missed every instance of. S20 was built first, on direct instruction, the same day
+the constraint was written. What bounds the exposure, stated precisely rather than reassuringly: S20a and
+S20c make **no model call at all**, so the ingested text never reaches a model on those paths; the single
+S20b advisory call goes through `hermes-router.py`, which screens every inbound call with Layer 1 and
+Layer 2 on the way in — so it is screened by exactly the pipeline S22 exists to fix, no better and no
+worse than every other call in this fleet; the text is additionally bounded and stripped by
+`hermes-model-scan.py`'s own `_sanitize_hf_text()` and framed as content-not-instructions; and the
+advisory output is appended to a record, is never the source of any fact, and nothing downstream executes
+it. The residual risk is a prompt-injection payload in a model card steering one advisory paragraph that a
+human reads next to the deterministic facts it cannot alter. That is a real cost of taking the stages out
+of order, and it does not go away until S22 ships.
+
+**Still open, deliberately:** S20d (retiring `trig_01Sr7ypybNp9RmpUsrAgPpxF` and seeding V4's
+`glm_5_3_seen` history) waits on a week of real runs, per its own text. Risk 4 also stands unchanged —
+there is still no number proving this pipeline's worth, and there cannot be until a candidate it surfaced
+gets benchmarked and wins or loses. The first one to do so should be recorded here by name.
+
 #### Risks and open questions
 
 1. **Daily cadence vs. `hermes-model-scan.py`'s weekly one is a real overlap, not fully resolved
@@ -3240,6 +3331,13 @@ That is a compatibility fix S27c's own change requires, not new weekly scope.
   from the open internet on a daily automated pass. That is precisely the case the incumbent Layer 2
   missed **every** instance of: instructions planted in retrieved text. Adding an internet-fed daily
   ingest ahead of fixing the screener widens the exact gap the measurement found.
+  **Not honored — S20 shipped first, on direct instruction, 2026-10-08**, the same day this was written.
+  Recorded rather than deleted, because a constraint that gets quietly dropped the first time it binds was
+  never a constraint. What bounds the cost is in S20's execution record: S20a/S20c make no model call,
+  S20b's single advisory call is screened by the router's own Layer 1 + Layer 2 like every other call in
+  this fleet (i.e. by exactly the pipeline S22 exists to fix), the text is bounded and stripped by
+  `_sanitize_hf_text()`, and the advisory output is never the source of any fact. The residual risk stands
+  until S22 ships.
 - **S22 before S21** — same reason at lower weight. The portal is tailnet-only and Basic-Auth'd, so the
   exposure is far smaller, but it is still new reachable surface in front of a screening layer that is
   under question.
@@ -3402,3 +3500,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.11.0 | 2026-10-08 | Added **S26** (planned, not executed): `hermes-feed-reader` — public RSS feeds covering AI trends/models and digital security, feeding the same RAG/news-digest pipeline S25 targets, follow-up research request the same day. Fourteen candidate feeds (OpenAI, Hugging Face, DeepMind, Google AI Blog, arXiv cs.AI, MIT Technology Review AI, MarkTechPost; Krebs, Schneier, The Hacker News, BleepingComputer, SANS ISC, two CISA advisory feeds) confirmed live by direct HTTP request before being written down. Deliberately kept separate from S25 rather than merged: every source here is first-party/official and keyless, tagged `confidence=high` (the `hermes_botnet_intel.py` Spamhaus/Feodo tier) rather than S25's `community` tier, with none of its PHP/RSS-Bridge infrastructure or ToS exposure — conflating the two would blur the exact distinction S25's own risk 1 names. Reuses S25b's cursor/sanitize/ingest shape rather than inventing a second one; no digest-side code needed either, same reason as S25. Added a new §5.1 constraint, S22 before S26, at S20's weight rather than S25's — publisher-supplied text, not adversarial-platform text. This bump landed after an unrelated concurrent edit (S19's mesh-repair fix) had already taken version 3.10.0 on this file; renumbered to 3.11.0 to avoid colliding with it rather than overwriting that entry. Minor bump — new stage added, nothing prior reversed. |
 | 3.12.0 | 2026-10-08 | Added **S27** (planned, not executed): a re-spec of the already-live `hermes-news-digest.py` 1.0.2, direct follow-up the same day as S25/S26 — a daily email series of "most important highlights from the previous day" across all RAG sources, six fixed topics in a stated priority order, one email per topic instead of today's single combined digest. Read against the real code first rather than assumed: `rag.search()` already has no `corpus` restriction, so "all RAG sources" is already the default, and `load_topics()`/`cmd_daily()` already iterate `topics.yaml` in file order, so priority ordering is free from the config alone — narrowing this stage to two real gaps, `cmd_daily()` sending one combined email instead of one per topic (S27b), and `summarize_topic()`'s hard one-line cap, loosened to "up to `TOP_K` lines, most important first" now that S25/S26 are about to add 15 new sources to the same index (S27c). Topic 6's AI-first/ransomware-second/other-novel-methods-third sub-ordering is carried entirely in its topic-string wording, the same mechanism the other five topics already use, with no new prompt-plumbing. `cmd_weekly()` is explicitly left untouched — the request named a daily series, and the boundary is stated rather than silently widened, the same discipline S19's slicing exclusion and S24a's audit-scope boundary already use. No new §5.1 ordering constraint: S27 changes presentation of already-ingested, already-screened content, not ingestion itself. Minor bump — new stage added, nothing prior reversed. |
 | 3.13.0 | 2026-10-08 | Amended S27 and S21 on direct request, same day. **S27**: the email's highlight cap rises from 5 to 20 per topic, and — because S21e below needs more than the email ever shows — each topic now generates and stores up to **50** distinct highlights per day, not 20 and not one blob; the email renders the top 20 of those 50 by rank (S27d). This forces the real change: `news_digest_daily`'s one-row-per-topic-per-day/`summary` blob becomes one row **per highlight** (S27c) — which corrects 3.12.0's own claim that the daily table "stays exactly as they are" and that this stage carries "no new §5.1 ordering constraint." Both were true of 3.12.0's narrower design and are superseded here, not silently dropped: the schema does change, and a new constraint (S27 before S21e) is added. `cmd_weekly()`'s *behavior* stays out of scope as 3.12.0 said, but its SQL needs a small forced adjustment to keep reading the reshaped table at all — a compatibility fix, not new weekly scope. **S21**: added **S21e**, a new read-only report page on `hermes-fleetops-ui` — browse up to the full 50 stored highlights per topic per day, same no-decide-buttons posture as S21b, same "exactly one copy, never a second drifting from the first" discipline as S21d, reading S27's reshaped table directly. Minor bump — both changes refine an unexecuted same-day design before any of it has run once; nothing live is reversed. |
+| 3.14.0 | 2026-10-08 | **S20 executed — `hermes-model-scout` is built, deployed and live on `spark`** (`87ff883`). Four new tools (`hermes-model-scout.py`, `hermes-model-scout-gate.py`, two wrappers), a daily timer (06:30 + 600s jitter), an always-restart gate service, `infra/hermes-model-scout/README.md` as the recreate checklist, and `infra/hermes-model-scout/tests/test_model_scout.py` — **92 offline checks** needing no network, no hermes-memory and no model call, which run off-fleet as well as on. Discovery is reused rather than reimplemented: the scout imports `hermes-model-scan.py` and `hermes-model-watch.py` by path, with the same `importlib` idiom `hermes-attention-reminder.py` already uses for hyphenated siblings, and calls their own fetch, relevance bar, fit heuristics and architecture-enum diff; both keep their weekly timers, state files and email paths untouched. **Six findings, each costing a real failure or correction — two of them latent correctness bugs rather than environment friction.** (1) The system interpreter cannot read hermes-memory's database through `hermes-memory.py`: `connect()` loads sqlite-vec and its own docstring says `/usr/bin/python3` cannot see `sqlite_vec`, which is why `hermes-attention-reminder.service` runs under the RAG venv; listing one non-vector table does not justify that coupling, so `list_scout_tasks()` opens the file read-only with stdlib `sqlite3`, accepting a dependency on the `tasks` column names shared with that script. (2) **hermes-memory never unquotes path segments and `urllib.parse.quote()` escapes `:` by default**, so every `GET /tasks/<id>` 404'd — the visible symptom was a refused gate command, the dangerous one was silent: **dedup was broken, so every candidate would have been re-proposed and re-announced daily**; fixed with `safe=':'` in both tools plus a regression check. (3) The benchmark history's `date` is a full ISO-8601 timestamp with an offset (`2026-08-24T18:32:10+00:00`), not the `YYYY-MM-DD` first assumed — comparing those against a UTC-derived date string skipped a same-day match in exactly the window where it matters, evening local time where the UTC date has already rolled over; dates are now parsed to real instants, date-only values still accepted. (4) A benchmark that ran *before* its approval must still count, or a task where the human benchmarked first and replied second sits `approved` forever — bounded 24h backdate slack, with `matched_before_approval` recorded on the `done` turn rather than presenting it as a later run. (5) Role state comes from the router's `/v1/models`, not from importing `hermes-router.py`: S20b's "read `ROLES` live" was right, but that module `sys.exit()`s at import without `HERMES_NODE`, so importing it is a hard exit; the endpoint's `checkpoint`/`abliterated` metadata exists for exactly this, and the consequence is that `embed`/`rerank` have no router-visible incumbent at all. (6) **A candidate with no incumbent is not a swap decision** — 8 of the first 10 candidates were `asr`/`tts`/`media`, the two roles §4.5 records as never deployed plus the one Kiln serves outside the router, so those are counted and reported with the reason instead of proposed; `hermes-model-scan.py`'s weekly digest already owns "what's new, period" (risk 1 anticipated this from the other side), and the architecture signal stays the deliberate exception since "llama.cpp can now load X" has no incumbent by definition. Two design points the build forced: `done` could not be deterministic as specified, because `hermes-benchmark-model.sh` takes a free-form `--model-id`, so the gate now **prescribes** the exact label (the HF repo id verbatim, already this fleet's convention per that script's own usage examples) and `reconcile_done()` matches it exactly — a human using a different label gets "still approved", the honest answer rather than a false one; and the approval reply is deliberately a two-step procedure, since that script's `--role` mode wants a backend the fleet already serves while `--candidate` mode wants a GGUF already on disk, and a scouted model is neither. Verified in order, each from real state rather than a log line: a dry run against live HF/router/history; a real pass proposing `prithivMLmods/LightOnOCR-3-4B-GGUF` for `omni`, with the offer confirmed by reading the room event back; the role-fit join reading the **live** incumbent `gemma-4-26B-A4B-it (Google, stock)` rather than the Nemotron-Omni §4.2's target table still names, which is the "read it fresh, never hardcode it" requirement paying for itself on the first run; dedup confirmed by a second pass (proposed 0, skipped 1, nothing posted); the full gate loop driven by real Matrix replies through every legal transition and every refusal path (wrong state, wrong agent, unknown id); the `done` path driven live with only the history row injected, where an older row and an unrelated row both correctly left the task `approved` — writing a fabricated row into the real `history.jsonl` to satisfy a test would be the exact kind of fake fact this pipeline exists to prevent; and the oneshot unit run through systemd itself (`Result=success`), re-verified after the node pulled the committed copy, since a wrapper that works by hand and a unit that works are different claims. Deployment detail worth keeping: `core.fileMode` is `false` on the authoring checkout, so the four executables were staged with `git add --chmod=+x` — without it both `ExecStart` wrappers would have landed at `644` on every node, which is S14's own recorded executable-bit regression. **The S22-before-S20 ordering constraint was not honored** — S20 shipped first on direct instruction, the same day §5.1 recorded it; both that bullet and S20's execution record now state the residual exposure (S20a/S20c make no model call; S20b's single advisory call is screened by the router's Layer 1 + Layer 2, i.e. by exactly the pipeline S22 exists to fix; the text is bounded by `_sanitize_hf_text()`; the advisory is never the source of any fact) rather than dropping a constraint the first time it bound. **S20d stays open by design** (retire `trig_01Sr7ypybNp9RmpUsrAgPpxF`, seed V4's `glm_5_3_seen`), gated on a week of real runs, and risk 4 stands: there is still no number proving this pipeline's worth and there cannot be until a candidate it surfaced is benchmarked and wins or loses. Minor bump — a planned stage executed as designed with its findings recorded; nothing prior reversed. |
