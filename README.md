@@ -1,6 +1,6 @@
 # HermesAgentV5
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 The Firmament's V5 rebuild: moving from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** specified in
@@ -46,6 +46,10 @@ rule all carry forward unchanged.
 Hostnames stay `spark` / `spark-2` / `HomeD13`. Watch, Forge, and Kiln are role labels, not renames
 (§3.2).
 
+**LinodeMercury** (`IMPLEMENTATION_PLAN.md` S29) is not part of the three-node cutover above — it is a
+separate, deliberately external Linode VPS, reachable *from* the fleet only, never the reverse. See
+`infra/linodemercury/` and `infra/hermes-linodemercury-watch/`.
+
 ## Contents
 
 - [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) — discovery against the live fleet, the gap analysis,
@@ -62,3 +66,4 @@ Hostnames stay `spark` / `spark-2` / `HomeD13`. Watch, Forge, and Kiln are role 
 |---|---|---|
 | 1.0.0 | 2026-08-29 | Initial migration-plan overview. |
 | 1.1.0 | 2026-08-30 | Status updated from "planning only" to "live and authoritative": `tools/`/`skills/`/`infra/` consolidated from `HermesAgentV4` into this repo, and all three fleet nodes cut over to it. `HermesAgentV4` marked superseded to match. |
+| 1.2.0 | 2026-10-09 | Noted LinodeMercury (S29) — a deliberately external node, reachable from the fleet only, not part of the three-node cutover above. |

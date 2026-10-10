@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.33.0
+**Version:** 3.37.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -480,6 +480,17 @@ identity, like Kiln. TRELLIS.2 under a StabilityMatrix-managed ComfyUI 0.38.2 �
 
 The int8 transformer is deliberate over `trellis_2_bf16.safetensors` (10.338 GB) for a 16 GB card; the
 shape-only path is ≈7.6 GB resident.
+
+#### `LinodeMercury` — external node (`74.207.233.234`), new since §4 was written (S29)
+
+Not a fleet member in the sense Watch/Forge/Kiln/Anvil are: no model, no agent, no persona, no Matrix
+identity, and — unlike every node above — **not reachable from inside the fleet's own control plane,
+only reachable *from* it.** A Linode-hosted Debian 13 VPS, admin access via `pmoney`/key-only SSH from
+`spark` (never the reverse), `ufw` default-deny with exactly one rule, `unattended-upgrades`, and local
+`aide`/`lynis`/`syft`+`grype` bundled daily for `spark`'s own `hermes-linodemercury-watch.py` to pull,
+parse, and digest (S29, `infra/linodemercury/`, `infra/hermes-linodemercury-watch/`). Kept deliberately
+unfitted to one narrow purpose — flagged as a possible future vantage point for the fleet's own
+internet-exposure or an external honeypot comparison, neither built yet.
 
 #### Evaluated, not adopted — so they are not in the tables above
 
@@ -3329,6 +3340,47 @@ attribution argument in S21f working on a genuine click, not a test.
 
 ---
 
+#### S21h — Recommendations report page, and a real backlog it uncovered (2026-10-09)
+
+Direct request, following S29: surface the recommendations S17's `hermes-node-baseline-scan.py`
+and S29's `hermes-linodemercury-watch.py` have been writing into hermes-memory as
+`REC-<node>-<date>-<seq>` tasks, across every node, in fleetops-ui. Built as a new **read-only**
+page — it does not reopen S21f's decide-buttons argument; authorizing or rejecting a
+recommendation still goes through the FleetOps Matrix reply `hermes-baseline-authorize-watch.py`
+watches for. Keyed off the `REC-` id prefix rather than an agent allowlist, so a future
+recommendation producer needs no code change here, directly answering the request's own "and any
+others from other nodes."
+
+**Building it surfaced a second, much bigger finding than the page itself: `memory.db` holds
+227,116 `REC-*` tasks, 139,853 of them still `pending`, dating back to 2026-09-07.** Sampling 2,000
+of the most recently touched pending rows found 1,942 were `aide` findings, and the one description
+pulled was `File changed: /var/log/sysstat/sa09` — sysstat's own daily-named activity log, rewritten
+continuously and never excluded from `hermes-node-baseline-scan.py`'s aide config on spark/spark-2.
+This is the identical class of gap S29 independently found and fixed for LinodeMercury's own
+tooling/log/apt-cache directories (`infra/hermes-node-baseline/README.md`'s own revision history
+already covers `/mnt` and the data-image excludes found the same way) — just never caught here.
+**Not fixed in this stage**: the missing excludes on spark/spark-2 and the 139,853-row pending
+backlog itself are a real, separate follow-up; this page's job was to surface the problem
+honestly, not clean it up.
+
+That discovery directly shaped the page's own design. A naive `ORDER BY updated_at DESC LIMIT 400`
+with no state filter spends its entire cap on whichever node is churning fastest **right now** —
+confirmed live: that query's top 400 rows were 388 of `spark-2`'s resolved history and 12 of
+LinodeMercury's, with `spark`'s own currently-pending findings nowhere in the window. Fixed by
+filtering `state != 'resolved'` in SQL by default (an explicit `state=all` option still reaches
+the resolved history), with a separate `COUNT(*)` for the true total so "showing N of total" is
+never a lie about scale regardless of how large the backlog gets. Verified live: the default view
+renders in under 0.15s even against the full 227K-row table, and correctly surfaces `spark`'s
+currently-pending findings alongside LinodeMercury's — the two nodes result pages ago buried.
+
+**S21h exit gate, met 2026-10-09:** the page is deployed and live on spark, verified by an
+authenticated HTTP request against the running service (not just the offline suite); 19 new
+offline checks (201 total) cover the id-prefix keying, the turn-merge that keeps a resolved
+recommendation's original finding fields, the SQL-level state filtering and its true-total
+counting, node filtering, escaping, and that no decide route exists on this page.
+
+---
+
 ### S23 — The Minecraft bot fleet enters this plan
 
 **Planned; not executed** — as a *plan* change. The fleet itself has been live since 2026-09-13; what
@@ -4147,6 +4199,207 @@ cell's runs are in the history; and each contender has a written verdict against
 
 ---
 
+### S29 — LinodeMercury: the fleet's first deliberately external node (2026-10-09, executed)
+
+Direct request: set up SSH access from `spark` to a new Linode-based Debian 13 node, then — once
+set up — document it, bring it to the fleet's own hardening standard, and give it a daily Fleet-side
+security check. The network model was corrected mid-plan, after an initial draft wrongly assumed the
+node would get its own local Vaultwarden identity reachable via a reverse tunnel or Tailscale:
+**reachability is one-directional, Fleet → Linode only.** LinodeMercury has no firewall-allowed route
+into any network the fleet considers internal, is not joined to the fleet's Tailscale tailnet
+(`tail1a534.ts.net`, confirmed live to carry `spark`, `spark-2`, `HomeD13`, and Vaultwarden's own
+`tailscale serve` exposure for NAS2/`homesyn2` — deliberately not extended to this node, the same
+"don't mix trust pools" reasoning `infra/muncraft-tailscale-ext/README.md` already applies to a
+less-trusted external party), and runs none of this repo's own code. It is kept deliberately flexible
+for roles not yet built — a vantage point for checking the fleet's own public-internet exposure, or an
+external honeypot to compare against the existing OpenCanary — rather than fitted narrowly to "testing
+node" alone. This is the repo's first off-LAN, cloud-hosted node; §4.5 gains a short entry below
+precisely because this stage executed, not while it was still only planned, matching the discipline S19
+already established for Anvil.
+
+#### S29a — Admin user, SSH hardening, firewall, baseline OS hardening
+
+Migrated from root-only (the initial key handoff) to the fleet's standard shape: a dedicated `pmoney`
+user with passwordless sudo (matching spark/spark-2/HomeD13's own already-privileged-worker model),
+verified working before touching root access at all, then `PermitRootLogin no` /
+`PasswordAuthentication no` via an `/etc/ssh/sshd_config.d/` drop-in, verified through `sshd -T`'s
+resolved config — the same check `hermes-node-health.py`'s `section_security()` already uses, not a
+raw grep — confirming both root login and password auth now fail while `pmoney` key auth still works.
+`ufw` is active, default-deny incoming, with exactly one rule (`22/tcp` from anywhere). **Deliberately
+not scoped to the fleet's current public egress IP** — a direct operator correction mid-plan: a home
+ISP can rotate that IP at any time, and baking it into this firewall rule would risk a self-inflicted,
+Fleet-unfixable lockout, with Linode's own Lish web console (outside this repo) as the only recovery.
+`unattended-upgrades` is new for this fleet — no other node runs it, since none of them sit directly on
+the public internet the way this one does — and its shipped defaults (quiet logging, no mail, a sane
+`logrotate` entry) already satisfied "minimal, local" logging without further tuning. `journald` is
+capped (`SystemMaxUse=500M`, `MaxRetentionSec=90day`) per a direct follow-up request that every local
+log source, not just the scan-tool bundle below, have a bounded retention policy.
+
+#### S29b — Local security tooling (aide, lynis, syft+grype), bundled daily, Fleet-driven retention
+
+`aide`/`lynis`/`syft`+`grype` run locally on LinodeMercury via their own native systemd timers, never
+through `tools/hermes-node-baseline-scan.py` (that script assumes it can reach Vaultwarden/Matrix
+itself, which this node structurally cannot) — logged minimally and locally only. A direct correction
+mid-plan disabled Debian's own shipped `dailyaidecheck.timer` (masked, not just stopped) in favor of a
+**weekly**, not daily, `aide --check` — full-filesystem re-hashing on a daily cadence has caused real
+resource-utilization amplification problems elsewhere, per the operator. `lynis` and `syft`+`grype`
+stay daily. A final daily step bundles everything the Fleet will want — the latest tool output, `apt
+list --upgradable`, `ufw status verbose`, and the day's SSH auth-log window — into one compressed
+tarball, cutting the Fleet's one-way pull to a single file instead of several round trips (a second
+direct correction, to reduce WAN transit time), then clears the raw files it just rolled up. **Retention
+is Fleet-driven, not a local timer** — a third direct correction: bundles accumulate under
+`/var/local/hermes-bundle/` until `spark` deletes a given day's bundle after confirming it was pulled
+and parsed successfully, so a missed retrieval day never loses data to a blind local rotation.
+
+Real findings, live, 2026-10-09: the fresh image had 68 pending package upgrades and 471 fixable-CVE
+grype matches on first scan — normal image-to-now drift, patched with `apt-get upgrade` rather than left
+to flood the first digest. The first `aide --init` was run *before* all setup finished, so the
+subsequent setup work itself (redeploying scripts, running the bundler, routine `apt` cache churn)
+showed up as integrity "violations" against the node's own tooling directories on the very first real
+scan — not a security event, a baselining-order mistake. Fixed by excluding
+`/var/local/hermes-bundle`, `/var/log/hermes-linodemercury`, and `/var/cache/apt` (none of them
+meaningful integrity targets — the first two are this tooling's own constantly-rewritten scratch
+output, the third is apt's own cache, which `unattended-upgrades` will touch routinely going forward)
+and re-running `aide --init` once more after all setup was actually complete.
+
+#### S29c — `hermes-linodemercury-watch`: the Fleet-side pull, analysis, and digest
+
+New tool, `tools/hermes-linodemercury-watch.py`, running entirely on `spark` (`infra/hermes-
+linodemercury-watch/`) — matching `hermes-pfsense-report.py`/`hermes-canary-health.py`'s own shape
+(SSH out to an external target, `spark`'s already-provisioned identity, inline `smtplib`/Matrix
+digest) rather than `hermes-node-baseline-scan.py`'s shape, since that script's own aide/lynis/grype
+functions are tied to invoking the tools live via local `sudo`, which this node cannot do for anything
+Vaultwarden-adjacent. The finding schema, severity handling, and the aide/lynis/grype parsers
+deliberately mirror `hermes-node-baseline-scan.py`'s own (same regexes, same severity maps) so output
+stays compatible with its existing `REC-<node>-<date>-<seq>` hermes-memory recommendation lifecycle and
+Matrix+email digest convention — reused by matching shape, not by import, since the data source (an
+already-pulled file) differs fundamentally from that script's live-execution model. Firewall posture is
+checked directly from the bundled `ufw status verbose`; local-log intrusion review classifies
+successful SSH logins against a small local history of the fleet's own previously-observed public
+egress IP (not a single day's snapshot), so an ISP NAT rotation reads as medium severity rather than an
+unidentified intruder.
+
+Real findings, live, 2026-10-09 — four, each costing a real fix before the pipeline could be trusted:
+(1) Debian 13 ships OpenSSH 10.0, whose privilege-separation re-exec model logs connection handling
+under comm `sshd-session`, not the classic `sshd` — confirmed live that `Accepted publickey for ...`
+was never logged at default `LogLevel` under it at all across many real successful logins during
+setup, while `Disconnected from user X <ip> port N` reliably was and implies successful auth just as
+well; the parser and the bundler's own `journalctl` match were both changed to use it as the primary
+signal. (2) `journalctl --cursor-file=FILE --since=...` together is a hard error — the bundler now uses
+`--cursor-file` alone, whose own documented first-run behavior (start at the earliest available entry,
+bounded by S29a's `journald` cap) is exactly what was wanted anyway. (3) A "Failed password for invalid
+user X" line appears in the journal **regardless of `PasswordAuthentication no`** — confirmed live
+against the very first real bundle, which already had one from ordinary internet background scanning;
+OpenSSH/PAM still processes and logs a received password-auth packet before policy refuses it, so this
+is routine noise on any box with `22/tcp` open to the world, not evidence of misconfiguration, and was
+removed from the finding logic (kept only as an informational digest count) rather than left to
+generate a false-positive "critical" finding every single day. (4) The remote bundle's containing
+directory is produced by a root systemd service, so `pmoney` can list and `scp` it but cannot `rm` it
+without `sudo` — confirmed live on the first real cleanup attempt, fixed in
+`cleanup_remote_bundle()`. The tool's own first-ever run used `--seed-only` (same reasoning
+`hermes-node-baseline-scan.py`'s own flag exists for) to absorb the one-time setup-history noise in
+that first bundle's journal window without alerting on it.
+
+**S29 exit gate, met 2026-10-09:** `pmoney`/SSH/`ufw`/`unattended-upgrades`/`journald` hardening live
+and verified; all four local LinodeMercury timers (`aide` weekly, `lynis`/`cve-scan` daily, `bundle`
+daily) enabled and producing real output; `hermes-linodemercury-watch.timer` enabled on `spark`
+(06:45 Eastern, comfortably after LinodeMercury's 03:30 UTC bundle); a full real (non-seed,
+non-dry-run) cycle verified end to end — 60 real findings parsed, 12 written as
+`REC-linodemercury-2026-10-09-NNN` recommendations, the remote bundle cleaned up only after
+successful processing.
+
+---
+
+### S30 — The aide exclude gap S21h found, fixed on all three fleet nodes (2026-10-09, executed)
+
+Direct follow-up request to S21h's discovery: fix the aide excludes behind the 139,853-row pending
+backlog on spark/spark-2/HomeD13, not just note it. Investigated with real data at every step
+rather than extrapolating from S21h's single sysstat sample — 5,000, then 10,000, then 15,000
+random pending findings pulled live from `memory.db` and bucketed by normalized path, per node.
+
+**Nine real categories, most never suspected from the one sysstat example S21h found:** snap
+packages (`/snap`, `/var/snap`, `/usr/lib/snapd` — every revision is a brand-new immutable path,
+and snapd already verifies them cryptographically); kernel packages (`/usr/src`,
+`/usr/lib/modules`); dynamic system/package-manager state (`/run/udev`, `/var/cache`, `/var/lib
+/apt/lists`, `/var/lib/PackageKit`, `/run/NetworkManager`, `/run/snapd/lock`, `/var/log/sysstat` —
+the original finding, somehow dropped from the first exclude pass and only caught because a live
+`--check` against the old baseline was run *before* committing to a fresh `--init`, not skipped as
+redundant with the earlier sampling; `/var/lib/landscape`; Tailscale's own log files, narrowly, not
+its state/key files); narrowly-scoped package-churn paths under `/usr/lib`/`/usr/share`/
+`/usr/include` (specific subpaths — `python3/dist-packages`, `node_modules`, the
+`*-linux-gnu*/gconv` and `*-linux-gnu*/perl-base` trees, several `/usr/share/*` doc/locale/
+completion dirs — never those three directories wholesale: `/usr/lib/systemd/system` stays
+tracked on purpose, since unit files are a real persistence target and the residual noise there is
+an acceptable cost); user-level caches (`~/.npm`, `~/.cache`, `/root/.cache`, and — found live,
+needing a `\ ` escape since confirmed live that AIDE tokenizes on whitespace even for `!` rules,
+failing with `invalid restriction 'CLI'` until fixed — `~/.config/Bitwarden CLI`, touched on every
+`vault-get-secret.sh` call); git internals under every checked-out repo (`.git` object churn from
+an ordinary `git pull`, e.g. `hermes-repo-autopull.timer`, is never itself a meaningful integrity
+signal — the working-tree files stay tracked); a live application database
+(`/var/lib/continuwuity/db` on spark, the identical class as `hermes-data.img`, S17); generated-
+output directories (`/opt/comfyui/output`, `/mnt/nas2-hermes-images`, HomeD13); and **this fleet's
+own operational state** — `~/.hermes/state`, `~/.hermes/cache`, `~/.hermes/bw-slowpath-appdata`,
+several lock/watermark files, per-role wake timestamps — the exact `/mnt` lesson S17 already
+documents, just never applied to the agent's own scratch directory. `70_aide_tmp`'s own shipped
+rule tracks only `/tmp`'s permissions, never its contents, so ephemeral build dirs
+(`/tmp/meshenv-*`, `/tmp/heapenv`, `/tmp/node-compile-cache`, all seen live on spark) fell through
+to the distro's `/ 0 Full` catch-all; `/tmp/.+` is now excluded explicitly.
+
+**Sequencing mattered.** A `--check` against each node's *old* baseline (not a fresh `--init`
+blind) was run first specifically to catch config errors cheaply and surface gaps the sampling
+missed — which it did twice: the whitespace-tokenization syntax error, and a second round of
+findings (`apt/lists`, `PackageKit`, `NetworkManager`, root's cache, Bitwarden CLI, then
+`~/.hermes`'s own state) that a sample of *already-pending* findings couldn't show, because by
+definition it only contains paths that were still being re-flagged, not ones a correct exclude
+would have caught on the very next run.
+
+**S30 exit gate, met 2026-10-09:** all three nodes re-`--init`'d and activated after the complete
+exclude set was in place — spark 160MB (was 242MB, 28m9s), spark-2 186MB (was 250MB, 38m26s),
+HomeD13 89MB (was 106MB, 38m12s) — then a fresh `--check` against each new baseline confirmed
+genuinely clean: spark 546,981 entries (0 added / 6 removed / 13 changed), spark-2 627,027
+(0/6/8), HomeD13 309,469 (0/0/1), versus tens of thousands of spurious entries per day beforehand.
+**Not done here, recorded as a real, separate follow-up**: the 139,853-row pending backlog
+already in `memory.db` is not retroactively resolved by this fix — each `REC-*` task is
+independent of the node's own local day-over-day diff snapshot, so fixing the excludes stops new
+noise without cleaning up the old pile.
+
+#### S30 follow-up — the pending backlog itself cleaned up (2026-10-09, executed, direct request)
+
+New `tools/hermes-baseline-backlog-cleanup.py` bulk-resolved the 138,865 pending `aide` findings
+that predated the fleet-wide `--init` reset above — every one was a diff against a baseline that
+no longer exists, so none has continued meaning; if a real change is still present relative to
+*today's* baseline, the next scan flags it fresh. `grype` (849 pending) and `lynis` (1 pending)
+findings were deliberately left untouched: they have nothing to do with aide's baseline and may
+still be genuinely open, so bulk-closing them would have been dishonest, not just redundant.
+
+**Writes a plain `/tasks` state upsert per record, not one `/turns` audit entry per record** —
+found live, by reading `hermes-memory.py`'s own handlers before assuming the normal
+`resolve_recommendation()` pattern would scale: `_create_turn()` calls `embed()` on every write,
+so 138,865 individual turns would have meant 138,865 embedding calls competing with the fleet's
+real embed role for no operational benefit, while `_upsert_task()` does no embedding at all. The
+upsert overwrites `agent`/`topic` unconditionally, so each record's own existing values were read
+and resent rather than guessed. One consolidated summary turn was written instead, under a new
+tracking task `REC-cleanup-2026-10-09`, plus a local (non-`memory.db`) log of every affected id.
+
+**A real bug in the first real run, caught and fixed the same day.** That run had no node filter
+at all and bulk-resolved LinodeMercury's 12 then-pending aide findings too — but LinodeMercury's
+baseline was last reset during S29, not S30, and none of its findings were invalidated by
+anything this stage did. Caught immediately by cross-checking the per-id cleanup log against
+which nodes S30 actually touched; all 12 were reverted to `pending` by hand, and the tool itself
+now hard-codes `RESET_NODES = {"spark", "spark-2", "homed13"}` so a bare `tool == 'aide'` check
+can never again sweep up a node whose baseline this specific cleanup didn't actually reset.
+
+**S30 follow-up exit gate, met 2026-10-09:** tested on one real record first (state flipped to
+`resolved`, `agent`/`topic` confirmed intact via direct query) before the full run; 138,865/138,865
+resolved, 0 failed, ~20-way concurrency with no measurable hit to `hermes-memory`'s own response
+latency throughout (`/health` stayed sub-millisecond for the whole run); the 12 LinodeMercury
+over-reach caught and reverted. `memory.db` now holds 999 pending (849 grype + 1 lynis + 137
+tasks with no turn at all + the 12 reverted LinodeMercury findings) against 226,118 resolved —
+confirmed both by direct query and by `hermes-fleetops-ui`'s `/recommendations` page, whose
+default view shows exactly that true total.
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -4380,4 +4633,8 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.30.0 | 2026-10-09 | **S21 enabled and serving; the first real start exposed one wrong claim in 3.29.0, corrected here.** The operator created the `fleetops-ui` Vaultwarden item; the unit, a tailnet-scoped ufw rule for 8103 and `systemctl enable --now` followed, and all five pages were re-verified against the **real** credential on `100.96.59.79:8103` — 80 backlog candidates, 6 roles with checkpoint/weights/host/residency, 6 roles of usage with two trailing 7-day windows, 64 benchmark rows, and 401 without credentials. **3.29.0 said the unit ships an empty `ReadWritePaths`. It cannot.** `usage.db` is in WAL mode, and a read-only SQLite connection to a WAL database still takes a read mark in the `-shm` sidecar, which needs write access to the directory — so with the whole tree read-only `/models` rendered `OperationalError: unable to open database file` in its usage section while the router section beside it was fine, which is `section()` doing its job. The asymmetry is instructive: `memory.db` is *also* WAL and read fine, because hermes-memory holds it open so the `-shm` stays live for a read-only joiner, whereas usage.db's writer opens per-write and closes — meaning the failure was **intermittent by nature**, not cleanly broken. Both narrower grants were tried and do not exist: systemd rejects a single FILE in `ReadWritePaths` (226/NAMESPACE), and the sidecars cannot be bind-mounted because SQLite unlinks `-shm` when the last writer closes — the bind target was missing mid-test. The unit therefore grants `~/.hermes/state` and nothing else, with `/mnt/hermes-data`, the repo and `/etc` confirmed unwritable by test. **What that does not confer is authority over approvals**: those are `memory.db` task states under `/mnt` and stay read-only; the granted directory holds a 26-byte last-seen Matrix cursor, the Layer-1 scan log and per-tool state JSONs, all already writable by every other unsandboxed `pmoney` service on the host. Follow-up recorded rather than rushed: relocate `usage.db` under its own directory via `HERMES_USAGE_DB` (which `hermes_usage_log.py` already honours) and bind only that — it means editing the writers' units and moving a live 50MB database. Minor bump — stage completed and a prior claim corrected. |
 | 3.31.0 | 2026-10-09 | **S21f — the decide buttons this plan twice argued against, plus TLS, on the operator's decision.** `hermes-fleetops-ui` 2.0.0. The operator overruled 1.0.0's refusal on the grounds that **the Matrix channel is only *perceived* to be more secure**, which holds up: that route authenticates a sender id on a homeserver this fleet runs itself, this one a credential on a tailnet-only service, and both reduce to one credential the operator holds. The prior reasoning is kept in the record rather than deleted. Three parts of the objection were **not** perceptual and were built instead of argued about. **CSRF**: a browser replays cached Basic Auth cross-origin and Matrix has no equivalent, so every decide carries a per-process token with `Sec-Fetch-Site` as a second line, all four verbs are POST, and the reply is a 303 so a refresh cannot replay one. **TLS**: Basic Auth had been crossing the tailnet in the clear; now terminated by `tailscale serve` with a real Let's Encrypt cert for `spark.tail1a534.ts.net` (verified chain, HTTP/2) proxying to a **loopback** backend on 8104, so no plaintext path exists beside the encrypted one, and no cert files, key permissions or renewal timer are added. **Port 443 was asked for and declined with a reason** — tailscaled already serves `/` there to the Matrix homeserver, and displacing it would break Matrix clients and federation; the path-on-443 alternative needs a base-path prefix in this service and is recorded, not done. **Attribution**: the one real edge Matrix had, turned around — `tailscale serve` forwards `Tailscale-User-Login`, so the audit record names a person where Matrix names a sender id and shared Basic Auth would name nobody; treated as attribution and never authentication, with a test asserting `_authed()` never reads those headers. **The gate is imported, not reimplemented** (transitions, task write, turn write, approval text), failing closed if that import fails, and **the state is re-read at decide time** rather than trusted from the rendered row. Honest cost: the service now holds the shared hermes-memory token and the FleetOps Matrix credential, which 1.0.0 did not — no new secret, but a real change in blast radius, scoped in code to one transition on a `model-scout` task. **Also found and fixed: 1.0.0's copy-command button emitted a command that does not exist** (`hermes-benchmark-run.py`), composed rather than taken from the gate; the real one is `hermes-benchmark-model.sh --candidate <local .gguf> --model-id <prescribed label>`, now pinned by a test. Verified live: every guard rail refused without mutating (state distribution unchanged throughout), then one defer/reject/override round trip ended back at `proposed`, with three audit turns and three FleetOps notices, labelled `claude-code live verification` so the trail does not imply a human decided it. 129 offline checks. Minor bump — a substage added and executed; the reversal it records is the operator's. |
 | 3.32.0 | 2026-10-09 | **S21g — multi-select on the benchmark backlog, and a CSP defect that had been breaking the page since 1.0.0.** Operator request: 77 candidates in `proposed` make one-decision-per-page-load unusable, so the table takes checkboxes, a bulk bar above and below, select all/none and a live count. **A rendering convenience, not a bulk write** — every selected task still goes through the same per-task guard (re-read, `model-scout` check, legality from its state *now*), so a mixed selection does the legal part and reports the rest; a row with no legal transition gets no checkbox and cannot be swept up. Outcomes return as a count per clause, carried in the URL as codes and integers only so nothing from a URL is rendered as text. Recorded because it is not obvious: **HTML forms cannot nest**, so this means one form around the whole table instead of per-row buttons, rows list their legal verbs as text, and the copy-command button had to become `type="button"` or it would have submitted a decide. **The defect found while doing it**: responses carry `default-src 'none'` with no `script-src`, which blocks inline `onclick`/`oninput`/`onsubmit` outright — so the copy-command button and the benchmark filter box had never worked in a browser, silently, with no error anywhere a human would look. Attributes cannot be nonced, so all handlers moved into one delegated `<script>` block that carries a per-response nonce, with a test asserting no `on*=` attribute returns; `form-action 'self'`, `base-uri 'none'`, `frame-ancestors 'none'` and `Referrer-Policy: no-referrer` added in the same pass, `form-action` being a second brake on the write route that a stolen CSRF token cannot cross. Verified live: one decide form, 79 checkboxes against 80 rows (the `done` row correctly has none), four bulk verbs, zero inline handlers, per-response nonce. **And the operator's own click is now in the audit trail** — `scout:super:687hjgh__DeepSeek-R1-Distill-Qwen-7B` rejected at 10:58:49 as `decided_by=fleetops-ui, decided_by_user='Paul <madbikernc@gmail.com>'`, which is S21f's attribution argument working on a real decision rather than a test. 167 offline checks. Minor bump — a substage added and executed. |
+| 3.34.0 | 2026-10-09 | **S29 executed — LinodeMercury, the fleet's first deliberately external node.** Direct request: SSH access from `spark`, then documentation, fleet-standard hardening, and a daily Fleet-side check. Corrected mid-plan from an initial draft that wrongly gave the node its own Vaultwarden identity reachable via a reverse tunnel or Tailscale — reachability is one-directional, Fleet → Linode only, no tailnet, no route into anything internal, nothing from this repo runs there. `pmoney`/SSH-hardening/`ufw`/`unattended-upgrades`/`journald` live and verified (`sshd -T`, not a grep); `ufw` deliberately not scoped to the fleet's own (rotatable) public IP, per direct correction. `aide` (weekly, the distro's own daily job masked — resource-amplification concern), `lynis`, `syft`+`grype` (both daily) run locally, logged minimally, bundled into one daily tarball (cutting WAN round-trips, a direct correction) with Fleet-driven retention (another direct correction — no local deletion timer, so a missed pull never loses data). New `tools/hermes-linodemercury-watch.py` on `spark` pulls, parses (schema/severity mirrored from `hermes-node-baseline-scan.py`, not imported — different data-sourcing model), writes `REC-linodemercury-<date>-<seq>` recommendations, and sends one Matrix+email digest. Four real bugs found and fixed live: Debian 13/OpenSSH 10.0 logs connections under comm `sshd-session`, never logging `Accepted publickey` at default `LogLevel` — `Disconnected from user X <ip>` used instead; `journalctl --cursor-file`+`--since` together is a hard error; "Failed password for invalid user X" appears regardless of `PasswordAuthentication no` (routine internet scanning, removed from the finding logic to avoid a false "critical" every day); the root-owned remote bundle directory needs `sudo` to clean up. A real pre-existing-noise gotcha also found and fixed: the first `aide --init` ran before setup finished, so the setup work itself (and the bundler's own scratch dirs, and `apt`'s cache) showed up as integrity violations — fixed with three more excludes and a second `--init` after setup was actually done. Verified end to end: a full real cycle parsed 60 findings, wrote 12 `REC-linodemercury-2026-10-09-NNN` recommendations, cleaned up the remote bundle only after success. Minor bump — a new stage added and executed. |
 | 3.33.0 | 2026-10-09 | **S20e — candidate sizing, architecture and publish date, after the operator asked what could be done about the "check manually" records.** Three findings, each measured on the live backlog rather than argued. (1) **A missing size was not just an unknown, it was a filter bypass**: `MIN_PARAMS_B` is applied only `if params`, so the 21 of 51 candidates with no `safetensors` block skipped the 7B floor entirely — which is how a 0.38B, a 0.41B and two 0.75B OCR models came to be proposed as replacements for 27—35B text roles. `hermes-model-scan` 1.5.0 adds `resolve_params()`, one extra detail call for sizeless candidates only, reading the repo's own `gguf` metadata block; re-run live, **9 of the 21 are now rejected before reaching the backlog**, 5 newly sized, 7 honestly unknown, and a 401/404 degrades to unknown rather than crashing. The size's **provenance** is recorded and shown (`gguf-metadata` vs `safetensors`), because `fit` reads as a measurement either way. (2) **The GGUF architecture is checkable before a download**, so `UNLOADABLE_ARCHS` flags the ones this fleet's llama.cpp has really failed on — `qwen4exp`, from coder2's own `unknown model architecture` incident; two live candidates carry it, and the note says to load-test rather than calling it impossible, since llama.cpp gains architectures. (3) **The publish date was being fetched and thrown away**: the scout read HF's `createdAt`, used it for the lookback window and omitted it from the candidate turn's explicit key list, so all 51 live candidates had no date at all. Now carried through, and `hermes-fleetops-ui` 2.2.0 shows date plus relative age with anything under a week flagged — not because new is bad, but because a same-day upload has no download history, no issues and no corroboration, and several of these turned out to be same-day test repos. 108 scout checks, 182 UI checks. Minor bump — a substage executed; no prior guidance reversed. |
+| 3.35.0 | 2026-10-09 | **S21h — new `/recommendations` report page, and a real 139,853-row pending backlog it uncovered.** (Numbered after 3.34.0 despite following it here: this row and 3.33.0/3.34.0 were written in two concurrent sessions that both branched from 3.32.0 and both landed on this same file — 3.33.0 was never reused, so no row was overwritten, but the table briefly reads out of strict numeric order at this one spot.) Direct request, following S29: surface every node's `REC-<node>-<date>-<seq>` recommendation in `hermes-fleetops-ui`, keyed by the `REC-` id prefix rather than an agent allowlist so a future producer needs no code change. Read-only — does not reopen S21f's decide-buttons argument. **Found live: `memory.db` holds 227,116 `REC-*` tasks, 139,853 still pending since 2026-09-07**, overwhelmingly `aide` findings against unexcluded rotating paths on spark/spark-2 (`/var/log/sysstat/sa<DD>` sampled directly) — the identical class of gap S29 independently found and fixed for LinodeMercury's own tooling/log/apt-cache directories, just never caught here. Not fixed in this stage; recorded as a real follow-up. A naive capped query confirmed live to bury every node but whichever was churning fastest *that moment* (388 of 400 rows were `spark-2` resolved history, `spark`'s own pending findings absent entirely); fixed with a SQL-level `state != 'resolved'` default and a separate true-total `COUNT(*)` so "showing N of total" is never misleading at this scale. 19 new offline checks (201 total). Minor bump — a new page added, a real operational gap surfaced and left open by direct scope choice. |
+| 3.36.0 | 2026-10-09 | **S30 executed — the aide exclude gap S21h found, fixed on all three fleet nodes.** Direct follow-up request: fix the excludes behind the 139,853-row pending backlog, not just note it. Investigated with real data at every step — 5,000, then 10,000, then 15,000 random pending findings sampled live and bucketed by normalized path, per node — rather than extrapolating from S21h's one sysstat example. Nine real categories added, most never suspected from that single sample: snap packages, kernel packages, dynamic system/package-manager state (including `/var/log/sysstat` — the original finding, somehow dropped from the first pass and only caught because a `--check` against the old baseline was run before committing to `--init`), narrowly-scoped package-churn paths (never `/usr/lib`/`/usr/share`/`/usr/include` wholesale — `/usr/lib/systemd/system` stays tracked on purpose), user-level caches (including `~/.config/Bitwarden CLI`, which needed a `\ ` escape after a live `invalid restriction 'CLI'` parse error — confirmed AIDE tokenizes on whitespace even for `!` rules), git internals under every checked-out repo, a live application database (`/var/lib/continuwuity/db`, the same class as `hermes-data.img`), generated-output directories, and **this fleet's own operational state** (`~/.hermes/state`/`cache`/locks — the exact `/mnt` lesson S17 already documents, never applied to the agent's own scratch directory). `/tmp/.+` now excluded explicitly, since the distro's own rule only ever covered the directory's permissions, not its contents. All three nodes re-`--init`'d and activated — spark 160MB (was 242MB), spark-2 186MB (was 250MB), HomeD13 89MB (was 106MB) — then verified genuinely clean on a fresh `--check`: spark 0 added/6 removed/13 changed of 546,981 entries, spark-2 0/6/8 of 627,027, HomeD13 0/0/1 of 309,469, versus tens of thousands of spurious entries per day beforehand. **Not done here**: the existing 139,853-row pending backlog is not retroactively resolved — each task is independent of the node's own local diff snapshot; recorded as a real, separate follow-up. Minor bump — a new stage added and executed. |
+| 3.37.0 | 2026-10-09 | **S30 follow-up executed — the pending backlog itself cleaned up.** Direct request. New `tools/hermes-baseline-backlog-cleanup.py` bulk-resolved the 138,865 pending `aide` findings predating S30's baseline reset (every one was a diff against a baseline that no longer exists); `grype` (849) and `lynis` (1) pending findings deliberately untouched, since bulk-closing possibly-still-open findings unrelated to aide's baseline would have been dishonest. Writes a plain `/tasks` state upsert per record rather than one `/turns` entry per record, after reading `hermes-memory.py`'s own handlers and confirming `_create_turn()` calls `embed()` on every write — 138,865 individual turns would have meant 138,865 embedding calls competing with the fleet's real embed role for nothing `_upsert_task()`'s own embedding-free upsert doesn't already give. One consolidated summary turn written instead. Verified live: tested on one real record first, then 138,865/138,865 resolved, 0 failed, no measurable `hermes-memory` latency impact. **A real bug in the first run, caught and fixed the same day**: no node filter meant LinodeMercury's 12 then-pending aide findings got swept up too, even though its baseline was reset during S29, not S30, and nothing S30 did invalidated them; reverted to `pending` by hand, and the tool now hard-codes `RESET_NODES = {"spark", "spark-2", "homed13"}` so this can't recur. `memory.db` now holds 999 pending (849 grype + 1 lynis + 137 no-turn + the 12 reverted) vs. 226,118 resolved, confirmed by direct query and by `hermes-fleetops-ui`'s `/recommendations` page. Minor bump — a real cleanup executed, no prior guidance changed. |

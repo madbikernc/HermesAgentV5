@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily bundle timer, scheduled after the day's local scans
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

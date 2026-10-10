@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 2.2.0
+# Version: 2.3.0
 #
 # Offline checks for hermes-fleetops-ui.py. No network, no live stores, no server bound.
 #
@@ -732,6 +732,135 @@ def check_published(ui):
     check("the backlog has a published column", ">published<" in html)
 
 
+def check_recommendations(ui, tmp):
+    print(NL + "[recommendations: REC-<node>-<date>-<seq>, keyed by id prefix not an agent list]")
+    db = tmp / "memory-recs.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, agent TEXT, topic TEXT, state TEXT,"
+        " memory_ref TEXT, created_at TEXT, updated_at TEXT);"
+        "CREATE TABLE turns (id INTEGER PRIMARY KEY, task_id TEXT, agent TEXT, role TEXT,"
+        " raw TEXT, presented TEXT, created_at TEXT, conv_id TEXT);")
+    rows = [
+        ("REC-spark-2026-10-01-001", "node-baseline", "node-baseline", "pending", "100"),
+        ("REC-spark-2-2026-09-07-001", "node-baseline", "node-baseline", "resolved", "50"),
+        ("REC-linodemercury-2026-10-09-001", "linodemercury-watch", "linodemercury-watch",
+         "pending", "90"),
+        # A future fourth producer, different agent name, same id/payload shape -- the whole
+        # point of keying off the `REC-` prefix instead of an agent allowlist.
+        ("REC-futurenode-2026-10-09-001", "some-future-scanner", "some-future-scanner",
+         "manual-required", "95"),
+        # Not a recommendation at all -- must never appear on this page.
+        ("scout:super:not-a-rec", "model-scout", "text", "proposed", "99"),
+    ]
+    for tid, agent, topic, state, updated in rows:
+        conn.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?)",
+                     (tid, agent, topic, state, None, "10", updated))
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                 (rows[0][0], "node-baseline", "system",
+                  json.dumps({"node": "spark", "status": "pending", "finding_id": "aide:/x:changed",
+                              "tool": "aide", "severity": "medium", "description": "File changed: /x",
+                              "suggested_remediation": {"kind": "manual-review", "detail": "review it"}}),
+                  "100"))
+    # A resolved recommendation: the SECOND turn only carries status/finding_id/resolved_at,
+    # never repeating tool/severity/description -- the merge must not lose them.
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                 (rows[1][0], "node-baseline", "system",
+                  json.dumps({"node": "spark-2", "status": "pending", "finding_id": "grype:pkg@1:CVE-1",
+                              "tool": "grype", "severity": "high", "description": "CVE-1 in pkg 1"}),
+                  "50"))
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                 (rows[1][0], "node-baseline", "system",
+                  json.dumps({"node": "spark-2", "status": "resolved",
+                              "finding_id": "grype:pkg@1:CVE-1", "resolved_at": "60"}),
+                  "60"))
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                 (rows[2][0], "linodemercury-watch", "system",
+                  json.dumps({"node": "linodemercury", "status": "pending",
+                              "finding_id": "ufw:inactive", "tool": "ufw", "severity": "critical",
+                              "description": "ufw is not active"}),
+                  "90"))
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                 (rows[3][0], "some-future-scanner", "system",
+                  json.dumps({"node": "futurenode", "status": "manual-required",
+                              "tool": "whatever-next-tool", "severity": "low",
+                              "description": "a finding from a producer that does not exist yet"}),
+                  "95"))
+    conn.commit()
+    conn.close()
+    ui.MEMORY_DB = str(db)
+
+    tasks, detail, total, state_counts = ui.read_recommendations("")
+    ids = {t["id"] for t in tasks}
+    check("only REC-* ids are returned, never a model-scout task",
+          "scout:super:not-a-rec" not in ids, str(ids))
+    check("the default view is 'open' -- resolved is excluded",
+          rows[1][0] not in ids, str(ids))
+    check("pending, and other non-resolved states, are included",
+          {rows[0][0], rows[2][0], rows[3][0]} <= ids, str(ids))
+    check("a producer under a different agent name is still surfaced -- keyed by id, not agent",
+          rows[3][0] in ids, str(ids))
+    check("the true total is the real count, not just what this call loaded",
+          total == 3, total)
+    check("state_counts covers the WHOLE table regardless of the current filter",
+          state_counts.get("resolved") == 1 and state_counts.get("pending") == 2, str(state_counts))
+
+    tasks_all, _detail_all, total_all, _sc = ui.read_recommendations("all")
+    check("state='all' includes the resolved one too",
+          rows[1][0] in {t["id"] for t in tasks_all}, str([t["id"] for t in tasks_all]))
+    check("and its total reflects that", total_all == 4, total_all)
+
+    tasks_resolved, _d, total_resolved, _sc2 = ui.read_recommendations("resolved")
+    check("an explicit single-state filter works",
+          {t["id"] for t in tasks_resolved} == {rows[1][0]}, str(tasks_resolved))
+    check("and its total matches", total_resolved == 1, total_resolved)
+
+    print(NL + "[turns merge oldest-first: a resolved REC keeps its original finding]")
+    # Fetch with state="all", since the default (open) call above excludes the resolved one.
+    _tasks_all2, detail_all2, _tot2, _sc4 = ui.read_recommendations("all")
+    d2 = detail_all2[rows[1][0]]
+    check("tool/severity/description survive the resolve turn",
+          d2.get("tool") == "grype" and d2.get("severity") == "high"
+          and d2.get("description") == "CVE-1 in pkg 1", str(d2))
+    check("but status/finding_id/resolved_at come from the LATER turn",
+          d2.get("status") == "resolved" and d2.get("resolved_at") == "60", str(d2))
+
+    print(NL + "[rendering: node filter, severity color, and an honest 'showing N of true-total']")
+    html = ui.render_recommendations("", "")
+    check("the true total appears, not just the capped page size",
+          "of 3 matching" in html, html[html.find("Showing"):html.find("Showing") + 80])
+    check("a critical finding is colored as bad", "var(--bad)" in html and "critical" in html)
+    check("the suggested remediation detail is shown",
+          "review it" in html)
+    check("the page says deciding still goes through the Matrix reply, not a button here",
+          "authorize|reject" in html and "hermes-baseline-authorize-watch.py" in html)
+    check("no decide form exists on this page (unlike the backlog)",
+          'action="/backlog/decide"' not in html and "<form" in html
+          and 'method="post"' not in html)
+
+    node_only = ui.render_recommendations("linodemercury", "")
+    check("a node filter narrows to just that node",
+          "REC-linodemercury" in node_only and "REC-spark-2026-10-01" not in node_only,
+          "node filter did not narrow correctly")
+
+    print(NL + "[everything rendered here is escaped too]")
+    conn2 = sqlite3.connect(db)
+    conn2.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?)",
+                 ("REC-nasty-2026-10-09-001", "node-baseline", "node-baseline", "pending", None,
+                  "10", "200"))
+    conn2.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                 ("REC-nasty-2026-10-09-001", "node-baseline", "system",
+                  json.dumps({"node": "<img src=x onerror=alert(1)>", "status": "pending",
+                              "tool": "aide", "severity": "medium",
+                              "description": "<script>steal()</script>"}),
+                  "200"))
+    conn2.commit()
+    conn2.close()
+    nasty_html = ui.render_recommendations("", "")
+    check("a hostile node/description value is escaped, not rendered as markup",
+          "<script>" not in nasty_html and "<img src=x" not in nasty_html)
+
+
 def main():
     import tempfile
     ui = load("fleetopsui", "hermes-fleetops-ui.py")
@@ -752,6 +881,7 @@ def main():
         check_multiselect(ui)
         check_csp(ui)
         check_published(ui)
+        check_recommendations(ui, tmp)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

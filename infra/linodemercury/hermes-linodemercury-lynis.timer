@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily lynis hardening audit timer
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

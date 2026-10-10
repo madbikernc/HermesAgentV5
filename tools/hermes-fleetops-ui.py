@@ -1078,7 +1078,7 @@ REC_SEVERITY_COLOR = {"critical": "var(--bad)", "high": "var(--bad)",
                        "medium": "var(--warn)", "low": "var(--dim)"}
 
 
-def read_recommendations():
+def read_recommendations(state_filter):
     """Same read-only stdlib-sqlite approach as read_backlog(), for the same reason (hermes-memory
     has no task-list route; /usr/bin/python3 cannot load sqlite-vec). Unlike the backlog, a
     recommendation's turns are not interchangeable: the FIRST turn written
@@ -1086,13 +1086,33 @@ def read_recommendations():
     (resolve_recommendation()) only adds status/finding_id/resolved_at without repeating it — so
     turns are merged oldest-first. dict.update() only overwrites keys the later turn actually
     sets, so a resolved recommendation keeps its original tool/severity/description rather than
-    losing them to a turn that never carried them."""
+    losing them to a turn that never carried them.
+
+    State filtering happens here, in SQL, rather than on the capped Python-side result —
+    confirmed live 2026-10-09 that this table holds 227,116 REC rows (139,853 pending, 87,263
+    resolved) going back to 2026-09-07, so a flat `ORDER BY updated_at DESC LIMIT N` with no
+    state filter spends its entire cap on whichever node is churning resolutions fastest *right
+    now* (spark-2, confirmed: 388 of 400 in that naive query were its resolved history) and can
+    bury every other node's genuinely open findings. The true total for the active filter is
+    counted separately (cheap — one COUNT(*)) so "showing 400 of ...` is never a lie about scale."""
     conn = ro_sqlite(MEMORY_DB)
     try:
+        where = ["id LIKE 'REC-%'"]
+        params = []
+        if state_filter == "all":
+            pass
+        elif state_filter:
+            where.append("state = ?")
+            params.append(state_filter)
+        else:
+            where.append("state != 'resolved'")   # default view: open/actionable only
+        clause = " AND ".join(where)
+        total = conn.execute(f"SELECT count(*) FROM tasks WHERE {clause}", params).fetchone()[0]
+        state_counts = dict(conn.execute(
+            "SELECT state, count(*) FROM tasks WHERE id LIKE 'REC-%' GROUP BY state").fetchall())
         tasks = conn.execute(
-            "SELECT id, state, topic, agent, created_at, updated_at FROM tasks "
-            "WHERE id LIKE 'REC-%' ORDER BY updated_at DESC LIMIT ?",
-            (MAX_RECOMMENDATION_ROWS,)).fetchall()
+            f"SELECT id, state, topic, agent, created_at, updated_at FROM tasks WHERE {clause} "
+            f"ORDER BY updated_at DESC LIMIT ?", params + [MAX_RECOMMENDATION_ROWS]).fetchall()
         detail = {}
         for t in tasks:
             merged = {}
@@ -1107,34 +1127,43 @@ def read_recommendations():
                 if isinstance(payload, dict):
                     merged.update(payload)
             detail[t["id"]] = merged
-        return [dict(t) for t in tasks], detail
+        return [dict(t) for t in tasks], detail, total, state_counts
     finally:
         conn.close()
 
 
 def render_recommendations(node_filter, state_filter):
-    tasks, detail = read_recommendations()
+    tasks, detail, total, state_counts = read_recommendations(state_filter)
     loaded = [(t, detail.get(t["id"], {})) for t in tasks]
     loaded = [(t, d, d.get("node") or "", t["state"] or "?") for t, d in loaded]
 
-    nodes = sorted({n for _, _, n, _ in loaded if n})
-    counts = Counter(state for _, _, _, state in loaded)
+    # True counts across the WHOLE table, not just this capped/filtered page — the scale found
+    # live 2026-10-09 (see read_recommendations()) makes a count over only the loaded rows
+    # actively misleading.
     summary = " · ".join(
-        f'<span class="pill s-{esc(REC_STATE_STYLE.get(k, "proposed"))}">{esc(k)} {v}</span>'
-        for k, v in sorted(counts.items(),
+        f'<span class="pill s-{esc(REC_STATE_STYLE.get(k, "proposed"))}">{esc(k)} {v:,}</span>'
+        for k, v in sorted(state_counts.items(),
                            key=lambda kv: REC_STATE_ORDER.index(kv[0])
                            if kv[0] in REC_STATE_ORDER else len(REC_STATE_ORDER)))
 
-    nopts = ['<option value="">(every node)</option>']
+    # Node options come from what's actually in the loaded (capped) set, same limitation
+    # render_highlights()'s topic/date dropdowns already accept — a node with zero rows in this
+    # filter's most-recently-updated window won't appear as a choice until something about it
+    # updates. Stated plainly in the note below rather than solved with a second full-table scan.
+    nodes = sorted({n for _, _, n, _ in loaded if n})
+    nopts = ['<option value="">(every node in this view)</option>']
     for n in nodes:
         sel = " selected" if n == node_filter else ""
         nopts.append(f'<option value="{esc(n)}"{sel}>{esc(n)}</option>')
-    sopts = ['<option value="">(every state)</option>']
+    sopts = [f'<option value=""{"" if state_filter else " selected"}>(open — excludes resolved)'
+             f'</option>',
+             f'<option value="all"{" selected" if state_filter == "all" else ""}>'
+             f'(every state, including resolved)</option>']
     for s in REC_STATE_ORDER:
-        if s not in counts:
+        if s not in state_counts:
             continue
         sel = " selected" if s == state_filter else ""
-        sopts.append(f'<option value="{esc(s)}"{sel}>{esc(s)}</option>')
+        sopts.append(f'<option value="{esc(s)}"{sel}>{esc(s)} only</option>')
     form = (f'<form method="get"><select name="node">{"".join(nopts)}</select> '
             f'<select name="state">{"".join(sopts)}</select> '
             f'<button type="submit">show</button></form>')
@@ -1142,8 +1171,6 @@ def render_recommendations(node_filter, state_filter):
     rows = []
     for t, d, node, state in loaded:
         if node_filter and node != node_filter:
-            continue
-        if state_filter and state != state_filter:
             continue
         severity = (d.get("severity") or "").lower()
         sev_color = REC_SEVERITY_COLOR.get(severity, "var(--dim)")
@@ -1161,13 +1188,15 @@ def render_recommendations(node_filter, state_filter):
             esc(when(t["updated_at"])),
         ])
 
-    note = (f'{summary}<br>Showing {len(rows)} of {len(loaded)} loaded (at most '
-            f'{MAX_RECOMMENDATION_ROWS}, newest-updated first). <b>Read-only</b> — authorizing or '
-            f'rejecting one still goes through the FleetOps Matrix reply '
-            f'<span class="mono">authorize|reject &lt;id&gt;</span> that '
+    note = (f'{summary} (true totals, not just this page)<br>Showing {len(rows)} of {total:,} '
+            f'matching this filter (newest-updated first, capped at {MAX_RECOMMENDATION_ROWS}). '
+            f'<b>Read-only</b> — authorizing or rejecting one still goes through the FleetOps '
+            f'Matrix reply <span class="mono">authorize|reject &lt;id&gt;</span> that '
             f'<span class="mono">hermes-baseline-authorize-watch.py</span> watches for. The '
             f'benchmark backlog page above earns its own write route on a separately-argued '
-            f'decision (S21f); this page does not reopen that argument.')
+            f'decision (S21f); this page does not reopen that argument. The node filter\'s '
+            f'options are drawn from this page\'s own loaded rows, not a full scan — a node with '
+            f'nothing in the current window won\'t appear as a choice.')
     # data-filter rather than an inline oninput: see PAGE_SCRIPT's own note on why that silently
     # does nothing under this service's CSP.
     search = (f'<p><input type="search" placeholder="filter rows…" data-filter="#recs">'
@@ -1187,7 +1216,8 @@ def page_recommendations(query):
         "aide/lynis/syft+grype from <span class=\"mono\">hermes-node-baseline-scan.py</span> "
         "(spark, spark-2, HomeD13) and the firewall/package/SSH-log checks from "
         "<span class=\"mono\">hermes-linodemercury-watch.py</span> (LinodeMercury), plus anything "
-        "else that ever writes the same shape.",
+        "else that ever writes the same shape. Defaults to open findings only — see the note "
+        "below the filters for why.",
         lambda: render_recommendations(node_filter, state_filter))
     return shell("Recommendations", body)
 

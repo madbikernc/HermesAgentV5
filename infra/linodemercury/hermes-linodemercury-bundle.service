@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily bundle of local scan output for Fleet pickup
+After=hermes-linodemercury-lynis.service hermes-linodemercury-cve-scan.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hermes-linodemercury-bundle.sh

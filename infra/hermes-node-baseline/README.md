@@ -1,6 +1,6 @@
 # hermes-node-baseline — S17 recreate checklist
 
-**Version:** 1.3.2
+**Version:** 1.5.0
 
 Daily local-node security baseline (aide file-integrity, lynis hardening audit, syft+grype
 SBOM/CVE), diffed day-over-day, with new medium+ findings written as durable, queryable
@@ -103,6 +103,95 @@ needs tuning for a particular node's real database size. Re-run `aide --init` (w
 operator's sign-off) whenever a legitimate bulk change makes the old
 baseline noisy — this is a manual step, not something the scanner does for you.
 
+**A second, much bigger exclude gap — found 2026-10-09 while building `hermes-fleetops-ui`'s
+`/recommendations` page, not while looking at aide directly.** `memory.db` held 227,116 `REC-*`
+tasks, 139,853 still `pending` since 2026-09-07. Sampling thousands of them live (not guessing)
+found the overwhelming majority were `aide` findings against paths that change constantly for
+reasons that have nothing to do with security: **snap packages** (`/snap`, `/var/snap`,
+`/usr/lib/snapd` — every revision is a brand-new immutable path, and snapd already verifies them
+cryptographically; aide re-checking them is pure noise), **kernel packages** (`/usr/src`,
+`/usr/lib/modules` — every kernel/header update), **dynamic system/package-manager state**
+(`/run/udev`, `/var/cache`, `/usr/share/zoneinfo`, and — narrowly, not `/usr/lib` wholesale —
+`/usr/lib/python3/dist-packages`, `/usr/lib/node_modules`, the `*-linux-gnu*/gconv` and
+`*-linux-gnu*/perl-base` locale/runtime trees, plus several `/usr/share/*` doc/locale/completion
+dirs), **user-level caches** (`~/.npm`, `~/.cache`), **git internals** under every checked-out
+repo (`.git` — object churn from an ordinary `git pull`, e.g. `hermes-repo-autopull.timer`, is
+never itself a meaningful integrity signal; the *working-tree files* stay tracked), **a live
+application database** (`/var/lib/continuwuity/db` on spark — same class as `hermes-data.img`
+above), **generated-output directories** (`/opt/comfyui/output` and `/mnt/nas2-hermes-images` on
+HomeD13), and **the rest of `/tmp`** — `70_aide_tmp`'s own shipped rule only tracks the top-level
+directory's permissions, not its contents, so ephemeral build/runtime dirs (`/tmp/meshenv-*`,
+`/tmp/heapenv`, `/tmp/node-compile-cache`, all seen live on spark) fell through to the distro's
+catch-all `/ 0 Full` rule. **Deliberately not excluded**, despite real noise, because the paths are
+genuinely security-relevant and the noise is an acceptable cost: `/usr/lib/systemd/system` (unit
+files — a classic persistence target) and anything else under plain `/usr/lib`/`/usr/bin`/`/usr/sbin`
+not named above.
+
+Fixing the excludes stops new noise; it does **not** retroactively resolve an already-pending
+backlog on its own (each `REC-*` task sits in `memory.db` independently of the node's own local
+`findings_by_id` snapshot, which only remembers the last run). **Done as a direct follow-up,
+2026-10-09** — `tools/hermes-baseline-backlog-cleanup.py` bulk-resolved the 138,865 pending
+`aide` findings that predated the fleet-wide `--init` reset below (every one of them was a diff
+against a baseline that no longer exists), using a plain `/tasks` state upsert per record — not
+`/turns` — since `hermes-memory.py`'s `_create_turn()` calls `embed()` on every turn write, and
+138,865 individual turns would have meant 138,865 embedding calls competing with the fleet's real
+embed role for no benefit. One consolidated summary turn was written instead, under
+`REC-cleanup-2026-10-09`. `grype` (849 pending) and `lynis` (1 pending) findings were deliberately
+left untouched — they have nothing to do with aide's baseline and may still be genuinely open.
+
+**A real bug in the first real run, caught and fixed the same day.** It had no node filter at
+all and bulk-resolved LinodeMercury's 12 then-pending aide findings too — but LinodeMercury's own
+baseline was last reset during S29, not S30, and nothing S30 did invalidated those 12. Caught by
+cross-checking the per-id cleanup log against which nodes actually got a `--init` reset; all 12
+reverted to `pending` by hand, and the script now hard-codes
+`RESET_NODES = {"spark", "spark-2", "homed13"}` so a bare `tool == 'aide'` check can never again
+sweep up a node this specific cleanup didn't actually reset.
+
+Verified: `memory.db` now holds 999 pending (849 grype + 1 lynis + 137 tasks with no turn at all,
+unrelated, + the 12 reverted LinodeMercury findings) against 226,118 resolved, and
+`hermes-fleetops-ui`'s `/recommendations` page's default view shows exactly that true total.
+
+```bash
+# Shared across every node (inert where a path doesn't exist, e.g. /snap on the x86_64 HomeD13
+# node, which runs no snapd at all):
+echo -e '!/snap\n!/var/snap\n!/usr/lib/snapd' | sudo tee /etc/aide/aide.conf.d/92_hermes_exclude_snap
+echo -e '!/usr/src\n!/usr/lib/modules' | sudo tee /etc/aide/aide.conf.d/93_hermes_exclude_kernel_pkgs
+echo -e '!/run/udev\n!/var/cache' | sudo tee /etc/aide/aide.conf.d/94_hermes_exclude_dynamic_system_state
+echo -e '!/home/pmoney/.npm\n!/home/pmoney/.cache' | sudo tee /etc/aide/aide.conf.d/95_hermes_exclude_user_caches
+echo '!/home/pmoney/HermesAgentV5/.git' | sudo tee /etc/aide/aide.conf.d/96_hermes_exclude_git_internals
+# plus, only where the checkout exists (spark has both; spark-2 has llama.cpp only; HomeD13 has neither):
+echo '!/home/pmoney/HermesAgentV5-selfrepair/.git' | sudo tee -a /etc/aide/aide.conf.d/96_hermes_exclude_git_internals
+echo '!/opt/llama.cpp/.git' | sudo tee -a /etc/aide/aide.conf.d/96_hermes_exclude_git_internals
+
+cat <<'EOF' | sudo tee /etc/aide/aide.conf.d/97_hermes_exclude_package_churn
+!/usr/share/zoneinfo
+!/usr/lib/python3/dist-packages
+!/usr/lib/node_modules
+!/usr/share/bash-completion
+!/usr/share/perl
+!/usr/share/python-babel-localedata
+!/usr/share/man
+!/usr/share/i18n/locales
+!/usr/share/ca-certificates
+!/usr/share/subiquity
+!/usr/share/doc
+!/usr/include/node
+!/usr/lib/.*-linux-gnu.*/gconv
+!/usr/lib/.*-linux-gnu.*/perl-base
+EOF
+
+# Node-specific: /tmp's contents everywhere, plus whichever generated-output/live-db dirs exist.
+echo '!/tmp/.+' | sudo tee /etc/aide/aide.conf.d/98_hermes_exclude_generated_and_tmp
+# spark only:
+echo '!/var/lib/continuwuity/db' | sudo tee -a /etc/aide/aide.conf.d/98_hermes_exclude_generated_and_tmp
+# HomeD13 only:
+echo -e '!/opt/comfyui/output\n!/mnt/nas2-hermes-images' | sudo tee -a /etc/aide/aide.conf.d/98_hermes_exclude_generated_and_tmp
+```
+
+Re-run `aide --init` (see above) on every node after applying these — an exclude added after the
+baseline already contains a path does not retroactively stop that path's *existing* database
+entry from being compared, only new scans from re-adding it.
+
 ## Install
 
 ```bash
@@ -171,3 +260,5 @@ curl -s $MEMORY_URL/turns?task_id=<REC-id> -H "Authorization: Bearer $MEMORY_TOK
 | 1.2.0 | 2026-09-05 | Two more real bugs found completing the first live `--seed-only` runs: aide's `--check` timeout (600s) was nowhere near enough for a real database (fixed, now 7200s default, configurable) and its exit status is a bitmask, not a plain 0/1 convention (exit 5 = new+changed both found, was wrongly treated as a hard failure). Also found and fixed a real path mismatch in the distro's own shipped aide NFS ruleset (`/var/lib/nfs/rpc_pipefs` vs. this fleet's actual `/run/rpc_pipefs`) and documented `pmoney`'s already-broad sudo, the gzip-vs-not baseline-activation difference between nodes, and real measured `aide --init` timings. |
 | 1.3.0 | 2026-09-06 | Found live, three kill-and-restart rounds in a row: spark and spark-2's `aide --init` ran 6+ hours because it was reading a 2.1TB live database image (`/opt/hermes-data.img`), that same data's separately-mounted view (`/mnt/hermes-data` — a distinct filesystem `du -x` hides but aide still crosses into), and an NFS-mounted NAS backup share (`/mnt/nas2-hermes-backup`, unrelated personal data) over the network. Direct operator decision: exclude `/mnt` wholesale rather than chase individual mounts one discovery at a time, plus any large local (non-mounted) data file like `hermes-data.img` and, on spark-2, `hermes-models`. None of it was a meaningful integrity target — a live database always shows as "changed" regardless, and nothing under `/mnt` on this fleet is a local system file aide is meant to be watching. |
 | 1.3.2 | 2026-09-06 | Consolidated the 1.3.0/1.3.1 setup instructions (originally written mid-investigation, one mount at a time) into the single final `!/mnt`-wholesale guidance above, once all three rounds were actually complete — no new findings, just cleaner instructions for a future node. |
+| 1.4.0 | 2026-10-09 | **A second, much bigger exclude gap, found live via `hermes-fleetops-ui`'s new `/recommendations` page, not by looking at aide directly**: `memory.db` held 227,116 `REC-*` tasks, 139,853 pending since 2026-09-07, overwhelmingly `aide` findings against paths that change constantly for reasons unrelated to security. Investigated with real samples (5,000 then 10,000 then 15,000 random pending findings, bucketed by normalized path) rather than guessed, across all three nodes. Nine real exclude categories added across two rounds — snap packages, kernel packages, dynamic system/package-manager state (`/run/udev`, `/var/cache`, `/var/lib/apt/lists`, `/var/lib/PackageKit`, `/run/NetworkManager`, `/run/snapd/lock`, `/var/log/sysstat`, `/var/lib/landscape`, Tailscale's own log files), narrowly-scoped package-churn paths under `/usr/lib`/`/usr/share`/`/usr/include` (not those directories wholesale — `/usr/lib/systemd/system` and everything else stays tracked, since unit files are a real persistence target and the noise there is an acceptable cost), user-level caches (`~/.npm`, `~/.cache`, `/root/.cache`, and — found live, escaping required a `\ ` since AIDE tokenizes on whitespace even for `!` rules — `~/.config/Bitwarden CLI`), git internals under every checked-out repo, a live application database (`/var/lib/continuwuity/db` on spark, same class as `hermes-data.img`), generated-output directories (HomeD13), and **this fleet's own operational state** (`~/.hermes/state`, `~/.hermes/cache`, lock files, per-role wake timestamps — the exact gap this file already warns about for `/mnt`, just never applied to the agent's own scratch directory). `70_aide_tmp`'s shipped rule only ever tracked `/tmp`'s own permissions, never its contents, so `/tmp/.+` is now excluded explicitly too. Verified live, post-`--init`, on all three nodes: spark 546,981 entries (0 added/6 removed/13 changed), spark-2 627,027 (0/6/8), HomeD13 309,469 (0/0/1) — vs. tens of thousands of spurious entries per day beforehand. **Not done here**: the 139,853-row pending backlog in `memory.db` is not retroactively resolved by this fix (each task is independent of the node's own local diff snapshot) — a real, separate follow-up. |
+| 1.5.0 | 2026-10-09 | **Direct follow-up: the pending backlog itself cleaned up.** New `tools/hermes-baseline-backlog-cleanup.py` bulk-resolved the 138,865 pending `aide` findings that predated the fleet-wide `--init` reset above — every one was a diff against a baseline that no longer exists, so none has continued meaning. Writes a plain `/tasks` state upsert per record (preserving each task's own `agent`/`topic`, which the upsert overwrites unconditionally) rather than one `/turns` audit entry per record, after reading `hermes-memory.py`'s own handler and confirming `_create_turn()` calls `embed()` on every write — 138,865 individual turns would have meant 138,865 embedding calls, competing with the fleet's real embed role for no benefit `_upsert_task()` doesn't need. One consolidated summary turn written instead, under `REC-cleanup-2026-10-09`. `grype` (849 pending) and `lynis` (1 pending) findings deliberately left untouched — independent of aide's baseline, possibly still genuinely open. Verified live: tested on one real record first (state flipped, agent/topic intact) before the full run; 138,865/138,865 resolved, 0 failed, ~20-way concurrency with no measurable impact on `hermes-memory`'s own response latency throughout. **A real bug in that first run, caught and fixed the same day**: no node filter meant LinodeMercury's 12 then-pending aide findings got swept up too, even though its baseline was reset during S29, not S30; reverted to `pending` by hand, and the script now hard-codes `RESET_NODES = {"spark", "spark-2", "homed13"}` so this can't recur. `memory.db` now holds 999 pending (849 grype + 1 lynis + 137 no-turn + the 12 reverted) vs. 226,118 resolved, confirmed via both a direct query and `hermes-fleetops-ui`'s `/recommendations` page. Minor bump — a real cleanup executed, no prior guidance changed. |

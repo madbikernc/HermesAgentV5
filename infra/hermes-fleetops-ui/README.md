@@ -1,10 +1,11 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.2.0
+**Version:** 2.3.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
-backlog, which checkpoint backs each role, benchmark results, and the news digest's stored
-highlights. Runs on **Watch (spark)** only, over **HTTPS**, Basic Auth required.
+backlog, which checkpoint backs each role, benchmark results, the news digest's stored highlights,
+and security/integrity recommendations written by the fleet's scanners. Runs on **Watch (spark)**
+only, over **HTTPS**, Basic Auth required.
 
 **<https://spark.tail1a534.ts.net:8103/>**
 
@@ -196,6 +197,7 @@ missing-table crash on first run — is the concrete precedent.
 | `/models` | `usage_log` in `usage.db`, counted in SQL | two trailing 7-day windows, no commentary |
 | `/benchmarks` | the NAS `history.jsonl` + local fallback | same two paths the benchmark tooling writes |
 | `/highlights` | `news_digest_daily` in `vectors.db` | every stored rank, not just the emailed top 20 |
+| `/recommendations` | `tasks`/`turns` in `memory.db`, `id LIKE 'REC-%'` | read-only; keyed by id prefix, not an agent list — see below |
 
 **The plan was wrong about the backlog source and the code follows the store, not the plan.** S21b
 said to read the scout's tasks with "the same `GET /tasks` shape `hermes-self-repair-status.py`
@@ -238,7 +240,7 @@ route, since even with a stolen CSRF token a form on someone else's page cannot 
 
 ## 6. Tests
 
-`tests/test_fleetops_ui.py` — 64 offline checks, no network, no live store, no socket bound. The
+`tests/test_fleetops_ui.py` — 201 offline checks, no network, no live store, no socket bound. The
 fixtures are the real schemas read off the live stores on 2026-10-09, because the first draft got
 two of them wrong from the plan's own prose. Also asserts the things that are easy to break
 silently: that the NAS and local history paths still equal `hermes_benchmark_common`'s own
@@ -264,6 +266,22 @@ narrative call was itself being blocked by Layer 2 until S27f exempted it (the g
 at 06:41 on 2026-10-09). The page prints "none recorded" rather than a blank cell so the two cases
 stay distinguishable. Advisories appear on the next scout run.
 
+**`/recommendations` found a real, large, pre-existing problem on first load, not a page bug.**
+`memory.db` holds 227,116 `REC-*` tasks as of 2026-10-09 — 139,853 still `pending`, going back to
+2026-09-07 — the overwhelming majority `aide` findings against inherently rotating paths on
+`spark`/`spark-2` (e.g. `/var/log/sysstat/sa<DD>`, sysstat's own daily-named activity log) that
+were never excluded from `hermes-node-baseline-scan.py`'s aide config, the same class of gap S29
+independently found and fixed for LinodeMercury's own tooling/log/apt-cache directories. A naive
+`ORDER BY updated_at DESC LIMIT 400` with no state filter spends its entire cap on whichever node
+is churning fastest *right now* and buries every other node's genuinely open findings — confirmed
+live: that query's top 400 was 388 rows of `spark-2` history and 12 of LinodeMercury's, with
+`spark`'s own currently-pending findings nowhere in the window. Fixed by filtering `state !=
+'resolved'` **in SQL**, not after the cap, with a separate `COUNT(*)` so the page's "showing N of
+total" is never a lie about scale, and an explicit `state=all` escape hatch to see the resolved
+history anyway. **Not fixed here, and a real follow-up**: the root cause on spark/spark-2 (the
+missing aide excludes) and the 139,853-row pending backlog itself — this page surfaces the
+problem honestly, it does not clean it up.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -273,3 +291,4 @@ stay distinguishable. Advisories appear on the next scout run.
 | 2.0.0 | 2026-10-09 | **Major — reverses this file's own "no decide buttons" position, on the operator's decision that the Matrix channel is only *perceived* to be more secure, and adds TLS.** The backlog now has approve/defer/reject/un-reject buttons that write the same transition through the same code as the Matrix reply, by importing `hermes-model-scout-gate.py` rather than restating its state machine — failing closed if that import fails. Records the three non-perceptual things that were handled instead of argued about: CSRF (a browser replays Basic Auth cross-origin; Matrix has no equivalent), TLS via `tailscale serve` with a real Let's Encrypt cert, and attribution — `Tailscale-User-Login` now names a person in the audit record, closing the one genuine edge the Matrix route had, while never being used for authentication. States plainly that the service now holds write credentials it did not before. Port 443 was asked for and refused: tailscaled serves the Matrix homeserver there. |
 | 2.1.0 | 2026-10-09 | Multi-select on the backlog, on operator request: checkboxes, a bulk bar above and below, select all/none and a live count — a rendering convenience only, since every selected task still goes through the same per-task guard and a row with no legal transition gets no checkbox. Outcomes return as a count per clause, carried in the URL as codes and integers so nothing from a URL is rendered as text. **Also fixes a defect the CSP had been hiding since 1.0.0**: `default-src 'none'` with no `script-src` blocks inline event handlers, so the copy-command button and the benchmark filter never worked in a browser; all handlers moved into one nonced, delegated script block, with `form-action 'self'` added as a second brake on the write route. 167 offline checks. |
 | 2.2.0 | 2026-10-09 | Backlog shows **how old each candidate is** — publish date plus a relative age, flagged under a week, from the `created_at` the scout now carries (it used to fetch HF's `createdAt`, filter on it and drop it, so all 51 live candidates had no date). The `fit` cell also states how the size was established (`gguf-metadata` vs `safetensors`), since it reads as a measurement either way. |
+| 2.3.0 | 2026-10-09 | **New `/recommendations` page (S21h)**, direct request: surface every `REC-<node>-<date>-<seq>` security/integrity finding written to hermes-memory by `hermes-node-baseline-scan.py` (spark/spark-2/HomeD13, S17) and `hermes-linodemercury-watch.py` (LinodeMercury, S29) — keyed by the `REC-` id prefix rather than an agent allowlist, so a future producer needs no code change here. Read-only; no new write route. **Found a real, large pre-existing problem on first load**: 227,116 `REC-*` rows, 139,853 still pending since 2026-09-07, overwhelmingly `aide` noise against unexcluded rotating paths (`/var/log/sysstat/sa<DD>`) on spark/spark-2 — the same class of gap S29 independently found for LinodeMercury's own directories. A naive capped query buried every node but whichever was churning fastest *right now*; fixed by filtering `state != 'resolved'` in SQL by default (not after the cap), with a separate true-total `COUNT(*)` so "showing N of total" is never misleading, and an explicit `state=all` option to see resolved history anyway. 201 offline checks (19 new). |
