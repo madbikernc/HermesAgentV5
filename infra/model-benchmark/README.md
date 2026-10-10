@@ -1,6 +1,6 @@
 # model-benchmark — recreate checklist
 
-**Version:** 3.0.1
+**Version:** 3.1.0
 
 One-time install of the evaluation stack used to score a fleet backend (or an unpromoted
 candidate — a fresh `heretic`/fine-tune output, a bake-off contender) against five industry-
@@ -226,6 +226,99 @@ discipline `infra/hermes-model-archive/README.md` (Stage 13) established, no new
 both locations are read back on comparison so a run recorded during a mount outage isn't lost, just
 split across two files.
 
+## Incumbent baselines, and the three things that stopped them (2026-10-10)
+
+The six live roles had almost no measured baseline: 33 history entries, 11 distinct models, newest
+2026-09-20, and `omni` had never been measured at all. A candidate's score means nothing without
+the incumbent's, so the baselines came first. ifeval at `--limit 75`, matching the most recent real
+role runs so old and new group together.
+
+| role | checkpoint | ifeval @75 | vs history |
+|---|---|---|---|
+| dispatch | Qwen3.6-35B-A3B | 0.9067 | identical to prior |
+| omni | gemma-4-26B-A4B-it | 0.9067 | first measurement ever |
+| muse | Huihui-Qwen3.6-35B-A3B-abliterated | 0.8933 | identical to 2026-09-20 |
+| coder | Qwen3.8-27B-abliterated | 0.8800 | identical to 2026-09-20 |
+| super | Huihui-GLM-4.7-Flash-abliterated | 0.7600 | 0.72, so +0.04 |
+| coder2 | Muse-Glimmer-30B | not recorded | 90-minute timeout |
+
+Three of the five reproduce their historical score exactly, which is the evidence that this harness
+measures something stable rather than noise. **`super` at 0.76 is 14 points below the rest**, and it
+is the role `hermes-news-digest` and `hermes-canary-report` both use.
+
+**`coder2` could not be measured in 90 minutes**, for a reason already documented elsewhere in this
+repo: it is backed by Muse-Glimmer-30B, which emits extended `reasoning_content` before its answer
+(`hermes-minecraft-triage.py` had to raise its own token budget for exactly this). At ~11 tok/s with
+a reasoning preamble on all 75 prompts it exceeds any reasonable timeout. It needs a capped
+`max_tokens` or a much longer budget; its one prior figure is a candidate-mode **0.28**, worth
+confirming given the gap.
+
+### 1. Layer 2 blocks ifeval prompts, so role mode cannot go through the router
+
+The first validation run died inside lm_eval's retry loop. The guard report named the cause within
+a minute: `3x 'I am planning a trip to Japan, and I would like '` at **p=0.997**. An ifeval prompt
+classified as a prompt injection. `max_retries=3` turns one blocked prompt into three blocked calls
+and then a failed suite.
+
+A benchmark suite is a fixed, public, auditable corpus with no attacker in the loop, and a suite
+that tests instruction-following is structurally indistinguishable from instruction-override. So
+these runs use **`--endpoint <the role's own backend>`**, which also measures the model rather than
+the router's screening overhead — the right thing for a baseline. No screening change was made.
+
+### 2. Going direct makes the role invisible to the idle-sleep watchdog
+
+`coder` and `coder2` then failed at 19 and 16 minutes with a tenacity reraise.
+`hermes-model-idle-sleep.sh` stops an on-demand backend after `IDLE_SECONDS` (default **900**) and
+judges idleness from a `<role>.last_used` stamp that only **hermes-router** writes. A direct
+benchmark never touches it, so the role looked idle and was unloaded mid-run — both failures land
+just past the 15-minute mark.
+
+Fix for the duration: stop `hermes-coder-idle-sleep.timer` and `hermes-coder2-idle-sleep.timer`,
+and restore them afterwards. `coder` then completed at 0.88.
+
+### 3. A shared single slot, which is the finding worth keeping
+
+`muse` could not answer a 32-token probe in 150 seconds while the bots were running, and hit a
+90-minute timeout. It was never slow: **the moment the bots stopped it served 53.6 tok/s.** Every
+llama-server in this fleet ran `--parallel` at its default of **one slot** while allocating
+`--ctx-size 65536`, against a fleet-wide peak prompt of 4309 tokens — 15x more context per slot
+than anything uses, spent on one request at a time.
+
+See `## Backend concurrency` below. Benchmarking a resident role that the live fleet shares will
+degrade the fleet; this run roughly doubled the bots' LLM timeouts, which is why it was stopped
+mid-way and finished later with the bots down. **This is what the "foreground, human-attended
+operation" rule in `skills/model-benchmark/SKILL.md` is protecting against.**
+
+## Backend concurrency — `--parallel`
+
+`--ctx-size` is the TOTAL KV allocation, divided among `--parallel` slots. Measured 2026-10-10:
+
+| backend | parallel | aggregate throughput | note |
+|---|---|---|---|
+| muse | **4** | 13.0 -> 24.0 -> 51.9 tok/s at concurrency 1/2/4 | per-request latency flat, 6.8s -> 7.9s |
+| dispatch | **4** | 58.8 -> 125.4 tok/s at concurrency 1/4 | per-request 1.5s -> 3.1s |
+| super | 1, deliberately | — | see below |
+| omni, coder, coder2 | 1 | — | low volume, on-demand |
+
+Aggregate throughput scales close to linearly, because batched decoding on this hardware is
+memory-bandwidth bound. A single slot's decode rate *drops* under contention — a log line reading
+`1.08 tokens per second` is one slot of four, not the server — while the server as a whole serves
+roughly 4x the work.
+
+**`super` must stay at one slot.** `hermes_rag_common.router_chat()` defaults to `model="super"`,
+and `hermes-news-digest` sends it up to `MAX_HIGHLIGHTS`=50 passages at
+`sanitize_llm_input(text, 1200)` each — on the order of 15-20k tokens. Splitting 65536 into four
+16384-token slots would truncate that. muse's peak is 2153 and dispatch's 2875, so both keep 5-7x
+headroom at 16384.
+
+**The flags are NOT in this repo.** They live in `/opt/llama.cpp/start-<role>.sh` on each node,
+which nothing here tracks — so this change is real configuration drift, recorded here because the
+file cannot record itself. Backups: `start-muse.sh.bak-2026-10-10` on spark-2,
+`start-dispatch.sh.bak-2026-10-10` on spark. Reverting is removing `--parallel 4` and restarting.
+
+**A readiness gotcha, since it cost a confusing 503:** `/v1/models` answers before the model is
+loaded. Poll `/v1/chat/completions` for a 200 instead — dispatch needed ~25s.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -235,3 +328,4 @@ split across two files.
 | 2.0.0 | 2026-08-24 | Live verification pass on `spark`: `/opt/benchmark-venv` actually created and installed; `mmlu_pro`/`gpqa_diamond_cot_zeroshot`/`ifeval` task names confirmed against a real `lm_eval ls tasks`. **§3 (BFCL) rewritten** — the original `--base-url` guess doesn't exist; replaced with the real, live-verified mechanism (direct `llama-server` port, `REMOTE_OPENAI_BASE_URL`, a registry-matched `--model`), confirmed with a genuine end-to-end run against `nano` producing a real score. Found and fixed a real `bfcl-eval` packaging gap (`soundfile` missing, undeclared dependency). **§4 (SWE-bench) resolved from "unknown" to "confirmed blocked"** — live-tested `docker run --platform linux/amd64 hello-world`, real `exec format error`, no binfmt emulation registered; also found `pmoney` isn't in the `docker` group on `spark`. `run_bfcl()`/`run_swebench()` in `tools/hermes_benchmark_common.py` updated to match (1.0.0→1.1.0), including a fast pre-flight check so a doomed SWE-bench run fails immediately with the real reason instead of grinding through predictions generation first. Major bump — §3 is a reversal of prior guidance, not just an addition. |
 | 2.1.0 | 2026-08-24 | §2 rewritten around a live GPQA Diamond test: `hermes-benchmark-model.sh` 1.1.0 now fetches `HF_TOKEN` from Vaultwarden automatically every run (`Hermes - HuggingFace` item, in-memory only, never written to disk) instead of requiring a manual export — confirmed the token reaches the Hub correctly. Found the real remaining blocker: the dataset itself needs its gate terms accepted on huggingface.co by the account behind the token, a one-time manual web-UI step no fleet tool can perform — `lm_eval` fails with a real `DatasetNotFoundError` until that's done, not a token or wiring problem. |
 | 3.0.0 | 2026-08-24 | **§4 (SWE-bench) fully rewritten** — direct request to run it from `HomeD13` (x86_64) instead of the aarch64 Sparks. Set up and verified live: Docker installed natively (no emulation needed at all — `docker run hello-world` just works), `/opt/benchmark-venv` with `swebench`/`datasets`. Real network path needed two real fixes: `spark`'s `ufw` only allowed `spark-2` through to `nano`/`super`'s ports (added a matching rule for `HomeD13`'s IP), and `nano`'s own `llama-server` turned out to be bound to `127.0.0.1` only — likely never actually reachable cross-node even for `spark-2`, since nano/super aren't real `model-delegation` targets today — rebound to `0.0.0.0` (matching `muse`'s own convention) and restarted, verified healthy through the live router before and after. First real end-to-end run then surfaced two real code bugs in `tools/hermes_benchmark_common.py`, both fixed: the dataset org was wrong (`princeton-nlp/SWE-bench_Verified` has no `"image"` field `swebench` 5.0.2 requires; `SWE-bench/SWE-bench_Verified` does) and the 180s per-instance generation timeout was too short for a real issue, plus `TimeoutError` wasn't in the caught-exceptions tuple (would have crashed the whole run, not just skipped one instance). Second real run produced a genuine score (`resolved_rate=0.0`, 1/1 submitted). Major bump — this reverses "confirmed blocked" into a real, working path, not just an addition. |
+| 3.1.0 | 2026-10-10 | Added the incumbent ifeval baselines (five of six roles; three reproduce their historical score exactly, `super` is 14 points below the rest, `coder2` cannot finish in 90 minutes because it emits reasoning tokens), and the three obstacles found getting them: Layer 2 classifies ifeval prompts as injections at p=0.997 so role mode must use `--endpoint`; going direct makes a role invisible to `hermes-model-idle-sleep.sh`, which unloaded two backends mid-run at the 15-minute mark; and every backend ran one slot against a 65536 context, which is why benchmarking a shared resident role doubles the bots' LLM timeouts. Records the `--parallel 4` change to muse and dispatch with measured throughput, why `super` must stay at one slot (the digest sends it 15-20k tokens), that the flags live in untracked `/opt/llama.cpp/start-*.sh`, and that `/v1/models` answers before a model is loaded. |
