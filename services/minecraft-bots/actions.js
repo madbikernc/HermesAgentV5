@@ -1,4 +1,63 @@
-// Version: 1.83.1
+// Version: 1.88.0
+//
+// 1.88.0 (2026-10-11, PRIORITIES_PROPOSAL.md §2a -- "arbitrate which Soldier holds which
+// sub-role the same way bed claims are already arbitrated"). New holdsGuardAnchor(), same
+// shared-agent_state-plus-per-host-fallback shape as BED_CLAIMS_AGENT/BUILDER_CLAIMS_AGENT, but
+// ONE row ({holder, claimedAt}), not one per bot -- there's a single anchor slot to contend for.
+// index.js's isLiveSoldier() callback decides what "still a live Soldier" means (this file has
+// no view of the fleet roster or who's connected); holdsGuardAnchor() only handles the shared
+// claim mechanics.
+//
+// 1.87.0 (2026-10-11, PRIORITIES_PROPOSAL.md Tier 2 item 2 -- "a bot about to make any of
+// these checks shared world-memory... not just her own immediate 32-block view"). "craft"'s
+// REUSABLE_UTILITY_BLOCKS short-circuit (2026-09-08, crafting_table/furnace) extended with the
+// same findRememberedLocation() fallback its own tableWouldHelp workbench search already has --
+// a table or furnace outside her current 32-block view, or one she saw earlier and wandered
+// away from, is exactly as worth remembering as a resource vein. Chest deliberately left out:
+// unlike a table or furnace, a full chest is a real reason to want a second one.
+//
+// 1.86.0 (2026-10-11, PRIORITIES_PROPOSAL.md Tier 2 PR2 -- "reuse the bed-claim mechanism... for
+// a short-lived claim on 'I'm working builder-priority item X'"). New claimBuilderItem()/
+// myBuilderClaim()/releaseBuilderItem(), same shape as BED_CLAIMS_AGENT below -- a shared
+// hermes-memory agent_state row per bot, the same per-host fallback file and MC_*_SHARED escape
+// hatch -- so index.js can de-exclusive its Tier 2 infrastructure checklist (any idle bot, not
+// just Builder-primary) without two idle bots converging on the same unmet item. Unlike a bed
+// claim, short-lived: staleness (BUILDER_CLAIM_TTL_MS) is checked against `claimedAt` on read,
+// since the store itself has no per-row expiry, so a bot claiming an item and then dying,
+// getting stuck, or disconnecting doesn't block the fleet's infrastructure forever.
+//
+// 1.85.0 (2026-10-11, direct report: "a shelter is defined as having complete walls, ceiling,
+// floor, and at least one door (not an opening or arch), with no other openings...") -- the
+// doorway used to be a bare, permanent gap: shelterPositions() excluded all three of its
+// wall-height cells from the fill, and nothing ever placed anything there. Now only the two
+// door-height cells are left open (doorwayPosition()); the lintel rejoins the wall fill, and the
+// floor under the room joins shelterPositions() too (never checked before this at all). "build"
+// crafts a door (any species, needs a table -- 1.83.1's own fixed check already finds/makes one)
+// and places it -- but ONLY after the generic wall/roof/floor loop, confirmed live after two real
+// bugs: getting the door ITEM has to happen FIRST (oak_planks counts as ordinary shelter material
+// too, so the generic loop spent every plank on walls before the door, which has no substitute,
+// ever got a turn), while PLACING the door block has to happen LAST (placed into open air before
+// any neighbouring wall existed, it came out facing east/west instead of north/south, and
+// doorPassageSides() then protected the wrong, wall-adjacent cells as "the way through" it,
+// refusing every wall next to the doorway). No connection to a cave system needed its own check:
+// once every wall/roof/floor cell is solid and the one opening holds a real door, nothing else is
+// left for a cave to connect through.
+//
+// Found live the same day: with the room still 2x2, a real door and a bed could never both fit --
+// findBedSites()'s nearDoor() exclusion, correctly applied now that a real door exists, rules out
+// the only row deep enough to reach, and the room was too narrow for a "stand" cell outside its
+// own footprint. Fixed by widening the room to 2x3 (SHELTER_ROOM's own header comment above has
+// the full account): the bed now lives in the two rows farthest from the door, with the new row
+// at the door free to be her stand-cell.
+//
+// 1.84.0 (2026-10-10, direct report: bots "give up on constructed goals without seeming to
+// attempt to get the raw materials they lack") -- "get_wool" only ever checked bot.entities
+// within 32 blocks of wherever she already stood, breaking immediately if that came up empty.
+// Confirmed live: Mayor's bed goal failed 3 times in a row, ~45s apart, an identical ms=0 "no
+// sheep nearby" each time, never once walking anywhere to actually look -- unlike "mine"/
+// "explore," which already wander on an empty local search. New wanderAndRetryForSheep(): a few
+// random short hops (wanderAndRetryFind()'s own block-beacon approach doesn't apply to a live,
+// moving entity that isn't tracked at all until she's already near it), re-checking after each.
 //
 // 1.83.1 (2026-10-09, first live run of 1.83.0 below) -- that fix's own tableWouldHelp check,
 // "!noTableRecipes.length && ...", was still wrong for any item with more than one path to it: a
@@ -1009,7 +1068,7 @@ import { loadEquipmentPlugins, equipBestArmor, equipBestWeapon } from "./equipme
 import { cancelAndRotate, isBusy, holdsControl, releaseControl } from "./arbiter.js";
 import { searchMemory } from "./longterm.js";
 import { listState, setState } from "./memory.js";
-import { holdDoorsOpen } from "./swim-movements.js";
+import { holdDoorsOpen, isDoorway } from "./swim-movements.js";
 import { bedHalves, chestHalves, wouldBlockAccess, findAccessObstructions, isLivingSpaceWall,
          ACCESS_SCAN_RADIUS } from "./shelter.js";
 
@@ -1540,6 +1599,41 @@ async function wanderAndRetryFind(bot, token, findOptions) {
     if (positions.length) return positions;
   }
   return [];
+}
+
+// Real bug found live 2026-10-10 (direct report: bots "give up on constructed goals without
+// seeming to attempt to get the raw materials they lack"): "get_wool"'s own sheep search only
+// ever checked bot.entities within 32 blocks of wherever she happened to already be standing --
+// an instant, un-wandering check, unlike "mine"/"explore"'s own wanderAndRetryFind(). Confirmed
+// live: Mayor's bed goal failed 3 times in a row, ~45s apart, with an identical "no sheep nearby"
+// and ms=0 each time -- she never moved an inch to go actually look for one, just re-checked the
+// same empty radius until the goal gave up entirely. wanderAndRetryFind() itself is block-search-
+// specific (bot.findBlocks, a far-off "beacon" to hop toward) and has no equivalent for a live,
+// moving ENTITY that isn't rendered/tracked at all until she's already near it -- there's no
+// "scan a wider radius" to beacon off, only "walk somewhere new and look again." A few random
+// short hops, same distance/timeout "explore" already uses to look around, before genuinely
+// giving up.
+async function wanderAndRetryForSheep(bot, token) {
+  const nearestSheep = () => Object.values(bot.entities)
+    .filter((e) => e.name === "sheep" && e.position.distanceTo(bot.entity.position) <= 32)
+    .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+  for (let hop = 0; hop < MAX_DIRECTED_HOPS && !token.cancelled; hop++) {
+    const angle = Math.random() * 2 * Math.PI;
+    const pos = bot.entity.position;
+    const target = pos.offset(Math.cos(angle) * EXPLORE_DISTANCE, 0, Math.sin(angle) * EXPLORE_DISTANCE);
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 4)),
+        EXPLORE_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+    } catch {
+      // Couldn't fully reach this hop's point -- still worth checking from wherever she ended up.
+    } finally {
+      if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+    }
+    if (token.cancelled) return null;
+    const sheep = nearestSheep();
+    if (sheep) return sheep;
+  }
+  return null;
 }
 
 // Direct request, 2026-09-07 ("build the water crossing mechanic" -> boat/vehicle use, following
@@ -2461,30 +2555,62 @@ export function shelterMaterialCount(bot) {
   return bot.inventory.items().filter((i) => isShelterMaterial(i.name)).reduce((n, i) => n + i.count, 0);
 }
 
-// The shelter: 4x4 outside, a 2x2 room inside. `base` is the room's back-left cell at floor level;
-// the room is base..base+(1,0,1), walls three high round it with a doorway at (0, *, 2), and a 4x4
-// roof on top. The room fits a bed (foot at (0,1), head at (0,0), placed from the doorway) with
-// (1,0)-(1,1) left to stand in. index.js's hasShelterNearHome() checks this same shape.
-export const SHELTER_ROOM = [[0, 0], [1, 0], [0, 1], [1, 1]];
+// The shelter: 4x5 outside, a 2x3 room inside. `base` is the room's back-left cell at floor level;
+// the room is base..base+(1,0,2), walls three high round it with a doorway at (0, *, 3), and a 4x5
+// roof on top. index.js's hasShelterNearHome() checks this same shape.
+export const SHELTER_ROOM = [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]];
+// Direct report, 2026-10-11 ("a shelter needs... a real door, not an opening or arch... no other
+// openings... with at least one bed"): the doorway used to exclude all three wall-height cells at
+// (0, 0..2, 2) from the generic fill, leaving a bare, permanent gap -- nothing ever placed a door
+// there, and nothing ever checked the floor beneath the room at all. Now only the two door-height
+// cells (dy 0-1, doorwayPosition() below) are left for door placement specifically; the lintel
+// (dy 2) rejoins the ordinary wall fill, and the floor under the room is included too -- one real
+// opening, filled by an actual door, is the only way in or out once this is complete.
+//
+// Found live the same day: with the room still only 2x2, a real door and a bed could never both
+// fit. findBedSites() (below) needs a bed's foot, head AND the cell she stands in to place it, all
+// three colinear -- that's 3 cells deep, but every row of a 2-deep room is adjacent to the single
+// door, and nearDoor() (correctly) refuses to put a bed's foot or head next to a real door. Before,
+// the doorway was just an open gap -- "air", not a door -- so it transparently stood in as that
+// third cell; placing an actual door there is what broke it. Fixed by making the room one row
+// deeper (2x3, not 2x2): the two rows farthest from the door hold the bed (foot and head, neither
+// adjacent to the door), and the new row right at the door is free to be her stand-cell -- nearDoor
+// only rules out a bed's own foot/head, never the cell she's merely standing in to place it.
+export function doorwayPosition(base) { return base.offset(0, 0, 3); }
 export function shelterPositions(base) {
   const walls = [];
   for (let dx = -1; dx <= 2; dx++) {
-    for (let dz = -1; dz <= 2; dz++) {
-      if (dx >= 0 && dx <= 1 && dz >= 0 && dz <= 1) continue; // the room
-      if (dx === 0 && dz === 2) continue; // doorway column
-      for (let dy = 0; dy <= 2; dy++) walls.push(base.offset(dx, dy, dz));
+    for (let dz = -1; dz <= 3; dz++) {
+      if (dx >= 0 && dx <= 1 && dz >= 0 && dz <= 2) continue; // the room
+      for (let dy = 0; dy <= 2; dy++) {
+        if (dx === 0 && dz === 3 && dy <= 1) continue; // the doorway itself -- a door, not a wall block
+        walls.push(base.offset(dx, dy, dz));
+      }
     }
   }
   const roof = [];
   for (let dx = -1; dx <= 2; dx++) {
-    for (let dz = -1; dz <= 2; dz++) roof.push(base.offset(dx, 3, dz));
+    for (let dz = -1; dz <= 3; dz++) roof.push(base.offset(dx, 3, dz));
   }
-  return [...walls, ...roof];
+  const floor = SHELTER_ROOM.map(([dx, dz]) => base.offset(dx, -1, dz));
+  return [...walls, ...floor, ...roof];
 }
 
-// A flat, clear 4x4 footprint within 4 blocks of home (the range hasShelterNearHome() looks in):
-// solid ground under all sixteen columns, four blocks of open air above each, no bed/door/chest in
+// Mirrors bedItemFor's own simplicity: whatever species she's already holding planks of, else
+// oak. A door needs a table (6 planks in a 2x3 shape -- 3 rows exceeds the personal 2x2 grid), but
+// that's craftItem's own concern (via the fixed tableWouldHelp check, actions.js 1.83.1), not this
+// function's.
+export function doorItemFor(bot) {
+  const planks = bot.inventory.items().find((i) => i.name.endsWith("_planks"));
+  const species = planks ? planks.name.replace(/_planks$/, "") : "oak";
+  return `${species}_door`;
+}
+
+// A flat, clear 4x5 footprint within 4 blocks of home (the range hasShelterNearHome() looks in):
+// solid ground under all twenty columns, four blocks of open air above each, no bed/door/chest in
 // the way, and a walkable cell outside the doorway so the room can be entered. Nearest home wins.
+// 2026-10-11: oz/outside widened from the room's old 2x2 (dz 0-1, door at 2) to 2x3 (dz 0-2, door
+// at 3) -- see SHELTER_ROOM's own header comment for why the room grew.
 export function findShelterSite(bot, home) {
   const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
   const clear = (p) => {
@@ -2500,12 +2626,12 @@ export function findShelterSite(bot, home) {
         if (dist >= bestDist) continue;
         let ok = true;
         for (let ox = -1; ox <= 2 && ok; ox++) {
-          for (let oz = -1; oz <= 2 && ok; oz++) {
+          for (let oz = -1; oz <= 3 && ok; oz++) {
             ok = bot.blockAt(base.offset(ox, -1, oz))?.boundingBox === "block";
             for (let oy = 0; oy <= 3 && ok; oy++) ok = clear(base.offset(ox, oy, oz));
           }
         }
-        const outside = base.offset(0, 0, 3); // in front of the doorway
+        const outside = base.offset(0, 0, 4); // in front of the doorway
         ok = ok && bot.blockAt(outside.offset(0, -1, 0))?.boundingBox === "block" && clear(outside) && clear(outside.offset(0, 1, 0));
         if (ok) { best = base; bestDist = dist; }
       }
@@ -2719,6 +2845,201 @@ async function saveClaimedBed(bot, position) {
 
 async function clearClaimedBed(bot) {
   await writeBedClaim(bot, null);
+}
+
+// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 -- "ownable by whichever bot is idle
+// and able, not pinned to whoever's primary role happens to be Builder"). Same shape as
+// BED_CLAIMS_AGENT above -- a shared hermes-memory agent_state row per bot, the same per-host
+// fallback file and MC_*_SHARED escape hatch for when hermes-memory is unreachable -- so a second
+// idle bot sees an infrastructure item is already being worked and picks a different one instead
+// of converging on the same gap. Short-lived (BUILDER_CLAIM_TTL_MS), unlike a bed claim: a bot
+// claiming "furnace" and then dying, getting stuck, or disconnecting mid-task shouldn't block the
+// fleet's infrastructure forever -- the store has no per-row expiry, so staleness is checked
+// against `claimedAt` here, on read, rather than trusted from the store.
+const BUILDER_CLAIMS_DIR = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/builder-claims`;
+const BUILDER_CLAIMS_AGENT = "minecraft-builder-claims";
+const BUILDER_CLAIMS_SHARED = (process.env.MC_BUILDER_CLAIMS_SHARED ?? "true") !== "false";
+const BUILDER_CLAIMS_TIMEOUT_MS = 5000;
+const BUILDER_CLAIM_TTL_MS = 10 * 60_000;
+let builderClaimsSharedDown = false;
+
+const toBuilderClaim = (v) => (typeof v?.item === "string" && Number.isFinite(v?.claimedAt) ? v : null);
+
+async function readLocalBuilderClaims() {
+  const claims = {};
+  let files = [];
+  try {
+    files = await readdir(BUILDER_CLAIMS_DIR);
+  } catch {}
+  for (const file of files.filter((f) => f.endsWith(".json"))) {
+    try {
+      const claim = toBuilderClaim(JSON.parse(await readFile(path.join(BUILDER_CLAIMS_DIR, file), "utf8")));
+      if (claim) claims[file.slice(0, -5)] = claim;
+    } catch {} // a half-written or corrupt claim just doesn't count
+  }
+  return claims;
+}
+
+async function writeLocalBuilderClaim(username, claim) {
+  const file = path.join(BUILDER_CLAIMS_DIR, `${username}.json`);
+  try {
+    if (!claim) return await unlink(file).catch(() => {});
+    await mkdir(BUILDER_CLAIMS_DIR, { recursive: true });
+    await writeFile(file, JSON.stringify(claim), "utf8");
+  } catch (err) {
+    console.error("builder claims: failed to write local claim:", err.message);
+  }
+}
+
+// Every bot's claim, { username: {item, claimedAt} } -- the shared store when reachable, else
+// this host's copy. Stale claims (older than BUILDER_CLAIM_TTL_MS) are dropped before the caller
+// ever sees them, same "don't trust a claim forever" principle readBedClaims applies by other
+// means (a destroyed/reassigned bed).
+async function readBuilderClaims(bot) {
+  const local = await readLocalBuilderClaims();
+  let claims = local;
+  if (BUILDER_CLAIMS_SHARED) {
+    try {
+      const rows = await listState(BUILDER_CLAIMS_AGENT, BUILDER_CLAIMS_TIMEOUT_MS);
+      if (builderClaimsSharedDown) console.log("[builder claims] shared claims reachable again.");
+      builderClaimsSharedDown = false;
+      claims = {};
+      for (const row of rows) {
+        const claim = toBuilderClaim(row.value);
+        if (claim) claims[row.key] = claim;
+      }
+      const mine = local[bot.username];
+      if (!rows.some((r) => r.key === bot.username)) {
+        if (mine) { // first read since sharing began: publish this host's claim
+          await setState(BUILDER_CLAIMS_AGENT, bot.username, mine, BUILDER_CLAIMS_TIMEOUT_MS)
+            .catch((err) => console.error("builder claims: failed to publish claim:", err.message));
+          claims[bot.username] = mine;
+        }
+      } else {
+        const shared = claims[bot.username] || null; // keep the fallback copy in step with the store
+        const same = mine && shared ? mine.item === shared.item && mine.claimedAt === shared.claimedAt : !mine && !shared;
+        if (!same) await writeLocalBuilderClaim(bot.username, shared);
+      }
+    } catch (err) {
+      if (!builderClaimsSharedDown) console.log(`[builder claims] shared claims unreachable, using this host's: ${err.message}`);
+      builderClaimsSharedDown = true;
+      claims = local;
+    }
+  }
+  const now = Date.now();
+  for (const [username, claim] of Object.entries(claims)) {
+    if (now - claim.claimedAt > BUILDER_CLAIM_TTL_MS) delete claims[username];
+  }
+  return claims;
+}
+
+async function writeBuilderClaim(bot, claim) {
+  await writeLocalBuilderClaim(bot.username, claim);
+  if (!BUILDER_CLAIMS_SHARED) return;
+  await setState(BUILDER_CLAIMS_AGENT, bot.username, claim || {}, BUILDER_CLAIMS_TIMEOUT_MS)
+    .catch((err) => console.error("builder claims: failed to share claim:", err.message));
+}
+
+// Claims `item` for `bot`, refreshing her own existing claim on the same item (so a long,
+// multi-step item doesn't expire out from under her mid-work just because BUILDER_CLAIM_TTL_MS
+// elapsed since she first took it). Returns false, claiming nothing, if a DIFFERENT bot already
+// holds a live claim on it -- the caller picks its next unclaimed candidate instead.
+export async function claimBuilderItem(bot, item) {
+  const claims = await readBuilderClaims(bot);
+  const holder = Object.entries(claims).find(([username, c]) => c.item === item && username !== bot.username);
+  if (holder) return false;
+  await writeBuilderClaim(bot, { item, claimedAt: Date.now() });
+  return true;
+}
+
+// Whichever item (if any) `bot` herself currently holds a live claim on.
+export async function myBuilderClaim(bot) {
+  return (await readBuilderClaims(bot))[bot.username]?.item || null;
+}
+
+export async function releaseBuilderItem(bot) {
+  await writeBuilderClaim(bot, null);
+}
+
+// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md §2a -- "arbitrate which Soldier holds which
+// sub-role the same way bed claims are already arbitrated, rather than inventing a new
+// mechanism"). Same shared-agent_state-plus-per-host-fallback shape as BED_CLAIMS_AGENT/
+// BUILDER_CLAIMS_AGENT above, but ONE row, not one per bot: there's a single anchor slot to
+// contend for, not N beds or M infrastructure items.
+const GUARD_ANCHOR_AGENT = "minecraft-guard-anchor";
+const GUARD_ANCHOR_KEY = "anchor"; // the one row this agent ever holds
+const GUARD_ANCHOR_SHARED = (process.env.MC_GUARD_ANCHOR_SHARED ?? "true") !== "false";
+const GUARD_ANCHOR_TIMEOUT_MS = 5000;
+const GUARD_ANCHOR_FILE = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/guard-anchor.json`;
+let guardAnchorSharedDown = false;
+
+const toGuardAnchor = (v) => (typeof v?.holder === "string" && Number.isFinite(v?.claimedAt) ? v : null);
+
+async function readLocalGuardAnchor() {
+  try {
+    return toGuardAnchor(JSON.parse(await readFile(GUARD_ANCHOR_FILE, "utf8")));
+  } catch {
+    return null; // missing or corrupt -- no local claim on record
+  }
+}
+
+async function writeLocalGuardAnchor(value) {
+  try {
+    if (!value) return await unlink(GUARD_ANCHOR_FILE).catch(() => {});
+    await mkdir(path.dirname(GUARD_ANCHOR_FILE), { recursive: true });
+    await writeFile(GUARD_ANCHOR_FILE, JSON.stringify(value), "utf8");
+  } catch (err) {
+    console.error("guard anchor: failed to write local claim:", err.message);
+  }
+}
+
+// The current anchor holder, { holder, claimedAt } or null -- the shared store when reachable,
+// else this host's own copy, published on first read the same way a bed claim is.
+async function readGuardAnchor() {
+  const local = await readLocalGuardAnchor();
+  if (!GUARD_ANCHOR_SHARED) return local;
+  try {
+    const rows = await listState(GUARD_ANCHOR_AGENT, GUARD_ANCHOR_TIMEOUT_MS);
+    if (guardAnchorSharedDown) console.log("[guard anchor] shared claim reachable again.");
+    guardAnchorSharedDown = false;
+    const row = rows.find((r) => r.key === GUARD_ANCHOR_KEY);
+    if (!row) {
+      if (local) {
+        await setState(GUARD_ANCHOR_AGENT, GUARD_ANCHOR_KEY, local, GUARD_ANCHOR_TIMEOUT_MS)
+          .catch((err) => console.error("guard anchor: failed to publish claim:", err.message));
+      }
+      return local;
+    }
+    const shared = toGuardAnchor(row.value);
+    const same = local && shared ? local.holder === shared.holder && local.claimedAt === shared.claimedAt : !local && !shared;
+    if (!same) await writeLocalGuardAnchor(shared);
+    return shared;
+  } catch (err) {
+    if (!guardAnchorSharedDown) console.log(`[guard anchor] shared claim unreachable, using this host's: ${err.message}`);
+    guardAnchorSharedDown = true;
+    return local;
+  }
+}
+
+async function writeGuardAnchor(value) {
+  await writeLocalGuardAnchor(value);
+  if (!GUARD_ANCHOR_SHARED) return;
+  await setState(GUARD_ANCHOR_AGENT, GUARD_ANCHOR_KEY, value || {}, GUARD_ANCHOR_TIMEOUT_MS)
+    .catch((err) => console.error("guard anchor: failed to share claim:", err.message));
+}
+
+// True once `bot` holds the anchor -- claiming it herself first if it's empty, or its current
+// holder is no longer a live Soldier (dead, disconnected, reassigned; `isLiveSoldier(name)` is
+// index.js's own call, since this file has no view of the fleet roster or who's actually
+// connected). With one live Soldier, this trivially claims it on her first check and is never
+// contested again. With two or more, whichever doesn't hold it checks every cycle and takes it
+// the moment it frees up -- no permanent anchorless gap.
+export async function holdsGuardAnchor(bot, isLiveSoldier) {
+  const current = await readGuardAnchor();
+  if (current?.holder === bot.username) return true;
+  if (current && isLiveSoldier(current.holder)) return false; // someone else genuinely holds it
+  await writeGuardAnchor({ holder: bot.username, claimedAt: Date.now() });
+  return true;
 }
 
 // Direct request, 2026-09-25: "if a bot's bed is destroyed, it should just claim another
@@ -3058,10 +3379,28 @@ async function performActionAs(bot, action, speaker, token) {
       // MAKE already exists in reach. Same real gap applies to furnace (also craftable without a
       // table, also commonly over-made). Reusable utility blocks -- unlike a personal tool or a
       // piece of armor, there's no reason to own a SECOND one when the first is right there.
+      // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 2 -- "a bot about to make any of these
+      // checks shared world-memory... not just her own immediate 32-block view, before spending
+      // materials on a duplicate"): extends the local-only check above with the SAME fleet-wide
+      // findRememberedLocation() fallback tableWouldHelp's own workbench search already uses
+      // (below) -- a table or furnace someone else placed out of this bot's own 32-block view,
+      // or one she saw earlier and wandered away from, is exactly as worth remembering as a
+      // resource vein. Chest deliberately excluded from this list: unlike a table or furnace, a
+      // chest can legitimately need a second one once the first is full, so "one exists
+      // somewhere" isn't by itself a reason to skip making another -- bedItemFor/findBedSites and
+      // the shelter_capacity checklist item already have their own, fuller-aware "don't duplicate"
+      // logic for beds and shelters respectively.
       const REUSABLE_UTILITY_BLOCKS = ["crafting_table", "furnace"];
       if (REUSABLE_UTILITY_BLOCKS.includes(action.item)) {
         const existingType = bot.registry.blocksByName[action.item];
-        const existing = existingType ? bot.findBlocks({ matching: existingType.id, maxDistance: 32, count: 1 }) : [];
+        let existing = existingType ? bot.findBlocks({ matching: existingType.id, maxDistance: 32, count: 1 }) : [];
+        if (!existing.length) {
+          const remembered = await findRememberedLocation(action.item).catch(() => null);
+          if (remembered) {
+            await gotoRememberedSpot(bot, token, remembered);
+            existing = existingType ? bot.findBlocks({ matching: existingType.id, maxDistance: 32, count: 1 }) : [];
+          }
+        }
         if (existing.length) {
           return ok(`already have a ${action.item} nearby, no need to make another.`);
         }
@@ -4098,9 +4437,8 @@ async function performActionAs(bot, action, speaker, token) {
       const buildOrder = shelterPositions(base);
       const missing = () => buildOrder.filter((pos) => bot.blockAt(pos)?.boundingBox !== "block").length;
       const needed = missing();
-      if (!needed) return { ...ok("the shelter is already standing."), built: true };
       const have = shelterMaterialCount(bot);
-      if (have < needed) {
+      if (needed && have < needed) {
         return { ...fail(`need ${needed} building blocks (dirt, cobblestone, planks...) for a small shelter, only have ${have}.`),
           short: needed - have };
       }
@@ -4114,6 +4452,27 @@ async function performActionAs(bot, action, speaker, token) {
       buildMovements.scafoldingBlocks = [];
       buildMovements.allow1by1towers = false;
       bot.pathfinder.setMovements(buildMovements);
+
+      // Direct report, 2026-10-11 ("a real door, not an opening or arch"). Two real bugs found
+      // live, not one: (1) getting the door ITEM has to happen before the generic wall/roof/floor
+      // loop below -- oak_planks (or any species) counts as ordinary isShelterMaterial() too, so
+      // letting that loop run first spent every plank she carried on walls (dirt/cobblestone work
+      // just as well there) before the door, which has no substitute, ever got a turn: 20 planks
+      // in hand, all gone to walls, "don't have the ingredients" for the door. (2) PLACING the
+      // door, though, has to happen AFTER the walls -- confirmed live, placing it into open air
+      // before any neighbouring wall exists gave it an east/west `facing` instead of north/south,
+      // and doorPassageSides() (shelter.js) then protected the WALL cells beside the door as "the
+      // way through" it instead of the cells actually in front of/behind it, so every one of
+      // those walls refused to place. (No door held -> craft one; needs a table, which
+      // craftItem's own fixed tableWouldHelp check, 1.83.1, already handles finding/making.)
+      const doorPos = doorwayPosition(base);
+      let doorAlready = isDoorway(bot.blockAt(doorPos));
+      if (!doorAlready && !token.cancelled && !bot.inventory.items().some((i) => i.name.endsWith("_door"))) {
+        await performActionAs(bot, { type: "craft", item: doorItemFor(bot), count: 1 }, speaker, token);
+      }
+      let doorPlaced = doorAlready;
+
+      if (!needed && doorAlready) return { ...ok("the shelter is already standing."), built: true };
 
       let placed = 0;
       let shutIn = 0; // declared out here: the try block below is a real scope, and the result text reads it
@@ -4169,17 +4528,50 @@ async function performActionAs(bot, action, speaker, token) {
       }
       await refreshGear(bot);
 
-      // A cell left open on purpose still counts as missing against the 80% bar, and against
-      // index.js's own hasShelterNearHome() -- the two must not disagree about whether a shelter
-      // stands. It's named in the result instead, so a site that keeps coming out partial for
-      // this reason is visible rather than a mystery.
+      // Placing the door itself, now that the walls flanking it exist (see this step's own
+      // header comment above for why that order matters for its facing).
+      if (!doorAlready && !token.cancelled) {
+        const doorItem = bot.inventory.items().find((i) => i.name.endsWith("_door"));
+        const floorBelow = bot.blockAt(doorPos.offset(0, -1, 0));
+        if (doorItem && floorBelow?.boundingBox === "block") {
+          try {
+            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(doorPos.x, doorPos.y, doorPos.z, 4)),
+              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+            if (!token.cancelled) {
+              await bot.equip(doorItem, "hand");
+              // Facing straight out through the doorway (away from the room, +z) -- her OWN x,
+              // not doorPos's, so the look vector has zero x component regardless of exactly
+              // where GoalNear(..., 4) left her standing (a diagonal vector can still round to
+              // the wrong cardinal direction).
+              await bot.lookAt(new Vec3(bot.entity.position.x, doorPos.y + 1, doorPos.z + 3), true);
+              await bot.placeBlock(floorBelow, new Vec3(0, 1, 0));
+              doorPlaced = isDoorway(bot.blockAt(doorPos));
+            }
+          } catch (err) {
+            console.error(`build: door placement failed at ${doorPos}:`, err.message);
+          } finally {
+            if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+          }
+        }
+        // No door item (craft above failed -- genuinely out of planks) or no floor under the
+        // doorway yet: nothing to place against this pass -- a later call catches up, same as
+        // any other still-missing piece.
+      }
+
+      // A cell left open on purpose still counts as missing, and against index.js's own
+      // hasShelterNearHome() -- the two must not disagree about whether a shelter stands. It's
+      // named in the result instead, so a site that keeps coming out partial for this reason is
+      // visible rather than a mystery.
       const openedFor = shutIn ? ` (${shutIn} left open so a neighbouring fixture stays reachable)` : "";
       if (token.cancelled) return ok(`stopped building (${placed} placed, ${missing()} still missing)${openedFor}.`);
       const left = missing();
-      if (!placed && left) return fail(`couldn't place any of the shelter (${left} blocks still missing)${openedFor}.`);
-      const built = left <= Math.floor(buildOrder.length * 0.2); // the same 80% index.js's check accepts
-      return { ...(built ? ok(`built a small shelter (${placed} blocks placed)${openedFor}.`)
-        : fail(`built part of a shelter: ${placed} placed, ${left} still missing${openedFor}.`)), built };
+      if (!placed && left && !doorPlaced) return fail(`couldn't place any of the shelter (${left} blocks still missing)${openedFor}.`);
+      // 2026-10-11: 100%, not the old 80% -- a shelter with a gap in it (or no real door) isn't
+      // sealed, and a half-sealed shelter is exactly what this fix exists to stop calling "done."
+      const built = left === 0 && doorPlaced;
+      return { ...(built ? ok(`built a small shelter (${placed} blocks placed, sealed with a door)${openedFor}.`)
+        : fail(`built part of a shelter: ${placed} placed, ${left} still missing` +
+               `${doorPlaced ? "" : ", no door yet"}${openedFor}.`)), built };
     }
 
     case "build_pen": {
@@ -5014,9 +5406,15 @@ async function performActionAs(bot, action, speaker, token) {
       const best = () => Math.max(0, ...Object.values(woolCounts(bot)));
       const startedWith = best();
       for (let tries = 0; tries < 6 && best() < want && !token.cancelled; tries++) {
-        const sheep = Object.values(bot.entities)
+        let sheep = Object.values(bot.entities)
           .filter((e) => e.name === "sheep" && e.position.distanceTo(bot.entity.position) <= 32)
           .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+        // Real bug found live 2026-10-10: this used to just break here -- an instant give-up the
+        // moment no sheep happened to be in her current 32-block radius, never once walking
+        // anywhere to actually look. wanderAndRetryForSheep() is a single attempt (it already
+        // fails fast if the wander itself turns up nothing), so this can only extend the loop by
+        // one real search, not six.
+        if (!sheep) sheep = await wanderAndRetryForSheep(bot, token);
         if (!sheep) break;
         const shears = bot.inventory.items().some((i) => i.name === "shears");
         const got = await performActionAs(bot, shears ? { type: "shear" } : { type: "attack", target: sheep }, speaker, token);
@@ -5027,7 +5425,7 @@ async function performActionAs(bot, action, speaker, token) {
       if (best() >= want) return ok(`gathered wool: now have ${best()} of one colour.`);
       const gained = best() - startedWith;
       return fail(gained > 0 ? `got ${gained} wool, still short of ${want} of one colour.`
-        : "no sheep nearby to get wool from.");
+        : "no sheep nearby to get wool from, even after looking around.");
     }
 
     case "place_bed": {

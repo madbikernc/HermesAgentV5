@@ -1,4 +1,8 @@
-// Version: 1.5.0
+// Version: 1.5.1
+//
+// 1.5.1 (2026-10-11) -- isDoorway() exported: the new shelter-integrity check (index.js) and the
+// new door placement in "build" (actions.js) both need "is a real door/gate standing here," the
+// same question this already answered, not a second definition of it.
 //
 // 1.5.0 (2026-10-07) -- direct request: "shelters should not be compromised by random digging or
 // by random decisions that don't leverage a door." safeToBreak now refuses any block in a living
@@ -93,8 +97,10 @@ export function applyDoorState(b) {
   return b;
 }
 
-// The block she walks through in a doorway: a door's lower half, or a fence gate.
-function isDoorway(block) {
+// The block she walks through in a doorway: a door's lower half, or a fence gate. Exported
+// 2026-10-11 for the shelter-integrity check (index.js) and door placement ("build", actions.js) --
+// "does a real door/gate stand here" is exactly this same question, not a second definition of it.
+export function isDoorway(block) {
   const name = block?.name;
   if (name?.endsWith("_fence_gate")) return true;
   return !!name?.endsWith("_door") && block.getProperties?.().half === "lower";

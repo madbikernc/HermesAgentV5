@@ -1,4 +1,14 @@
-// Version: 1.5.0
+// Version: 1.7.0
+//
+// 1.7.0 (2026-10-11, PRIORITIES_PROPOSAL.md §2a) -- Soldier's domain/priorities now describe the
+// guard-anchor split: with two or more live Soldiers, exactly one holds index.js's new
+// holdsGuardAnchor() claim and stays near home; the rest patrol more broadly and prioritize
+// escort/rescue. Invisible with just one Soldier (trivially the anchor, unchanged).
+//
+// 1.6.0 (2026-10-11) -- Soldier's `priorities` drops weapon/armor: PRIORITIES_PROPOSAL.md's new
+// universal Tier 1 (index.js's nextSurvivalPriority()) now enforces both for every bot before
+// any role-specific list runs, this one included -- keeping them here too would just be the same
+// two lines drifting from a second copy of the same check.
 //
 // 1.5.0 (2026-09-24) -- Soldier priorities reordered to weapon, then armor, then guard --
 // matching index.js's nextSoldierPriority(), which now checks armor too.
@@ -53,11 +63,21 @@
 export const ROLES = Object.freeze({
   LEADER:   Object.freeze({ name: "Leader",   domain: "coordinates the group, assigns tasks, tracks fleet progress" }),
   SOLDIER:  Object.freeze({
-    name: "Soldier", domain: "fights, defends itself and others, responds to alarm calls",
+    name: "Soldier",
+    // 2026-10-11 (PRIORITIES_PROPOSAL.md §2a): with two or more live Soldiers, exactly one holds
+    // the guard-anchor claim (index.js's holdsGuardAnchor()) and stays near home; every other
+    // Soldier patrols more broadly instead, ready to escort/rescue. With only one Soldier, this
+    // is invisible -- she's trivially the anchor, unchanged from always just guarding home.
+    domain: "fights, defends itself and others, responds to alarm calls; if more than one " +
+      "Soldier is on duty, exactly one stays anchored near home while the rest patrol more " +
+      "broadly and prioritize escort/rescue",
+    // 2026-10-11: weapon/armor dropped -- now a universal Tier 1 concern (index.js's
+    // nextSurvivalPriority(), PRIORITIES_PROPOSAL.md), enforced for every bot before any
+    // role-specific list, this one included, ever gets consulted.
     priorities: [
-      "get a real weapon (sword or axe), not bare hands",
-      "get a full set of armor, any tier",
-      "stand guard near the shared spawn point and respond to threats -- ongoing, never \"done\"",
+      "hunt down any hostile within patrol range",
+      "if anchoring home (the only Soldier, or holding the guard-anchor claim), stand guard and respond to threats -- ongoing, never \"done\"",
+      "otherwise, patrol more broadly and prioritize responding to a squad call or helping a teammate over independent patrol",
     ],
   }),
   ARTIST:   Object.freeze({

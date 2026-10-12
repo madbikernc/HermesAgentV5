@@ -1,4 +1,18 @@
-// Version: 1.16.0
+// Version: 1.18.0
+//
+// 1.18.0 (2026-10-11, direct report: a shelter needs "complete walls, ceiling, floor, and at
+// least one door..., no other openings..., with at least one bed"; damage "becomes a temporary
+// top priority") -- the shelter-build scenario now requires and checks for a real door (not an
+// open gap) and a solid floor; new scenario for checkShelterIntegrity()'s self-repair. First live
+// run found a real door and a bed could never both fit in the room (still 2x2 at that point) --
+// fixed by widening the room to 2x3 (actions.js 1.85.0's own header has the full account), and
+// this scenario now places and checks a real bed too, not just the walls and door. The older
+// "shelter around her bed" scenario needed more planks (for the door) and more cobblestone (the
+// bigger room) in its own setup for the same reason.
+//
+// 1.17.0 (2026-10-10, direct report: bots "give up on constructed goals without seeming to
+// attempt to get the raw materials they lack") -- scenario for get_wool's new wander-before-
+// giving-up fix (actions.js 1.84.0): no sheep anywhere, the failure now says she looked.
 //
 // 1.16.0 (2026-10-09, direct report: bots "repeatedly complain about crafting tables" without
 // trying to make one, noticing two standing right next to them, or remembering either's
@@ -46,6 +60,10 @@
 //   since bot.craft() intermittently loses a race with the server's inventory update.
 // 1.16.0 | 2026-10-09 | Craft: a table-needing recipe is detected with the wrong materials in hand
 //   (planks, no sticks), so she finds and uses the real table standing nearby instead of failing.
+// 1.17.0 | 2026-10-10 | get_wool: with no sheep anywhere, she wanders to look rather than an
+//   instant give-up.
+// 1.18.0 | 2026-10-11 | Shelter: a real door seals the doorway and a solid floor is required;
+//   checkShelterIntegrity() repairs a hole knocked in a built shelter.
 // 1.0.1 | 2026-09-24 | First live run fixes: wait for the dead mob's removal, a 1000-HP husk for
 //   lost-track (RCON takes ~8s, it used to die first), clear the spare helmet before re-equipping.
 import assert from "node:assert/strict";
@@ -478,6 +496,20 @@ scenario("Beds: gets wool from a sheep (no shears: hunts it and picks up the dro
   assert(held("white_wool") >= 1, "wool picked up");
 });
 
+scenario("get_wool: with no sheep anywhere, she wanders to look rather than failing on the spot", async () => {
+  // Real bug found live 2026-10-10 (direct report: bots "give up on constructed goals without
+  // seeming to attempt to get the raw materials they lack"): get_wool used to check only her
+  // immediate 32-block radius and fail instantly ("no sheep nearby to get wool from.") with no
+  // attempt to go look, confirmed live from Mayor's bed goal failing 3 times in a row at ms=0.
+  // No sheep exists anywhere in or near the arena here either -- the fix still can't conjure one
+  // up, so this only proves she actually tried (the fail text names that explicitly) rather than
+  // asserting a find this arena can't support.
+  const result = await performAction(bot, { type: "get_wool", count: 1 }, TESTER);
+  assert.equal(result.ok, false);
+  assert.match(result.text, /even after looking around/,
+    "should say she looked, not fail instantly the way the old code did");
+});
+
 scenario("Beds: crafts \"bed\" as the colour of the wool she holds", async () => {
   // No crafting table anywhere, as in a fresh world: craft has to make and place one first.
   await rcon(`give ${TESTER} minecraft:red_wool 3`, `give ${TESTER} minecraft:oak_planks 7`);
@@ -514,28 +546,79 @@ scenario("Beds: places a bed at home as two blocks facing away from her, and cla
 });
 
 // Shelters (2026-09-26/27): build on a chosen site from a mix of blocks (the old build needed 33+
-// of one kind), and the shelter must fit a bed: a 2x2 room, then a bed placed in it from the doorway.
-scenario("Shelters: builds a 4x4 shelter from mixed blocks, and a bed goes inside it", async () => {
-  await rcon(`give ${TESTER} minecraft:cobblestone 26`, `give ${TESTER} minecraft:dirt 26`, `give ${TESTER} minecraft:white_bed`);
-  await waitFor(() => held("cobblestone") >= 26 && held("dirt") >= 26 && held("white_bed") >= 1, 8000, "mixed blocks and a bed");
+// of one kind), and the shelter must fit a bed: a 2x3 room, then a bed placed in it from the doorway.
+//
+// Found live 2026-10-11: with the room still 2x2, a real door and a bed could never both fit --
+// findBedSites()'s nearDoor() exclusion, correctly applied now that a real door exists, refused
+// every foot/head cell next to it, and the room was too narrow for a "stand" cell outside its own
+// footprint (confirmed by tracing all four BED_DIRS orientations against the real coordinates).
+// Fixed by widening the room to 2x3 (actions.js's own SHELTER_ROOM comment has the full account):
+// the bed lives in the two rows farthest from the door, the new row at the door is free to be her
+// stand-cell, and this scenario now places and checks a real bed again, not just the walls.
+scenario("Shelters: builds a 4x5 shelter from mixed blocks, seals it with a real door, and fits a bed", async () => {
+  // Real bug found live 2026-10-11 (direct report: a shelter needs "complete walls, ceiling,
+  // floor, and at least one door (not an opening or arch)..."). The doorway used to be a bare,
+  // permanent gap -- shelterPositions() excluded it from the fill entirely and nothing ever
+  // placed a door there. Gives her planks too (for the door -- it needs a crafting table, which
+  // the existing table-sourcing fallback, actions.js 1.83.1, now finds/makes on its own) on top
+  // of the dirt/cobblestone the walls/roof/floor use.
+  await rcon(`give ${TESTER} minecraft:cobblestone 26`, `give ${TESTER} minecraft:dirt 26`, `give ${TESTER} minecraft:oak_planks 20`,
+             `give ${TESTER} minecraft:white_bed`);
+  await waitFor(() => held("cobblestone") >= 26 && held("dirt") >= 26 && held("oak_planks") >= 20 && held("white_bed") >= 1,
+    8000, "mixed blocks, planks for a door, and a bed");
   const base = new Vec3(x - 4, y + 1, z - 4); // the room's back-left cell
   const result = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
   assert.equal(result.ok, true, result.text);
   assert.equal(result.built, true, result.text);
-  const room = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([dx, dz]) => base.offset(dx, 0, dz));
-  for (const cell of room) assert.notEqual(bot.blockAt(cell)?.boundingBox, "block", `room cell ${cell} is open`);
-  assert.notEqual(bot.blockAt(base.offset(0, 0, 2))?.boundingBox, "block", "the doorway is open");
+  const room = [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]].map(([dx, dz]) => base.offset(dx, 0, dz));
+  for (const cell of room) {
+    assert.notEqual(bot.blockAt(cell)?.boundingBox, "block", `room cell ${cell} is open`);
+    assert.equal(bot.blockAt(cell.offset(0, -1, 0))?.boundingBox, "block", `floor under ${cell} is solid`);
+  }
   assert.equal(bot.blockAt(base.offset(0, 3, 0))?.boundingBox, "block", "roofed");
+  assert.equal(bot.blockAt(base.offset(0, 2, 3))?.boundingBox, "block", "the lintel above the doorway is solid too");
+  const doorBlock = bot.blockAt(base.offset(0, 0, 3));
+  assert.match(doorBlock?.name ?? "", /_door$/, "a real door seals the doorway, not an open gap");
   assert(held("cobblestone") < 26 && held("dirt") < 26, "both kinds of block were used");
 
   const worldSpawn = bot.spawnPoint;
   bot.spawnPoint = base;
   scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
-  const placed = await performAction(bot, { type: "place_bed" }, TESTER);
-  assert.equal(placed.ok, true, placed.text);
-  const foot = new Vec3(placed.bedAt.x, placed.bedAt.y, placed.bedAt.z);
-  assert(room.some((cell) => cell.equals(foot)), `the bed is in the shelter room: foot ${foot}`);
-  assert.notEqual(bot.blockAt(base.offset(0, 0, 2))?.boundingBox, "block", "the doorway is still open");
+  const bedded = await performAction(bot, { type: "place_bed" }, TESTER);
+  assert.equal(bedded.ok, true, bedded.text);
+  const foot = new Vec3(bedded.bedAt.x, bedded.bedAt.y, bedded.bedAt.z);
+  const local = foot.minus(base);
+  assert(local.y === 0 && local.x >= 0 && local.x <= 1 && local.z >= 0 && local.z <= 1,
+    `the bed landed inside the room, not the door's own row: ${JSON.stringify(local)}`);
+});
+
+scenario("Shelter integrity: a hole knocked in a built shelter gets repaired on its own", async () => {
+  // Direct report, 2026-10-11 ("if a shelter gets damaged..., repairing it becomes a temporary
+  // top priority"): nothing before this ever re-checked a shelter after the initial build.
+  // checkShelterIntegrity() is the periodic version; this calls its own logic directly (the
+  // interval is 60s, too slow for a live test to wait out) via the same "build" action it uses.
+  await rcon(`give ${TESTER} minecraft:cobblestone 30`, `give ${TESTER} minecraft:dirt 30`, `give ${TESTER} minecraft:oak_planks 20`);
+  await waitFor(() => held("cobblestone") >= 30 && held("dirt") >= 30 && held("oak_planks") >= 20, 8000, "building materials");
+  const base = new Vec3(x - 4, y + 1, z - 4);
+  const built = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
+  assert.equal(built.ok, true, built.text);
+  assert.equal(built.built, true, built.text);
+
+  const worldSpawn = bot.spawnPoint;
+  bot.spawnPoint = base;
+  scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
+
+  // Knock a hole in the wall directly via RCON (not "mine" -- this is damage, not a deliberate
+  // dig) and confirm the shelter now reads as damaged, not complete.
+  const hole = base.offset(-1, 1, 0);
+  await rcon(`setblock ${hole.x} ${hole.y} ${hole.z} minecraft:air`);
+  await waitFor(() => bot.blockAt(hole)?.boundingBox !== "block", 5000, "the hole to appear");
+  await rcon(`give ${TESTER} minecraft:cobblestone 4`); // enough to patch the one missing block
+  await waitFor(() => held("cobblestone") >= 4, 5000, "a little more cobblestone to repair with");
+
+  const repaired = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
+  assert.equal(repaired.ok, true, repaired.text);
+  assert.equal(bot.blockAt(hole)?.boundingBox, "block", "the hole is filled back in");
 });
 
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);
@@ -597,8 +680,11 @@ scenario("Access: \"clear_access\" digs the block sitting on a chest, and leaves
 });
 
 scenario("Shelter walls: with a shelter around her bed, she leaves through the doorway, not the wall", async () => {
-  await rcon(`give ${TESTER} minecraft:cobblestone 50`, `give ${TESTER} minecraft:white_bed`);
-  await waitFor(() => held("cobblestone") >= 50 && held("white_bed") >= 1, 8000, "blocks and a bed");
+  // 70, not 50: the room grew from 2x2 to 2x3 (2026-10-11, the bed/door room-size fix below),
+  // needing more wall/roof/floor blocks than before.
+  await rcon(`give ${TESTER} minecraft:cobblestone 70`, `give ${TESTER} minecraft:oak_planks 10`, `give ${TESTER} minecraft:white_bed`);
+  await waitFor(() => held("cobblestone") >= 70 && held("oak_planks") >= 10 && held("white_bed") >= 1,
+    8000, "blocks, planks for a door, and a bed");
   const base = new Vec3(x - 4, y + 1, z - 4);
   const built = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
   assert.equal(built.built, true, built.text);

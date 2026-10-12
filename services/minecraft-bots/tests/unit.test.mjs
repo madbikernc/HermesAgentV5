@@ -1,4 +1,4 @@
-// Version: 1.21.0
+// Version: 1.23.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -45,6 +45,26 @@
 // 1.21.0 | 2026-10-09 | First live run of the above found tableWouldHelp was still wrong for any
 //   item with a second, unusable no-table recipe (a colored bed's dye-recolor shortcut) -- a check
 //   for that case too.
+// 1.22.0 | 2026-10-10 | A healthy non-Soldier fights a single ordinary mob directly, not just a
+//   hurt or Soldier one; get_wool wanders to look for a sheep instead of instant-failing.
+// 1.23.0 | 2026-10-11 | Shelter: a real door required (not just an opening), 100% solid walls/
+//   roof/floor (not 80%), the floor itself now checked at all; findShelterNearHome()'s own
+//   damaged-but-real-structure detection, separate from the hasShelterNearHome() boolean. Also:
+//   the room grew from 2x2 to 2x3 (found live the same day -- a real door and a bed could never
+//   both fit in 2x2), updating every geometry-derived count and offset this file asserts.
+// 1.24.0 | 2026-10-11 | PRIORITIES_PROPOSAL.md Tiers 1-2: nextSurvivalPriority()'s ordering
+//   (weapon, sheltered bed, food, armor, null) and survivalPriorityItemSatisfied(); the Soldier
+//   priorities check narrowed now that weapon/armor live there instead; the new builder-item
+//   claim mechanism (blocks, releases, TTL-expires, falls back to a local file); and
+//   builderPriorityCandidates()'s "beds"+"shelter" merge into one real countQualifyingSheltersNearHome()
+//   check (multiple separate structures, not just the nearest).
+// 1.25.0 | 2026-10-11 | PRIORITIES_PROPOSAL.md Tier 2 items 2-4: "craft"'s reusable-utility-block
+//   check now falls back to a remembered location, not just the local 32-block view; new
+//   checkSurplusSharing() and checkLocationSharing() give surplus-storing and location-sharing
+//   a standing cadence of their own instead of only running as a side effect of something else.
+// 1.26.0 | 2026-10-11 | PRIORITIES_PROPOSAL.md §2a (the guard-anchor claim): actions.js's new
+//   holdsGuardAnchor() (a single shared slot, not one row per bot); index.js's isLiveSoldier()/
+//   isGuardAnchor()/nextSoldierPriority()'s new anchor-vs-escort split, now async.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -377,6 +397,53 @@ await check('EFF storage pauses after only full/obstructed chests, resumes on su
   assert.equal(vm.runInContext('storageBlockedUntil', c), 0, 'item-specific failures do not pause storage');
 });
 
+await check('Tier 2: checkSurplusSharing runs storeSurplusNearHome on a standing cadence, gated like its siblings', async () => {
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 3 -- "elevates 'don't hoard' from an
+  // incidental cleanup pass to an explicit, regularly-checked Tier 2 item"). Before this,
+  // storeSurplusNearHome() only ever ran right after a craft; surplus picked up any other way
+  // never got checked. Same gating as checkDeferredSurplusCleanup's own post-craft version.
+  let calls = 0;
+  const bot = { isSleeping: false };
+  const c = vm.createContext({ setInterval() {}, console: { error() {} }, process: { env: {} },
+    AUTONOMY_ENABLED: true, currentGoal: null, routineBlocked: () => false, bot,
+    storeSurplusNearHome: async () => { calls++; }, USERNAME: 'Amy' });
+  vm.runInContext(between(index, 'const SURPLUS_SHARING_CHECK_MS', 'const LOCATION_SHARING_CHECK_MS'), c);
+  await c.checkSurplusSharing();
+  assert.equal(calls, 1, 'runs when idle, awake, autonomous, and not routine-blocked');
+  vm.runInContext('currentGoal = {}', c);
+  await c.checkSurplusSharing();
+  assert.equal(calls, 1, 'skipped while a goal is active');
+  vm.runInContext('currentGoal = null', c);
+  bot.isSleeping = true;
+  await c.checkSurplusSharing();
+  assert.equal(calls, 1, 'skipped while asleep');
+  bot.isSleeping = false;
+  vm.runInContext('AUTONOMY_ENABLED = false', c);
+  await c.checkSurplusSharing();
+  assert.equal(calls, 1, 'skipped while autonomy is off');
+});
+
+await check('Tier 2: checkLocationSharing runs noteNearbyResources on a standing cadence, not just as a side effect', async () => {
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 4 -- "makes it an explicit tier item so a bot
+  // who's otherwise idle can go looking specifically to report back, not just incidentally while
+  // doing something else"). No arbiter/busy gate needed -- noteNearbyResources() is a pure,
+  // no-movement scan, same as when mine/explore/craft already trigger it as a side effect.
+  let calls = 0;
+  const bot = { entity: { position: {} } };
+  const c = vm.createContext({ setInterval() {}, console: { error() {} },
+    AUTONOMY_ENABLED: true, bot, noteNearbyResources: async (reason) => { calls++; assert.match(reason, /location sweep/); } });
+  vm.runInContext(between(index, 'async function checkLocationSharing(', 'setInterval(() => {\n  checkLocationSharing'), c);
+  await c.checkLocationSharing();
+  assert.equal(calls, 1, 'runs while loaded in and autonomous');
+  bot.entity = null;
+  await c.checkLocationSharing();
+  assert.equal(calls, 1, 'skipped while not loaded in (no entity yet)');
+  bot.entity = { position: {} };
+  vm.runInContext('AUTONOMY_ENABLED = false', c);
+  await c.checkLocationSharing();
+  assert.equal(calls, 1, 'skipped while autonomy is off');
+});
+
 // ---- 2026-09-24 follow-up: remaining gaps from the review ----------------------------------------
 const longterm = await readFile(root + 'longterm.js', 'utf8');
 
@@ -521,18 +588,205 @@ await check('EFF a repeated memory note skips the duplicate-search process', asy
   assert.equal(searches, 1); assert.equal(writes, 1);
 });
 
-await check('Soldier priorities: weapon, then monster, then missing armor (rate-limited), then guard', async () => {
-  const slots = []; let weapon = true; let threat = null;
-  const c = vm.createContext({ Date, bot: { inventory: { slots } }, hasWeapon: () => weapon,
-    nearestHostile: () => threat, FLEE_ONLY_MOBS: new Set(), SOLDIER_PATROL_RANGE: 32 });
-  vm.runInContext(between(index, 'function nextSoldierPriority(', 'async function proposeOwnGoal('), c);
-  weapon = false; assert.equal(c.nextSoldierPriority().name, 'weapon'); weapon = true;
-  threat = { name: 'zombie' }; assert.equal(c.nextSoldierPriority().name, 'monster'); threat = null;
-  assert.equal(c.nextSoldierPriority().name, 'armor');
-  assert.equal(c.nextSoldierPriority().name, 'guard', 'armor retried at most every 30 min');
-  vm.runInContext('soldierArmorRetryAt = 0', c);
+await check('Soldier priorities: monster, then guard -- weapon/armor moved to the universal Tier 1', async () => {
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md -- "Narrowed: weapon/armor move to Tier 1"): nextSoldierPriority()
+  // no longer checks either itself -- nextSurvivalPriority() (tested separately below) now
+  // intercepts both for every bot before this function is ever reached.
+  // isGuardAnchor() mocked true (always the anchor) -- the anchor/escort split itself is a
+  // separate concern, covered by its own test below.
+  let threat = null;
+  const c = vm.createContext({ bot: {}, nearestHostile: () => threat, FLEE_ONLY_MOBS: new Set(), SOLDIER_PATROL_RANGE: 32,
+    isGuardAnchor: async () => true });
+  vm.runInContext(between(index, 'async function nextSoldierPriority(', 'async function proposeOwnGoal('), c);
+  threat = { name: 'zombie' }; assert.equal((await c.nextSoldierPriority()).name, 'monster'); threat = null;
+  assert.equal((await c.nextSoldierPriority()).name, 'guard');
+  assert.equal(Object.getOwnPropertyNames(c).includes('soldierArmorRetryAt'), false,
+    'the old per-Soldier armor retry state is gone, not just unused');
+});
+
+await check('Survival (Tier 1): weapon, then her own sheltered bed, then food, then armor, then null', async () => {
+  const slots = []; let weapon = false, ownShelter = false, food = false, rod = false;
+  const bot = { food: 20, inventory: { slots } };
+  const c = vm.createContext({ Date, bot, hasWeapon: () => weapon, hasOwnShelterWithBed: () => ownShelter,
+    hasFood: () => food, hasRod: () => rod, HUNGER_THRESHOLD: 18, foodFetchBlockedUntil: Infinity });
+  vm.runInContext(between(index, 'function nextSurvivalPriority(', 'function survivalPriorityItemSatisfied('), c);
+  assert.equal(c.nextSurvivalPriority().name, 'weapon', 'no weapon beats everything else');
+  weapon = true;
+  assert.equal(c.nextSurvivalPriority().name, 'shelter', 'armed, but no sheltered bed of her own yet');
+  ownShelter = true;
+  bot.food = 10; // < HUNGER_THRESHOLD, no food, no rod, and the reactive fetch already backed off
+  assert.equal(c.nextSurvivalPriority().name, 'food', 'sheltered, but trending toward starvation');
+  food = true;
+  assert.equal(c.nextSurvivalPriority().name, 'armor', 'fed, but no armor at all');
   for (const s of [5, 6, 7, 8]) slots[s] = { name: 'iron_helmet' };
-  assert.equal(c.nextSoldierPriority().name, 'guard', 'fully armored');
+  assert.equal(c.nextSurvivalPriority(), null, 'every Tier 1 baseline met -- falls through to role work');
+  // The food item only escalates to a real goal once the reactive chore has already tried and
+  // backed off -- not the instant food drops, which would just duplicate what that chore (running
+  // every 15s) is already doing.
+  for (const s of [5, 6, 7, 8]) slots[s] = null;
+  food = false; bot.food = 10;
+  vm.runInContext('foodFetchBlockedUntil = 0; survivalArmorRetryAt = 0', c);
+  assert.equal(c.nextSurvivalPriority().name, 'armor', 'low on food, but the reactive chore has not even tried yet -- not escalated');
+});
+
+await check('Survival (Tier 1): survivalPriorityItemSatisfied re-checks real state, not a claim', async () => {
+  // Same hallucinated-DONE guard builderPriorityItemSatisfied() already gives Builder's own
+  // items (2026-09-13's beehive bug): "shelter" and "food" don't reduce to "holds item X," so a
+  // model claiming either done gets re-checked against the same real condition the ladder itself
+  // trusts, not taken on its word.
+  const slots = []; let weapon = false, ownShelter = false, food = false;
+  const c = vm.createContext({ bot: { inventory: { slots } }, hasWeapon: () => weapon,
+    hasOwnShelterWithBed: () => ownShelter, hasFood: () => food });
+  vm.runInContext(between(index, 'function survivalPriorityItemSatisfied(', '\n// Real bug found live 2026-09-12'), c);
+  assert.equal(c.survivalPriorityItemSatisfied('weapon'), false); weapon = true;
+  assert.equal(c.survivalPriorityItemSatisfied('weapon'), true);
+  assert.equal(c.survivalPriorityItemSatisfied('shelter'), false); ownShelter = true;
+  assert.equal(c.survivalPriorityItemSatisfied('shelter'), true);
+  assert.equal(c.survivalPriorityItemSatisfied('food'), false); food = true;
+  assert.equal(c.survivalPriorityItemSatisfied('food'), true);
+  assert.equal(c.survivalPriorityItemSatisfied('armor'), false, 'no armor worn at all');
+  for (const s of [5, 6, 7]) slots[s] = { name: 'iron_helmet' };
+  assert.equal(c.survivalPriorityItemSatisfied('armor'), false, '3 of 4 pieces is not a full set');
+  slots[8] = { name: 'iron_boots' };
+  assert.equal(c.survivalPriorityItemSatisfied('armor'), true);
+  assert.equal(c.survivalPriorityItemSatisfied('something-unrelated'), true, 'not one of the four known items -- nothing to block on');
+});
+
+// Builder-item claims (2026-10-11, PRIORITIES_PROPOSAL.md Tier 2 PR2): same shape as bedWorld's
+// own claims directory + shared-store mock, just a {item, claimedAt} value instead of a position.
+// `shared`: hermes-memory's minecraft-builder-claims rows as { name: value } (mutated by writes);
+// omitted = hermes-memory unreachable, so claims fall back to this host's files.
+async function builderClaimsWorld(username, { shared } = {}) {
+  const fs = await import('node:fs/promises');
+  const pathMod = (await import('node:path')).default;
+  const dir = await fs.mkdtemp(pathMod.join((await import('node:os')).tmpdir(), 'mbtest-builder-claims-'));
+  const bot = { username };
+  const listState = async (agent) => {
+    if (!shared) throw new Error('connect ECONNREFUSED');
+    assert.equal(agent, 'minecraft-builder-claims');
+    return Object.entries(shared).map(([key, value]) => ({ key, value }));
+  };
+  const setState = async (agent, k, value) => {
+    if (!shared) throw new Error('connect ECONNREFUSED');
+    shared[k] = value;
+  };
+  const c = vm.createContext({ bot, Date, console: { log() {}, error() {} }, process: { env: {} },
+    BUILDER_CLAIMS_DIR: dir, path: pathMod, readFile: fs.readFile, writeFile: fs.writeFile,
+    mkdir: fs.mkdir, readdir: fs.readdir, unlink: fs.unlink, listState, setState });
+  vm.runInContext(between(actions, 'const BUILDER_CLAIMS_DIR', '\n// Direct request, 2026-09-25'), c);
+  return { bot, c };
+}
+
+await check('Builder claims: a live claim blocks another bot on the same item, not a different one', async () => {
+  const shared = {}; // the same mock store, shared by both bots -- same hermes-memory row set
+  const amy = await builderClaimsWorld('Amy', { shared });
+  const babs = await builderClaimsWorld('Babs', { shared });
+  assert.equal(await amy.c.claimBuilderItem(amy.bot, 'furnace'), true, 'unclaimed -- she gets it');
+  assert.equal(await amy.c.myBuilderClaim(amy.bot), 'furnace');
+  assert.equal(await babs.c.claimBuilderItem(babs.bot, 'furnace'), false, "Amy already holds it -- Babs doesn't get it too");
+  assert.equal(await babs.c.claimBuilderItem(babs.bot, 'chest'), true, 'a different item is still free');
+});
+
+await check('Builder claims: releasing frees the item, and a stale claim expires on its own', async () => {
+  const w = await builderClaimsWorld('Amy');
+  await w.c.claimBuilderItem(w.bot, 'furnace');
+  await w.c.releaseBuilderItem(w.bot);
+  assert.equal(await w.c.myBuilderClaim(w.bot), null);
+  const other = await builderClaimsWorld('Babs', { shared: { Amy: { item: 'furnace', claimedAt: Date.now() } } });
+  assert.equal(await other.c.claimBuilderItem(other.bot, 'furnace'), false, 'a fresh claim still blocks');
+  const stale = await builderClaimsWorld('Babs',
+    { shared: { Amy: { item: 'furnace', claimedAt: Date.now() - 20 * 60_000 } } }); // older than BUILDER_CLAIM_TTL_MS (10 min)
+  assert.equal(await stale.c.claimBuilderItem(stale.bot, 'furnace'), true,
+    "a dead bot's stale claim doesn't block the fleet's infrastructure forever");
+});
+
+await check('Builder claims: the shared store down falls back to this host\'s own file, same as bed claims', async () => {
+  const w = await builderClaimsWorld('Amy'); // no `shared` -- listState/setState both throw
+  assert.equal(await w.c.claimBuilderItem(w.bot, 'chest'), true);
+  assert.equal(await w.c.myBuilderClaim(w.bot), 'chest', 'the local fallback file still answers her own claim');
+});
+
+// Guard anchor (2026-10-11, PRIORITIES_PROPOSAL.md §2a): same shape as builderClaimsWorld, just
+// a single shared row ({holder, claimedAt}, key "anchor") instead of one per bot.
+async function guardAnchorWorld(username, { shared } = {}) {
+  const fs = await import('node:fs/promises');
+  const pathMod = (await import('node:path')).default;
+  const dir = await fs.mkdtemp(pathMod.join((await import('node:os')).tmpdir(), 'mbtest-guard-anchor-'));
+  const bot = { username };
+  const listState = async (agent) => {
+    if (!shared) throw new Error('connect ECONNREFUSED');
+    assert.equal(agent, 'minecraft-guard-anchor');
+    return Object.entries(shared).map(([key, value]) => ({ key, value }));
+  };
+  const setState = async (agent, k, value) => {
+    if (!shared) throw new Error('connect ECONNREFUSED');
+    shared[k] = value;
+  };
+  const c = vm.createContext({ bot, Date, console: { log() {}, error() {} }, process: { env: { MC_MEMORY_ROOT: dir } },
+    path: pathMod, readFile: fs.readFile, writeFile: fs.writeFile, mkdir: fs.mkdir, unlink: fs.unlink, listState, setState });
+  vm.runInContext(between(actions, 'const GUARD_ANCHOR_AGENT', '\n// Direct request, 2026-09-25'), c);
+  return { bot, c };
+}
+
+await check('Guard anchor: one holder blocks a second bot, released or stale frees it for the next', async () => {
+  const shared = {}; // the same mock store, shared by both bots
+  const amy = await guardAnchorWorld('Amy', { shared });
+  const babs = await guardAnchorWorld('Babs', { shared });
+  const isAlwaysLive = () => true;
+  assert.equal(await amy.c.holdsGuardAnchor(amy.bot, isAlwaysLive), true, 'empty slot -- she claims it');
+  assert.equal(await babs.c.holdsGuardAnchor(babs.bot, isAlwaysLive), false, 'Amy already holds it');
+  assert.equal(await amy.c.holdsGuardAnchor(amy.bot, isAlwaysLive), true, 'still hers on a later check');
+
+  // Amy is no longer a live Soldier (dead/disconnected/reassigned) -- Babs takes over.
+  const isLiveExceptAmy = (name) => name !== 'Amy';
+  assert.equal(await babs.c.holdsGuardAnchor(babs.bot, isLiveExceptAmy), true, "Amy's stale claim frees the anchor");
+  assert.equal(await amy.c.holdsGuardAnchor(amy.bot, isLiveExceptAmy), false, 'and Babs now genuinely holds it');
+});
+
+await check('Soldier priorities: one live Soldier is trivially the anchor; two or more contend for it', async () => {
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md §2a): "with one, she patrols near home, unchanged from
+  // today... with two or more, exactly one holds a claim to stay anchored... every other
+  // Soldier's priority becomes escort/rescue."
+  let threat = null;
+  const otherBotGoalSeenAt = new Map();
+  const holds = {};
+  const SOLDIER_ROLE = { name: 'Soldier' };
+  const c = vm.createContext({ bot: { username: 'Mark' }, nearestHostile: () => threat, FLEE_ONLY_MOBS: new Set(), SOLDIER_PATROL_RANGE: 32,
+    USERNAME: 'Mark', BOT_USERNAMES: new Set(['Mark', 'Luke']), // matches BOT_USERNAMES' own capitalized convention
+    BOT_ROLES: { mark: { primary: SOLDIER_ROLE }, luke: { primary: SOLDIER_ROLE } }, ROLES: { SOLDIER: SOLDIER_ROLE },
+    otherBotGoalSeenAt, GOAL_LEASE_MS: 60_000, Date,
+    holdsGuardAnchor: async (bot) => holds[bot.username] ?? false });
+  vm.runInContext(between(index, 'function isLiveSoldier(', 'async function proposeOwnGoal('), c);
+
+  assert.equal((await c.nextSoldierPriority()).name, 'guard', 'alone (Luke never seen) -- trivially the anchor, no claim touched');
+  threat = { name: 'zombie' };
+  assert.equal((await c.nextSoldierPriority()).name, 'monster', 'a real threat still outranks anchor/escort either way');
+  threat = null;
+
+  otherBotGoalSeenAt.set('mc-luke', Date.now()); // Luke heartbeats -- now a live, contending Soldier
+  holds.Mark = false;
+  assert.equal((await c.nextSoldierPriority()).name, 'escort', "Mark doesn't hold the claim -- escort, not guard");
+  holds.Mark = true;
+  assert.equal((await c.nextSoldierPriority()).name, 'guard', 'Mark holds the claim -- guard, as normal');
+
+  otherBotGoalSeenAt.set('mc-luke', Date.now() - 120_000); // Luke's lease expired -- stale, not live
+  assert.equal((await c.nextSoldierPriority()).name, 'guard', "Luke's own staleness also makes Mark trivially the anchor again");
+});
+
+await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims the way the others do', async () => {
+  const bedNames = []; let shelterCount = 0; let beehive = 0; let bred = false;
+  const c = vm.createContext({ bot: { registry: { blocksByName: {} } },
+    countNearHome: (names) => (names[0] === 'beehive' ? beehive : 0),
+    countQualifyingSheltersNearHome: () => shelterCount, getAchievements: () => (bred ? ['bred:cow'] : []),
+    BOT_USERNAMES: new Set(['amy', 'babs', 'mark']) });
+  vm.runInContext(between(index, 'function builderPriorityCandidates(', 'function nextBuilderPriority('), c);
+  const names = () => c.builderPriorityCandidates().map((x) => x.name);
+  assert(names().includes('shelter_capacity'), 'merged item present when short');
+  assert(!names().includes('beds') && !names().includes('shelter'), 'the old separate items are gone');
+  const capacityItem = c.builderPriorityCandidates().find((x) => x.name === 'shelter_capacity');
+  assert.match(capacityItem.directive, /We have 0, need at least 3/);
+  shelterCount = 3;
+  assert(!names().includes('shelter_capacity'), 'baseline met -- drops off the list');
 });
 
 await check('Fairness: routine checks that lose their turn are counted', async () => {
@@ -778,6 +1032,15 @@ await check('Fight-or-flee: armed bot at critical health fights a single melee o
     const { c, threat } = policyContext({ health: 5, mobs: [[mob, 3]] });
     assert.equal(c.decideFightType(threat), 'attack', mob);
   }
+});
+
+await check('Fight-or-flee: a healthy non-Soldier still fights one ordinary mob, not just a hurt or Soldier one', async () => {
+  // Direct report, 2026-10-10 ("they still aren't fighting back when even a single mob is
+  // attacking them"): this policy's own header says an armed bot fights a single threat
+  // unconditionally, but nearby === 1 used to fall through to the consecutive-flee counter
+  // instead, which starts at "flee." Confirmed live: Bob fled a single zombie at 11.8/20 health.
+  const { c, threat } = policyContext({ health: 20, mobs: [['zombie', 3]] });
+  assert.equal(c.decideFightType(threat), 'attack');
 });
 
 await check('Fight-or-flee: outnumbered at critical health flees, even a Soldier', async () => {
@@ -1504,6 +1767,59 @@ await check('Craft: a table requirement is detected even when a DIFFERENT, unusa
     'an unrelated, unusable no-table recipe existing should not skip the table search');
 });
 
+await check('Craft: a reusable utility block found via remembered location skips making a duplicate', async () => {
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 2 -- "not just her own immediate 32-block
+  // view, before spending materials on a duplicate"). REUSABLE_UTILITY_BLOCKS' own local-only
+  // check (2026-09-08) now falls back to findRememberedLocation() too, the same "nearby, then
+  // remembered" pattern tableWouldHelp's own workbench search already has.
+  let gotoRememberedCalls = 0;
+  let localHasIt = false; // flips true only once she's actually walked to the remembered spot
+  const bot = makeBot();
+  Object.assign(bot, {
+    registry: { itemsByName: { crafting_table: { id: 1 } }, blocksByName: { crafting_table: { id: 10 } } },
+    inventory: { items: () => [], count: () => 0, slots: [] },
+    findBlocks: (opts) => ((opts.matching === 10 && localHasIt) ? [{ x: 40, y: 64, z: 40 }] : []),
+  });
+  const c = context(bot, { gearCategoryNames: () => [], tryTakeFromNearbyChest: async () => null,
+    findRememberedLocation: async (name) => { assert.equal(name, 'crafting_table'); return { x: 40, y: 64, z: 40 }; },
+    gotoRememberedSpot: async () => { gotoRememberedCalls++; localHasIt = true; } });
+  vm.runInContext(timeoutFn + actionFn + between(actions, 'function simpleSourceFor(', '// Extracted from "loot"'), c);
+
+  const result = await c.performAction(bot, { type: 'craft', item: 'crafting_table', count: 1 }, 'test');
+  assert.equal(gotoRememberedCalls, 1, 'walked to the remembered spot instead of crafting a new one outright');
+  assert.equal(result.ok, true);
+  assert.match(result.text, /already have a crafting_table nearby/);
+});
+
+await check('get_wool: wanders to look for a sheep instead of instant-failing when none is in range', async () => {
+  // Real bug found live 2026-10-10 (direct report: bots "give up on constructed goals without
+  // seeming to attempt to get the raw materials they lack"): this used to check bot.entities
+  // within 32 blocks of wherever she already stood and break immediately if empty -- an instant
+  // give-up, unlike "mine"/"explore"'s own wanderAndRetryFind(). Confirmed live: Mayor's bed goal
+  // failed 3 times in a row, ~45s apart, each an identical ms=0 "no sheep nearby," never once
+  // moving to actually look. No sheep ever appears in this test either, so the only thing being
+  // checked is that she WALKED somewhere to look before giving up.
+  const bot = makeBot();
+  let gotoCalls = 0;
+  Object.assign(bot, {
+    entity: { position: new V3(0, 64, 0) },
+    entities: {},
+    inventory: { items: () => [], slots: [] },
+  });
+  bot.pathfinder.goto = async () => { gotoCalls++; };
+  const c = context(bot, {
+    EXPLORE_DISTANCE: 40, EXPLORE_TIMEOUT_MS: 15000, MAX_DIRECTED_HOPS: 4,
+    woolCounts: () => ({}), collectDrops: async () => {},
+  });
+  vm.runInContext(timeoutFn + actionFn +
+    between(actions, 'async function wanderAndRetryForSheep(', '// Direct request, 2026-09-07 ("build the water crossing'), c);
+
+  const result = await c.performAction(bot, { type: 'get_wool', count: 3 }, 'test');
+  assert(gotoCalls >= 1, 'should wander to look for a sheep instead of giving up on the spot');
+  assert.equal(result.ok, false);
+  assert.match(result.text, /even after looking around/);
+});
+
 await check('Craft: finding an already-placed utility block nearby gets remembered too, not just a freshly-placed one', async () => {
   // Real bug found live 2026-10-09, same direct report as the check above: "craft"'s own
   // REUSABLE_UTILITY_BLOCKS short-circuit (actions.js) finds an existing crafting_table/furnace
@@ -1633,7 +1949,20 @@ await check('Shelters: any mix of plain building blocks; never sand, gravel, val
   }
   const bot = { inventory: { items: () => [{ name: 'dirt', count: 20 }, { name: 'cobblestone', count: 12 }, { name: 'sand', count: 64 }] } };
   assert.equal(c.shelterMaterialCount(bot), 32, 'dirt and cobblestone add up; sand does not count');
-  assert.equal(c.shelterPositions(new V3(0, 64, 0)).length, 49, '11 wall columns x 3 + a 4x4 roof (a 2x2 room inside)');
+  // 2026-10-11: the doorway column used to be excluded from the fill entirely (a bare, permanent
+  // gap); now only its two door-height cells are (doorwayPosition() takes them for a real door),
+  // its lintel rejoins the wall count, and the floor under the room is included too.
+  // Also 2026-10-11: the room itself grew from 2x2 to 2x3 (a real door and a bed could never both
+  // fit in 2x2 -- SHELTER_ROOM's own header comment has the full account).
+  // 13 full wall columns x 3 (39) + the doorway column's lintel (1) + a 4x5 roof (20) + a 2x3
+  // floor (6) = 66.
+  assert.equal(c.shelterPositions(new V3(0, 64, 0)).length, 66,
+    '13 full wall columns x 3, + the doorway column\'s lintel, + a 4x5 roof, + a 2x3 floor');
+  const doorPos = c.doorwayPosition(new V3(0, 64, 0));
+  assert.deepEqual({ x: doorPos.x, y: doorPos.y, z: doorPos.z }, { x: 0, y: 64, z: 3 },
+    'the doorway sits at the lower door cell, excluded from the generic fill above');
+  assert.equal(c.doorItemFor({ inventory: { items: () => [{ name: 'spruce_planks', count: 4 }] } }), 'spruce_door');
+  assert.equal(c.doorItemFor({ inventory: { items: () => [] } }), 'oak_door', 'no planks held -- defaults to oak');
   const build = actions.slice(actions.indexOf('case "build": {'), actions.indexOf('case "build_pen": {'));
   assert.match(build, /buildMovements\.scafoldingBlocks = \[\];/, 'no scaffolding: she pillared up inside her own shelter');
   assert.match(build, /buildMovements\.allow1by1towers = false;/);
@@ -1646,15 +1975,15 @@ function shelterWorld({ groundY = (x, z) => 63, blocked = [] } = {}) {
     ? { name: 'grass_block', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' }) };
 }
 
-await check('Shelters: the site is a flat, clear 4x4 within 4 blocks of home, even a step above or below it', async () => {
+await check('Shelters: the site is a flat, clear 4x5 within 4 blocks of home, even a step above or below it', async () => {
   const c = shelterFns();
   const home = new V3(0, 64, 0);
   const flat = c.findShelterSite(shelterWorld(), home);
   assert.deepEqual([flat.x, flat.y, flat.z], [0, 64, 0], 'right on home when that is clear');
   const wall = [];
-  for (let z = -3; z <= 6; z++) for (let y = 64; y <= 66; y++) wall.push(new V3(3, y, z)); // a wall one block past the 4x4
+  for (let z = -3; z <= 6; z++) for (let y = 64; y <= 66; y++) wall.push(new V3(3, y, z)); // a wall one block past the 4x5
   const tight = c.findShelterSite(shelterWorld({ blocked: wall }), home);
-  assert(tight.x + 2 < 3, `the whole 4x4 footprint stays clear of the wall: base ${tight}`);
+  assert(tight.x + 2 < 3, `the whole 4x5 footprint stays clear of the wall: base ${tight}`);
   const tree = c.findShelterSite(shelterWorld({ blocked: [new V3(0, 65, 0)] }), home);
   assert(Math.max(Math.abs(tree.x), Math.abs(tree.z)) <= 4 && Math.max(Math.abs(tree.x), Math.abs(tree.z)) >= 2, `moved off the obstacle: ${tree}`);
   const raised = c.findShelterSite(shelterWorld({ groundY: () => 64 }), home);
@@ -1670,19 +1999,73 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
   assert.equal(c.farmTaskFor('go to the shelter and wait'), null);
   // A complete shelter whose floor is at spawn height + 1: the old check only looked at spawn height.
   const s = shelterFns();
-  const shelterBot = (cells, bedAt = null) => {
+  // 2026-10-11: a shelter now also needs a real door (not an opening) and a fully (not 80%)
+  // solid wall/roof/floor -- shelterBot() places one at doorwayPosition() unless told not to, and
+  // `cells` controls exactly how complete the rest is.
+  const shelterBot = (cells, { bedAt = null, doorAt = null } = {}) => {
     const solid = new Set(cells.map((p) => `${p.x},${p.y},${p.z}`));
     return { spawnPoint: new V3(0, 64, 0), isABed: (b) => b.name === 'white_bed',
       blockAt: (p) => (bedAt && p.equals(bedAt) ? { name: 'white_bed', boundingBox: 'block' }
+        : doorAt && p.equals(doorAt) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower' }) }
         : { name: 'x', boundingBox: p.y <= 64 || solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' }) };
   };
   const check = (bot) => {
-    const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s) });
-    vm.runInContext(between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+    const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s) });
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
     return h.hasShelterNearHome();
   };
-  assert.equal(check(shelterBot(s.shelterPositions(new V3(0, 65, 0)))), true, 'a 4x4 shelter a step up');
-  assert.equal(check(shelterBot(s.shelterPositions(new V3(0, 65, 0)), new V3(0, 65, 1))), true, 'a bed in the room still counts');
+  const base = new V3(0, 65, 0);
+  const full = s.shelterPositions(base), doorPos = s.doorwayPosition(base);
+  assert.equal(check(shelterBot(full, { doorAt: doorPos })), true, 'a 4x5 shelter a step up, sealed with a door');
+  assert.equal(check(shelterBot(full, { doorAt: doorPos, bedAt: new V3(0, 65, 1) })), true, 'a bed in the room still counts');
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 1 item 2): hasShelterNearHome() alone only proves the
+  // STRUCTURE is complete -- confirmed live that the fleet's separate bed-count and
+  // shelter-exists checks are fully independent, so a shelter with no bed at all still passes it.
+  // hasOwnShelterWithBed() is the real per-bot check: the same complete structure, PLUS an actual
+  // bed in one of its own room cells.
+  const ownShelterCheck = (bot) => {
+    const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s) });
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+    return h.hasOwnShelterWithBed();
+  };
+  assert.equal(ownShelterCheck(shelterBot(full, { doorAt: doorPos })), false,
+    'a complete, sealed shelter with no bed inside is not "her own sheltered bed" yet');
+  assert.equal(ownShelterCheck(shelterBot(full, { doorAt: doorPos, bedAt: new V3(0, 65, 1) })), true,
+    'complete, sealed, and a bed inside -- this is what Tier 1 item 2 actually requires');
+  // Real gap found live 2026-10-11: before this, a shelter with no door at all (shelterPositions()
+  // left that whole column permanently excluded from the fill) still passed every time.
+  assert.equal(check(shelterBot(full)), false, 'no door at all -- not sealed, does not count');
+  // Before this, an 80%-complete shelter counted; it no longer does -- one missing wall block out
+  // of 66 is still a real, unsealed gap.
+  const oneShort = full.slice(1);
+  assert.equal(check(shelterBot(oneShort, { doorAt: doorPos })), false, 'one missing wall block out of 66 -- not 100%, does not count');
+  // The floor was never checked at all before this; a room floating over open air now fails too.
+  // A higher base (not y <= 64, shelterBot's own hardcoded "ground") so the floor cells actually
+  // depend on `cells` instead of always reading as solid regardless.
+  const base2 = new V3(0, 66, 0); // within findShelterNearHome's dy -2..2 search range; floor at y=65, not the mock's hardcoded y<=64 "ground"
+  const full2 = s.shelterPositions(base2), doorPos2 = s.doorwayPosition(base2);
+  const floorCells = vm.runInContext('SHELTER_ROOM', s).map(([dx, dz]) => ({ x: base2.x + dx, y: base2.y - 1, z: base2.z + dz }));
+  const noFloor = full2.filter((p) => !floorCells.some((f) => f.x === p.x && f.y === p.y && f.z === p.z));
+  assert.equal(check(shelterBot(full2, { doorAt: doorPos2 })), true, 'sanity: the same shape at a higher base still counts complete');
+  assert.equal(check(shelterBot(noFloor, { doorAt: doorPos2 })), false, 'walls and roof solid, floor missing -- does not count');
+  // findShelterNearHome() itself (not just the hasShelterNearHome() boolean wrapper): a real,
+  // damaged shelter -- hollow-interior-shaped, missing its door -- is a repair target, not a
+  // bare "no shelter," since checkShelterIntegrity() needs its base to send "build" back to.
+  const findCheck = (bot) => {
+    const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s) });
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+    return h.findShelterNearHome();
+  };
+  const damaged = findCheck(shelterBot(full2));
+  assert.equal(damaged.complete, false, 'no door -- incomplete');
+  assert.deepEqual([damaged.base.x, damaged.base.y, damaged.base.z], [base2.x, base2.y, base2.z],
+    'and the damaged shelter\'s own base is returned, not just a bare false');
   // The old 3x3 shelter (one cell inside) no longer counts: it can't fit a bed.
   const old = [];
   for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
@@ -1690,6 +2073,41 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
     old.push(new V3(dx, 68, dz));
   }
   assert.equal(check(shelterBot(old)), false, "a shelter that can't fit a bed isn't enough");
+
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1 -- "today's separate 'beds' and 'shelter'
+  // items merge into one"): hasOwnShelterWithBed above only ever answers "does SHE have one";
+  // the fleet-wide checklist needs an actual count of how many qualifying structures exist near
+  // home, not a single nearest-match boolean.
+  const multiShelterBot = (spawnPoint, shelters) => {
+    const solid = new Set(), doors = new Set(), beds = new Set();
+    const k = (p) => `${p.x},${p.y},${p.z}`;
+    for (const sh of shelters) {
+      for (const p of sh.cells) solid.add(k(p));
+      if (sh.doorAt) doors.add(k(sh.doorAt));
+      if (sh.bedAt) beds.add(k(sh.bedAt));
+    }
+    return { spawnPoint, isABed: (b) => b.name === 'white_bed',
+      blockAt: (p) => (beds.has(k(p)) ? { name: 'white_bed', boundingBox: 'block' }
+        : doors.has(k(p)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower' }) }
+        : { name: 'x', boundingBox: p.y <= 64 || solid.has(k(p)) ? 'block' : 'empty' }) };
+  };
+  const count = (bot) => {
+    const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24 });
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+    return h.countQualifyingSheltersNearHome();
+  };
+  const multiSpawn = new V3(0, 64, 0);
+  // y=65, not 64 -- same reason `base` above is: the mock's own "y<=64 is always solid ground"
+  // rule would otherwise read every room floor cell as solid, not just the real floor beneath it.
+  const baseA = new V3(0, 65, 0), baseB = new V3(10, 65, 0); // far enough apart not to overlap
+  const shelterA = { cells: s.shelterPositions(baseA), doorAt: s.doorwayPosition(baseA), bedAt: baseA.offset(0, 0, 1) };
+  const shelterB = { cells: s.shelterPositions(baseB), doorAt: s.doorwayPosition(baseB), bedAt: baseB.offset(0, 0, 1) };
+  assert.equal(count(multiShelterBot(multiSpawn, [shelterA])), 1, 'one complete, sealed, bedded shelter');
+  assert.equal(count(multiShelterBot(multiSpawn, [shelterA, shelterB])), 2, 'two separate ones both count -- not just the nearest');
+  const shelterBNoBed = { ...shelterB, bedAt: null };
+  assert.equal(count(multiShelterBot(multiSpawn, [shelterA, shelterBNoBed])), 1, 'complete and sealed, but no bed inside -- does not count');
 });
 
 await check('Shelters: a shelter goal gets materials (planks from her logs), builds on its site, and is done when it stands', async () => {
@@ -1697,7 +2115,10 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
   let standing = false; const calls = []; const done = [];
   const performAction = async (b, action) => {
     calls.push(action.type + (action.item ? `:${action.item}` : '') + (action.block ? `:${action.block}` : ''));
-    if (action.type === 'craft') { inv.push({ name: 'oak_planks', count: 60 }); return { ok: true, text: 'crafted planks' }; }
+    // 70, not 60: the shelter's own room grew from 2x2 to 2x3 (2026-10-11), needing more material
+    // than one craft call used to provide -- a second call here would mean a second 'craft' entry
+    // in `calls` below, which this test treats as a regression (one craft, then build, not two).
+    if (action.type === 'craft') { inv.push({ name: 'oak_planks', count: 70 }); return { ok: true, text: 'crafted planks' }; }
     if (action.type === 'build') { standing = true; return { ok: true, text: 'built a small shelter', built: true }; }
     return { ok: false, text: '?' };
   };
@@ -1745,8 +2166,11 @@ await check('Beds: the first choice is a spot under a roof -- the shelter room, 
     blockAt: (p) => (p.y < 64 || walls.has(`${p.x},${p.y},${p.z}`) ? { name: 'cobblestone', boundingBox: 'block' }
       : { name: 'air', boundingBox: 'empty' }) };
   const site = c.findBedSites(bot, new V3(0, 64, 0))[0];
-  assert.deepEqual([site.foot.x, site.foot.z, site.head.x, site.head.z, site.stand.x, site.stand.z], [5, 6, 5, 5, 5, 7],
-    'foot (0,1) and head (0,0) of the room, placed standing in the doorway');
+  // 2026-10-11: the room grew from 2x2 to 2x3 rows (local z 0-1 -> 0-2), so the middle row (local
+  // z=1) now has two equally-scored orientations -- head toward the open doorway gap or away from
+  // it -- and BED_DIRS tries (0,1) before (0,-1), so the former wins the tie.
+  assert.deepEqual([site.foot.x, site.foot.z, site.head.x, site.head.z, site.stand.x, site.stand.z], [5, 6, 5, 7, 5, 5],
+    'foot (0,1) and head (0,2) of the room, standing at (0,0) to place it');
   const atSpawn = c.findBedSites(bot, base)[0]; // spawn inside the shelter, as at the fleet's home
   assert.deepEqual([atSpawn.foot.x, atSpawn.foot.z], [5, 6], 'the room is still used when it sits on spawn');
 });
@@ -1895,7 +2319,7 @@ await check('Access: a door sealed on both sides is left alone; one blocked side
     'a door built into solid ground on both sides is not a passage anyone uses');
 });
 
-// The 4x4 shelter from actions.js, with a bed in its room -- the real geometry, not a mock of it.
+// The 4x5 shelter from actions.js, with a bed in its room -- the real geometry, not a mock of it.
 function shelterLivingSpace() {
   const s = shelterFns();
   const c = shelter();
@@ -1910,9 +2334,14 @@ function shelterLivingSpace() {
 await check('Shelter walls: the covered fill finds the room, stops at the doorway, and names every wall', async () => {
   const { c, w, base, space } = shelterLivingSpace();
   assert.equal(space.anchors.length, 1, 'one bed, not two halves');
-  assert.equal(space.inside.size, 13, '2x2 room x3 high less the two bed blocks, plus the doorway column');
-  assert.equal(c.isInsideLivingSpace(w.bot, base.offset(0, 0, 2)), true, 'the doorway is inside');
-  assert.equal(c.isInsideLivingSpace(w.bot, base.offset(0, 0, 3)), false, 'the step outside it is not -- no roof there');
+  // 2026-10-11: the doorway's lintel (y 2) now rejoins the wall fill (doorwayPosition() only
+  // takes the two door-height cells, y 0-1), so only those two, not all three, are still passable.
+  // Also 2026-10-11: the room itself grew from 2x2 to 2x3 rows (a real door and a bed could never
+  // both fit in 2x2 -- SHELTER_ROOM's own header comment has the full account), moving the doorway
+  // from local z=2 to z=3.
+  assert.equal(space.inside.size, 18, '2x3 room x3 high less the two bed blocks, plus the doorway\'s two door-height cells');
+  assert.equal(c.isInsideLivingSpace(w.bot, base.offset(0, 0, 3)), true, 'the doorway is inside');
+  assert.equal(c.isInsideLivingSpace(w.bot, base.offset(0, 0, 4)), false, 'the step outside it is not -- no roof there');
 
   assert.equal(c.isLivingSpaceWall(w.bot, base.offset(-1, 1, 0)), true, 'a wall block');
   assert.equal(c.isLivingSpaceWall(w.bot, base.offset(0, 3, 0)), true, 'the roof');
@@ -1920,8 +2349,8 @@ await check('Shelter walls: the covered fill finds the room, stops at the doorwa
   assert.equal(c.isLivingSpaceWall(w.bot, base.offset(20, -1, 20)), false, 'ordinary terrain well clear of it');
 
   // The doorway: filling it seals the shelter even though no door hangs there yet.
-  assert.deepEqual([...space.exits.keys()], ['0,2'], 'one way out: the doorway column');
-  const sealed = c.wouldBlockAccess(w.bot, base.offset(0, 0, 2));
+  assert.deepEqual([...space.exits.keys()], ['0,3'], 'one way out: the doorway column');
+  const sealed = c.wouldBlockAccess(w.bot, base.offset(0, 0, 3));
   assert(sealed && /way out/.test(sealed.reason), `the doorway is refused: ${JSON.stringify(sealed)}`);
   assert.equal(c.wouldBlockAccess(w.bot, base.offset(1, 0, 1)), null, 'a cell deep inside the room is not an exit');
 });
@@ -1930,20 +2359,20 @@ await check('Shelter walls: a hole in a wall is a second way out, so it can be f
   const { c, w, base } = shelterLivingSpace();
   w.open([base.x - 1, base.y, base.z]); // knock a hole in the west wall at floor level
   const holed = c.refreshLivingSpace(w.bot, base);
-  assert.deepEqual([...holed.exits.keys()].sort(), ['-1,0', '0,2'], 'the hole counts as a way out too');
+  assert.deepEqual([...holed.exits.keys()].sort(), ['-1,0', '0,3'], 'the hole counts as a way out too');
   assert.equal(c.wouldBlockAccess(w.bot, base.offset(-1, 0, 0)), null, 'so repairing it is allowed');
-  assert.equal(c.wouldBlockAccess(w.bot, base.offset(0, 0, 2)), null, 'and the doorway is no longer the only one');
+  assert.equal(c.wouldBlockAccess(w.bot, base.offset(0, 0, 3)), null, 'and the doorway is no longer the only one');
 
-  // Hang a door in the doorway and cap the cell above it (the shelter's doorway column is three
-  // high, a door only two). The fill stops at the door, but the door still counts as the way out
-  // -- otherwise the first hole knocked in a wall would look like the only exit and be protected
-  // from repair, exactly backwards.
+  // Hang a door in the doorway (now local z=3, the room having grown to 2x3) and cap the cell
+  // above it (the shelter's doorway column is three high, a door only two). The fill stops at the
+  // door, but the door still counts as the way out -- otherwise the first hole knocked in a wall
+  // would look like the only exit and be protected from repair, exactly backwards.
   const d = shelterLivingSpace();
-  d.w.door([d.base.x, d.base.y, d.base.z + 2]);
-  d.w.place([d.base.x, d.base.y + 2, d.base.z + 2], 'cobblestone');
+  d.w.door([d.base.x, d.base.y, d.base.z + 3]);
+  d.w.place([d.base.x, d.base.y + 2, d.base.z + 3], 'cobblestone');
   const shut = d.c.refreshLivingSpace(d.w.bot, d.base);
-  assert.deepEqual([...shut.exits.keys()], ['0,1'], 'the cell inside the door is the way out');
-  const onlyWay = d.c.wouldBlockAccess(d.w.bot, d.base.offset(0, 1, 1));
+  assert.deepEqual([...shut.exits.keys()], ['0,2'], 'the cell inside the door is the way out');
+  const onlyWay = d.c.wouldBlockAccess(d.w.bot, d.base.offset(0, 1, 2));
   assert(onlyWay && /_door$/.test(onlyWay.fixture), `walling the door off from inside: ${JSON.stringify(onlyWay)}`);
   d.w.open([d.base.x - 1, d.base.y, d.base.z]);
   d.c.refreshLivingSpace(d.w.bot, d.base);
