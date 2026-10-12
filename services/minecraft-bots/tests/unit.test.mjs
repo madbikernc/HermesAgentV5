@@ -1,4 +1,4 @@
-// Version: 1.23.0
+// Version: 1.27.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -65,6 +65,14 @@
 // 1.26.0 | 2026-10-11 | PRIORITIES_PROPOSAL.md §2a (the guard-anchor claim): actions.js's new
 //   holdsGuardAnchor() (a single shared slot, not one row per bot); index.js's isLiveSoldier()/
 //   isGuardAnchor()/nextSoldierPriority()'s new anchor-vs-escort split, now async.
+// 1.27.0 | 2026-10-12 | PRIORITIES_PROPOSAL.md Tier 2 item 1a (the communal shelter, sized per
+//   the operator's own rule) and the first instance of the resource-gathering override:
+//   isCommunalShelterMaterial/communalShelterPositions/findCommunalShelterSite (actions.js), the
+//   new "build_communal_shelter" case and place_bed's action.near; fleetHasReachedIronTools()'s
+//   fleet-wide evidence tracking, communalShelterSize()'s dynamic sizing, structure/bed-count
+//   verification, farmTaskFor's "communal" routing, and the shared gatherPlanks() helper
+//   (index.js). Also fixes this file's own top "Version:" line, which had quietly fallen behind
+//   the Revision History below it since 1.24.0 -- a real, if harmless, drift this bump closes.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -773,11 +781,102 @@ await check('Soldier priorities: one live Soldier is trivially the anchor; two o
   assert.equal((await c.nextSoldierPriority()).name, 'guard', "Luke's own staleness also makes Mark trivially the anchor again");
 });
 
+await check('Communal shelter: fleet-wide iron-tool evidence, never a bare claim', async () => {
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a -- "checked the same verified way the
+  // existing curriculum already checks tool tiers... not a new detection mechanism"). Ungated
+  // (every bot, not just Mayor) unlike TECH_TREE_STAGES' own evidence tracking -- see
+  // fleetHasReachedIronTools()'s own header for why that distinction matters here.
+  const slots = [];
+  const bot = { inventory: { items: () => [], slots } };
+  const c = vm.createContext({ bot, BOT_USERNAMES: new Set(['amy']),
+    TOOL_TIERS: ["wooden", "stone", "iron", "golden", "diamond", "netherite"] });
+  vm.runInContext(between(index, 'const TOOL_NAME', 'function communalShelterTargetBeds('), c);
+  assert.equal(c.isIronOrBetterTool('iron_pickaxe'), true);
+  assert.equal(c.isIronOrBetterTool('stone_pickaxe'), false);
+  assert.equal(c.isIronOrBetterTool('golden_sword'), true);
+  assert.equal(c.isIronOrBetterTool('diamond_hoe'), true);
+  assert.equal(c.isIronOrBetterTool('iron_ingot'), false, 'not a tool at all');
+  assert.equal(c.fleetHasReachedIronTools(), false, 'nothing seen yet');
+  c.noteIronToolEvidence(['stone_axe']); // worse than iron -- doesn't flip it
+  assert.equal(c.fleetHasReachedIronTools(), false);
+  slots[6] = { name: 'iron_chestplate' }; // armor, not a tool -- shouldn't flip it either
+  assert.equal(c.fleetHasReachedIronTools(), false);
+  slots[6] = null;
+  c.noteIronToolEvidence(['diamond_pickaxe']); // a teammate's real, broadcast evidence
+  assert.equal(c.fleetHasReachedIronTools(), true, 'verified evidence, even from someone else, is enough');
+  c.noteIronToolEvidence(['stone_pickaxe']); // a later, worse report never un-sets it
+  assert.equal(c.fleetHasReachedIronTools(), true);
+});
+
+await check('Communal shelter: sized per the operator\'s own rule (at least N+1 beds for N bots)', async () => {
+  const c = vm.createContext({ bot: {}, Math,
+    BOT_USERNAMES: new Set(['amy', 'babs', 'mark', 'luke', 'mayor', 'bob', 'nell', 'wade', 'dale']) });
+  vm.runInContext(between(index, 'function communalShelterTargetBeds(', 'function hasHollowCommunalInterior('), c);
+  assert.equal(c.communalShelterTargetBeds(), 10, 'N+1 for a 9-bot fleet');
+  const size = c.communalShelterSize();
+  assert(size.width * size.depth >= 10 * 4, `generously sized for the target: ${JSON.stringify(size)}`);
+  assert.equal(size.width, size.depth, 'kept square');
+});
+
+await check('Communal shelter: "communal" routes to its own runner, not the individual-shelter one', async () => {
+  const c = vm.createContext({
+    BED_WORDS: /\b(make|craft|build|set up|place|get|need|more)\b[^.]*?\bbeds?\b/i,
+    NOT_MAKING_A_BED: /\b(go(ing)? to|sleep(ing)? in|find a|head(ing)? to) (a |the |your |her )?bed\b/i,
+    SHELTER_WORDS: /\b(build(ing)?|mak(e|ing)|set(ting)? up|put(ting)? up|need)\b[^.]*?\bshelter\b/i,
+  });
+  vm.runInContext(between(index, 'const FARM_WORDS', 'async function completeGoal('), c);
+  assert.equal(c.farmTaskFor('lead the fleet\'s communal shelter near home'), 'communal_shelter');
+  assert.equal(c.farmTaskFor('build a shelter near home'), 'shelter', 'a plain shelter is unaffected');
+});
+
+await check('Resource-gathering override: gatherPlanks crafts from a held log, else mines a tree', async () => {
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md -- "gathering that resource becomes her temporary
+  // priority"). Extracted from bedStep's own inline fallback -- see gatherPlanks' own header for
+  // why shelterStep's near-identical-LOOKING fallback (which wants ANY wall material, not
+  // specifically planks) is deliberately NOT also folded into this.
+  let calls = [];
+  const bot = { inventory: { items: () => [] }, findBlocks: () => [], blockAt: () => ({ name: 'oak_log' }) };
+  const performAction = async (b, action) => { calls.push(action); return { ok: true, text: 'did it' }; };
+  const c = vm.createContext({ bot, USERNAME: 'Amy',
+    heldCount: (test) => bot.inventory.items().filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
+    performAction });
+  vm.runInContext(between(index, 'async function gatherPlanks(', 'async function bedStep('), c);
+
+  bot.inventory.items = () => [{ name: 'oak_planks', count: 10 }];
+  assert.equal(await c.gatherPlanks({}, 7), null, 'already holds enough -- nothing to do');
+  assert.equal(calls.length, 0);
+
+  bot.inventory.items = () => [{ name: 'spruce_log', count: 2 }];
+  const crafted = await c.gatherPlanks({}, 7);
+  assert.equal(crafted.action.type, 'craft');
+  assert.equal(crafted.action.item, 'spruce_planks');
+  assert.deepEqual({ ...calls.at(-1) }, { type: 'craft', item: 'spruce_planks', count: 7 });
+
+  calls = [];
+  bot.inventory.items = () => [];
+  bot.findBlocks = () => [{ x: 5, y: 64, z: 5 }];
+  bot.blockAt = () => ({ name: 'birch_log' });
+  const mined = await c.gatherPlanks({}, 8);
+  assert.equal(mined.action.type, 'mine');
+  assert.equal(mined.action.block, 'birch_log');
+  assert.equal(calls.at(-1).count, 2, 'ceil(8/4) logs -- each gives ~4 planks');
+
+  calls = [];
+  bot.findBlocks = () => [];
+  const stuck = await c.gatherPlanks({}, 8);
+  assert.equal(stuck.ok, false);
+  assert.match(stuck.text, /no tree nearby/);
+  assert.equal(calls.length, 0, 'a real, reported failure -- not a crash');
+});
+
 await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims the way the others do', async () => {
   const bedNames = []; let shelterCount = 0; let beehive = 0; let bred = false;
+  let ironTools = false; let communalDone = false;
   const c = vm.createContext({ bot: { registry: { blocksByName: {} } },
     countNearHome: (names) => (names[0] === 'beehive' ? beehive : 0),
     countQualifyingSheltersNearHome: () => shelterCount, getAchievements: () => (bred ? ['bred:cow'] : []),
+    fleetHasReachedIronTools: () => ironTools, communalShelterSatisfied: () => communalDone,
+    communalShelterTargetBeds: () => 4,
     BOT_USERNAMES: new Set(['amy', 'babs', 'mark']) });
   vm.runInContext(between(index, 'function builderPriorityCandidates(', 'function nextBuilderPriority('), c);
   const names = () => c.builderPriorityCandidates().map((x) => x.name);
@@ -787,6 +886,15 @@ await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims t
   assert.match(capacityItem.directive, /We have 0, need at least 3/);
   shelterCount = 3;
   assert(!names().includes('shelter_capacity'), 'baseline met -- drops off the list');
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a): additive, not blocking on the rest, but
+  // gated on the fleet actually having reached iron tools -- and last in the list either way.
+  assert(!names().includes('communal_shelter'), 'no iron tools yet -- not even a candidate');
+  ironTools = true;
+  assert.equal(names().at(-1), 'communal_shelter', 'unlocked, and last in priority order');
+  const communalItem = c.builderPriorityCandidates().find((x) => x.name === 'communal_shelter');
+  assert.match(communalItem.directive, /at least 4 beds/);
+  communalDone = true;
+  assert(!names().includes('communal_shelter'), 'already satisfied -- drops off the list');
 });
 
 await check('Fairness: routine checks that lose their turn are counted', async () => {
@@ -1969,6 +2077,77 @@ await check('Shelters: any mix of plain building blocks; never sand, gravel, val
   assert.match(build, /finally \{\s+if \(bot\.pathfinder\.movements === buildMovements\) bot\.pathfinder\.setMovements\(sharedMovements\);/);
 });
 
+await check('Communal shelter: stone-or-better material, parameterized geometry, a door-first build', async () => {
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a -- "every block used must be at least
+  // stone tier... though the materials don't all have to match each other").
+  const c = shelterFns();
+  for (const n of ['stone', 'cobblestone', 'mossy_cobblestone', 'deepslate', 'stone_bricks', 'andesite', 'iron_block', 'bricks', 'white_concrete']) {
+    assert.equal(c.isCommunalShelterMaterial(n), true, n);
+  }
+  for (const n of ['dirt', 'sand', 'oak_planks', 'oak_log', 'gravel', 'iron_ore', 'netherrack', 'glass']) {
+    assert.equal(c.isCommunalShelterMaterial(n), false, n);
+  }
+  const bot = { inventory: { items: () => [{ name: 'stone', count: 40 }, { name: 'oak_planks', count: 20 }, { name: 'cobblestone', count: 10 }] } };
+  assert.equal(c.communalShelterMaterialCount(bot), 50, 'stone and cobblestone count; planks (wood) do not');
+
+  // 5x5 interior: dx -1..5 (7) x dz -1..5 (7) = 49 pairs, minus the 5x5=25 room pairs = 24 wall
+  // columns; 23 full (x3 = 69) + the doorway column's lintel only (1) = 70 walls, + a 7x7 roof
+  // (49) + a 5x5 floor (25) = 144.
+  const base = new V3(0, 64, 0);
+  assert.equal(c.communalShelterPositions(base, 5, 5).length, 144,
+    '23 full wall columns x 3, + the doorway column\'s lintel, + a 7x7 roof, + a 5x5 floor');
+  const doorPos = c.communalDoorwayPosition(base, 5);
+  assert.deepEqual({ x: doorPos.x, y: doorPos.y, z: doorPos.z }, { x: 0, y: 64, z: 5 });
+  assert.deepEqual([...c.communalRoomCells(2, 1)].map((p) => [...p]), [[0, 0], [1, 0]]);
+
+  const communalBuild = actions.slice(actions.indexOf('case "build_communal_shelter": {'), actions.indexOf('case "build_pen": {'));
+  assert.match(communalBuild, /isCommunalShelterMaterial/, 'uses the stricter material check, not the individual-shelter baseline');
+  assert.match(communalBuild, /if \(!width \|\| !depth\) return fail/, 'refuses to guess a size if none was given');
+  // Same door-first-craft/door-last-placement order as "build" -- see that case's own header for
+  // the two real bugs (plank starvation, wrong door facing) this order exists to avoid repeating.
+  const doorCraftIdx = communalBuild.indexOf('type: "craft", item: doorItemFor(bot)');
+  const wallLoopIdx = communalBuild.indexOf('for (const pos of buildOrder)');
+  const doorPlaceIdx = communalBuild.indexOf('await bot.placeBlock(floorBelow');
+  assert(doorCraftIdx > 0 && doorCraftIdx < wallLoopIdx && wallLoopIdx < doorPlaceIdx,
+    'door item crafted before the wall loop, door itself placed after it');
+});
+
+await check('Communal shelter: structure completeness and bed-count verification, mocked', async () => {
+  const s = shelterFns();
+  const base = new V3(0, 64, 0);
+  const width = 5, depth = 5;
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  const communalMockBot = (doorAt, bedCells) => {
+    const solid = new Set(s.communalShelterPositions(base, width, depth).map(key));
+    const doors = new Set(doorAt ? [key(doorAt)] : []);
+    const beds = new Set((bedCells || []).map(key));
+    return { spawnPoint: base, isABed: (b) => b?.name === 'white_bed',
+      blockAt: (p) => (beds.has(key(p)) ? { name: 'white_bed', boundingBox: 'block' }
+        : doors.has(key(p)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower' }) }
+        : { name: 'x', boundingBox: solid.has(key(p)) ? 'block' : 'empty' }) };
+  };
+  const check2 = (bot) => {
+    const h = vm.createContext({ bot, Math, BOT_USERNAMES: new Set(['amy']), BUILDER_PRIORITY_RADIUS: 6,
+      communalShelterPositions: s.communalShelterPositions, communalDoorwayPosition: s.communalDoorwayPosition });
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+      between(index, 'const TOOL_NAME', 'function nextSurvivalPriority('), h);
+    return h;
+  };
+  const doorPos = s.communalDoorwayPosition(base, depth);
+  const noBeds = check2(communalMockBot(doorPos, []));
+  assert.equal(noBeds.hasCommunalShelterStructure(), true, 'walls/roof/floor/door complete');
+  assert.equal(noBeds.communalShelterSatisfied(), false, 'no beds yet -- not satisfied');
+  const oneBed = check2(communalMockBot(doorPos, [base.offset(0, 0, 0), base.offset(1, 0, 0)]));
+  assert.equal(oneBed.communalShelterBedCount(base, width, depth), 1);
+  assert.equal(oneBed.communalShelterSatisfied(), false, '1 bed, need 2 (N+1 for a 1-bot fleet)');
+  const bedCells2 = [base.offset(0, 0, 0), base.offset(1, 0, 0), base.offset(0, 0, 1), base.offset(1, 0, 1)];
+  const twoBeds = check2(communalMockBot(doorPos, bedCells2));
+  assert.equal(twoBeds.communalShelterBedCount(base, width, depth), 2);
+  assert.equal(twoBeds.communalShelterSatisfied(), true, '2 beds meets the target');
+  const noDoor = check2(communalMockBot(null, bedCells2));
+  assert.equal(noDoor.hasCommunalShelterStructure(), false, 'no real door -- not complete, regardless of beds');
+});
+
 function shelterWorld({ groundY = (x, z) => 63, blocked = [] } = {}) {
   const b = new Set(blocked.map((p) => `${p.x},${p.y},${p.z}`));
   return { blockAt: (p) => (p.y <= groundY(p.x, p.z) || b.has(`${p.x},${p.y},${p.z}`)
@@ -2154,6 +2333,12 @@ await check('Beds: a spot with a bot standing in it is skipped, and a refused sp
   // The predicate gained an access clause in 1.81.0, so this only pins the "not tried yet" half;
   // the access half has its own check further down.
   assert.match(place, /\.find\(\(c\) => !tried\.some\(\(t\) => t\.equals\(c\.foot\)\)/, 'each attempt takes a spot not tried yet');
+  // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a): an optional action.near (the communal
+  // shelter's own runner passes its site), same shape as "store"'s own -- unset, she still goes
+  // "home" exactly as before.
+  assert.match(place, /action\.near \? new Vec3\(action\.near\.x, action\.near\.y, action\.near\.z\) : null/);
+  assert.match(place, /findBedSites\(bot, target \?\? bot\.spawnPoint \?\? bot\.entity\.position\)/,
+    'the target, when given, is what findBedSites actually searches around');
 });
 
 await check('Beds: the first choice is a spot under a roof -- the shelter room, entered from its doorway', async () => {

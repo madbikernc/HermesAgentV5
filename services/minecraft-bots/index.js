@@ -1,4 +1,20 @@
-// Version: 2.113.0
+// Version: 2.114.0
+//
+// 2.114.0 (2026-10-12, PRIORITIES_PROPOSAL.md Tier 2 item 1a -- the communal shelter, sized per
+// the operator's own rule: "large enough for beds to suit all active bots... at least N+1 for N
+// bots"; and the first concrete instance of the resource-gathering override). New
+// fleetHasReachedIronTools() (an ungated, in-memory, every-bot-visible tracker fed by real
+// gear/broadcast evidence, never a bare claim -- TECH_TREE_STAGES' own fleet-wide evidence
+// tracking is Mayor-only, which would've meant only Mayor's process could ever see this unlocked)
+// gates a new "communal_shelter" Tier 2 item, last in builderPriorityCandidates()'s own order.
+// New communalShelterStep()/runCommunalShelterGoal(): builds the structure (communalShelterSize()
+// scales the room to the target bed count), then populates it with beds one per tick, reusing
+// bedStep's own wool-to-bed acquisition rather than a third copy. New shared gatherPlanks(),
+// extracted from bedStep's own inline "craft from a held log, else mine a tree" fallback -- the
+// first real instance of "gathering a missing resource becomes her temporary priority," reused
+// by the communal shelter's own door. (The fully general version -- recognizing a missing
+// resource from arbitrary failure text across every action -- remains unbuilt; this unifies the
+// one concrete, already-duplicated case, not a new general parser.)
 //
 // 2.113.0 (2026-10-11, PRIORITIES_PROPOSAL.md §2a -- "with one, she patrols near home, unchanged
 // from today... with two or more, exactly one holds a claim to stay anchored near home at all
@@ -1535,7 +1551,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor, communalShelterPositions, communalDoorwayPosition, findCommunalShelterSite, isCommunalShelterMaterial, communalShelterMaterialCount } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -3287,6 +3303,104 @@ function countQualifyingSheltersNearHome() {
   return count;
 }
 
+// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a -- "once the fleet's
+// progression reaches iron tools or better... checked the same verified way the existing
+// curriculum already checks tool tiers... not a new detection mechanism"). TECH_TREE_STAGES'
+// own fleet-wide evidence tracking (stageEvidence/stageProgress, below) is Mayor-only by design
+// (only Mayor ever credits it) -- reusing it here would mean only Mayor's own process could ever
+// see the communal shelter as unlocked, defeating the whole "any idle bot" point of Tier 2.
+// Instead: a small, UNGATED (every bot, not just Mayor) tracker fed by the exact same verified
+// evidence already flowing fleet-wide -- her own current gear, checked fresh every call, plus
+// whatever an incoming "goal"/"evidence" Buzz message's real item names reveal (see the incoming
+// handler below) -- never a bare claim, the same trust TECH_TREE_STAGES' own mayorHasStageItem()
+// already relies on. In-memory only (resets on restart), same low-stakes tradeoff
+// otherBotActivityAt already makes.
+const TOOL_NAME = /^(wooden|stone|iron|golden|diamond|netherite)_(pickaxe|axe|sword|shovel|hoe)$/;
+function isIronOrBetterTool(name) {
+  const m = TOOL_NAME.exec(name);
+  return !!m && TOOL_TIERS.indexOf(m[1]) >= TOOL_TIERS.indexOf("iron");
+}
+let fleetHasIronTool = false;
+function noteIronToolEvidence(itemNames) {
+  if (!fleetHasIronTool && itemNames?.some(isIronOrBetterTool)) fleetHasIronTool = true;
+}
+function fleetHasReachedIronTools() {
+  const mine = bot.inventory.items().map((i) => i.name)
+    .concat([5, 6, 7, 8, 45].map((s) => bot.inventory.slots[s]?.name).filter(Boolean));
+  noteIronToolEvidence(mine);
+  return fleetHasIronTool;
+}
+
+// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a), sized per the operator's
+// own rule (2026-10-12: "large enough for beds to suit all active bots... at least N+1 for N
+// bots"). No exact bed layout is pre-planned (see communalShelterPositions()'s own header,
+// actions.js) -- the room is just sized generously enough that findBedSites() can actually fit
+// the target count, called once per bed by runCommunalShelterGoal() below. Roughly 4 floor cells
+// per bed (a bed's own foot+head, plus room for the stand cell and a little aisle slack) keeps
+// the room squarish and not razor-thin for a large target.
+function communalShelterTargetBeds() {
+  return BOT_USERNAMES.size + 1;
+}
+function communalShelterSize() {
+  const side = Math.max(5, Math.ceil(Math.sqrt(communalShelterTargetBeds() * 4)));
+  return { width: side, depth: side };
+}
+
+// Mirrors findShelterNearHome()/hasHollowInterior() above, parameterized by width/depth instead
+// of the individual shelter's fixed SHELTER_ROOM -- same "100% solid walls/roof/floor, a real
+// door" completeness bar, just no bed-count check here (that's tracked separately below, since
+// the target is N+1 beds, not just one).
+function hasHollowCommunalInterior(base, width, depth) {
+  for (let dx = 0; dx < width; dx++) {
+    for (let dz = 0; dz < depth; dz++) {
+      const floor = bot.blockAt(base.offset(dx, 0, dz)), above = bot.blockAt(base.offset(dx, 1, dz));
+      if (!((floor?.boundingBox !== "block" || bot.isABed(floor)) && above?.boundingBox !== "block")) return false;
+    }
+  }
+  return true;
+}
+function findCommunalShelterNearHome() {
+  if (!bot.spawnPoint) return null;
+  const { width, depth } = communalShelterSize();
+  const center = bot.spawnPoint.floored();
+  let damaged = null, damagedSolid = -1;
+  for (let dx = -BUILDER_PRIORITY_RADIUS; dx <= BUILDER_PRIORITY_RADIUS; dx++) {
+    for (let dz = -BUILDER_PRIORITY_RADIUS; dz <= BUILDER_PRIORITY_RADIUS; dz++) {
+      for (let dy = -2; dy <= 2; dy++) {
+        const base = center.offset(dx, dy, dz);
+        if (!hasHollowCommunalInterior(base, width, depth)) continue;
+        const positions = communalShelterPositions(base, width, depth);
+        const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
+        const hasDoor = isDoorway(bot.blockAt(communalDoorwayPosition(base, depth)));
+        if (solid === positions.length && hasDoor) return { base, width, depth, complete: true };
+        if (solid >= positions.length * 0.5 && solid > damagedSolid) {
+          damaged = base;
+          damagedSolid = solid;
+        }
+      }
+    }
+  }
+  return damaged ? { base: damaged, width, depth, complete: false } : null;
+}
+function hasCommunalShelterStructure() {
+  return findCommunalShelterNearHome()?.complete === true;
+}
+// Real beds specifically inside the communal room's own footprint -- not a bare "near home"
+// count, which would also catch every individual shelter's own bed and over-report progress.
+function communalShelterBedCount(base, width, depth) {
+  let count = 0;
+  for (let dx = 0; dx < width; dx++) {
+    for (let dz = 0; dz < depth; dz++) {
+      if (bot.isABed(bot.blockAt(base.offset(dx, 0, dz)))) count++;
+    }
+  }
+  return Math.ceil(count / 2); // each bed is two cells (foot+head), both inside the same room
+}
+function communalShelterSatisfied() {
+  const found = findCommunalShelterNearHome();
+  return !!found?.complete && communalShelterBedCount(found.base, found.width, found.depth) >= communalShelterTargetBeds();
+}
+
 // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md §1, Tier 1 -- "survival needs... don't stop
 // applying to a Miner or a Farmer just because her role happens not to enforce them"). Mirrors
 // nextBuilderPriority()/nextSoldierPriority()'s own shape -- a deterministic, world-checked
@@ -3418,6 +3532,18 @@ function builderPriorityCandidates() {
   if (![...getAchievements(bot)].some((a) => a.startsWith("bred:"))) {
     candidates.push({ name: "ranch", directive: "set up a ranch near home: build an animal pen, lead two animals of one kind into it, and breed them" });
   }
+  // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a -- "once the fleet's
+  // progression reaches iron tools or better... building one single communal shelter becomes a
+  // Tier 2 goal, in addition to -- not instead of -- the individual shelters above"). Last on the
+  // list by design: §3's own Builder priority order has it AFTER the rest of the checklist, not
+  // blocking on every other item being 100% done first (the de-exclusive claim mechanism already
+  // lets a different bot work an earlier item while this one waits its turn).
+  if (fleetHasReachedIronTools() && !communalShelterSatisfied()) {
+    const target = communalShelterTargetBeds();
+    candidates.push({ name: "communal_shelter", directive: "lead the fleet's communal shelter near " +
+      `home: a single larger shelter built entirely from stone-tier material or better (no planks ` +
+      `or dirt), with real walls, a roof, a real door, and room for at least ${target} beds.` });
+  }
   return candidates;
 }
 
@@ -3459,8 +3585,10 @@ function builderPriorityItemSatisfied(name) {
       // (2026-09-14), the same two-copies-of-the-same-number drift this function exists to
       // prevent in the first place.
       return countQualifyingSheltersNearHome() >= BOT_USERNAMES.size;
+    case "communal_shelter":
+      return communalShelterSatisfied();
     default:
-      return true; // not one of the five known items -- nothing real to re-check, don't block
+      return true; // not one of the six known items -- nothing real to re-check, don't block
   }
 }
 
@@ -3830,9 +3958,15 @@ const FARM_WORDS = /\b(farm(ing|land)?|till(ing|ed)?|crops?|sow(ing)?|plant(ing)
 const NOT_A_CROP_FARM = /\b(iron|xp|mob|tree|gold|sugar ?cane|wool|honey|bee|fish) farm/i;
 const RANCH_WORDS = /\b(ranch(ing)?|breed(ing)?|livestock|(animal|cow|sheep|pig|chicken) pen|herd(ing)?)\b/i;
 
+// 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a): checked BEFORE the plain SHELTER_WORDS
+// below, which would otherwise also match "communal shelter" text (it just requires the word
+// "shelter" somewhere near a build/make verb) and route it to the wrong, individual-shelter runner.
+const COMMUNAL_SHELTER_WORDS = /\bcommunal\b[^.]*?\bshelter\b|\bshelter\b[^.]*?\bcommunal\b/i;
+
 function farmTaskFor(description) {
   if (!description) return null;
   if (BED_WORDS.test(description) && !NOT_MAKING_A_BED.test(description)) return "bed";
+  if (COMMUNAL_SHELTER_WORDS.test(description)) return "communal_shelter";
   if (SHELTER_WORDS.test(description)) return "shelter";
   if (RANCH_WORDS.test(description)) return "ranch";
   if (FARM_WORDS.test(description) && !NOT_A_CROP_FARM.test(description)) return "farm";
@@ -4003,6 +4137,30 @@ const BED_WORDS = /\b(make|craft|build|set up|place|get|need|more)\b[^.]*?\bbeds
 const NOT_MAKING_A_BED = /\b(go(ing)? to|sleep(ing)? in|find a|head(ing)? to) (a |the |your |her )?bed\b/i;
 const BED_GOAL = "make myself a bed and place it at home";
 
+// Resource-gathering override (2026-10-11, PRIORITIES_PROPOSAL.md -- "when any task requires a
+// resource she doesn't have, gathering that resource becomes her temporary priority, superseded
+// only by defense"). The first, most-needed instance: planks specifically (not shelterStep's own
+// fallback below, which wants ANY wall material and happily substitutes dirt -- a real
+// difference, not the same pattern). Extracted from bedStep's own inline "craft planks from a
+// held log, else mine a tree" so the communal shelter's own door (which needs planks too, for
+// the exact same reason a bed does) reuses it instead of becoming a second copy. Returns null
+// once she already holds `count` planks (the caller proceeds); otherwise the in-progress
+// gathering step.
+async function gatherPlanks(handle, count) {
+  const planks = heldCount((n) => n.endsWith("_planks"));
+  if (planks >= count) return null;
+  const short = count - planks;
+  const log = bot.inventory.items().find((i) => /_(log|stem)$/.test(i.name));
+  if (log) {
+    const item = `${log.name.replace(/^stripped_/, "").replace(/_(log|stem)$/, "")}_planks`;
+    return { ...(await performAction(bot, { type: "craft", item, count: short }, USERNAME, handle)), action: { type: "craft", item } };
+  }
+  const tree = bot.findBlocks({ matching: (b) => /_log$/.test(b.name) && !b.name.startsWith("stripped_"), maxDistance: 32, count: 1 })[0];
+  if (!tree) return { ok: false, text: "need wood and there's no tree nearby." };
+  const block = bot.blockAt(tree).name;
+  return { ...(await performAction(bot, { type: "mine", block, count: Math.ceil(short / 4) }, USERNAME, handle)), action: { type: "mine", block } };
+}
+
 async function bedStep(goal, handle) {
   if (bot.inventory.items().some((i) => i.name.endsWith("_bed"))) {
     const placed = await performAction(bot, { type: "place_bed" }, USERNAME, handle);
@@ -4014,21 +4172,8 @@ async function bedStep(goal, handle) {
     const tableType = bot.registry.blocksByName.crafting_table;
     const tableNear = heldCount((n) => n === "crafting_table") > 0 ||
       (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
-    const planksNeeded = 3 + (tableNear ? 0 : 4);
-    const planks = heldCount((n) => n.endsWith("_planks"));
-    if (planks < planksNeeded) {
-      const log = bot.inventory.items().find((i) => /_(log|stem)$/.test(i.name));
-      if (log) {
-        const item = `${log.name.replace(/^stripped_/, "").replace(/_(log|stem)$/, "")}_planks`;
-        return { ...(await performAction(bot, { type: "craft", item, count: planksNeeded - planks }, USERNAME, handle)),
-          action: { type: "craft", item } };
-      }
-      const tree = bot.findBlocks({ matching: (b) => /_log$/.test(b.name) && !b.name.startsWith("stripped_"), maxDistance: 32, count: 1 })[0];
-      if (!tree) return { ok: false, text: "need wood for the bed and there's no tree nearby." };
-      const block = bot.blockAt(tree).name;
-      return { ...(await performAction(bot, { type: "mine", block, count: Math.ceil((planksNeeded - planks) / 4) }, USERNAME, handle)),
-        action: { type: "mine", block } };
-    }
+    const gathering = await gatherPlanks(handle, 3 + (tableNear ? 0 : 4));
+    if (gathering) return gathering;
     const item = bedItemFor(bot);
     return { ...(await performAction(bot, { type: "craft", item, count: 1 }, USERNAME, handle)), action: { type: "craft", item } };
   }
@@ -4117,6 +4262,59 @@ async function runShelterGoal(goal, takeControl, getHandle, replaced) {
   await failGoalStep(goal, step.text);
 }
 
+// Communal shelter (2026-10-11, PRIORITIES_PROPOSAL.md Tier 2 item 1a): same shape as
+// shelterStep/runShelterGoal above -- a site persisted on the goal, build when short on
+// material, done only on a verified result -- plus a second phase shelterStep never needs:
+// once the structure itself is complete, populate it with beds up to the fleet-size target, one
+// per tick, reusing bedStep's own wool-to-bed acquisition sequence rather than a third copy of it.
+async function communalShelterStep(goal, handle) {
+  if (communalShelterSatisfied()) return { ok: true, text: "the communal shelter is fully built and bedded.", done: true };
+  const found = findCommunalShelterNearHome();
+  const { width, depth } = communalShelterSize();
+  if (!found?.complete) {
+    if (!bot.spawnPoint) return { ok: false, text: "don't know where home is yet." };
+    const site = goal.communalShelterAt ? new Vec3(goal.communalShelterAt.x, goal.communalShelterAt.y, goal.communalShelterAt.z)
+      : (found?.base ?? findCommunalShelterSite(bot, bot.spawnPoint, width, depth));
+    if (!site) return { ok: false, text: `couldn't find a flat, clear ${width}x${depth} spot near home for the communal shelter.` };
+    goal.communalShelterAt = { x: site.x, y: site.y, z: site.z };
+    const needed = communalShelterPositions(site, width, depth).filter((p) => bot.blockAt(p)?.boundingBox !== "block").length;
+    const short = needed - communalShelterMaterialCount(bot);
+    if (short > 0) {
+      // Stone, not planks: the communal shelter's own material floor (actions.js's
+      // isCommunalShelterMaterial) -- "stone" is what mining it drops as, the same block nearly
+      // every biome has underground, same reasoning "mine" already applies everywhere else.
+      return { ...(await performAction(bot, { type: "mine", block: "stone", count: short }, USERNAME, handle)),
+        action: { type: "mine", block: "stone" } };
+    }
+    const built = await performAction(bot, { type: "build_communal_shelter", at: goal.communalShelterAt, width, depth }, USERNAME, handle);
+    return { ...built, done: false, action: { type: "build_communal_shelter" } }; // structure alone is never "done" -- still needs beds
+  }
+  if (bot.inventory.items().some((i) => i.name.endsWith("_bed"))) {
+    const placed = await performAction(bot, { type: "place_bed", near: found.base }, USERNAME, handle);
+    return { ...placed, action: { type: "place_bed" } };
+  }
+  // Doesn't hold a bed yet: bedStep's own wool/craft sequence gets her one (its OWN place_bed
+  // branch is unreachable here since we just confirmed she isn't holding one) -- same acquisition,
+  // not a second copy of it.
+  return bedStep(goal, handle);
+}
+
+async function runCommunalShelterGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  const step = await communalShelterStep(goal, getHandle());
+  getHandle()?.release();
+  if (step.cancelled || replaced()) return;
+  logStep(goal, `communal shelter: ${step.text}`, step.ok, step.action);
+  console.log(`[${USERNAME}] communal shelter goal: ${step.text} (ok=${step.ok})`);
+  if (step.done) return completeGoal(goal, "the communal shelter is built and bedded");
+  if (step.ok) {
+    goal.consecutiveFailures = 0;
+    await saveGoalIfCurrent(goal);
+    return;
+  }
+  await failGoalStep(goal, step.text);
+}
+
 async function goalTick() {
   if (!AUTONOMY_ENABLED || routineBlocked("goalTick")) return;
   // Review MB-14: no new work or goal steps from dusk to dawn (the goal is paused, not dropped).
@@ -4197,6 +4395,10 @@ async function goalTick() {
     }
     if (goal.farmTask === "shelter") {
       await runShelterGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    if (goal.farmTask === "communal_shelter") {
+      await runCommunalShelterGoal(goal, takeControl, () => handle, replaced);
       return;
     }
     if (goal.targetItem && holdsItem(goal.targetItem)) {
@@ -6810,8 +7012,13 @@ bot.once("spawn", () => {
         if (USERNAME === MAYOR_USERNAME && payload.status === "done" && (payload.item || payload.have?.length)) {
           creditCurriculumEvidence(msg.from_agent, [payload.item, ...(payload.have ?? [])]);
         }
+        // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a): NOT Mayor-gated, unlike the credit
+        // above -- every bot needs to be able to see "has the fleet reached iron tools" for
+        // herself, not just Mayor (see fleetHasReachedIronTools()'s own header for why).
+        noteIronToolEvidence([payload.item, ...(payload.have ?? [])].filter(Boolean));
       } else if (payload.type === "evidence") {
         if (USERNAME === MAYOR_USERNAME && payload.have?.length) creditCurriculumEvidence(msg.from_agent, payload.have);
+        noteIronToolEvidence(payload.have ?? []);
       } else if (payload.type === "threat" && SQUAD_RESPONDER && !squadResponseInFlight) {
         if (withinSquadAssistRange(payload)) {
           console.log(`[${USERNAME}] squad response: ${msg.from_agent} under attack (${payload.name}) ` +

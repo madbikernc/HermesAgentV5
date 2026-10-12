@@ -1,4 +1,18 @@
-// Version: 1.88.0
+// Version: 1.89.0
+//
+// 1.89.0 (2026-10-12, PRIORITIES_PROPOSAL.md Tier 2 item 1a -- the communal shelter, sized per
+// the operator's own rule: "large enough for beds to suit all active bots... at least N+1 for N
+// bots"). New isCommunalShelterMaterial() (stone or better -- no planks/dirt, stricter than the
+// individual-shelter baseline isShelterMaterial()); new communalRoomCells()/
+// communalDoorwayPosition()/communalShelterPositions()/findCommunalShelterSite(), parameterized
+// (width/depth) mirrors of the individual shelter's own fixed-size geometry functions -- a
+// deliberate second set of functions, not a shared parametric refactor of the proven originals.
+// New "build_communal_shelter" case, same door-first-craft/wall-loop/door-last-placement shape as
+// "build" (see its own header for the two real bugs that order fixes), just the bigger geometry
+// and stricter material. No bed positions pre-planned: the room is sized generously and
+// findBedSites() fills it, called once per target bed by index.js's own runner. "place_bed"
+// gained an optional action.near (same shape as "store"'s) so a bed meant for the communal room
+// doesn't scatter wherever findBedSites' generic "nearest covered spot near home" prefers instead.
 //
 // 1.88.0 (2026-10-11, PRIORITIES_PROPOSAL.md §2a -- "arbitrate which Soldier holds which
 // sub-role the same way bed claims are already arbitrated"). New holdsGuardAnchor(), same
@@ -2555,6 +2569,23 @@ export function shelterMaterialCount(bot) {
   return bot.inventory.items().filter((i) => isShelterMaterial(i.name)).reduce((n, i) => n + i.count, 0);
 }
 
+// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a -- "every block used must be
+// at least stone tier... though the materials don't all have to match each other"). Stricter
+// than isShelterMaterial() above, which still governs the individual-shelter baseline: this is
+// ONLY for the communal shelter. Explicitly excludes planks/dirt/sand/wood -- the whole point of
+// the constraint -- and excludes raw ore blocks too (an ore block isn't "stone-tier building
+// material" just because it's stone-hard; smooth_stone/bricks/concrete/terracotta are real,
+// finished building blocks, which is the actual category this is meant to capture).
+const STONE_OR_BETTER_MATERIAL = /^(stone|smooth_stone|cobblestone|mossy_cobblestone|cobbled_deepslate|polished_deepslate|deepslate|deepslate_bricks|deepslate_tiles|chiseled_deepslate|stone_bricks|mossy_stone_bricks|cracked_stone_bricks|chiseled_stone_bricks|andesite|polished_andesite|diorite|polished_diorite|granite|polished_granite|tuff|polished_tuff|tuff_bricks|chiseled_tuff|chiseled_tuff_bricks|calcite|basalt|polished_basalt|smooth_basalt|blackstone|polished_blackstone|blackstone_bricks|chiseled_polished_blackstone|bricks|.+_bricks|iron_block|.+_concrete|.+_terracotta|glazed_terracotta)$/;
+
+export function isCommunalShelterMaterial(name) {
+  return STONE_OR_BETTER_MATERIAL.test(name);
+}
+
+export function communalShelterMaterialCount(bot) {
+  return bot.inventory.items().filter((i) => isCommunalShelterMaterial(i.name)).reduce((n, i) => n + i.count, 0);
+}
+
 // The shelter: 4x5 outside, a 2x3 room inside. `base` is the room's back-left cell at floor level;
 // the room is base..base+(1,0,2), walls three high round it with a doorway at (0, *, 3), and a 4x5
 // roof on top. index.js's hasShelterNearHome() checks this same shape.
@@ -2632,6 +2663,76 @@ export function findShelterSite(bot, home) {
           }
         }
         const outside = base.offset(0, 0, 4); // in front of the doorway
+        ok = ok && bot.blockAt(outside.offset(0, -1, 0))?.boundingBox === "block" && clear(outside) && clear(outside.offset(0, 1, 0));
+        if (ok) { best = base; bestDist = dist; }
+      }
+    }
+  }
+  return best;
+}
+
+// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a, sized per the operator's own
+// rule, 2026-10-12: "large enough for beds to suit all active bots... at least N+1 for N bots").
+// Generalizes SHELTER_ROOM/shelterPositions/doorwayPosition/findShelterSite above into a
+// variable-size version -- same wall/roof/floor/single-doorway shape, just parameterized by
+// width/depth instead of a fixed room. Deliberately NOT a refactor of the individual-shelter
+// functions themselves (a second, separate set of functions, not a shared parametric core) --
+// those are proven and heavily tested; this keeps zero risk of changing their behavior.
+//
+// No bed positions are pre-planned here: the room is just sized generously and findBedSites()
+// (already proven for individual shelters -- avoids doors, chokepoints, occupied cells, prefers
+// clustering near existing beds) fills it, called once per target bed from index.js's own
+// communal-shelter runner.
+export function communalRoomCells(width, depth) {
+  const cells = [];
+  for (let dx = 0; dx < width; dx++) for (let dz = 0; dz < depth; dz++) cells.push([dx, dz]);
+  return cells;
+}
+
+export function communalDoorwayPosition(base, depth) { return base.offset(0, 0, depth); }
+
+export function communalShelterPositions(base, width, depth) {
+  const inRoom = (dx, dz) => dx >= 0 && dx < width && dz >= 0 && dz < depth;
+  const walls = [];
+  for (let dx = -1; dx <= width; dx++) {
+    for (let dz = -1; dz <= depth; dz++) {
+      if (inRoom(dx, dz)) continue;
+      for (let dy = 0; dy <= 2; dy++) {
+        if (dx === 0 && dz === depth && dy <= 1) continue; // the doorway itself -- a door, not a wall block
+        walls.push(base.offset(dx, dy, dz));
+      }
+    }
+  }
+  const roof = [];
+  for (let dx = -1; dx <= width; dx++) for (let dz = -1; dz <= depth; dz++) roof.push(base.offset(dx, 3, dz));
+  const floor = communalRoomCells(width, depth).map(([dx, dz]) => base.offset(dx, -1, dz));
+  return [...walls, ...floor, ...roof];
+}
+
+// Mirrors findShelterSite() above exactly, just parameterized by width/depth instead of the
+// individual shelter's fixed 2x3 room. Searched over a wider radius (8, not 4) since a big
+// communal footprint needs more room to find a clear site for than a small personal one.
+export function findCommunalShelterSite(bot, home, width, depth) {
+  const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
+  const clear = (p) => {
+    const b = bot.blockAt(p);
+    return !!b && b.boundingBox !== "block" && b.name !== "water" && b.name !== "lava" && !isProtectedBlockName(b.name);
+  };
+  let best = null, bestDist = Infinity;
+  for (let dx = -8; dx <= 8; dx++) {
+    for (let dz = -8; dz <= 8; dz++) {
+      for (let dy = -2; dy <= 2; dy++) {
+        const base = new Vec3(hx + dx, hy + dy, hz + dz);
+        const dist = Math.hypot(dx, dz) + Math.abs(dy) * 0.5;
+        if (dist >= bestDist) continue;
+        let ok = true;
+        for (let ox = -1; ox <= width && ok; ox++) {
+          for (let oz = -1; oz <= depth + 1 && ok; oz++) {
+            ok = bot.blockAt(base.offset(ox, -1, oz))?.boundingBox === "block";
+            for (let oy = 0; oy <= 3 && ok; oy++) ok = clear(base.offset(ox, oy, oz));
+          }
+        }
+        const outside = base.offset(0, 0, depth + 1); // in front of the doorway
         ok = ok && bot.blockAt(outside.offset(0, -1, 0))?.boundingBox === "block" && clear(outside) && clear(outside.offset(0, 1, 0));
         if (ok) { best = base; bestDist = dist; }
       }
@@ -4574,6 +4675,123 @@ async function performActionAs(bot, action, speaker, token) {
                `${doorPlaced ? "" : ", no door yet"}${openedFor}.`)), built };
     }
 
+    case "build_communal_shelter": {
+      // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a), sized per the
+      // operator's own rule (2026-10-12: "large enough for beds to suit all active bots"). Same
+      // door-first-craft, wall-loop, door-last-placement shape as "build" above (see its own
+      // header for the two real bugs that order fixes) -- just the bigger, parameterized
+      // communalShelterPositions()/communalDoorwayPosition() geometry and the stricter
+      // isCommunalShelterMaterial() (stone or better, no planks/dirt) instead of the individual
+      // shelter's permissive baseline. action.width/action.depth come from index.js's own
+      // runner, which is the one place that actually knows the fleet size -- not guessed here.
+      const base = action.at ? new Vec3(action.at.x, action.at.y, action.at.z).floored() : bot.entity.position.floored();
+      const { width, depth } = action;
+      if (!width || !depth) return fail("don't know how big to build the communal shelter.");
+      const buildOrder = communalShelterPositions(base, width, depth);
+      const missing = () => buildOrder.filter((pos) => bot.blockAt(pos)?.boundingBox !== "block").length;
+      const needed = missing();
+      const have = communalShelterMaterialCount(bot);
+      if (needed && have < needed) {
+        return { ...fail(`need ${needed} stone-or-better building blocks (stone, cobblestone, stone ` +
+          `bricks, deepslate...) for the communal shelter, only have ${have}.`), short: needed - have };
+      }
+
+      const sharedMovements = bot.pathfinder.movements;
+      const buildMovements = Object.assign(Object.create(Object.getPrototypeOf(sharedMovements)), sharedMovements);
+      buildMovements.scafoldingBlocks = [];
+      buildMovements.allow1by1towers = false;
+      bot.pathfinder.setMovements(buildMovements);
+
+      const doorPos = communalDoorwayPosition(base, depth);
+      let doorAlready = isDoorway(bot.blockAt(doorPos));
+      if (!doorAlready && !token.cancelled && !bot.inventory.items().some((i) => i.name.endsWith("_door"))) {
+        await performActionAs(bot, { type: "craft", item: doorItemFor(bot), count: 1 }, speaker, token);
+      }
+      let doorPlaced = doorAlready;
+
+      if (!needed && doorAlready) return { ...ok("the communal shelter is already standing."), built: true };
+
+      let placed = 0;
+      let shutIn = 0;
+      try {
+      for (const pos of buildOrder) {
+        if (token.cancelled) break;
+        if (bot.blockAt(pos)?.boundingBox === "block") continue;
+        const shuts = wouldBlockAccess(bot, pos);
+        if (shuts) {
+          shutIn++;
+          console.log(`build_communal_shelter: left ${pos} open -- a wall there would block ${shuts.reason} the ${shuts.fixture}`);
+          continue;
+        }
+
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 4)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        } catch {
+          if (token.cancelled) break;
+          continue;
+        } finally {
+          if (!token.cancelled) bot.pathfinder.setGoal(null);
+        }
+        if (token.cancelled) break;
+
+        let refBlock = null, face = null;
+        for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
+          const neighbor = bot.blockAt(pos.offset(dx, dy, dz));
+          if (neighbor?.boundingBox === "block") {
+            refBlock = neighbor;
+            face = new Vec3(-dx, -dy, -dz);
+            break;
+          }
+        }
+        if (!refBlock) continue;
+
+        const item = bot.inventory.items().filter((i) => isCommunalShelterMaterial(i.name)).sort((a, b) => b.count - a.count)[0];
+        if (!item) break;
+        try {
+          await bot.equip(item, "hand");
+          await bot.placeBlock(refBlock, face);
+          placed++;
+        } catch (err) {
+          console.error(`build_communal_shelter: placement failed at ${pos}:`, err.message);
+        }
+      }
+      } finally {
+        if (bot.pathfinder.movements === buildMovements) bot.pathfinder.setMovements(sharedMovements);
+      }
+      await refreshGear(bot);
+
+      if (!doorAlready && !token.cancelled) {
+        const doorItem = bot.inventory.items().find((i) => i.name.endsWith("_door"));
+        const floorBelow = bot.blockAt(doorPos.offset(0, -1, 0));
+        if (doorItem && floorBelow?.boundingBox === "block") {
+          try {
+            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(doorPos.x, doorPos.y, doorPos.z, 4)),
+              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+            if (!token.cancelled) {
+              await bot.equip(doorItem, "hand");
+              await bot.lookAt(new Vec3(bot.entity.position.x, doorPos.y + 1, doorPos.z + 3), true);
+              await bot.placeBlock(floorBelow, new Vec3(0, 1, 0));
+              doorPlaced = isDoorway(bot.blockAt(doorPos));
+            }
+          } catch (err) {
+            console.error(`build_communal_shelter: door placement failed at ${doorPos}:`, err.message);
+          } finally {
+            if (!token.cancelled) bot.pathfinder.setGoal(null);
+          }
+        }
+      }
+
+      const openedFor = shutIn ? ` (${shutIn} left open so a neighbouring fixture stays reachable)` : "";
+      if (token.cancelled) return ok(`stopped building the communal shelter (${placed} placed, ${missing()} still missing)${openedFor}.`);
+      const left = missing();
+      if (!placed && left && !doorPlaced) return fail(`couldn't place any of the communal shelter (${left} blocks still missing)${openedFor}.`);
+      const built = left === 0 && doorPlaced;
+      return { ...(built ? ok(`built the communal shelter (${placed} blocks placed, sealed with a door)${openedFor}.`)
+        : fail(`built part of the communal shelter: ${placed} placed, ${left} still missing` +
+               `${doorPlaced ? "" : ", no door yet"}${openedFor}.`)), built };
+    }
+
     case "build_pen": {
       // Direct request, 2026-09-11 (§15.11 follow-up -- pen/fence containment for bred animals).
       // Deliberately one fixed, small shape, same philosophy as "build"'s own shelter above: a
@@ -5433,9 +5651,27 @@ async function performActionAs(bot, action, speaker, token) {
       // a bed needs two free, supported cells the way she faces, and nothing checked it appeared.
       const bedItem = bot.inventory.items().find((i) => i.name.endsWith("_bed"));
       if (!bedItem) return fail("don't have a bed to place.");
-      const home = await performActionAs(bot, { type: "gohome" }, speaker, token);
+      // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a): an optional target, same shape as
+      // "store"'s own action.near -- without it, unchanged (her claimed-bed/spawn "home", via
+      // "gohome"). The communal shelter's own runner passes its site here instead, so a bed meant
+      // for the communal room doesn't end up scattered wherever findBedSites' generic "nearest
+      // covered spot near home" scoring happens to prefer.
+      const target = action.near ? new Vec3(action.near.x, action.near.y, action.near.z) : null;
+      const home = target
+        ? await (async () => {
+            try {
+              await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 3)),
+                ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+              return ok("made it to the target site.");
+            } catch (err) {
+              return token.cancelled ? ok("stopped heading to the target site.") : fail(`couldn't reach the target site: ${err.message}`);
+            } finally {
+              if (!token.cancelled) bot.pathfinder.setGoal(null);
+            }
+          })()
+        : await performActionAs(bot, { type: "gohome" }, speaker, token);
       if (token.cancelled) return home;
-      if (!home.ok) return fail(`couldn't get home to place the bed: ${home.text}`);
+      if (!home.ok) return fail(`couldn't get to the bed site: ${home.text}`);
       // Up to 4 spots, best first: a refusal (someone stepped into it, a stale view) moves on to the
       // next instead of retrying the same one. A bed that appeared despite an error still counts.
       const tried = [];
@@ -5447,7 +5683,7 @@ async function performActionAs(bot, action, speaker, token) {
         // each re-read the world, and a spot that is blocked now may not be on the next pass
         // (someone moves a chest, another bot clears the way) -- unlike a spot the SERVER
         // refused, which is what `tried` is for.
-        const candidate = findBedSites(bot, bot.spawnPoint ?? bot.entity.position)
+        const candidate = findBedSites(bot, target ?? bot.spawnPoint ?? bot.entity.position)
           .find((c) => !tried.some((t) => t.equals(c.foot)) &&
             !wouldBlockAccess(bot, c.foot) && !wouldBlockAccess(bot, c.head));
         if (!candidate) break;
