@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.38.1
+**Version:** 3.39.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -142,6 +142,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S26 | `hermes-feed-reader` — public AI/security RSS feeds into the existing RAG/news-digest pipeline | ✅ Built, deployed and live-verified on `spark` 2026-10-08; **exit gate met 2026-10-09** on a confirmed digest line citing a real CISA advisory — daily timer, 65 offline checks, first run 185 entries / 263 chunks from all 14 feeds, 0 failures; eight live findings; the S22-before-S26 constraint was **not** honored |
 | S27 | `hermes-news-digest` re-spec — six fixed priority-ordered topics, top-20-of-50 per email, daily | ✅ **Done 2026-10-09.** Six per-topic emails sent live (5 of 6 with news, 0 failures), 26 individually-cited highlights stored, schema migrated with the v1 table kept. S27f added a router analysis-screening mode after S22d's working screener blocked the fleet's own analysis prompts at score 1.000 |
 | S28 | **Optional** — security-benchmark suites (OWASP Juice Shop, WebGoat) in the existing harness, then a VulnHunter bake-off across the local roster | 📋 Planned 2026-10-09, optional, not executed — gates nothing; written from this repo, no fleet node was reachable |
+| S31 | **Optional** — `super` candidate bake-off: GLM-5.3-Flash (`autotrust`'s two DGX-Spark GGUF builds) vs. incumbent Huihui-GLM-4.7-Flash-abliterated | 📋 Planned 2026-10-13, optional, not executed — gated on real `llama.cpp` `glm5-next` architecture support; gates nothing else; written from this repo, no fleet node was reachable |
 
 ---
 
@@ -4509,6 +4510,120 @@ default view shows exactly that true total.
 
 ---
 
+### S31 — `super` candidate bake-off: GLM-5.3-Flash (`autotrust` DGX-Spark builds) vs. the incumbent
+
+**Planned; not executed; optional — gates nothing else in this plan.** Written from a session with no
+fleet network path (same constraint `infra/model-benchmark/qwen4-coder-bakeoff-runbook.md` §0 and §4.5
+both record for themselves) — every port, path, and memory figure below is repo-sourced, not freshly
+measured. Re-verify live before executing any step.
+
+**Why this role, why now.** `HermesAgentV4`'s `infra/model-watch/` routine (still running daily pending
+S20d's retirement decision) surfaced two Hugging Face GGUF builds aimed specifically at this fleet's own
+hardware class — `autotrust/GLM-5.3-Flash-GGUF-DGX-Spark` and `autotrust/GLM-5.3-GGUF-DGX-Spark` — the
+same week `super`'s own incumbent (`Huihui-GLM-4.7-Flash-abliterated`, 16.9 GB, `spark`, port 8095) was
+confirmed the weakest of the six measured roles: **ifeval@75 = 0.76, fourteen points below the rest**
+(S20f). GLM-5.3 is Z.ai's own next post-training generation past GLM-4.7 on record, which makes `super`
+the obvious role to point a bake-off at, not an arbitrary choice.
+
+#### S31a — The llama.cpp gate, checked before anything else is spent
+
+Both candidates need the `glm5-next` architecture, which is **not confirmed merged-and-released** as of
+this writing — exactly the "open PR is not enough to act on" rule `infra/model-watch/alert-state.json`
+already enforces for `qwen4exp`. Evidence so far is contradictory on two different axes: one secondary
+source names PR [#27773](https://github.com/ggml-org/llama.cpp/pull/27773) and claims it merged
+2026-09-30 into build `b11279`; Unsloth's own docs point at a *different* PR,
+[#27754](https://github.com/ggml-org/llama.cpp/pull/27754), for the same feature; `autotrust`'s own model
+card for the Flash build still says #27773 is unmerged and must be built from the PR branch directly.
+None of this was re-verified against the Releases page in this pass. **Added to
+`HermesAgentV4/infra/model-watch/alert-state.json`** as a new tracked item, `llama_cpp_glm5_next`, next
+to `llama_cpp_qwen4exp` — same rule: only a tagged release counts, an open PR only seeds `evidence_url`
+so a later run doesn't re-discover it from scratch. Do not start S31b until that item (or a fresh,
+independent check of the Releases page) says a real tag has it.
+
+#### S31b — Two candidates, deliberately not equivalent
+
+- **`autotrust/GLM-5.3-Flash-GGUF-DGX-Spark`** — Q2, two shards (41.9 + 37.2 GiB = 79.1 GiB), 32 of 288
+  routed experts pruned per layer, explicitly sized for **one** Spark's 128 GB unified memory. This is
+  the realistic candidate for this stage.
+- **`autotrust/GLM-5.3-GGUF-DGX-Spark`** — full/unpruned, 149.7 GiB, the card's own stated target is
+  **two** Sparks over ConnectX-7 (or a single 180 GB GPU / Mac Studio, neither of which this fleet has).
+  A dual-Spark split here is already governed by §5.1's standing constraint — **"S18 (RoCE fabric)
+  before any tensor-parallel model deployment... gates every MoE variant, on-demand as much as
+  persistent"** — even though llama.cpp's own multi-node path (`--rpc`, plain TCP) is a different
+  mechanism than the NCCL/RDMA collective S18 actually measured. Nothing on this fleet has run
+  llama.cpp's RPC backend over `bond-fabric0` or the fixed `f1` RoCE link at all, so whether it clears a
+  usable tok/s bar is a genuinely open question, not something S18's ~1.4 GB/s NCCL figure settles either
+  way. Treat as a stretch goal gated on its own cheap pre-check (S31e), never a parallel first-class
+  candidate alongside the Flash build.
+
+**Naming caution**, same class as the existing `qwen4-coder-bakeoff-runbook.md` §0 warning about
+`coder2`: `autotrust` publishes near-identical repo names across this hardware class
+(`GLM-5.3-GGUF-DGX-Spark`, `GLM-5.3-Flash-GGUF-DGX-Spark`, and the separate `GLM5.3-Flash-E192/224/256-
+DGX-Spark` vLLM-targeted variants) — pin the exact repo id and revision actually used in any
+record, don't rely on memory of which is which.
+
+#### S31c — Pre-checks before spending real time
+
+1. Re-verify `spark`'s resident memory live. Target §4.1's own figure — **≈58 GB of ~105 GB usable,
+   already without any candidate** — is dated 2026-08-29 and may have drifted (`coder` has since moved
+   onto this same node, 2026-10-07, per §4.5). The Flash build alone (79.1 GiB) will not coexist with
+   today's full co-resident set in memory at the same time regardless of the exact current number.
+2. Byte-verify both shards' `content-length` before downloading anything, same gate
+   `infra/hermes-coder2/README.md` §1 and the qwen4-coder runbook §2 already use.
+3. **Known tooling gap, same class as the one the qwen4-coder runbook flagged for `coder2`:**
+   `tools/hermes-benchmark-model.sh`'s candidate mode only stops `llama-coder.service`/
+   `llama-muse.service` (+ `llama-amy-vision.service` with `--free-omni`) — it has **no knowledge of
+   `llama-super.service`**. Stop it manually before running candidate mode and restart it manually
+   afterward; do not assume the script does this, or the real incumbent will keep competing for memory
+   with the temporary candidate server for the whole run.
+4. Confirm the candidate's abliteration status before treating it as a drop-in. `autotrust`'s builds are
+   presumably stock quants of Z.ai's own release — `super`'s target slot explicitly wants "abliterated
+   permitted" (§4.1), and every abliterated checkpoint live on this fleet today is a `huihui-ai` community
+   build, not self-produced (S11's own documented, still-open risk). A stock-only candidate either needs
+   a `heretic`/`huihui`-style abliteration pass first, or the bake-off proceeds stock-vs-abliterated and
+   says so plainly rather than treating the comparison as clean.
+
+#### S31d — Benchmark plan for the realistic candidate (Flash, single-Spark)
+
+- **Baseline the incumbent first, but it mostly already exists** — `super`'s ifeval@75 = 0.76 (S20f) and
+  mmlu_pro = 0.614 (S11) are both real, recent numbers; re-run only if they're more than a few weeks
+  stale by execution time.
+- **BFCL**: no exact registry entry for GLM-4.7-Flash or GLM-5.3-Flash — use the same `glm-4.6-FC`/
+  `glm-4.5-FC` approximation `infra/model-benchmark/README.md` §3 already establishes for this family,
+  and report the result with the same "approximation, not a clean number" caveat every other GLM run
+  through this harness already carries.
+- **`--parallel 1` applies to whichever checkpoint holds this role, not just the incumbent** —
+  `hermes-news-digest` sends `super` up to ~15-20k tokens per call (S20f), so the candidate needs the
+  same single-slot, large-context server flags, not whatever a smaller-context role's defaults would be.
+- **SWE-bench, from `HomeD13`**, same pattern as the qwen4-coder runbook §5. The incumbent's port (8095)
+  is already in the `HomeD13`-reachable firewall allowlist — one of only two roles that are (§7 risk 5)
+  — so no new `ufw` rule is needed for that side; the candidate's temporary port will need the same check
+  the coder runbook had to do for 8094.
+- Compare with `tools/hermes-benchmark-compare.py`, same as every other bake-off in this repo.
+
+#### S31e — The full build (dual-Spark) — stretch only, not pursued by default
+
+Gated on, in order: (1) confirming llama.cpp's `--rpc` backend is even installed/configured on this
+fleet at all — it is not, as of this writing; (2) a cheap, non-inference connectivity smoke test over the
+fixed RoCE `f1` link before committing to a 149.7 GiB download; (3) explicit operator go-ahead, given
+that S18's standing finding is that this fabric is not proven fast for *any* multi-node model split, and
+this would be the first test of a different (RPC, not NCCL) mechanism over it. Do not start a 149.7 GiB
+download on the strength of this section alone.
+
+#### S31 exit gate
+
+One full cycle (ifeval, mmlu_pro, BFCL-approximation at minimum) for the Flash candidate recorded in the
+shared benchmark history against the incumbent, with a written win/no-win verdict and why — same
+discipline S28's own exit gates use. A win is necessary, not sufficient: `super` is effectively
+always-resident in practice today regardless of what `ROLES`/`WAKE_TARGETS` claim (§7 risk/§4.5's
+recorded on-demand/always-restart inconsistency, still unfixed as of 3.38.1), and a 79 GiB cold load is
+not instant — wake latency against whatever SLA `hermes-news-digest`/`hermes-canary-report`/`hermes-logs`
+actually need is **not measured anywhere yet** and must be before any promotion conversation, not after.
+No promotion happens inside this stage regardless of outcome; that still goes through S11's existing
+abliteration/promotion path, unchanged.
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -4749,3 +4864,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.37.0 | 2026-10-09 | **S30 follow-up executed — the pending backlog itself cleaned up.** Direct request. New `tools/hermes-baseline-backlog-cleanup.py` bulk-resolved the 138,865 pending `aide` findings predating S30's baseline reset (every one was a diff against a baseline that no longer exists); `grype` (849) and `lynis` (1) pending findings deliberately untouched, since bulk-closing possibly-still-open findings unrelated to aide's baseline would have been dishonest. Writes a plain `/tasks` state upsert per record rather than one `/turns` entry per record, after reading `hermes-memory.py`'s own handlers and confirming `_create_turn()` calls `embed()` on every write — 138,865 individual turns would have meant 138,865 embedding calls competing with the fleet's real embed role for nothing `_upsert_task()`'s own embedding-free upsert doesn't already give. One consolidated summary turn written instead. Verified live: tested on one real record first, then 138,865/138,865 resolved, 0 failed, no measurable `hermes-memory` latency impact. **A real bug in the first run, caught and fixed the same day**: no node filter meant LinodeMercury's 12 then-pending aide findings got swept up too, even though its baseline was reset during S29, not S30, and nothing S30 did invalidated them; reverted to `pending` by hand, and the tool now hard-codes `RESET_NODES = {"spark", "spark-2", "homed13"}` so this can't recur. `memory.db` now holds 999 pending (849 grype + 1 lynis + 137 no-turn + the 12 reverted) vs. 226,118 resolved, confirmed by direct query and by `hermes-fleetops-ui`'s `/recommendations` page. Minor bump — a real cleanup executed, no prior guidance changed. |
 | 3.38.0 | 2026-10-10 | **S20f — the incumbent baselines, and the one-slot backend behind the bots' LLM timeouts.** Five of six roles measured on ifeval @75 — dispatch 0.9067, omni 0.9067 (first ever), muse 0.8933, coder 0.8800, super 0.7600 (from 0.72); **three reproduce their historical figure exactly**, which is the evidence the harness is stable, and **super sits 14 points below the rest** while being the role the digest and canary report both use. `coder2` cannot finish in 90 minutes because Muse-Glimmer-30B emits reasoning tokens, a property `hermes-minecraft-triage.py` already had to budget for. Baselines came first because a candidate's score is meaningless without the incumbent's and the fleet had 33 history entries, newest 2026-09-20, with omni never measured. **Three obstacles, each diagnosed:** Layer 2 classifies ifeval prompts as injections at **p=0.997** (the fifth component S22d has broken — found by S22e's own guard report in one command) and `max_retries=3` turns one block into a failed suite, so runs go direct via `--endpoint`, which also measures the model rather than screening overhead; going direct then makes a role invisible to `hermes-model-idle-sleep.sh`, which unloads an on-demand backend after `IDLE_SECONDS`=900 judged from a stamp **only the router writes**, killing coder and coder2 just past the 15-minute mark; and every backend ran **one slot**. **The finding worth keeping:** muse could not answer a 32-token probe in 150s yet served **53.6 tok/s the moment the bots stopped** — never slow, just starved. `--parallel 4` on muse and dispatch now gives **51.9 tok/s aggregate at concurrency 4 (from 13.0) and 125.4 (from 58.8)** with per-request latency roughly flat, since `--ctx-size` is the total KV split across slots and the fleet-wide peak prompt is 4309 against 65536 allocated. **`super` stays at one slot** because `router_chat()` defaults to it and the digest sends it 15-20k tokens. Cost stated plainly: benchmarking a shared resident role doubled the bots' timeouts, the run was stopped for that reason, and the fleet was down ~3h to finish — exactly what SKILL.md's human-attended rule protects against. Also fixed a driver bug that reported muse's 90-minute timeout as `rc=0` (`$?` after a pipeline reads `tail`). Drift recorded: these flags live in untracked `/opt/llama.cpp/start-*.sh`, with backups. Minor bump — a substage executed. |
 | 3.38.1 | 2026-10-10 | **S20f(b) confirmed by measurement, with a control.** Bot LLM timeouts went from 20/9/2 per 10 minutes on one slot to **0 and 0** across two complete windows on `--parallel 4` — and because zero is meaningless if the bots were idle, activity is reported beside it: bot LLM-ish log lines rose from 171-726 to **6200-7196** over the same windows. The bots do roughly 10-30x more work and fail none of it, which confirms the starvation reading rather than merely being consistent with it: they had been spending their time queued on a single slot instead of acting. muse sustained 40.9 tok/s aggregate at concurrency 4 with the fleet live. Patch bump — a measurement added, no guidance changed. |
+| 3.39.0 | 2026-10-13 | Added **S31** (planned, not executed, optional): a `super` candidate bake-off between the incumbent (`Huihui-GLM-4.7-Flash-abliterated`, ifeval@75 0.76, fourteen points below the fleet's other measured roles per S20f) and two Hugging Face GGUF builds `HermesAgentV4`'s `infra/model-watch/` routine surfaced, both from `autotrust` and both explicitly targeted at this fleet's own DGX Spark hardware: a 79.1 GiB single-Spark Flash build (the realistic candidate) and a 149.7 GiB full build sized for two Sparks over ConnectX-7 (a stretch goal, since a dual-Spark split falls under §5.1's existing "S18 before any tensor-parallel deployment" constraint even though llama.cpp's RPC mechanism differs from the NCCL path S18 actually measured). Gated up front on real `llama.cpp` `glm5-next` architecture support reaching a tagged release — evidence is contradictory on both PR number (#27773 vs. #27754) and build tag, so a new `llama_cpp_glm5_next` entry was added to `HermesAgentV4/infra/model-watch/alert-state.json` alongside the existing `qwen4exp` tracking, same "open PR is not enough" rule. Also flags a real tooling gap before anyone runs it: `hermes-benchmark-model.sh`'s candidate mode has no knowledge of `llama-super.service`, the same class of gap the qwen4-coder runbook already documented for `coder2`. Minor bump — new stage added, nothing prior reversed. |
