@@ -1,6 +1,6 @@
 # hermes-reolink — recreate checklist
 
-**Version:** 2.4.1
+**Version:** 2.5.0
 
 Reolink camera agent (`tools/hermes-reolink.py`) — owns the Buzz `reolink` topic (on-demand "check
 the camera" from Matrix chat) and runs an AI-detection poll loop (person/vehicle/pet, email-
@@ -229,10 +229,51 @@ Synology also scatters `@eaDir` metadata directories through the tree that shado
 (a directory named `foo.jpg` beside the actual `foo.jpg`). Any traversal must `-path "*@eaDir*"
 -prune` and match `-type f`, or it will hand back directories where files are expected.
 
+## Possible future enhancement — Frigate local detection (idea only, not built, not scheduled)
+
+**Status: flagged for future consideration, like `LinodeMercury`'s "possible future vantage point" note in
+`IMPLEMENTATION_PLAN.md` §4 — not evaluated, not adopted, not a staged migration item.** Recorded here so
+the idea isn't lost, not as a commitment to build it.
+
+[Frigate](https://frigate.video) is an open-source NVR that pulls RTSP from existing cameras and runs local
+object detection (person/vehicle/package/etc.) with real zones/masks and per-object-type tracking, publishing
+events over MQTT. The Home Hub already exposes RTSP per channel, so Frigate would sit alongside
+`hermes-reolink.py` rather than replace the on-demand "check the camera" chat path — it would only be a
+candidate for the AI-detection half.
+
+**Two things it would fix that are currently accepted tradeoffs, not bugs (see Revision History 2.2.0/2.3.0
+above):** `COOLDOWN_SECONDS_PER_DEVICE` is keyed per channel, not per detection label, because
+`hermes-reolink.py`'s own detection logic has no concept of spatial zones — Frigate's per-zone tracking would
+let a vehicle detection and a person detection on the same camera coexist without one suppressing the other.
+Separately, `garden` (channel 0) has been pointed at what looks like an indoor hallway since 2026-09-11 —
+a zone/mask editor would make that framing problem immediately visible (an empty or always-triggering zone)
+instead of relying on someone looking at a raw snapshot.
+
+**Placement candidates, both already real nodes in this fleet, neither evaluated against this workload:**
+- **`HomeD13` (Kiln)** — x86_64+CUDA, RTX 3060 12GB, already the fleet's render-worker (ComfyUI with SDXL
+  base resident, FLUX.2 Klein, Wan2.1 T2V) plus a CPU-only embed worker forced off-GPU by that same VRAM
+  conflict. Adding Frigate's detector here means a third consumer competing for 12GB that's already tight
+  enough to have pushed one workload to CPU-only.
+- **The RTX 5060 Ti 16GB node (`Anvil`/`PMWIN11`)** — more VRAM headroom, but it's a Windows-only mesh node
+  (S19) deliberately scoped as "a tooling endpoint with no agent, no persona, no Matrix identity," currently
+  dedicated to the TRELLIS.2/mesh-repair pipeline. Frigate's own packaging/service model on Windows, and
+  whether it should share a GPU already earmarked for TRELLIS.2 work, is unresearched.
+
+**Open questions before this could become a real stage:** whether the fleet needs its own MQTT broker added
+(none currently referenced anywhere in this repo) or whether events should instead feed `hermes-router`
+directly; whether Frigate's own clip/recording storage would duplicate the Home Hub's existing 5-day NAS2
+archive (`/mnt/nas2-reolink`, above) rather than add value; and actual GPU contention, measured, not assumed,
+on whichever node is picked. None of this blocks anything today — `hermes-reolink.py` is live-verified and
+working end to end.
+
+**Does not help with `myQ`** — Chamberlain exposes no RTSP/local stream for Frigate to pull from; that
+camera stays cloud-locked regardless (see the myQ research, referenced from fleet memory).
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 2.5.0 | 2026-10-12 | Added a "possible future enhancement" note on Frigate local detection (idea only, not built/evaluated/scheduled): would sit alongside `hermes-reolink.py`'s on-demand path, addressing the per-channel-not-per-label cooldown and the `garden`-pointed-at-a-hallway framing issue via real zones/masks. Flagged two placement candidates — `HomeD13`'s RTX 3060 12GB (already contended, pushed one workload to CPU-only) and the RTX 5060 Ti 16GB mesh node (`Anvil`/`PMWIN11`, currently dedicated to TRELLIS.2) — neither evaluated. Does not help `myQ`, which has no local stream to pull from. |
 | 2.4.1 | 2026-09-24 | Share permissions fixed DSM-side the same day: root is now `drwxr-xr-x`, files `-rwxrwxrwx`, and `pmoney` confirmed reading real JPEG bytes on both nodes — the archive is usable by `hermes-reolink.py` as of now. 2.4.0's "cannot use this mount" caveat is superseded; the mode-000 note is kept as a first thing to check if it ever regresses. |
 | 2.4.0 | 2026-09-24 | NAS2 `ReoLink` share (the Hub's own motion-event archive: per-event JPG+MP4 in date folders, ~5 days retained) mounted read-only on both Sparks at `/mnt/nas2-reolink`, mirroring the proven `/mnt/nas2-hermes-backup` fstab shape. Two real blockers found and recorded: the NFS export initially allowlisted the NAS's own IP rather than the Sparks, so `showmount` listed it while every mount returned `access denied`; and the share root is mode `000`, so only root can traverse it — `hermes-reolink.py` runs as `pmoney` and **cannot use the mount until that is fixed DSM-side**, deliberately not worked around by running the agent as root. Also noted Synology `@eaDir` metadata directories shadowing real filenames, which breaks naive `find`. Added while sourcing real frames for an `omni`-replacement bake-off. |
 | 2.3.0 | 2026-09-11 | Third camera ("Driveway") paired to the Hub and all three renamed (`garden`, `housefront`, `Driveway`); real channels now `[0, 1, 2]`. Caught and fixed a real channel/name mismatch: the vault's `channels` field initially had 0 and 2 swapped relative to what the cameras' own on-screen overlays show — confirmed by pulling real snapshots and reading each camera's burned-in name, not just trusting metadata. Also documented that a vault read shortly after an edit can reflect the pre-edit value for up to `VAULT_AGENT_REFRESH_SECONDS` (10 min) — restarting `hermes-vault-agent.service` forces an immediate resync. Re-verified live post-fix: snapshot/AI-state for all three channels, both on-demand routing cases with real camera names. |
