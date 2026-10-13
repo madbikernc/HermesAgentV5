@@ -1,4 +1,16 @@
-// Version: 2.114.0
+// Version: 2.115.0
+//
+// 2.115.0 (2026-10-12, root-caused a real, confirmed live regression: Luke/Mark's own
+// attack_win_rate collapsed from a 0.846 baseline to 0.167 over 24h). Weapon acquisition used to
+// rely entirely on the freeform planner -- the same unreliable multi-step chain already found
+// wanting everywhere else, confirmed live via Luke's own "ACTION CRAFT wooden_sword 1" getting
+// knocked off course ("stopped on the way to a crafting table") by a self-defense interrupt, a
+// vicious cycle for a weaponless Soldier specifically (decideFightType forces flee regardless of
+// role without a weapon, and fleeing just keeps interrupting the fix). New weaponStep()/
+// runWeaponGoal(), same dedicated-runner shape as bedStep/shelterStep, reusing gatherPlanks() for
+// the wood step; dispatched in goalTick() off currentGoal.survivalPriorityItem (a structured tag
+// proposeOwnGoal() already sets), not text-matched, since the directive's own wording is a fixed
+// string this file controls.
 //
 // 2.114.0 (2026-10-12, PRIORITIES_PROPOSAL.md Tier 2 item 1a -- the communal shelter, sized per
 // the operator's own rule: "large enough for beds to suit all active bots... at least N+1 for N
@@ -4161,6 +4173,62 @@ async function gatherPlanks(handle, count) {
   return { ...(await performAction(bot, { type: "mine", block, count: Math.ceil(short / 4) }, USERNAME, handle)), action: { type: "mine", block } };
 }
 
+// Direct request, 2026-10-12 (root-caused from a real, confirmed live regression: Luke/Mark's own
+// attack_win_rate collapsed to 0.167 from a 0.846 baseline). Weapon acquisition used to rely
+// entirely on the generic freeform planner -- the SAME kind of multi-step "gather wood -> craft
+// planks -> craft table -> craft weapon" chain this project already found unreliable everywhere
+// else, which is exactly why bed/shelter/farm/ranch all got dedicated deterministic runners
+// instead. Confirmed live: Luke's own "you have no sword or axe" goal fired 360 times in 24h,
+// and a real "ACTION CRAFT wooden_sword 1" attempt was logged as "craft interrupted -- stopped on
+// the way to a crafting table" -- almost certainly a self-defense interrupt, since decideFightType
+// (below) forces flee for ANY weaponless bot regardless of role, making this a vicious cycle for
+// a Soldier specifically: no weapon means constant forced fleeing, which keeps interrupting the
+// one goal that would fix it. A dedicated runner, same shape as bedStep/shelterStep: a nearby/
+// remembered chest first, else gatherPlanks() + craft -- reliable regardless of how many times
+// self-defense knocks it off course, since (like every other dedicated runner) it just resumes
+// on the next tick rather than needing a fresh multi-step plan from the model each time.
+//
+// Deliberately narrower than the directive's own text ("ask the fleet... if neither works"):
+// skips the REQUEST-another-bot step entirely -- crafting from scratch is always achievable
+// (wood exists somewhere), while waiting on a teammate who may not have a spare either, in a
+// fresh-world bootstrap, is exactly the kind of unreliable path this fix exists to avoid. Targets
+// wooden_sword specifically (the cheapest real weapon) rather than "sword or axe" generically --
+// matching how bedStep targets one specific bed item rather than staying open-ended.
+async function weaponStep(goal, handle) {
+  if (hasWeapon(bot)) return { ok: true, text: "already have a real weapon.", done: true };
+  if (!goal.triedWeaponChest) {
+    goal.triedWeaponChest = true;
+    const looted = await performAction(bot, { type: "loot", item: "sword", count: 1 }, USERNAME, handle);
+    if (looted.ok || looted.cancelled) return { ...looted, action: { type: "loot", item: "sword" } };
+  }
+  const tableType = bot.registry.blocksByName.crafting_table;
+  const tableNear = heldCount((n) => n === "crafting_table") > 0 ||
+    (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
+  // 2 planks covers the sword (1 plank + 1 stick, and craftItem's own auto-chain already makes
+  // the stick from a spare plank -- 1.82.0's own fix, "coal + planks makes a torch" is the same
+  // mechanism) -- 4 more if she'll have to make the crafting table herself too.
+  const gathering = await gatherPlanks(handle, 2 + (tableNear ? 0 : 4));
+  if (gathering) return gathering;
+  return { ...(await performAction(bot, { type: "craft", item: "wooden_sword", count: 1 }, USERNAME, handle)),
+    action: { type: "craft", item: "wooden_sword" } };
+}
+
+async function runWeaponGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  const step = await weaponStep(goal, getHandle());
+  getHandle()?.release();
+  if (step.cancelled || replaced()) return;
+  logStep(goal, `weapon: ${step.text}`, step.ok, step.action);
+  console.log(`[${USERNAME}] weapon goal: ${step.text} (ok=${step.ok})`);
+  if (step.done) return completeGoal(goal, "got a real weapon");
+  if (step.ok) {
+    goal.consecutiveFailures = 0;
+    await saveGoalIfCurrent(goal);
+    return;
+  }
+  await failGoalStep(goal, step.text);
+}
+
 async function bedStep(goal, handle) {
   if (bot.inventory.items().some((i) => i.name.endsWith("_bed"))) {
     const placed = await performAction(bot, { type: "place_bed" }, USERNAME, handle);
@@ -4399,6 +4467,14 @@ async function goalTick() {
     }
     if (goal.farmTask === "communal_shelter") {
       await runCommunalShelterGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    // Direct request, 2026-10-12 (root-caused attack_win_rate regression -- see weaponStep's own
+    // header). Tagged by proposeOwnGoal() itself (currentGoal.survivalPriorityItem), not text-
+    // matched like farmTask: a Tier 1 survival goal's description is a fixed string this file
+    // already controls, so there's no ambiguous wording to misroute the way a regex could.
+    if (goal.survivalPriorityItem === "weapon") {
+      await runWeaponGoal(goal, takeControl, () => handle, replaced);
       return;
     }
     if (goal.targetItem && holdsItem(goal.targetItem)) {

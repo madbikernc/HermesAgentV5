@@ -1,4 +1,4 @@
-// Version: 1.27.0
+// Version: 1.28.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -73,6 +73,10 @@
 //   verification, farmTaskFor's "communal" routing, and the shared gatherPlanks() helper
 //   (index.js). Also fixes this file's own top "Version:" line, which had quietly fallen behind
 //   the Revision History below it since 1.24.0 -- a real, if harmless, drift this bump closes.
+// 1.28.0 | 2026-10-12 | Root-caused a real, confirmed live regression (attack_win_rate collapsed
+//   from a 0.846 baseline to 0.167): weaponStep()/runWeaponGoal(), a dedicated runner for weapon
+//   acquisition (a nearby chest first, else gatherPlanks() + craft), dispatched off
+//   currentGoal.survivalPriorityItem rather than the unreliable freeform planner.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -869,6 +873,54 @@ await check('Resource-gathering override: gatherPlanks crafts from a held log, e
   assert.equal(calls.length, 0, 'a real, reported failure -- not a crash');
 });
 
+await check('Resource-gathering override: weaponStep -- a chest first, else gatherPlanks + craft', async () => {
+  // 2026-10-12: root-caused a real, confirmed live regression (attack_win_rate collapsed from a
+  // 0.846 baseline to 0.167) to weapon acquisition relying entirely on the freeform planner --
+  // see weaponStep's own header for the full account, including the vicious cycle a weaponless
+  // Soldier falls into (forced to flee, which keeps interrupting the one goal that would fix it).
+  let calls = []; let armed = false;
+  const bot = { inventory: { items: () => [] }, findBlocks: () => [], blockAt: () => ({ name: 'oak_log' }),
+    registry: { blocksByName: {} } };
+  const performAction = async (b, action) => {
+    calls.push(action);
+    if (action.type === 'loot') return { ok: false, text: 'nothing in any chest' };
+    if (action.type === 'craft' && action.item === 'wooden_sword') { armed = true; return { ok: true, text: 'crafted a wooden_sword' }; }
+    return { ok: true, text: 'did it' };
+  };
+  const c = vm.createContext({ bot, USERNAME: 'Amy', hasWeapon: () => armed,
+    heldCount: (test) => bot.inventory.items().filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
+    performAction });
+  vm.runInContext(between(index, 'async function gatherPlanks(', 'async function bedStep('), c);
+
+  armed = true;
+  const done = await c.weaponStep({}, {});
+  assert.equal(done.done, true, 'already has a real weapon -- immediately done');
+  assert.equal(calls.length, 0, 'no action taken when already armed');
+  armed = false;
+
+  const goal = {};
+  bot.findBlocks = () => [{ x: 1, y: 64, z: 1 }]; // a tree, for gatherPlanks' own fallback
+  // A failed chest loot (bedStep's own "if ok or cancelled" convention, reused verbatim) falls
+  // straight through to gathering within this SAME call, not a separate tick.
+  const first = await c.weaponStep(goal, {});
+  assert.equal(goal.triedWeaponChest, true, 'the chest check ran exactly once');
+  assert.equal(first.action.type, 'mine');
+  assert.equal(calls.filter((a) => a.type === 'loot').length, 1);
+  assert.equal(calls.at(-1).count, 2, 'ceil(6/4) logs -- 2 planks for the sword, 4 more for her own table');
+
+  const second = await c.weaponStep(goal, {}); // chest already tried -- never retried
+  assert.equal(second.action.type, 'mine');
+  assert.equal(calls.filter((a) => a.type === 'loot').length, 1, 'still just the one attempt');
+
+  bot.inventory.items = () => [{ name: 'oak_planks', count: 10 }]; // now holds enough
+  const crafted = await c.weaponStep(goal, {});
+  assert.equal(crafted.action.item, 'wooden_sword');
+  assert.equal(armed, true);
+
+  assert.match(index, /if \(goal\.survivalPriorityItem === "weapon"\) \{\s+await runWeaponGoal/,
+    'goalTick actually dispatches a weapon-tagged goal to the dedicated runner, not the freeform planner');
+});
+
 await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims the way the others do', async () => {
   const bedNames = []; let shelterCount = 0; let beehive = 0; let bred = false;
   let ironTools = false; let communalDone = false;
@@ -1600,8 +1652,10 @@ await check('Farm goals: a missing hoe is fetched (loot, then craft) and the har
 });
 
 await check('Farm goals: holding a crop, or a DONE claim, never finishes one -- only a harvest', async () => {
-  assert.match(index, /goal\.farmTask \?\?= farmTaskFor\(goal\.description\);[\s\S]{0,900}if \(goal\.targetItem && holdsItem\(goal\.targetItem\)\)/,
-    'farm/ranch routing runs before the "already holding the target" shortcut and the skill lookup');
+  // 1400, not 900: 2026-10-12's new weapon-goal dispatch (its own header comment included) sits
+  // in this same block, between farmTask routing and the "already holding the target" shortcut.
+  assert.match(index, /goal\.farmTask \?\?= farmTaskFor\(goal\.description\);[\s\S]{0,1400}if \(goal\.targetItem && holdsItem\(goal\.targetItem\)\)/,
+    'farm/ranch/weapon routing runs before the "already holding the target" shortcut and the skill lookup');
   const w = farmGoalWorld([{ ok: false, text: "couldn't start a farm: tilled 0, planted 0 (the grass_block didn't turn to farmland)." }]);
   await w.tick(); await w.tick(); await w.tick();
   assert.deepEqual(w.done, [['abandoned', undefined]], 'three real failures give up; nothing claims done');
