@@ -1,6 +1,6 @@
 # Lessons Learned
 
-**Version:** 1.38.0
+**Version:** 1.39.0
 
 **Purpose:** this document holds the *why* — the incidents, dead ends, and measurements that justify the
 design decisions in `IMPLEMENTATION_PLAN.md`. That document says what the fleet does and what gets built
@@ -639,6 +639,10 @@ Short enough to remember; each traces to a section above.
    contents before including it in the repo.
 7. **Mark superseded documents explicitly rather than leaving them to be discovered wrong.** (§1, the 2830-line
    plan doc)
+8. **A fleet-wide register belongs in one shared doc, referenced by every prompt it governs, not copy-pasted
+   drift.** `STYLE_GUIDE.md`'s STE100-lite rule (short declarative sentences, active voice, consistent
+   terminology) applies to every summarization and email prompt across the fleet; each prompt points back at
+   it instead of restating it, so one update stays one update. (direct operator request, 2026-10-13)
 
 ---
 

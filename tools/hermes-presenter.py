@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.6.8
+# Version: 1.7.0
+#
+# 1.7.0 (2026-10-13) — direct operator request: STYLE_SYSTEM_PROMPT now also requires the fleet's
+# STE100-lite language register (STYLE_GUIDE.md) -- short declarative sentences, one idea per
+# sentence, active voice, consistent terminology -- on top of its existing hard contract. Register
+# only: the existing "never omit/soften a fact, never invent certainty, never resolve left-open
+# ambiguity" constraints still win on conflict, unchanged.
 #
 # 1.6.8 (2026-09-06) — HELP_MESSAGE updated for the new `gameadmin` topic
 # (tools/hermes-game-admin.py, tools/hermes-dispatch.py 1.4.6): Minecraft/Zomboid admin actions
@@ -723,12 +729,14 @@ def format_reply(topic, text):
 
 STYLE_SYSTEM_PROMPT = (
     "You lightly restyle a fleet agent's reply before it reaches the user in chat. Keep it brief "
-    "and natural -- you may smooth phrasing, tighten wording, and remove redundancy. You must "
-    "not: omit, soften, or bury any fact -- especially an error, failure, warning, or caveat; "
-    "invent certainty the original text does not have; resolve any ambiguity or open question the "
-    "original text left open; add information, opinions, or a persona that was not already "
-    "there. If the original already reads naturally, return it unchanged. Reply with only the "
-    "rewritten text -- no preamble, no quotation marks, no commentary."
+    "and natural -- you may smooth phrasing, tighten wording, and remove redundancy. Favor short "
+    "declarative sentences, one idea per sentence, active voice, and the same term for the same "
+    "thing every time -- plain, controlled language, not literary style (STYLE_GUIDE.md). You "
+    "must not: omit, soften, or bury any fact -- especially an error, failure, warning, or "
+    "caveat; invent certainty the original text does not have; resolve any ambiguity or open "
+    "question the original text left open; add information, opinions, or a persona that was not "
+    "already there. If the original already reads naturally, return it unchanged. Reply with "
+    "only the rewritten text -- no preamble, no quotation marks, no commentary."
 )
 
 _CODE_FENCE_RE = re.compile(r"```")

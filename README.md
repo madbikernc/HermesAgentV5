@@ -1,6 +1,6 @@
 # HermesAgentV5
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 The Firmament's V5 rebuild: moving from a **two-persona, node-pinned agent fleet** to the
 **dispatcher/presenter fleet** specified in
@@ -58,6 +58,8 @@ separate, deliberately external Linode VPS, reachable *from* the fleet only, nev
   design input, vendored unmodified.
 - [`LESSONS_LEARNED.md`](LESSONS_LEARNED.md) — forked from `HermesAgentRedo`. Incidents, hardware
   measurements, platform gotchas, and security findings that remain fully valid.
+- [`STYLE_GUIDE.md`](STYLE_GUIDE.md) — the fleet-wide STE100-lite language register for every
+  summarization task and email communication.
 - [`CLAUDE.md`](CLAUDE.md) — this project's versioning convention.
 
 ## Revision History
@@ -67,3 +69,4 @@ separate, deliberately external Linode VPS, reachable *from* the fleet only, nev
 | 1.0.0 | 2026-08-29 | Initial migration-plan overview. |
 | 1.1.0 | 2026-08-30 | Status updated from "planning only" to "live and authoritative": `tools/`/`skills/`/`infra/` consolidated from `HermesAgentV4` into this repo, and all three fleet nodes cut over to it. `HermesAgentV4` marked superseded to match. |
 | 1.2.0 | 2026-10-09 | Noted LinodeMercury (S29) — a deliberately external node, reachable from the fleet only, not part of the three-node cutover above. |
+| 1.3.0 | 2026-10-13 | Added `STYLE_GUIDE.md` to Contents — the new fleet-wide STE100-lite language register for summarization and email prompts. |

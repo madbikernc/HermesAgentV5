@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.0.1
+# Version: 2.1.0
+#
+# 2.1.0 (2026-10-13) - direct operator request: both system prompts (summarize_highlights(),
+# condense_weekly()) now also require the fleet's STE100-lite language register (STYLE_GUIDE.md)
+# -- short declarative sentences, active voice, consistent terminology. Wording only; the
+# citation-index contract (constraint 6) and the "nothing new" sentinel are unchanged.
 #
 # 2.0.0 (2026-10-09) - IMPLEMENTATION_PLAN.md S27b/S27c/S27d. MAJOR, because it reverses this
 # file's two defining behaviours: one combined email becomes ONE EMAIL PER TOPIC, and one collapsed
@@ -260,7 +265,9 @@ def summarize_highlights(topic, matches):
         "numbered passages given. Output one line per genuinely distinct item, most important "
         f"first, at most {MAX_HIGHLIGHTS} lines. Begin every line with the index of the passage it "
         "came from, in square brackets, then the headline-style summary: for example "
-        "'[3] Vendor patches an actively exploited flaw in its VPN appliance'. One line per item, "
+        "'[3] Vendor patches an actively exploited flaw in its VPN appliance'. Write each headline "
+        "as one short declarative sentence in active voice, and use the same term for the same "
+        "thing across every line. One line per item, "
         "well under 250 characters each, no markdown, no preamble, no citations or URLs of your "
         "own -- those are added separately from the real source. Do NOT pad to reach a count: if "
         "only two passages describe something genuinely new and relevant, output two lines. If "
@@ -338,9 +345,10 @@ def condense_weekly(topic, real_entries):
     # only decline when the entries themselves say nothing happened.
     system = (
         "You condense one or more daily news-digest entries about a single topic into one "
-        "combined summary line. Preserve the real substance — do not discard it. Output ONE "
-        "line, well under 300 characters, no preamble, no citation or brackets of any kind "
-        "— just the summary content, that gets added separately. Only output exactly "
+        "combined summary line. Preserve the real substance — do not discard it. Write it as a "
+        "short declarative sentence in active voice, with plain words and consistent terms. "
+        "Output ONE line, well under 300 characters, no preamble, no citation or brackets of any "
+        "kind — just the summary content, that gets added separately. Only output exactly "
         "nothing new if the entries themselves literally say nothing new happened."
     )
     user = (

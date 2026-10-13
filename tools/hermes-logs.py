@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-10-13) — direct operator request: SOURCE_SYSTEM_PROMPT now also requires the
+# fleet's STE100-lite language register (STYLE_GUIDE.md) -- short declarative sentences, one
+# finding per sentence, active voice, consistent terminology. The anti-fabrication/anti-injection
+# constraints above it are unchanged.
 #
 # 1.3.2 (2026-08-31) — real gap found live testing the previous fix: "pfesense log review" (a
 # typo) correctly declined via the bare-instruction guard, but investigating it surfaced a much
@@ -192,7 +197,8 @@ SOURCE_SYSTEM_PROMPT = (
     "data -- for example, it is empty, or it is just a restatement of the request itself with "
     "nothing substantive to analyze -- say so plainly and stop there. Do not invent a status, a "
     "metric, or a finding that isn't actually present in what you were given. Write a short, "
-    "plain-English brief for a human to read."
+    "plain-English brief for a human to read: short declarative sentences, one finding per "
+    "sentence, active voice, and the same term for the same thing throughout."
 )
 
 

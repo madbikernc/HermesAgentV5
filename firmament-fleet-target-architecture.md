@@ -1,5 +1,7 @@
 # Firmament Fleet — Target Architecture Specification
 
+**Version:** 1.1.0
+
 **Purpose of this document:** This is a *target state* specification, derived
 from a design conversation. It has **not** been checked against the running
 implementation. A reviewing model should treat every section as a proposal to
@@ -300,6 +302,22 @@ Every response costs an extra model pass. `[PROPOSED]` passthrough-by-default:
 technical output (log dumps, stack traces, structured data) goes out unstyled;
 only chat-shaped replies get the voice. Small models doing personality *plus*
 faithful technical summarization is exactly where distortion appears.
+
+### 6.4 Language register `[DECIDED]` — STE100-lite, fleet-wide
+
+Direct operator decision, applying to every summarization task and every
+outbound email communication across the fleet, not just the presenter:
+write in roughly 80% of the ASD-STE100 (Simplified Technical English)
+discipline — short declarative sentences, one action or idea per sentence,
+active voice, consistent terminology, plain approved-list-style vocabulary.
+Full rule and the current inventory of prompts it governs: `STYLE_GUIDE.md`.
+
+This is a register, not a content rule — it sits underneath §6.2's hard
+contract and never overrides it. The presenter is one of several places
+this applies: the §5.2 scheduled-reporter persona's periodic email/report
+output is in scope by the same decision, as is any specialist's own
+summarization prompt (retrieval synthesis, web-search synthesis, log
+briefs, news-digest highlights).
 
 ---
 
@@ -673,3 +691,12 @@ Sections marked `[DECIDED]` reflect explicit operator choices. Sections marked
 `[PROPOSED]` are design recommendations that the operator has not ratified and
 that a reviewing model should feel free to challenge on contact with the real
 implementation.
+
+---
+
+## Revision History
+
+| Version | Date | Change |
+|---|---|---|
+| 1.0.0 | 2026-08-29 | Baseline — vendored unmodified from the original design conversation. |
+| 1.1.0 | 2026-10-13 | Added §6.4 — STE100-lite language register, a direct operator decision applying fleet-wide to all summarization tasks and email communications, not only the presenter. First edit to this document since it was vendored; everything above this entry is still the original design input, diffed against reality per this document's own stated purpose, not rewritten. |
