@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.39.0
+**Version:** 3.40.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -134,7 +134,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S18 | RoCE fabric: clear the gate S1 set | ✅ Closed 2026-09-24 with its exit gate deliberately **missed** — RoCE fixed and persistent at 13.0 GB/s (unbonded `f1`, S18a; S18b never needed), but GB10 has no GPUDirect RDMA, so `TP=2` stays non-viable and MiMo does not proceed |
 | S19 | `Anvil` — mesh node (native-ComfyUI TRELLIS.2 on a Windows 5060 Ti) + viable-STL repair chain | 🔨 Everything but the node built + tested end to end (2026-09-27); node not stood up. Node identified as `PMWIN11`, route corrected to native ComfyUI (2026-10-03); models in place and win_amd64 gate closed (2026-10-04); workflow built and generating on the node, and the repair chain now yields a viable STL from real output (2026-10-08) |
 | S20 | `hermes-model-scout` — daily discovery → role-fit comparison → tracked benchmark backlog | ✅ Built, deployed and live-verified on `spark` 2026-10-08 (`87ff883`) — daily timer + decision gate running, 92 offline checks, one real candidate open; six live findings; **S20d still open by design** (gated on a week of runs), and the S22-before-S20 constraint was **not** honored |
-| S21 | `hermes-fleetops-ui` — base process-management web UI | 📋 Planned 2026-10-08, not executed |
+| S21 | `hermes-fleetops-ui` — base process-management web UI | ✅ **Done 2026-10-09/10.** Live on `spark` behind `tailscale serve` TLS at `https://spark.tail1a534.ts.net:8103/`, Basic Auth, five read-only pages plus the backlog's decide buttons (S21f, on the operator's decision that the Matrix channel is only *perceived* more secure) with multi-select (S21g); 201 offline checks. Corrected three plan assumptions live: 8101 was `hermes-buzz`, hermes-memory's `/tasks` is POST-only, and benchmark rows hold a `suites` dict not a `scores` blob |
 | S22 | Layer 2 re-specified — the deployed screener missed 14 of 18 injections | ✅ **Done 2026-10-09.** Layer 2 is `proventra/mdeberta-v3-base-prompt-injection` (279M, MIT, CPU, in-process): **17/18 alone, 18/18 composite at tool role, 6/6 indirect** against the incumbent's 4/18 and 0/6, at 0% failures / p50 317 ms under 6-way concurrency. Layer 1's `SYSTEM:` gap fixed in the same pass. Two one-line rollbacks retained |
 | S23 | The Minecraft bot fleet enters this plan | 📋 Planned 2026-10-08, not executed (the fleet itself is live since 2026-09-13) |
 | S24 | Currency audit — what S13/S14 would find today | 📋 Planned 2026-10-08, not executed — nine findings, one questions S16's recall number |
@@ -142,7 +142,14 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S26 | `hermes-feed-reader` — public AI/security RSS feeds into the existing RAG/news-digest pipeline | ✅ Built, deployed and live-verified on `spark` 2026-10-08; **exit gate met 2026-10-09** on a confirmed digest line citing a real CISA advisory — daily timer, 65 offline checks, first run 185 entries / 263 chunks from all 14 feeds, 0 failures; eight live findings; the S22-before-S26 constraint was **not** honored |
 | S27 | `hermes-news-digest` re-spec — six fixed priority-ordered topics, top-20-of-50 per email, daily | ✅ **Done 2026-10-09.** Six per-topic emails sent live (5 of 6 with news, 0 failures), 26 individually-cited highlights stored, schema migrated with the v1 table kept. S27f added a router analysis-screening mode after S22d's working screener blocked the fleet's own analysis prompts at score 1.000 |
 | S28 | **Optional** — security-benchmark suites (OWASP Juice Shop, WebGoat) in the existing harness, then a VulnHunter bake-off across the local roster | 📋 Planned 2026-10-09, optional, not executed — gates nothing; written from this repo, no fleet node was reachable |
+| S29 | LinodeMercury — the fleet's first deliberately external, one-way-reachable node | ✅ Done 2026-10-09 |
+| S30 | The `aide` exclude gap S21h found, fixed on all three fleet nodes | ✅ Done 2026-10-09 |
 | S31 | **Optional** — `super` candidate bake-off: GLM-5.3-Flash (`autotrust`'s two DGX-Spark GGUF builds) vs. incumbent Huihui-GLM-4.7-Flash-abliterated | 📋 Planned 2026-10-13, optional, not executed — gated on real `llama.cpp` `glm5-next` architecture support; gates nothing else; written from this repo, no fleet node was reachable |
+| S32 | `hermes-news-digest` — a failed run must not report as a quiet day | 📋 Planned 2026-10-13, **not executed; the urgent one** — 5 of 6 topics failed with 503 on 2026-10-12 and it logged `0 failed` and emailed "nothing new" |
+| S33 | `hermes-guard-report` — the window is 500 rows, not 26 hours | 📋 Planned 2026-10-13, not executed — hermes-memory caps `limit` at 500; two of four daily runs hit the cap and reported 0 blocks while blind |
+| S34 | Bot-to-bot chat is screened as player chat, and is being dropped | 📋 Planned 2026-10-13, not executed — 8 Mayor directives blocked at 0.970 on 2026-10-13 |
+| S35 | Backend launch configuration (`/opt/llama.cpp/start-*.sh`) under version control | 📋 Planned 2026-10-13, not executed — model paths, `--ctx-size` and `--parallel` exist only on the hosts |
+| S36 | `coder2` — make it measurable at all | 📋 Planned 2026-10-13, not executed — exceeded a 90-minute ifeval timeout; emits reasoning tokens |
 
 ---
 
@@ -3470,6 +3477,8 @@ actually calling, so activity volume is reported beside it:
 | 18:36-18:46, `--parallel 4` | **6200** | **0** |
 | 18:46-18:56, `--parallel 4` | **7196** | **0** |
 
+Three full days later the result holds: **1968 bot LLM timeouts on 2026-10-10** (inflated by the benchmark window that deliberately starved the fleet) against **0, 0 and 0** on 2026-10-11, 10-12 and 10-13. The two ten-minute windows above were what existed when this was first committed; three clean days supersede them.
+
 The bots do roughly 10-30x more and fail none of it, which is the starvation diagnosis
 confirmed: they had been spending their time queued on one slot rather than acting.
 muse sustained 40.9 tok/s aggregate at concurrency 4 with the fleet live.
@@ -3488,6 +3497,141 @@ follow-up worth doing.
 
 **One readiness gotcha, since it produced a confusing 503:** `/v1/models` answers before the model
 has loaded. Poll `/v1/chat/completions` for a 200 instead — dispatch needed ~25 seconds.
+
+---
+
+### S32 — `hermes-news-digest`: a failed run must not report as a quiet day
+
+**Planned; not executed.** Found 2026-10-13 while reviewing the plan for new items.
+
+**What happened.** On 2026-10-12 the digest failed **five of its six topics** with
+`HTTP Error 503: Service Unavailable`, then sent six "nothing new" emails and logged
+`0/6 topic(s) had news, 6 email(s) sent, 0 failed`. A near-total failure was reported to the
+operator as good news. The bots were healthy that day (zero LLM timeouts), so this was not
+contention.
+
+**Why.** 503 is `llama-server`'s reply while a model is still loading, and `super` — which
+`hermes_rag_common.router_chat()` defaults to — is `on_demand`. Two gaps compound:
+
+1. `hermes-router.py`'s `wake_role()` blocks until the **wake job** reports success, which is when
+   `systemctl start` returns — not when the model can serve a request. The router then forwards
+   into a loading backend and passes the 503 straight through.
+2. `router_chat()` makes a single `urlopen` with **no retry**, so that 503 ends the topic.
+
+This exact trap is already written down in `infra/model-benchmark/README.md` (3.1.0): "`/v1/models`
+answers before the model is loaded. Poll `/v1/chat/completions` for a 200 instead" — learned on
+2026-10-10 and never applied to the wake path, which is the lesson worth drawing.
+
+**The reporting half is the more dangerous half.** S27 decided, correctly, that "nothing new is the
+absence of rows, never a sentinel". That decision now makes an infrastructure failure
+**indistinguishable from a quiet news day** in both the email and the summary line. A run that could
+not reach the model has not found that there is no news.
+
+**Scope.** (a) Make the wake path wait for real readiness — a 200 from the backend, not a started
+unit — which fixes every on-demand caller, not just the digest. (b) Give `router_chat()` a bounded
+retry with backoff on 503 specifically. (c) Separate "no news" from "could not run" in the summary
+line, the exit status, and the email: a topic that errored must never render as "nothing new".
+(d) A test that a 503 on every topic exits non-zero and does not send a nothing-new email.
+
+**Exit gate:** a run with a deliberately unavailable backend reports failure, not a quiet day.
+
+---
+
+### S33 — `hermes-guard-report`: the window is 500 rows, not 26 hours
+
+**Planned; not executed.** Found 2026-10-13, by reading the tool's own output.
+
+`hermes-guard-report.py` fetches with `limit=SCAN_LIMIT` (default 1000). `hermes-memory.py` line 544
+caps it: `limit = min(int(...), 500)`. So the "last 26h" window is really **the newest 500 verdict
+rows**, and the report never says so.
+
+**It has already misreported.** Two of the four daily runs since 2026-10-10 logged
+`0 block(s), 500 analysis-allowed` — exactly the cap. On those days the report could not see past
+the newest 500 rows, which S27f's exemptions now fill with `analysis-allowed` traffic, so any block
+older than that was invisible. **It reported zero blocks because it was blind, not because nothing
+was blocked.** S22e built this tool precisely so screening could not fail silently; the tool can now
+fail silently in the same way.
+
+**Scope.** Page the fetch (or add a server-side `since` filter to `hermes-memory`'s `/turns`, which
+is the better fix and helps every caller), and **until then make truncation loud**: if the fetch
+returns exactly the cap, say in the report and in the exit status that the window is incomplete. A
+monitor that cannot see the whole window must never print a reassuring number for it.
+
+**Exit gate:** a day with more than 500 verdicts reports the true block count, or says plainly that
+it cannot.
+
+---
+
+### S34 — Bot-to-bot chat is screened as player chat, and is being dropped
+
+**Planned; not executed.** Recorded 2026-10-09 as a finding, deliberately not fixed then; it has
+since crossed the alert threshold, which is why it becomes a stage.
+
+The bots' chat path screens `<speaker> message` verbatim, correctly: a player typing an injection
+into Minecraft chat is exactly what Layer 2 exists to catch, and S23/3.25.0 deliberately left that
+path screened. But the **Mayor coordinates with the other bots over the same chat**, so its
+directives are classified as injections and dropped:
+
+- 2026-10-09: `<Mayor> New objective: I'm going to gather resou` — 3 blocks at score 1.000
+- 2026-10-13: `<Mayor> Actually, I do have a sword right here,` — **8 blocks at 0.970**, over
+  `ALERT_THRESHOLD`
+
+So inter-bot coordination fails silently and intermittently, and the fleet has no idea.
+
+**Scope.** The fleet knows its own roster (`minecraft-bot-*` usernames, and the Mayor's identity is
+already special-cased elsewhere in `index.js`). Distinguish a speaker that is one of our own bots
+from a speaker that is a player, and treat only the latter as a request path. **The roster check
+must be an allowlist of known bot usernames, never a pattern** — a player can name themselves
+`Mayor`, and a name-shaped check would hand any player the unscreened path. Worth stating because it
+is the obvious wrong implementation.
+
+**Exit gate:** a Mayor directive reaches its target bot; a player message containing the same text
+is still blocked. Both asserted in `unit.test.mjs`.
+
+---
+
+### S35 — Backend launch configuration under version control
+
+**Planned; not executed.** Found 2026-10-10 while applying `--parallel 4`.
+
+Every `llama-server`'s model path, `--ctx-size`, `--n-gpu-layers`, `--reasoning` flag and (since
+2026-10-10) `--parallel` live in `/opt/llama.cpp/start-<role>.sh` on each node. **Nothing in this
+repo tracks them.** The units in `infra/` reference those scripts by path; the scripts themselves are
+untracked, so the fleet's model-serving configuration exists only on the hosts.
+
+That means a node rebuild cannot reproduce the fleet from this repo, a drift like S20f(b)'s
+`--parallel 4` is recorded only in prose, and nothing can diff intended against actual.
+
+**Scope.** Bring the `start-*.sh` scripts into `infra/<role>/`, deploy them from the repo like every
+other unit, and add a check that the running process's flags match the tracked script — the gap that
+let `--parallel` default to 1 fleet-wide while every README implied otherwise. Backups from the
+2026-10-10 change (`start-muse.sh.bak-2026-10-10`, `start-dispatch.sh.bak-2026-10-10`) are the
+before-state if the tracked copies need reconciling.
+
+**Exit gate:** `start-*.sh` for all six roles tracked here and deployed from here, with a drift check.
+
+---
+
+### S36 — `coder2`: make it measurable at all
+
+**Planned; not executed.** Found 2026-10-10 during S20f.
+
+`coder2` is the one role with no ifeval baseline: it exceeded a 90-minute timeout on 75 prompts.
+The cause is a property this repo already documents — `hermes-minecraft-triage.py` had to raise its
+own token budget because Muse-Glimmer-30B "emits extended `reasoning_content` before its final
+answer". At ~11 tok/s with a reasoning preamble on every prompt, no reasonable timeout suffices.
+
+Its only recorded figure is a candidate-mode **0.28**, far below every other role, which is worth
+confirming rather than trusting — a reasoning model scored on a strict-format suite may be losing to
+the format rather than the task.
+
+**Scope.** Re-run with a capped `max_tokens` (and/or `--reasoning off`, which the other backends
+already set and this one may not), confirm whether 0.28 reproduces, and if it does, decide whether
+ifeval is measuring anything meaningful for a reasoning model before treating the number as a verdict
+on the role.
+
+**Exit gate:** a completed `coder2` ifeval run, or a written finding that ifeval is the wrong suite
+for it.
 
 ---
 
@@ -3619,6 +3763,33 @@ header status line.
    recorded list, not as "fix 77 tools"; the sweep's deliverable is knowing, which nobody does today.
 3. Several rows are decisions rather than tasks (2, 3, 8, 9). Those need the operator, not a session, and
    should be asked as a batch rather than one at a time across four sessions.
+
+---
+
+#### What a currency audit finds in the plan itself (2026-10-13)
+
+S24 was written to audit the *fleet*. Reviewing it found that **this document's own
+self-description has drifted**, in three different directions at once — which matters more than a
+stale tool reference, because §0 is the index every reader trusts.
+
+1. **§0's table is wrong about executed work.** S21 reads `📋 Planned 2026-10-08, not executed`
+   while `hermes-fleetops-ui` is live on spark, serving over TLS with decide buttons and 201 offline
+   checks. **S29 and S30 have no rows at all** — the table jumps S28 to S31 — though both are
+   executed stages with full sections.
+2. **Four stage headers claim they were never executed.** S20, S22, S26 and S27 each open with
+   "**Planned; not executed.**" and a specific false claim — S27's says "`hermes-news-digest.py`
+   1.0.2 is live and unchanged", against an actual 2.1.0. Their execution records exist, as `####`
+   substages far below, so the summary and the record contradict each other. A reader who stops at
+   the stage header concludes that none of it happened.
+3. **§7 carries resolved risks as open.** Risk 6 ("Prompt Guard 2's availability and licence are
+   unverified") was obsoleted by S22 replacing the checkpoint entirely. Risk 2 is answered by data
+   this fleet has held since 2026-08-29 — see §7 risk 2, now closed.
+
+**Why this happens, structurally:** an execution record is appended as a new substage and a new
+Revision History row, and neither of those touches the stage's own opening line or §0's row. Nothing
+enforces agreement. The §0 rows for S29/S30 and S32-S36 and the S21 correction were made while
+writing this; the four stale stage headers and §7 risk 6 are **left as this audit's work**, not
+quietly fixed, so the audit has something to verify against.
 
 ---
 
@@ -4770,9 +4941,16 @@ reference chain across two retired repos settles it in favour of forking.
    over RDMA negotiates real RoCE but fails mid-transfer (`IBV_WC_RETRY_EXC_ERR`) — reachable, not reliable.
    Treat every merged-mode plan as socket-bound (~2 GB/s) until someone does the RoCE lossless-fabric work
    (PFC/ECN) — that's unscoped, new work, not carried by S1. Detail in S1's execution log above.
-2. **The dispatcher checkpoint does not exist on disk yet.** A stock Qwen3.6-35B-A3B Q8 is a ~35 GB
-   download. The abliterated build of the same base is already there as `muse`, which makes an A/B on
-   identical architecture unusually cheap — take that measurement, it directly tests target §12.2.
+2. **RESOLVED 2026-10-13 — the measurement this risk asked for exists, and was reproduced.** The
+   dispatcher has been live on a stock `Qwen3.6-35B-A3B-UD-Q4_K_M` since S6, and the A/B against the
+   abliterated build of the same base (`muse`, same quant) has now been run twice, six weeks apart,
+   with identical results both times: **ifeval@75 stock 0.9067 vs. abliterated 0.8933**, on
+   2026-08-29 and again on 2026-10-09. **Abliteration costs 1.3 points, −1.5% relative**, on
+   identical architecture and quantisation. That is the direct test of target §12.2 this risk called
+   "unusually cheap", and the data sat unread in `history.jsonl` for six weeks — which is itself the
+   argument for S20f's baselines and for S24. One caveat before it is treated as a general figure:
+   ifeval measures instruction-following, which is the capability abliteration is most likely to
+   touch, so it is an upper-ish bound rather than a verdict on all capability.
 3. **S8 is irreversible.** Everything before it is additive.
 4. **V4 §9 risks 15/16 are stale — both checked during S1 and found not to hold.** `/mnt/nas2-hermes-backup`
    (the exact path `hermes-model-archive.py` expects) is mounted and working on spark-2 today, and
@@ -4865,3 +5043,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.38.0 | 2026-10-10 | **S20f — the incumbent baselines, and the one-slot backend behind the bots' LLM timeouts.** Five of six roles measured on ifeval @75 — dispatch 0.9067, omni 0.9067 (first ever), muse 0.8933, coder 0.8800, super 0.7600 (from 0.72); **three reproduce their historical figure exactly**, which is the evidence the harness is stable, and **super sits 14 points below the rest** while being the role the digest and canary report both use. `coder2` cannot finish in 90 minutes because Muse-Glimmer-30B emits reasoning tokens, a property `hermes-minecraft-triage.py` already had to budget for. Baselines came first because a candidate's score is meaningless without the incumbent's and the fleet had 33 history entries, newest 2026-09-20, with omni never measured. **Three obstacles, each diagnosed:** Layer 2 classifies ifeval prompts as injections at **p=0.997** (the fifth component S22d has broken — found by S22e's own guard report in one command) and `max_retries=3` turns one block into a failed suite, so runs go direct via `--endpoint`, which also measures the model rather than screening overhead; going direct then makes a role invisible to `hermes-model-idle-sleep.sh`, which unloads an on-demand backend after `IDLE_SECONDS`=900 judged from a stamp **only the router writes**, killing coder and coder2 just past the 15-minute mark; and every backend ran **one slot**. **The finding worth keeping:** muse could not answer a 32-token probe in 150s yet served **53.6 tok/s the moment the bots stopped** — never slow, just starved. `--parallel 4` on muse and dispatch now gives **51.9 tok/s aggregate at concurrency 4 (from 13.0) and 125.4 (from 58.8)** with per-request latency roughly flat, since `--ctx-size` is the total KV split across slots and the fleet-wide peak prompt is 4309 against 65536 allocated. **`super` stays at one slot** because `router_chat()` defaults to it and the digest sends it 15-20k tokens. Cost stated plainly: benchmarking a shared resident role doubled the bots' timeouts, the run was stopped for that reason, and the fleet was down ~3h to finish — exactly what SKILL.md's human-attended rule protects against. Also fixed a driver bug that reported muse's 90-minute timeout as `rc=0` (`$?` after a pipeline reads `tail`). Drift recorded: these flags live in untracked `/opt/llama.cpp/start-*.sh`, with backups. Minor bump — a substage executed. |
 | 3.38.1 | 2026-10-10 | **S20f(b) confirmed by measurement, with a control.** Bot LLM timeouts went from 20/9/2 per 10 minutes on one slot to **0 and 0** across two complete windows on `--parallel 4` — and because zero is meaningless if the bots were idle, activity is reported beside it: bot LLM-ish log lines rose from 171-726 to **6200-7196** over the same windows. The bots do roughly 10-30x more work and fail none of it, which confirms the starvation reading rather than merely being consistent with it: they had been spending their time queued on a single slot instead of acting. muse sustained 40.9 tok/s aggregate at concurrency 4 with the fleet live. Patch bump — a measurement added, no guidance changed. |
 | 3.39.0 | 2026-10-13 | Added **S31** (planned, not executed, optional): a `super` candidate bake-off between the incumbent (`Huihui-GLM-4.7-Flash-abliterated`, ifeval@75 0.76, fourteen points below the fleet's other measured roles per S20f) and two Hugging Face GGUF builds `HermesAgentV4`'s `infra/model-watch/` routine surfaced, both from `autotrust` and both explicitly targeted at this fleet's own DGX Spark hardware: a 79.1 GiB single-Spark Flash build (the realistic candidate) and a 149.7 GiB full build sized for two Sparks over ConnectX-7 (a stretch goal, since a dual-Spark split falls under §5.1's existing "S18 before any tensor-parallel deployment" constraint even though llama.cpp's RPC mechanism differs from the NCCL path S18 actually measured). Gated up front on real `llama.cpp` `glm5-next` architecture support reaching a tagged release — evidence is contradictory on both PR number (#27773 vs. #27754) and build tag, so a new `llama_cpp_glm5_next` entry was added to `HermesAgentV4/infra/model-watch/alert-state.json` alongside the existing `qwen4exp` tracking, same "open PR is not enough" rule. Also flags a real tooling gap before anyone runs it: `hermes-benchmark-model.sh`'s candidate mode has no knowledge of `llama-super.service`, the same class of gap the qwen4-coder runbook already documented for `coder2`. Minor bump — new stage added, nothing prior reversed. |
+| 3.40.0 | 2026-10-13 | **Plan review for new items: five new stages, a standing risk closed, and the plan's own drift recorded.** Grounded in three days of live evidence rather than a re-read. **S32 (urgent)** — on 2026-10-12 the news digest failed **5 of 6 topics with HTTP 503**, then emailed "nothing new" six times and logged `0 failed`: `super` is on-demand, `wake_role()` waits for `systemctl start` rather than for a servable model, and `router_chat()` has no retry — and S27's correct "absence means nothing new" rule makes the failure indistinguishable from a quiet day. The readiness trap was already written down in `infra/model-benchmark/README.md` on 10-10 and never applied to the wake path. **S33** — `hermes-guard-report` asks for 1000 turns and `hermes-memory` caps `limit` at 500, so its "last 26h" is the newest 500 rows; two of four daily runs logged exactly `500 analysis-allowed, 0 blocks` — blind, not quiet, in the very tool S22e built so screening could not fail silently. **S34** — the 2026-10-09 bot-to-bot finding has crossed the alert threshold (8 Mayor directives blocked at 0.970), so inter-bot coordination is being dropped; the spec requires a username allowlist, never a pattern, since a player can call themselves Mayor. **S35** — every backend's model path, ctx-size and the new `--parallel` live only in untracked `/opt/llama.cpp/start-*.sh`. **S36** — `coder2` has no baseline because it emits reasoning tokens; its lone 0.28 needs confirming before it is read as a verdict. **§7 risk 2 closed with its own answer:** the stock-vs-abliterated A/B it called "unusually cheap" was measured twice, six weeks apart, identically — ifeval@75 **0.9067 stock vs 0.8933 abliterated, so abliteration costs 1.3 points (−1.5%)** on identical architecture and quant — and sat unread in `history.jsonl`, which is the argument for both S20f and S24. **S24 gains the plan's own drift:** §0 called S21 unexecuted while it serves TLS in production, S29/S30 had no §0 rows at all, four stage headers (S20/S22/S26/S27) still open with "Planned; not executed" and a specific false claim each, and §7 risk 6 is obsolete — the structural cause being that an execution record appends a substage and a Revision History row and touches neither the stage's opening line nor §0. §0 rows added/corrected here; the four stale headers and risk 6 left for S24 to verify against. Also folded three clean days of zero bot timeouts into S20f(b), superseding the two ten-minute windows it shipped with. Minor bump — stages added, one risk resolved, no prior guidance reversed. |
