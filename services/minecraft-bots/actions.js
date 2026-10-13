@@ -1,4 +1,17 @@
-// Version: 1.89.0
+// Version: 1.90.0
+//
+// 1.90.0 (2026-10-13, direct report after a full fleet reset: "combat seems better, but
+// building and tooling do not"). Two real, live-confirmed bugs:
+// - "mine"'s chest short-circuit treated ANY chest match -- even a PARTIAL one -- as fully
+//   satisfying the request, skipping the real mining fallback for the shortfall entirely. Babs
+//   looped 20+ minutes on "found 1 ... already in a chest, no need to mine it" (wanted more)
+//   into a craft that needed the full count and failed every time. Now takes whatever a chest
+//   has and mines the rest herself; the final message credits both when it took a partial match.
+// - "place_bed" had no memory of a spot the SERVER refused across separate goal ticks (only
+//   within one call, via `tried`, which resets to [] every call) -- Mayor retried the identical
+//   "Server refused to place ... the block is still air" spot every single tick for 20+ minutes
+//   straight. New refusedBedSpots, TTL'd the same way the existing chestMisses cache handles an
+//   empty chest search, excludes a proven-dead spot until it's worth trying again later.
 //
 // 1.89.0 (2026-10-12, PRIORITIES_PROPOSAL.md Tier 2 item 1a -- the communal shelter, sized per
 // the operator's own rule: "large enough for beds to suit all active bots... at least N+1 for N
@@ -2496,6 +2509,23 @@ export function bedItemFor(bot) {
   return `${color}_bed`;
 }
 
+// A spot the server itself refuses: live, 2026-10-13 (direct report, "building... do not
+// [work]") -- Mayor retried the exact same 4 "Server refused ... the block is still air" spots
+// every single goal tick for 20+ minutes straight. cellOccupied's own fix below only covers a
+// spot going bad WITHIN one call -- `tried` (in "place_bed" further down) resets to [] on every
+// fresh call, so a spot the server just proved dead on tick N is offered again, identically, on
+// tick N+1, forever. Per-process (one bot per process, so module scope is already per-bot),
+// TTL'd the same way chestMisses handles a chest search that came up empty: long enough to stop
+// the busy-loop, short enough to retry if the world genuinely changes later (a floor gets filled
+// in, chunks catch up after a fresh join).
+const BED_SPOT_REFUSAL_TTL_MS = 30 * 60_000;
+const refusedBedSpots = new Map(); // "x,y,z" -> refused-at timestamp
+const bedSpotKey = (p) => `${p.x},${p.y},${p.z}`;
+function isRecentlyRefusedBedSpot(p) {
+  const at = refusedBedSpots.get(bedSpotKey(p));
+  return at !== undefined && Date.now() - at < BED_SPOT_REFUSAL_TTL_MS;
+}
+
 // Two free, supported cells in a row near home, plus a standing spot behind the foot: a bed is
 // placed facing the way she looks, so she stands at foot - dir and looks at the foot. Beds go next
 // to existing beds when there are any (one bedroom, not beds strewn across paths), else as close to
@@ -3321,18 +3351,26 @@ async function performActionAs(bot, action, speaker, token) {
         return fail(`won't mine ${action.block} -- that's a placed/crafted block, not a raw resource.`);
       }
 
+      const wantCount = action.count || 1;
       // Direct request, 2026-09-08 ("if a resource is in a nearby chest, they should not mine
       // it"). Checks the REAL resulting item (itemNamesForMinedBlocks/MINE_DROPS above), not the
       // block name itself -- a chest holds raw_iron, not iron_ore.
+      //
+      // Real bug found live 2026-10-13 (direct report: "building and tooling do not [work]"): a
+      // chest holding FEWER than wantCount was still treated as fully satisfying the request --
+      // Babs looped for 20+ minutes on "found 1 ... already in a chest, no need to mine it"
+      // (wanted more) immediately followed by a craft that needed the full count and failed every
+      // time, with nothing ever mining the shortfall. Takes whatever a chest has and mines the
+      // rest herself instead of calling a partial match done.
       const chestMatch = await tryTakeFromNearbyChest(bot, token,
-        itemNamesForMinedBlocks(bot, blockIds), action.count);
-      if (chestMatch) {
+        itemNamesForMinedBlocks(bot, blockIds), wantCount);
+      if (chestMatch && chestMatch.count >= wantCount) {
         await refreshGear(bot);
         return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to mine it.`);
       }
+      const stillNeed = wantCount - (chestMatch?.count ?? 0);
 
-      const wantCount = action.count || 1;
-      const findOptions = { matching: blockIds, maxDistance: MINE_SEARCH_RADIUS, count: wantCount * CONTENTION_SEARCH_OVERFETCH };
+      const findOptions = { matching: blockIds, maxDistance: MINE_SEARCH_RADIUS, count: stillNeed * CONTENTION_SEARCH_OVERFETCH };
       let positions = bot.findBlocks(findOptions);
       // Direct request, 2026-09-11 ("each bot uses the global world memory to gather a resource
       // it needs, if it's not in their immediate vicinity"): a remembered position -- her own
@@ -3366,7 +3404,7 @@ async function performActionAs(bot, action, speaker, token) {
           return fail(`the only ${action.block} nearby is part of a shelter wall -- not digging that out.`);
         }
       }
-      positions = filterAwayFromOtherBots(bot, positions).slice(0, wantCount);
+      positions = filterAwayFromOtherBots(bot, positions).slice(0, stillNeed);
       const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
       // Report what she actually found/collected, not just the name she was originally given --
       // asked for "oak_log" but the only trees around were spruce, this should say so rather than
@@ -3401,7 +3439,9 @@ async function performActionAs(bot, action, speaker, token) {
       } finally {
         if (!token.cancelled) await refreshGear(bot); // may have picked up something worth wearing/wielding
       }
-      return token.cancelled ? ok("stopped mining early.") : ok(`collected some ${collectedNames}.`);
+      if (token.cancelled) return ok("stopped mining early.");
+      return ok(chestMatch ? `took ${chestMatch.count} ${chestMatch.name} from a chest and collected some ${collectedNames}.`
+        : `collected some ${collectedNames}.`);
     }
 
     case "explore": {
@@ -5685,7 +5725,8 @@ async function performActionAs(bot, action, speaker, token) {
         // refused, which is what `tried` is for.
         const candidate = findBedSites(bot, target ?? bot.spawnPoint ?? bot.entity.position)
           .find((c) => !tried.some((t) => t.equals(c.foot)) &&
-            !wouldBlockAccess(bot, c.foot) && !wouldBlockAccess(bot, c.head));
+            !wouldBlockAccess(bot, c.foot) && !wouldBlockAccess(bot, c.head) &&
+            !isRecentlyRefusedBedSpot(c.foot));
         if (!candidate) break;
         tried.push(candidate.foot);
         try {
@@ -5705,6 +5746,7 @@ async function performActionAs(bot, action, speaker, token) {
           await bot.equip(bedNow, "hand");
           await bot.placeBlock(bot.blockAt(candidate.foot.offset(0, -1, 0)), new Vec3(0, 1, 0));
         } catch (err) {
+          refusedBedSpots.set(bedSpotKey(candidate.foot), Date.now());
           console.log(`[${bot.username}] place_bed: ${candidate.foot} refused (${err.message}) -- trying another spot`);
         }
         await new Promise((r) => setTimeout(r, 250)); // the head half's update lands a tick later

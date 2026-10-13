@@ -1,4 +1,28 @@
-// Version: 2.115.0
+// Version: 2.116.0
+//
+// 2.116.0 (2026-10-13, direct report after the 2.115.0 deploy and a full fleet state reset:
+// "combat seems better, but building and tooling do not"). Three real, live-confirmed bugs, plus
+// the first extension of the dedicated-runner pattern past weapons:
+// - actions.js's "mine" chest short-circuit treated ANY chest match, even a PARTIAL one, as fully
+//   satisfying the request -- Babs looped 20+ minutes on "found 1 ... already in a chest, no need
+//   to mine it" (wanted more) into a craft that needed the full count and failed every time,
+//   never mining the shortfall. Now takes what the chest has and mines the rest.
+// - actions.js's "place_bed" had no memory of a server-REFUSED spot across goal ticks (only
+//   within one call, via `tried`) -- Mayor retried the identical "the block is still air" spot
+//   every single tick for 20+ minutes straight. New refusedBedSpots TTL cache, same shape as the
+//   existing chestMisses cache, excludes a proven-dead spot until it's worth trying again.
+// - weaponStep's own gatherPlanks() target undercounted: a wooden_sword needs 2 planks + 1 stick,
+//   and that stick itself costs 2 MORE planks (a full stick-batch) -- 4 total, not 2. The
+//   retry-and-resume shape already recovered either way, but this was one avoidable wasted cycle
+//   most of the time.
+// - New toolStep()/runToolGoal(), same shape as weaponStep (crafts a wooden_pickaxe from a chest
+//   or from scratch, never waits on a teammate), replacing the freeform planner for pickaxe/axe
+//   acquisition (TECH_TREE_STAGES' own "basic tools" stage) -- live evidence was Nell's "craft
+//   wooden_pickaxe" throwing a raw "Error: missing ingredient" and Mark/Wade producing long,
+//   rambling self-talk that never converged. Unlike weapon/shelter/food/armor, this directive is
+//   Mayor-assigned free text, not self-proposed, so it's dispatched by TOOL_WORDS (text match on
+//   "pickaxe" specifically -- never bare "axe", which would collide with weaponStep's own "no
+//   sword or axe" directive text) rather than a survivalPriorityItem tag.
 //
 // 2.115.0 (2026-10-12, root-caused a real, confirmed live regression: Luke/Mark's own
 // attack_win_rate collapsed from a 0.846 baseline to 0.167 over 24h). Weapon acquisition used to
@@ -3975,11 +3999,17 @@ const RANCH_WORDS = /\b(ranch(ing)?|breed(ing)?|livestock|(animal|cow|sheep|pig|
 // "shelter" somewhere near a build/make verb) and route it to the wrong, individual-shelter runner.
 const COMMUNAL_SHELTER_WORDS = /\bcommunal\b[^.]*?\bshelter\b|\bshelter\b[^.]*?\bcommunal\b/i;
 
+// toolStep's own header has the full story. Anchored on "pickaxe" specifically, never bare
+// "axe" -- weaponStep's own directive text ("you have no sword or axe") mentions an axe too, and
+// this must never steal that goal into the wrong runner.
+const TOOL_WORDS = /\bpickaxe\b/i;
+
 function farmTaskFor(description) {
   if (!description) return null;
   if (BED_WORDS.test(description) && !NOT_MAKING_A_BED.test(description)) return "bed";
   if (COMMUNAL_SHELTER_WORDS.test(description)) return "communal_shelter";
   if (SHELTER_WORDS.test(description)) return "shelter";
+  if (TOOL_WORDS.test(description)) return "tool";
   if (RANCH_WORDS.test(description)) return "ranch";
   if (FARM_WORDS.test(description) && !NOT_A_CROP_FARM.test(description)) return "farm";
   return null;
@@ -4204,10 +4234,15 @@ async function weaponStep(goal, handle) {
   const tableType = bot.registry.blocksByName.crafting_table;
   const tableNear = heldCount((n) => n === "crafting_table") > 0 ||
     (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
-  // 2 planks covers the sword (1 plank + 1 stick, and craftItem's own auto-chain already makes
-  // the stick from a spare plank -- 1.82.0's own fix, "coal + planks makes a torch" is the same
-  // mechanism) -- 4 more if she'll have to make the crafting table herself too.
-  const gathering = await gatherPlanks(handle, 2 + (tableNear ? 0 : 4));
+  // A wooden_sword needs 2 planks + 1 stick, and craftItem's own auto-chain already makes the
+  // stick from spare planks (the same mechanism "coal + planks makes a torch" relies on) -- but
+  // that stick itself costs 2 MORE planks (a stick recipe yields 4 per craft, from 2 planks, and
+  // there's no way to craft fewer than a full batch). 4 total, not 2 -- found live 2026-10-13
+  // (direct report "combat is better, but...") still looping, cleanly, on an occasional first
+  // attempt short one log; the retry-and-resume shape already recovers either way, but the
+  // correct number means one fewer wasted cycle most of the time. 4 more if she'll have to make
+  // the crafting table herself too.
+  const gathering = await gatherPlanks(handle, 4 + (tableNear ? 0 : 4));
   if (gathering) return gathering;
   return { ...(await performAction(bot, { type: "craft", item: "wooden_sword", count: 1 }, USERNAME, handle)),
     action: { type: "craft", item: "wooden_sword" } };
@@ -4221,6 +4256,57 @@ async function runWeaponGoal(goal, takeControl, getHandle, replaced) {
   logStep(goal, `weapon: ${step.text}`, step.ok, step.action);
   console.log(`[${USERNAME}] weapon goal: ${step.text} (ok=${step.ok})`);
   if (step.done) return completeGoal(goal, "got a real weapon");
+  if (step.ok) {
+    goal.consecutiveFailures = 0;
+    await saveGoalIfCurrent(goal);
+    return;
+  }
+  await failGoalStep(goal, step.text);
+}
+
+function hasPickaxe() {
+  return bot.inventory.items().some((i) => i.name.endsWith("_pickaxe"));
+}
+
+// Direct report, 2026-10-13 ("combat seems better, but building and tooling do not"). Pickaxe/
+// axe acquisition (TECH_TREE_STAGES' own "basic tools" stage, Mayor-assigned over chat as free
+// text -- "make sure you have basic tools -- at least a pickaxe and an axe...") still went
+// through the generic freeform planner, the exact failure class weaponStep's own header
+// documents: live evidence was Nell's "craft wooden_pickaxe" throwing a raw "Error: missing
+// ingredient" (an execution race, not a clean failure) and Mark/Wade producing long, rambling
+// multi-paragraph self-talk that never converged on a next step. Same shape as weaponStep, same
+// deliberately narrower scope (crafts from scratch, never waits on a teammate's spare): targets
+// wooden_pickaxe specifically, not "pickaxe and axe" -- a pickaxe unblocks mining everything else
+// (stone, ore), while the axe is a convenience this doesn't need to chase to unblock the rest of
+// the tech tree. Text-matched (TOOL_WORDS), not a survivalPriorityItem tag, because unlike
+// weapon/shelter/food/armor this directive is Mayor-ASSIGNED free text, not self-proposed by this
+// bot's own structured Tier 1 ladder -- there is no creation-time moment to tag it the safe way.
+async function toolStep(goal, handle) {
+  if (hasPickaxe()) return { ok: true, text: "already have a pickaxe.", done: true };
+  if (!goal.triedToolChest) {
+    goal.triedToolChest = true;
+    const looted = await performAction(bot, { type: "loot", item: "pickaxe", count: 1 }, USERNAME, handle);
+    if (looted.ok || looted.cancelled) return { ...looted, action: { type: "loot", item: "pickaxe" } };
+  }
+  const tableType = bot.registry.blocksByName.crafting_table;
+  const tableNear = heldCount((n) => n === "crafting_table") > 0 ||
+    (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
+  // A wooden_pickaxe needs 3 planks + 2 sticks -- the 2 sticks cost 2 more planks (one full
+  // stick-batch, same accounting as weaponStep's own 4). 5 total, 4 more if she needs the table too.
+  const gathering = await gatherPlanks(handle, 5 + (tableNear ? 0 : 4));
+  if (gathering) return gathering;
+  return { ...(await performAction(bot, { type: "craft", item: "wooden_pickaxe", count: 1 }, USERNAME, handle)),
+    action: { type: "craft", item: "wooden_pickaxe" } };
+}
+
+async function runToolGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  const step = await toolStep(goal, getHandle());
+  getHandle()?.release();
+  if (step.cancelled || replaced()) return;
+  logStep(goal, `tool: ${step.text}`, step.ok, step.action);
+  console.log(`[${USERNAME}] tool goal: ${step.text} (ok=${step.ok})`);
+  if (step.done) return completeGoal(goal, "got a pickaxe");
   if (step.ok) {
     goal.consecutiveFailures = 0;
     await saveGoalIfCurrent(goal);
@@ -4467,6 +4553,10 @@ async function goalTick() {
     }
     if (goal.farmTask === "communal_shelter") {
       await runCommunalShelterGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    if (goal.farmTask === "tool") {
+      await runToolGoal(goal, takeControl, () => handle, replaced);
       return;
     }
     // Direct request, 2026-10-12 (root-caused attack_win_rate regression -- see weaponStep's own

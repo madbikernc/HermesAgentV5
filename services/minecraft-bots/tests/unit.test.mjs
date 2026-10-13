@@ -1,4 +1,4 @@
-// Version: 1.28.0
+// Version: 1.29.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -77,6 +77,12 @@
 //   from a 0.846 baseline to 0.167): weaponStep()/runWeaponGoal(), a dedicated runner for weapon
 //   acquisition (a nearby chest first, else gatherPlanks() + craft), dispatched off
 //   currentGoal.survivalPriorityItem rather than the unreliable freeform planner.
+// 1.29.0 | 2026-10-13 | Direct report after a fleet reset ("combat seems better, but building
+//   and tooling do not"): "mine" takes a partial chest match and still mines the shortfall
+//   (actions.js); a server-refused bed spot is not retried on a later goal tick (actions.js);
+//   toolStep()/runToolGoal(), the same dedicated-runner shape extended to pickaxe acquisition,
+//   dispatched by TOOL_WORDS text match rather than the freeform planner, plus a check that
+//   TOOL_WORDS ("pickaxe" only) never collides with weaponStep's own "sword or axe" text.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -919,6 +925,70 @@ await check('Resource-gathering override: weaponStep -- a chest first, else gath
 
   assert.match(index, /if \(goal\.survivalPriorityItem === "weapon"\) \{\s+await runWeaponGoal/,
     'goalTick actually dispatches a weapon-tagged goal to the dedicated runner, not the freeform planner');
+});
+
+await check('Resource-gathering override: toolStep -- a chest first, else gatherPlanks + craft a pickaxe', async () => {
+  // 2026-10-13: extends weaponStep's own fix to tooling (direct report: "combat seems better,
+  // but building and tooling do not" -- live evidence was Nell's "craft wooden_pickaxe" throwing
+  // a raw "Error: missing ingredient" and Mark/Wade producing long, rambling self-talk that never
+  // converged). Same shape, same deliberately narrow scope (a pickaxe specifically, crafted from
+  // scratch, never waiting on a teammate's spare).
+  let calls = []; let toolInHand = false;
+  const bot = { inventory: { items: () => [] }, findBlocks: () => [], blockAt: () => ({ name: 'oak_log' }),
+    registry: { blocksByName: {} } };
+  const performAction = async (b, action) => {
+    calls.push(action);
+    if (action.type === 'loot') return { ok: false, text: 'nothing in any chest' };
+    if (action.type === 'craft' && action.item === 'wooden_pickaxe') { toolInHand = true; return { ok: true, text: 'crafted a wooden_pickaxe' }; }
+    return { ok: true, text: 'did it' };
+  };
+  const c = vm.createContext({ bot, USERNAME: 'Nell',
+    heldCount: (test) => bot.inventory.items().filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
+    performAction });
+  vm.runInContext(between(index, 'async function gatherPlanks(', 'async function bedStep('), c);
+
+  bot.inventory.items = () => [{ name: 'wooden_pickaxe', count: 1 }];
+  const done = await c.toolStep({}, {});
+  assert.equal(done.done, true, 'already has a pickaxe -- immediately done');
+  assert.equal(calls.length, 0, 'no action taken when already equipped');
+  bot.inventory.items = () => [];
+
+  const goal = {};
+  bot.findBlocks = () => [{ x: 1, y: 64, z: 1 }]; // a tree, for gatherPlanks' own fallback
+  const first = await c.toolStep(goal, {});
+  assert.equal(goal.triedToolChest, true, 'the chest check ran exactly once');
+  assert.equal(first.action.type, 'mine');
+  assert.equal(calls.filter((a) => a.type === 'loot').length, 1);
+  assert.equal(calls.at(-1).count, 3, 'ceil(9/4) logs -- 5 planks for the pickaxe, 4 more for her own table');
+
+  const second = await c.toolStep(goal, {}); // chest already tried -- never retried
+  assert.equal(second.action.type, 'mine');
+  assert.equal(calls.filter((a) => a.type === 'loot').length, 1, 'still just the one attempt');
+
+  bot.inventory.items = () => [{ name: 'oak_planks', count: 10 }]; // now holds enough
+  const crafted = await c.toolStep(goal, {});
+  assert.equal(crafted.action.item, 'wooden_pickaxe');
+  assert.equal(toolInHand, true);
+
+  assert.match(index, /if \(goal\.farmTask === "tool"\) \{\s+await runToolGoal/,
+    'goalTick actually dispatches a tool-tagged goal to the dedicated runner, not the freeform planner');
+  assert.match(index, /const TOOL_WORDS = \/\\bpickaxe\\b\/i;/,
+    'routed by a text match on "pickaxe" specifically');
+});
+
+await check('Resource-gathering override: TOOL_WORDS never collides with weaponStep\'s own "sword or axe" text', async () => {
+  // The whole reason TOOL_WORDS is anchored on "pickaxe" and never bare "axe": weaponStep's own
+  // directive ("you have no sword or axe -- get one before anything else...") mentions an axe
+  // too, and farmTaskFor is checked for EVERY goal regardless of source -- a bare-axe match would
+  // have silently stolen every weapon goal into the tool runner instead.
+  // `const` at script top level never becomes a context property (unlike `var`/function
+  // declarations) -- same trick shelterConst() above uses: the extracted script's own last
+  // expression statement is what vm.runInContext returns.
+  const toolWords = vm.runInContext(between(index, 'const TOOL_WORDS', 'function farmTaskFor(') + 'TOOL_WORDS', vm.createContext({}));
+  assert.equal(toolWords.test('you have no sword or axe -- get one before anything else.'), false,
+    'the weapon directive text is not mistaken for a tool request');
+  assert.equal(toolWords.test('make sure you have basic tools -- at least a pickaxe and an axe, wood or stone is fine to start.'), true,
+    'the real tech-tree "basic tools" directive is recognized');
 });
 
 await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims the way the others do', async () => {
@@ -2725,6 +2795,81 @@ await check('Shelter walls: "mine" skips a target inside one, and says so when t
   const nothing = await c.performAction(bot, { type: 'mine', block: 'cobblestone', count: 3 }, 'test');
   assert.equal(nothing.ok, false);
   assert.match(nothing.text, /part of a shelter wall/, nothing.text);
+});
+
+await check('Mine: a chest holding fewer than needed is taken, and the shortfall is still mined', async () => {
+  // Real bug found live 2026-10-13 (direct report: "building and tooling do not [work]"). Babs's
+  // own weapon-acquisition loop (weaponStep/gatherPlanks, index.js) asked "mine" for more logs
+  // than a nearby chest actually had. The old code treated ANY truthy chest match -- even a
+  // partial one -- as fully satisfying the request and returned immediately: she looped for 20+
+  // minutes on "found 1 ... already in a chest, no need to mine it" (wanted more) followed by a
+  // craft that needed the full count and failed every single time, never once mining the
+  // shortfall herself.
+  const bot = makeBot();
+  bot.entity = { position: new V3(5, 64, 5) };
+  bot.registry = { blocks: { 1: { name: 'oak_log' } } };
+  bot.blockAt = (p) => ({ name: 'oak_log', position: p, harvestTools: null });
+  bot.findBlocks = () => [new V3(8, 64, 8)];
+  const collected = [];
+  bot.collectBlock = { collect: async (blocks) => collected.push(...blocks.map((b) => `${b.position.x},${b.position.y},${b.position.z}`)), cancelTask() {} };
+  const extras = { Vec3: V3, resolveBlockFamily: () => [1], itemNamesForMinedBlocks: () => ['oak_log'],
+    tryTakeFromNearbyChest: async () => ({ name: 'oak_log', count: 1 }), findRememberedLocation: async () => null,
+    wanderAndRetryFind: async () => [], filterAwayFromOtherBots: (b, p) => p,
+    isProtectedBlockName: () => false, MINE_SEARCH_RADIUS: 32, CONTENTION_SEARCH_OVERFETCH: 3,
+    isLivingSpaceWall: () => false };
+  const c = context(bot, extras);
+  vm.runInContext(timeoutFn + actionFn, c);
+
+  const result = await c.performAction(bot, { type: 'mine', block: 'oak_log', count: 2 }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(collected, ['8,64,8'], 'mined exactly the shortfall (1), not the full original count of 2');
+  assert.match(result.text, /took 1 oak_log from a chest and collected some oak_log/, result.text);
+
+  // Regression guard: a chest that fully covers the request still short-circuits, same as before
+  // this fix -- no wasted trip to a tree when the chest already had enough.
+  collected.length = 0;
+  c.tryTakeFromNearbyChest = async () => ({ name: 'oak_log', count: 2 });
+  const full = await c.performAction(bot, { type: 'mine', block: 'oak_log', count: 2 }, 'test');
+  assert.equal(full.ok, true);
+  assert.deepEqual(collected, [], 'a fully-sufficient chest match still skips mining entirely');
+  assert.match(full.text, /found 2 oak_log already in a chest, no need to mine it/, full.text);
+});
+
+await check('Beds: a spot the server refuses is not retried on a later goal tick', async () => {
+  // Real bug found live 2026-10-13 (direct report: "building... do not [work]") -- Mayor retried
+  // the exact same server-refused "Server refused to place ... the block is still air" spot
+  // every single goal tick for 20+ minutes straight. The existing "not retried" check above only
+  // pins the WITHIN-one-call `tried` guard -- `tried` resets to [] on every fresh "place_bed"
+  // call, so nothing previously stopped the identical spot being offered again, identically, on
+  // the very next tick.
+  const SPOT = { foot: new V3(1, 65, 1), head: new V3(1, 65, 2), stand: new V3(1, 65, 0) };
+  let placeAttempts = 0;
+  const bot = makeBot();
+  Object.assign(bot, {
+    spawnPoint: new V3(0, 65, 0),
+    inventory: { items: () => [{ name: 'white_bed' }] },
+    isABed: () => false, // the placement never actually lands, every attempt
+    blockAt: () => ({ name: 'air' }),
+  });
+  bot.pathfinder.goto = async () => {};
+  bot.equip = async () => {};
+  bot.placeBlock = async () => {
+    placeAttempts++;
+    throw new Error('Server refused to place white_bed at (1, 65, 1): the block is still air');
+  };
+  const c = context(bot, { Vec3: V3, findBedSites: () => [SPOT], wouldBlockAccess: () => false, cellOccupied: () => false,
+    goals: { GoalNear: class {}, GoalBlock: class {} } });
+  // The real refusal-memory functions, not mocked -- they're what this test actually verifies.
+  vm.runInContext(between(actions, 'const BED_SPOT_REFUSAL_TTL_MS', 'const BED_DIRS') + timeoutFn + actionFn, c);
+
+  const first = await c.performAction(bot, { type: 'place_bed', near: { x: 0, y: 65, z: 0 } }, 'test');
+  assert.equal(placeAttempts, 1, 'the one offered spot is tried once');
+  assert.equal(first.ok, false, 'the server refused the only candidate');
+
+  const second = await c.performAction(bot, { type: 'place_bed', near: { x: 0, y: 65, z: 0 } }, 'test');
+  assert.equal(placeAttempts, 1, 'the SAME spot, already proven refused last tick, is not retried');
+  assert.equal(second.text, "couldn't find two free, flat blocks in a row near home for a bed.",
+    'no candidates at all this time -- the refused one was filtered out before any attempt');
 });
 
 await check('Access: the other four placement sites ask first, each in the way that suits it', async () => {
