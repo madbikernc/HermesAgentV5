@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.17.0
+**Version:** 2.17.1
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -52,7 +52,7 @@ The host split is memory headroom, not design — `spark` carries the LLM stack,
 | | |
 |---|---|
 | Game server | `192.168.1.221:25580`, `minecraft-bots.service`, `/home/zomboid-admin/minecraft-bots/` |
-| World dir | `firmament-bots`, seed `5937977623953150827` (fresh world and bot memory wipe 2026-10-08; previous world `firmament-bots.bak-20261008185909`, the one before that `firmament-bots.bak-20260926025135`) |
+| World dir | `firmament-bots`, seed `9151092827955802825` (world reinit 2026-10-14 via `hermes-minecraft-admin.py bots reinit-world`, no seed given; previous world `firmament-bots.bak-20261014022300`, the one before that `firmament-bots.bak-20261008185909`) |
 | RCON | port `25581`, Vaultwarden item `Hermes - Minecraft Bot RCON` |
 | Build | vanilla `server.jar`, offline mode, MC 26.1.2 — **gamerule names are snake_case** (`mob_griefing`, not `mobGriefing`) |
 | Firewall | LAN/Tailscale only. Offline mode means any client can claim any username; this world is not internet-facing the way the human server is |
