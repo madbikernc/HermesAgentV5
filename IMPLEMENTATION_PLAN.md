@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.40.0
+**Version:** 3.41.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -145,7 +145,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S29 | LinodeMercury — the fleet's first deliberately external, one-way-reachable node | ✅ Done 2026-10-09 |
 | S30 | The `aide` exclude gap S21h found, fixed on all three fleet nodes | ✅ Done 2026-10-09 |
 | S31 | **Optional** — `super` candidate bake-off: GLM-5.3-Flash (`autotrust`'s two DGX-Spark GGUF builds) vs. incumbent Huihui-GLM-4.7-Flash-abliterated | 📋 Planned 2026-10-13, optional, not executed — gated on real `llama.cpp` `glm5-next` architecture support; gates nothing else; written from this repo, no fleet node was reachable |
-| S32 | `hermes-news-digest` — a failed run must not report as a quiet day | 📋 Planned 2026-10-13, **not executed; the urgent one** — 5 of 6 topics failed with 503 on 2026-10-12 and it logged `0 failed` and emailed "nothing new" |
+| S32 | A failed LUKS mount took out seven core services for 41 hours, unscreened | 🟡 **Investigated 2026-10-13; operational half repaired, engineering not written.** `/mnt/hermes-data` failed to mount at the 10-11 reboot; `Dependency failed` means `Restart=always` never retried, so memory/guard/broker/buzz/rag/triage/portal never started. Layer 2 fails open: **12,166 requests forwarded unscreened** over 41h with no alert. Three services were still down at 51h and were started by hand. `hermes-fleet-health` did email `[CRITICAL] hermes-broker inactive` daily throughout — the digest's "0 failed, nothing new" contradicted it. **This stage's first draft blamed a readiness race and was wrong** |
 | S33 | `hermes-guard-report` — the window is 500 rows, not 26 hours | 📋 Planned 2026-10-13, not executed — hermes-memory caps `limit` at 500; two of four daily runs hit the cap and reported 0 blocks while blind |
 | S34 | Bot-to-bot chat is screened as player chat, and is being dropped | 📋 Planned 2026-10-13, not executed — 8 Mayor directives blocked at 0.970 on 2026-10-13 |
 | S35 | Backend launch configuration (`/opt/llama.cpp/start-*.sh`) under version control | 📋 Planned 2026-10-13, not executed — model paths, `--ctx-size` and `--parallel` exist only on the hosts |
@@ -3500,40 +3500,81 @@ has loaded. Poll `/v1/chat/completions` for a 200 instead — dispatch needed ~2
 
 ---
 
-### S32 — `hermes-news-digest`: a failed run must not report as a quiet day
+### S32 — A failed LUKS mount took out seven core services for 41 hours, unscreened
 
-**Planned; not executed.** Found 2026-10-13 while reviewing the plan for new items.
+**Investigated 2026-10-13; the operational half is repaired, the engineering is not written.**
 
-**What happened.** On 2026-10-12 the digest failed **five of its six topics** with
-`HTTP Error 503: Service Unavailable`, then sent six "nothing new" emails and logged
-`0/6 topic(s) had news, 6 email(s) sent, 0 failed`. A near-total failure was reported to the
-operator as good news. The bots were healthy that day (zero LLM timeouts), so this was not
-contention.
+**This stage replaces its own first draft, whose diagnosis was wrong.** Written on 2026-10-13 from
+the digest's symptom, it blamed a readiness race: "`wake_role()` waits for `systemctl start` rather
+than for a servable model." That is **false** — `hermes-model-wake-worker.py`'s `run_job()` already
+polls `/health` until 200 with a `WAKE_TIMEOUT_S` deadline, and already treats already-warm as
+success. The real cause was found by reading the journals instead of the code, and it is both
+different and far larger. The wrong draft is noted rather than deleted, because "the symptom
+suggested the wrong layer" is the reusable lesson.
 
-**Why.** 503 is `llama-server`'s reply while a model is still loading, and `super` — which
-`hermes_rag_common.router_chat()` defaults to — is `on_demand`. Two gaps compound:
+**What actually happened.**
 
-1. `hermes-router.py`'s `wake_role()` blocks until the **wake job** reports success, which is when
-   `systemctl start` returns — not when the model can serve a request. The router then forwards
-   into a loading backend and passes the 503 straight through.
-2. `router_chat()` makes a single `urlopen` with **no retry**, so that 503 ends the topic.
+1. **2026-10-11 17:03** — all three fleet nodes rebooted (spark 17:03:08, spark-2 17:09:29,
+   HomeD13 17:37:17).
+2. On spark, `/mnt/hermes-data` — the LUKS data container — **failed to mount**:
+   `systemd-fsck@dev-mapper-hermes\x2ddata.service` failed, taking `mnt-hermes\x2ddata.mount` and
+   `local-fs.target` with it.
+3. Every service requiring that mount got `Dependency failed` and **was never started**:
+   `hermes-memory`, `hermes-guard`, `hermes-broker`, `hermes-buzz`, `hermes-minecraft-rag`,
+   `hermes-minecraft-triage`, `hermes-rag-discovery-portal`.
+4. **`Restart=always` does not apply to a start job that failed on a dependency.** systemd gave up
+   once and nothing ever retried. The mount came back and the services did not.
+5. Recovery at **2026-10-13 10:02** restored memory, guard, broker and buzz — **41 hours** later.
+   Three services were still down when this was investigated at 20:00, **51 hours** after the
+   reboot, and were started by hand: `hermes-minecraft-rag` and `hermes-minecraft-triage` on spark,
+   `hermes-minecraft-triage` on spark-2.
 
-This exact trap is already written down in `infra/model-benchmark/README.md` (3.1.0): "`/v1/models`
-answers before the model is loaded. Poll `/v1/chat/completions` for a 200 instead" — learned on
-2026-10-10 and never applied to the wake path, which is the lesson worth drawing.
+**The security consequence, which is the part that matters most.** `hermes-router.py`'s Layer 2 call
+fails **open** by design: on any exception it logs "Layer 2 guard unreachable, skipping for this
+request" and returns `None`. With `hermes-guard` down for 41 hours, that path was taken
+**12,166 times** — twelve thousand requests forwarded with no Layer 2 screening, Layer 1 alone.
+Zero since recovery. Fail-open is a defensible choice for an availability-critical proxy, but
+**failing open 12,166 times without a single alert is not** — and it is exactly the inverse of the
+S22d incident, where a screener that started working loudly broke the fleet. This one stopped
+working silently.
 
-**The reporting half is the more dangerous half.** S27 decided, correctly, that "nothing new is the
-absence of rows, never a sentinel". That decision now makes an infrastructure failure
-**indistinguishable from a quiet news day** in both the email and the summary line. A run that could
-not reach the model has not found that there is no news.
+**Why 41 hours passed.** Not because nothing noticed — the monitoring worked and told the truth.
+`hermes-fleet-health` ran daily and emailed: `[CRITICAL] Service: hermes-broker (system): inactive`,
+`[Broker] UNREACHABLE — broker /health unreachable`, `[Sintra] Critical — 33 ok / 0 warn / 2
+critical / 15 unknown`. The signal existed, in an email, for 41 hours. Three things blunted it:
 
-**Scope.** (a) Make the wake path wait for real readiness — a 200 from the backend, not a started
-unit — which fixes every on-demand caller, not just the digest. (b) Give `router_chat()` a bounded
-retry with backoff on 503 specifically. (c) Separate "no news" from "could not run" in the summary
-line, the exit status, and the email: a topic that errored must never render as "nothing new".
-(d) A test that a 503 on every topic exits non-zero and does not send a nothing-new email.
+- **The digest actively contradicted it.** On the same 10-12 morning the digest emailed six
+  "nothing new" notices and logged `0/6 topic(s) had news, 6 email(s) sent, 0 failed`. Its 503s were
+  the router refusing because the broker was gone, and S27's correct "absence means nothing new"
+  rule rendered a fleet-wide outage as a quiet news day.
+- **`15 unknown` understates a core-service outage.** A check that cannot run because the service it
+  queries is down reports *unknown*, not *critical*. Worth confirming which 15, and whether
+  memory/guard are among them — an unknown that means "the thing I check is dead" must not read the
+  same as "not applicable here".
+- **Nothing watches the fail-open path at all.** 12,166 skip lines produced no notice, and
+  `hermes-guard-report` could not have reported it either: it reads the verdict log out of
+  `hermes-memory`, which was also down.
 
-**Exit gate:** a run with a deliberately unavailable backend reports failure, not a quiet day.
+**Scope, now that the cause is known.**
+
+(a) **Make the mount failure recoverable.** A `Dependency failed` start job is never retried, so a
+transient fsck/unlock failure at boot becomes an indefinite outage. Either the mount must be made
+robust at boot, or the dependent services need a retry path that survives it — and a boot-time check
+that every `enabled`, non-oneshot unit actually reached `active`, which is the generic check that
+would have caught all seven and the three stragglers.
+(b) **Alert on fail-open screening.** Layer 2 being skipped is a security state change and must
+notify — once per outage, not once per request. The one-time-warning convention already in this file
+for `GUARD_TOKEN` is the right shape.
+(c) **The digest must distinguish "could not run" from "no news"** — in the summary line, the exit
+status and the email. A topic that errored must never render as "nothing new". This was the whole of
+the first draft and remains valid; it is now item (c) rather than the stage.
+(d) **`router_chat()` needs a bounded retry with backoff**, which would have ridden out a short
+broker blip, though not a 41-hour one.
+(e) **Make `unknown` distinguishable from `not applicable`** in `hermes-fleet-health`.
+
+**Exit gate:** kill `hermes-guard` and confirm (1) an alert fires once, (2) the digest reports
+failure rather than a quiet day, and (3) a boot-time check reports any enabled unit that did not
+start.
 
 ---
 
@@ -5044,3 +5085,4 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.38.1 | 2026-10-10 | **S20f(b) confirmed by measurement, with a control.** Bot LLM timeouts went from 20/9/2 per 10 minutes on one slot to **0 and 0** across two complete windows on `--parallel 4` — and because zero is meaningless if the bots were idle, activity is reported beside it: bot LLM-ish log lines rose from 171-726 to **6200-7196** over the same windows. The bots do roughly 10-30x more work and fail none of it, which confirms the starvation reading rather than merely being consistent with it: they had been spending their time queued on a single slot instead of acting. muse sustained 40.9 tok/s aggregate at concurrency 4 with the fleet live. Patch bump — a measurement added, no guidance changed. |
 | 3.39.0 | 2026-10-13 | Added **S31** (planned, not executed, optional): a `super` candidate bake-off between the incumbent (`Huihui-GLM-4.7-Flash-abliterated`, ifeval@75 0.76, fourteen points below the fleet's other measured roles per S20f) and two Hugging Face GGUF builds `HermesAgentV4`'s `infra/model-watch/` routine surfaced, both from `autotrust` and both explicitly targeted at this fleet's own DGX Spark hardware: a 79.1 GiB single-Spark Flash build (the realistic candidate) and a 149.7 GiB full build sized for two Sparks over ConnectX-7 (a stretch goal, since a dual-Spark split falls under §5.1's existing "S18 before any tensor-parallel deployment" constraint even though llama.cpp's RPC mechanism differs from the NCCL path S18 actually measured). Gated up front on real `llama.cpp` `glm5-next` architecture support reaching a tagged release — evidence is contradictory on both PR number (#27773 vs. #27754) and build tag, so a new `llama_cpp_glm5_next` entry was added to `HermesAgentV4/infra/model-watch/alert-state.json` alongside the existing `qwen4exp` tracking, same "open PR is not enough" rule. Also flags a real tooling gap before anyone runs it: `hermes-benchmark-model.sh`'s candidate mode has no knowledge of `llama-super.service`, the same class of gap the qwen4-coder runbook already documented for `coder2`. Minor bump — new stage added, nothing prior reversed. |
 | 3.40.0 | 2026-10-13 | **Plan review for new items: five new stages, a standing risk closed, and the plan's own drift recorded.** Grounded in three days of live evidence rather than a re-read. **S32 (urgent)** — on 2026-10-12 the news digest failed **5 of 6 topics with HTTP 503**, then emailed "nothing new" six times and logged `0 failed`: `super` is on-demand, `wake_role()` waits for `systemctl start` rather than for a servable model, and `router_chat()` has no retry — and S27's correct "absence means nothing new" rule makes the failure indistinguishable from a quiet day. The readiness trap was already written down in `infra/model-benchmark/README.md` on 10-10 and never applied to the wake path. **S33** — `hermes-guard-report` asks for 1000 turns and `hermes-memory` caps `limit` at 500, so its "last 26h" is the newest 500 rows; two of four daily runs logged exactly `500 analysis-allowed, 0 blocks` — blind, not quiet, in the very tool S22e built so screening could not fail silently. **S34** — the 2026-10-09 bot-to-bot finding has crossed the alert threshold (8 Mayor directives blocked at 0.970), so inter-bot coordination is being dropped; the spec requires a username allowlist, never a pattern, since a player can call themselves Mayor. **S35** — every backend's model path, ctx-size and the new `--parallel` live only in untracked `/opt/llama.cpp/start-*.sh`. **S36** — `coder2` has no baseline because it emits reasoning tokens; its lone 0.28 needs confirming before it is read as a verdict. **§7 risk 2 closed with its own answer:** the stock-vs-abliterated A/B it called "unusually cheap" was measured twice, six weeks apart, identically — ifeval@75 **0.9067 stock vs 0.8933 abliterated, so abliteration costs 1.3 points (−1.5%)** on identical architecture and quant — and sat unread in `history.jsonl`, which is the argument for both S20f and S24. **S24 gains the plan's own drift:** §0 called S21 unexecuted while it serves TLS in production, S29/S30 had no §0 rows at all, four stage headers (S20/S22/S26/S27) still open with "Planned; not executed" and a specific false claim each, and §7 risk 6 is obsolete — the structural cause being that an execution record appends a substage and a Revision History row and touches neither the stage's opening line nor §0. §0 rows added/corrected here; the four stale headers and risk 6 left for S24 to verify against. Also folded three clean days of zero bot timeouts into S20f(b), superseding the two ten-minute windows it shipped with. Minor bump — stages added, one risk resolved, no prior guidance reversed. |
+| 3.41.0 | 2026-10-13 | **S32 rewritten against the real cause, which its own first draft got wrong, and the operational half repaired.** The draft blamed a readiness race — "`wake_role()` waits for `systemctl start` rather than for a servable model" — which is false: the wake worker already polls `/health` to 200 against a deadline. Reading the journals instead found that **`/mnt/hermes-data`, the LUKS container, failed to mount at the 2026-10-11 17:03 reboot** (all three nodes rebooted), failing `local-fs.target` and leaving seven services with `Dependency failed`: memory, guard, broker, buzz, minecraft-rag, triage and the RAG portal. **`Restart=always` does not apply to a start job that failed on a dependency**, so systemd gave up once and nothing retried — 41 hours for the four core services, and **51 hours for three that were still down when this was investigated** and were started by hand. **The security consequence: the router's Layer 2 call fails open, and that path was taken 12,166 times** — twelve thousand requests forwarded with Layer 1 only, zero alerts. The exact inverse of S22d, where a screener that started working broke the fleet loudly; this one stopped working silently. **It was not unmonitored:** `hermes-fleet-health` emailed `[CRITICAL] Service: hermes-broker inactive` and `[Broker] UNREACHABLE` daily throughout, so the signal existed for 41 hours — blunted by the digest emailing six "nothing new" notices and `0 failed` on the same morning, by `15 unknown` reading the same as "not applicable" when a check cannot run because its target is dead, and by nothing watching the fail-open path at all (and `hermes-guard-report` could not have: it reads the verdict log from the memory service that was also down). Scope now has five items, with the original digest-reporting fix demoted from the whole stage to item (c), and an exit gate that kills `hermes-guard` to prove the alert fires. Minor bump — a stage re-specified against measured evidence; the wrong first draft is recorded, not deleted, because "the symptom suggested the wrong layer" is the reusable lesson. |
