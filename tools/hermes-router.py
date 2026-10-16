@@ -278,28 +278,26 @@
 
 import json
 import os
-import smtplib
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
-from email.mime.text import MIMEText
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hermes_alert_common  # noqa: E402
 import hermes_injection_guard  # noqa: E402
 import hermes_usage_log  # noqa: E402
 
 BIND = os.environ.get("ROUTER_BIND", "127.0.0.1")
 PORT = int(os.environ.get("ROUTER_PORT", "8080"))
 
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
-EMAIL_FROM = "mercury@canislupisnc.net"
-EMAIL_TO = "notifications@canislupisnc.net"
-EMAIL_TO_NAME = "Fleet Notifications"
-_email_warned = False
+# EMAIL_PASSWORD/FLEETOPS_TOKEN/FLEETOPS_ROOM are owned by hermes_alert_common now (S32 item
+# b) -- re-exported here only because main()'s startup banner below reads them directly.
+EMAIL_PASSWORD = hermes_alert_common.EMAIL_PASSWORD
+FLEETOPS_TOKEN = hermes_alert_common.FLEETOPS_TOKEN
+FLEETOPS_ROOM = hermes_alert_common.FLEETOPS_ROOM
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 SPARK2_IP = os.environ.get("SPARK2_LAN_IP", "10.129.1.17")
@@ -361,10 +359,6 @@ GUARD_TOKEN = os.environ.get("GUARD_TOKEN", "")
 MEMORY_URL = os.environ.get("MEMORY_URL", f"http://{SPARK_IP}:8102").rstrip("/")
 MEMORY_TOKEN = os.environ.get("MEMORY_TOKEN", "")
 
-MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER", "http://127.0.0.1:6167")
-FLEETOPS_TOKEN = os.environ.get("FLEETOPS_MATRIX_TOKEN", "")
-FLEETOPS_ROOM = os.environ.get("FLEETOPS_ROOM", "")
-
 MAX_BODY = 32 * 1024 * 1024  # 32MB — generous for a request body, bounded
 
 
@@ -373,28 +367,9 @@ def log(msg):
 
 
 def send_email(subject, body):
-    """Best-effort — never raises. A send failure must not affect the actual
-    proxied request, same rule matrix_notice() follows. Only called for
-    guard "block" verdicts (see do_POST) — deliberately not for "flag", to
-    avoid the alert-fatigue trap hermes-fleet-health.py's dead_recent window
-    already exists to prevent for the broker."""
-    global _email_warned
-    if not EMAIL_PASSWORD:
-        if not _email_warned:
-            log("no EMAIL_PASSWORD — guard block emails disabled for this process's lifetime")
-            _email_warned = True
-        return
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_FROM
-    msg["To"] = f"{EMAIL_TO_NAME} <{EMAIL_TO}>"
-    try:
-        with smtplib.SMTP("mail.hover.com", 587, timeout=20) as server:
-            server.starttls()
-            server.login(EMAIL_FROM, EMAIL_PASSWORD)
-            server.send_message(msg)
-    except Exception as exc:
-        log(f"guard alert email failed: {exc}")
+    """Thin wrapper over hermes_alert_common.send_email() (S32 item b) so every call site
+    below keeps reading "send_email(...)" and gets this process's own log() prefix."""
+    hermes_alert_common.send_email(subject, body, log=log)
 
 
 def _truncate(text, limit=200):
@@ -406,27 +381,13 @@ def _truncate(text, limit=200):
 
 
 def matrix_notice(text):
-    """Best-effort real-time notice to FleetOps. Never raises — a notice failure must not
-    affect the actual proxied request."""
-    if not FLEETOPS_TOKEN or not FLEETOPS_ROOM:
-        return
-    try:
-        txn = f"router-note-{int(time.time() * 1000)}"
-        req = urllib.request.Request(
-            f"{MATRIX_HOMESERVER}/_matrix/client/v3/rooms/"
-            f"{urllib.parse.quote(FLEETOPS_ROOM)}/send/m.room.message/{txn}",
-            data=json.dumps({"msgtype": "m.notice", "body": text}).encode(),
-            method="PUT",
-            headers={"Authorization": f"Bearer {FLEETOPS_TOKEN}",
-                     "Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            resp.read()
-    except Exception as exc:
-        log(f"notice delivery failed: {exc}")
+    """Thin wrapper over hermes_alert_common.matrix_notice() (S32 item b)."""
+    hermes_alert_common.matrix_notice(text, log=log)
 
 
 _guard_warned = False
+_guard_down = False  # S32 item (b): distinct from _guard_warned -- reachability flaps,
+# a missing GUARD_TOKEN doesn't, so this one resets on recovery instead of warning once ever.
 
 
 def guard_classify(text):
@@ -441,6 +402,7 @@ def guard_classify(text):
             log("WARNING: GUARD_TOKEN not set — Layer 2 skipped, Layer 1 alone is active")
             _guard_warned = True
         return None
+    global _guard_down
     try:
         req = urllib.request.Request(
             f"{GUARD_URL}/classify",
@@ -449,9 +411,39 @@ def guard_classify(text):
             headers={"Authorization": f"Bearer {GUARD_TOKEN}", "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode())
+            result = json.loads(resp.read().decode())
+        if _guard_down:
+            # S32: the 2026-10-11 outage's alert had no counterpart telling anyone it was
+            # over, so a reader of the first alert had no way to know screening had resumed
+            # without checking by hand.
+            log("Layer 2 guard reachable again — fail-open outage over")
+            matrix_notice(f"[router:{NODE}] Layer 2 guard reachable again — "
+                           f"requests are being screened normally again")
+            send_email(
+                f"[Hermes Guard] Layer 2 guard recovered on {NODE}",
+                f"Node: {NODE}\nhermes-guard answered again. Layer 2 screening has resumed; "
+                f"see the earlier alert for when the outage started.",
+            )
+            _guard_down = False
+        return result
     except Exception as exc:
         log(f"Layer 2 guard unreachable, skipping for this request: {exc}")
+        # S32: this path forwarded 12,166 requests Layer-1-only over 41h on 2026-10-11 with
+        # zero alerts. Fail-open is the right default for an availability-critical proxy;
+        # failing open silently is not. Alert once per outage (not once per request, which
+        # is why this checks _guard_down first) -- _guard_down only clears on the success
+        # branch above, so a second request mid-outage stays silent.
+        if not _guard_down:
+            matrix_notice(f"[router:{NODE}] Layer 2 guard UNREACHABLE — requests are being "
+                           f"forwarded with Layer 1 only until it recovers ({exc})")
+            send_email(
+                f"[Hermes Guard] Layer 2 guard UNREACHABLE on {NODE} — failing open",
+                f"Node: {NODE}\nhermes-guard could not be reached:\n{exc}\n\n"
+                f"Every request is being forwarded with Layer 1 screening only until this "
+                f"recovers. This is the only alert for this outage -- it will not repeat "
+                f"until hermes-guard answers again.",
+            )
+            _guard_down = True
         return None
 
 
