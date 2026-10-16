@@ -1,4 +1,24 @@
-// Version: 2.116.0
+// Version: 2.117.0
+//
+// 2.117.0 (2026-10-16, direct report: "check the last 24 hours behavior logs for incorrect
+// behaviors," against the freshly reinitialized world). Two real, live-confirmed bugs:
+// - farmTaskFor() checked BED_WORDS before SHELTER_WORDS/COMMUNAL_SHELTER_WORDS. Harmless until
+//   nextSurvivalPriority()'s own Tier 1 "shelter" directive started literally saying "bed" too
+//   ("...shelter with a bed in it yet -- build one near home...") -- BED_WORDS matched first, so
+//   the whole goal (build a real room) got routed to bedStep (place a bed in the open) instead
+//   of shelterStep, leaving hasOwnShelterWithBed() permanently unsatisfied. Confirmed live: Bob/
+//   Dale/Nell had 313 combined "bed goal:" lines and 0 "shelter goal:" lines in 24h on a goal
+//   whose own directive says "shelter" first. Also fixed SHELTER_WORDS itself to match "shelter"
+//   before its verb, the same reverse-order gap COMMUNAL_SHELTER_WORDS already covered.
+// - MAX_CONSECUTIVE_FAILURES=3 was shared between the freeform planner (where 3 genuinely means
+//   "stuck, re-plan") and the dedicated runners (bedStep/shelterStep/weaponStep/toolStep/
+//   farmGoal/ranchGoal/communalShelterStep), built on the opposite philosophy of resuming
+//   forever rather than giving up. In the new world's harder terrain, three transient "No path
+//   to the goal" failures in a row now abandoned the WHOLE goal (losing triedWeaponChest/
+//   goal.shelterAt and every other accumulated flag) instead of just the one step. New
+//   isDedicatedRunnerGoal()/DEDICATED_RUNNER_MAX_CONSECUTIVE_FAILURES=20 gives those goals a much
+//   longer leash -- long enough for checkStuck's own 15-minute teleport-rescue to get a real shot
+//   at physically fixing a bad spot first.
 //
 // 2.116.0 (2026-10-13, direct report after the 2.115.0 deploy and a full fleet state reset:
 // "combat seems better, but building and tooling do not"). Three real, live-confirmed bugs, plus
@@ -4004,11 +4024,24 @@ const COMMUNAL_SHELTER_WORDS = /\bcommunal\b[^.]*?\bshelter\b|\bshelter\b[^.]*?\
 // this must never steal that goal into the wrong runner.
 const TOOL_WORDS = /\bpickaxe\b/i;
 
+// Real bug found live 2026-10-16 (direct report: "check the last 24 hours behavior logs for
+// incorrect behaviors"). BED_WORDS used to be checked FIRST, before COMMUNAL_SHELTER_WORDS/
+// SHELTER_WORDS -- fine as long as nothing both mentions a bed AND is really asking for a
+// shelter, which held right up until nextSurvivalPriority()'s own Tier 1 "shelter" directive
+// ("you don't have your own shelter with a bed in it yet -- build one near home...") started
+// literally saying "bed" too. BED_WORDS matched it (the word "bed" is right there), so the
+// WHOLE Tier 1 goal -- build a real room, not just place a bed -- got routed to bedStep, which
+// happily places a bed in the open and calls it done, leaving hasOwnShelterWithBed() still
+// false and the identical goal re-proposed forever. Confirmed live: Bob/Dale/Nell -- the three
+// bots without a shelter yet -- had 313 combined "bed goal:" log lines and 0 "shelter goal:"
+// ones in 24h on a goal whose own text says "shelter" first. Checking communal/plain shelter
+// before bed fixes it without touching BED_WORDS itself, which still correctly wins for BED_GOAL
+// ("make myself a bed and place it at home") -- that text never mentions a shelter at all.
 function farmTaskFor(description) {
   if (!description) return null;
-  if (BED_WORDS.test(description) && !NOT_MAKING_A_BED.test(description)) return "bed";
   if (COMMUNAL_SHELTER_WORDS.test(description)) return "communal_shelter";
   if (SHELTER_WORDS.test(description)) return "shelter";
+  if (BED_WORDS.test(description) && !NOT_MAKING_A_BED.test(description)) return "bed";
   if (TOOL_WORDS.test(description)) return "tool";
   if (RANCH_WORDS.test(description)) return "ranch";
   if (FARM_WORDS.test(description) && !NOT_A_CROP_FARM.test(description)) return "farm";
@@ -4023,9 +4056,32 @@ async function completeGoal(goal, why, item = null) {
   await retireGoal(goal);
 }
 
+// Real bug found live 2026-10-16 (direct report: "check the last 24 hours behavior logs for
+// incorrect behaviors"), against the freshly reinitialized world (2026-10-14): MAX_CONSECUTIVE_
+// FAILURES=3 is shared between the freeform planner -- where 3 failures genuinely means "stuck,
+// re-plan from scratch" -- and the dedicated runners (bedStep/shelterStep/weaponStep/toolStep/
+// farmGoal/ranchGoal/communalShelterStep), which are built on the OPPOSITE philosophy: resilient
+// to being interrupted and resumed on the next tick, never meant to give up. In the new,
+// harder-to-navigate terrain, three transient "No path to the goal" failures in a row (confirmed
+// live: Mayor couldn't path to any tree, repeatedly) now abandon the WHOLE goal instead of just
+// the one step -- Bob/Dale/Nell alone logged 313 abandons of their shelter-or-bed goal in 24h.
+// Abandoning doesn't lose the underlying need (nextSurvivalPriority/builderPriorityCandidates
+// re-propose it immediately, since it's still unmet) but DOES throw away the goal object's own
+// accumulated progress (triedWeaponChest, triedToolChest, goal.shelterAt/site) every 3 strikes,
+// forcing the chest-check and site-pick to restart from scratch each cycle. A dedicated-runner
+// goal now gets a much longer leash -- long enough that checkStuck's own teleport-rescue
+// (15 minutes of real zero-movement) gets a real chance to physically fix a bad spot before the
+// goal gives up on it, rather than racing it and usually losing.
+const DEDICATED_RUNNER_MAX_CONSECUTIVE_FAILURES = 20;
+const DEDICATED_RUNNER_FARM_TASKS = new Set(["farm", "ranch", "bed", "shelter", "communal_shelter", "tool"]);
+function isDedicatedRunnerGoal(goal) {
+  return DEDICATED_RUNNER_FARM_TASKS.has(goal.farmTask) || goal.survivalPriorityItem === "weapon";
+}
+
 async function failGoalStep(goal, reason) {
   goal.consecutiveFailures += 1;
-  if (goal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+  const limit = isDedicatedRunnerGoal(goal) ? DEDICATED_RUNNER_MAX_CONSECUTIVE_FAILURES : MAX_CONSECUTIVE_FAILURES;
+  if (goal.consecutiveFailures >= limit) {
     console.log(`[${USERNAME}] giving up on goal after ${goal.consecutiveFailures} failures: ${goal.description}`);
     recordGoalOutcome(goal.description, "gave up", reason);
     await broadcastGoalState("abandoned", goal.description);
@@ -4377,7 +4433,11 @@ async function wantBed() {
 // DONE claims and one real "build" in two days. A shelter goal now runs directly: a flat, clear
 // site within 4 blocks of home, enough building blocks (planks from logs she holds, else dirt), then
 // "build" on that site. Done only when hasShelterNearHome() sees it.
-const SHELTER_WORDS = /\b(build(ing)?|mak(e|ing)|set(ting)? up|put(ting)? up|need)\b[^.]*?\bshelter\b/i;
+// Real bug found live 2026-10-16: only ever matched verb-then-"shelter" -- but
+// nextSurvivalPriority()'s own Tier 1 directive says "shelter" FIRST ("you don't have your own
+// shelter with a bed in it yet -- build one near home..."), the same reverse-order gap
+// COMMUNAL_SHELTER_WORDS already had to handle for its own directive text.
+const SHELTER_WORDS = /\b(build(ing)?|mak(e|ing)|set(ting)? up|put(ting)? up|need)\b[^.]*?\bshelter\b|\bshelter\b[^.]*?\b(build(ing)?|mak(e|ing)|set(ting)? up|put(ting)? up|need)\b/i;
 
 async function shelterStep(goal, handle) {
   if (hasShelterNearHome()) return { ok: true, text: "there's a shelter at home.", done: true };

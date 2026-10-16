@@ -1,4 +1,4 @@
-// Version: 1.29.0
+// Version: 1.30.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -83,6 +83,12 @@
 //   toolStep()/runToolGoal(), the same dedicated-runner shape extended to pickaxe acquisition,
 //   dispatched by TOOL_WORDS text match rather than the freeform planner, plus a check that
 //   TOOL_WORDS ("pickaxe" only) never collides with weaponStep's own "sword or axe" text.
+// 1.30.0 | 2026-10-16 | Direct report after a world reinit ("check the last 24 hours behavior
+//   logs for incorrect behaviors"): the Tier 1 shelter+bed directive now routes to shelterStep,
+//   not bedStep (BED_WORDS was checked before SHELTER_WORDS/COMMUNAL_SHELTER_WORDS, and matched
+//   the directive's own mention of "bed"); dedicated runners (farmTask-tagged or
+//   survivalPriorityItem="weapon") get a 20-failure leash instead of sharing the freeform
+//   planner's 3, so transient terrain failures no longer wipe accumulated goal progress.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -2300,6 +2306,21 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
   assert.equal(c.farmTaskFor('go home and build a small shelter there'), 'shelter');
   assert.equal(c.farmTaskFor("No roof over my head yet... I'm building a quick shelter nearby"), 'shelter');
   assert.equal(c.farmTaskFor('go to the shelter and wait'), null);
+  // Real bug found live 2026-10-16 (direct report: "check the last 24 hours behavior logs for
+  // incorrect behaviors"). BED_WORDS used to be checked before SHELTER_WORDS/
+  // COMMUNAL_SHELTER_WORDS -- harmless until nextSurvivalPriority()'s own Tier 1 directive
+  // started literally saying "bed" too ("...shelter with a bed in it yet -- build one near
+  // home..."). BED_WORDS matched first, so the whole goal (build a real room) got routed to
+  // bedStep (place a bed in the open) instead of shelterStep. Confirmed live: Bob/Dale/Nell had
+  // 313 combined "bed goal:" lines and 0 "shelter goal:" lines in 24h on exactly this goal.
+  const SHELTER_DIRECTIVE = "you don't have your own shelter with a bed in it yet -- build one " +
+    "near home: a small sealed room with complete walls, a roof, a floor, a real door (not just " +
+    "an opening), and a bed inside. Check whether an existing shelter nearby already has room " +
+    "for another bed before starting a brand new structure.";
+  assert.equal(c.farmTaskFor(SHELTER_DIRECTIVE), 'shelter',
+    'the whole-room directive routes to shelterStep, not bedStep, even though it says "bed" too');
+  assert.equal(c.farmTaskFor('make myself a bed and place it at home'), 'bed',
+    'the plain bed goal (no mention of a shelter) still routes to bedStep as before');
   // A complete shelter whose floor is at spawn height + 1: the old check only looked at spawn height.
   const s = shelterFns();
   // 2026-10-11: a shelter now also needs a real door (not an opening) and a fully (not 80%)
@@ -2411,6 +2432,53 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
   assert.equal(count(multiShelterBot(multiSpawn, [shelterA, shelterB])), 2, 'two separate ones both count -- not just the nearest');
   const shelterBNoBed = { ...shelterB, bedAt: null };
   assert.equal(count(multiShelterBot(multiSpawn, [shelterA, shelterBNoBed])), 1, 'complete and sealed, but no bed inside -- does not count');
+});
+
+await check('Dedicated runners get a much longer failure leash than the freeform planner', async () => {
+  // Real bug found live 2026-10-16 (direct report: "check the last 24 hours behavior logs for
+  // incorrect behaviors"). MAX_CONSECUTIVE_FAILURES=3 was shared between the freeform planner
+  // (where 3 genuinely means "stuck, re-plan from scratch") and the dedicated runners (bedStep/
+  // shelterStep/weaponStep/toolStep/farmGoal/ranchGoal/communalShelterStep), built on the
+  // OPPOSITE philosophy: resilient to being interrupted and resumed on the next tick, never
+  // meant to give up. Against the freshly reinitialized world's harder terrain, three transient
+  // "No path to the goal" failures in a row abandoned the WHOLE goal -- losing accumulated
+  // progress flags like triedWeaponChest/goal.shelterAt -- instead of just the one step.
+  let retired = false;
+  const c = vm.createContext({ setInterval() {}, Date, USERNAME: 'Amy', console, MAX_CONSECUTIVE_FAILURES: 3,
+    recordGoalOutcome() {}, broadcastGoalState: async () => {},
+    retireGoal: async () => { retired = true; }, saveGoalIfCurrent: async () => {} });
+  vm.runInContext(farmGoalSrc(), c);
+
+  const dedicated = { consecutiveFailures: 0, description: 'd', farmTask: 'shelter' };
+  for (let i = 0; i < 19; i++) await c.failGoalStep(dedicated, 'no path');
+  assert.equal(retired, false, 'a dedicated-runner goal survives well past the old 3-failure limit');
+  assert.equal(dedicated.consecutiveFailures, 19);
+  await c.failGoalStep(dedicated, 'no path'); // the 20th
+  assert.equal(retired, true, 'but it does eventually give up, at 20');
+
+  const weaponGoal = { consecutiveFailures: 0, description: 'w', survivalPriorityItem: 'weapon' };
+  for (let i = 0; i < 19; i++) await c.failGoalStep(weaponGoal, 'no path');
+  assert.equal(retired, true, 'already true from the dedicated case above'); // sanity: unchanged
+  retired = false;
+  await c.failGoalStep(weaponGoal, 'no path'); // the 20th for weaponGoal specifically
+  assert.equal(retired, true, 'the weapon tag (survivalPriorityItem) gets the same long leash, not just farmTask');
+
+  retired = false;
+  const freeform = { consecutiveFailures: 0, description: 'f' }; // no farmTask, no survivalPriorityItem
+  await c.failGoalStep(freeform, 'bad plan');
+  await c.failGoalStep(freeform, 'bad plan');
+  assert.equal(retired, false);
+  await c.failGoalStep(freeform, 'bad plan'); // the 3rd
+  assert.equal(retired, true, 'a plain freeform-planner goal still gives up at 3, unchanged');
+
+  retired = false;
+  const foodGoal = { consecutiveFailures: 0, description: 'food', survivalPriorityItem: 'food' };
+  await c.failGoalStep(foodGoal, 'bad plan');
+  await c.failGoalStep(foodGoal, 'bad plan');
+  assert.equal(retired, false);
+  await c.failGoalStep(foodGoal, 'bad plan'); // the 3rd
+  assert.equal(retired, true,
+    'food/armor are Tier 1 tagged but have no dedicated runner yet -- still the freeform 3-failure limit');
 });
 
 await check('Shelters: a shelter goal gets materials (planks from her logs), builds on its site, and is done when it stands', async () => {
