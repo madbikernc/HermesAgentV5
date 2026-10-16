@@ -110,6 +110,7 @@ import sys
 import os
 import re
 import sqlite3
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -372,12 +373,19 @@ def search(text: str, corpus: str = None, top_k: int = 5, min_chunk_id: int = No
 ROUTER_URL = os.environ.get("HERMES_ROUTER_URL", "http://127.0.0.1:8080")
 
 
-def router_chat(messages, model: str = "super", timeout: int = 120) -> str:
+def router_chat(messages, model: str = "super", timeout: int = 120, retries: int = 3) -> str:
     """A narrative-judgment call to the router (IMPLEMENTATION_PLAN.md §4d,
     Stage 4) — factored out of hermes-rag-source-discovery.py once
     hermes-news-digest.py needed the identical call. Raises on any failure
     or empty content rather than returning a placeholder, same principle as
-    embed()."""
+    embed().
+
+    S32 item (d): retries only on a transient/network failure (connection
+    refused, timeout, 5xx -- the shape a 41-hour broker outage or a short
+    blip both take). A clean response carrying `error.message` or empty
+    content is NOT retried -- the router answered and something is
+    semantically wrong, repeating the call would not fix that. Backoff
+    doubles from 5s, same shape as hermes-model-scan.py's _hf_get()."""
     body = json.dumps({"model": model, "messages": messages, "stream": False}).encode()
     # S27f: this call's payload is retrieved RAG content being summarized -- data by construction,
     # not a request. Declaring analysis mode makes the router scan and log Layer 2 without
@@ -389,8 +397,21 @@ def router_chat(messages, model: str = "super", timeout: int = 120) -> str:
         headers={"Content-Type": "application/json", "X-Hermes-Screening": "analysis"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        result = json.loads(resp.read().decode())
+    delay = 5.0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result = json.loads(resp.read().decode())
+            break
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt > retries:
+                raise
+            print(f"WARNING: router_chat attempt {attempt}/{retries + 1} failed "
+                  f"({exc}), retrying in {delay:.0f}s", file=sys.stderr)
+            time.sleep(delay)
+            delay *= 2
     err = result.get("error", {}).get("message")
     if err:
         raise RuntimeError(f"router error: {err}")
