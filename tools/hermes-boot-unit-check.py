@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-16) - real bug found on spark's first live run: a blanket scan flagged 14
+# stock-Ubuntu units as "not active" (NetworkManager-dispatcher, rsyslog, anacron, dmesg,
+# mdcheck_*, open-vm-tools, ubuntu-advantage, vgauth, ...) -- all `enabled` but legitimately,
+# permanently `inactive` on this hardware, with no reliable systemd-exposed signal to tell that
+# apart from a real dependency-stranding (see UNIT_PREFIXES' comment below for why). Scoped
+# list_enabled_units() to this fleet's own `hermes-` units, where Type=oneshot is accurate
+# because we declare it ourselves.
 #
 # 1.0.0 (2026-10-16) - S32 item (a): the generic check the stage calls for -- "a boot-time check
 # that every enabled, non-oneshot unit actually reached active, which is the generic check that
@@ -55,18 +63,37 @@ def run(cmd, timeout=15):
         return "", -1 if isinstance(e, subprocess.TimeoutExpired) else 1
 
 
+# S32 item (a), found on spark's first live run (2026-10-16): a blanket scan of every enabled
+# unit on the box flagged 14 false positives -- stock Ubuntu units (NetworkManager-dispatcher,
+# rsyslog, anacron, dmesg, mdcheck_*, open-vm-tools, ubuntu-advantage, vgauth, ...) that are
+# `enabled` but legitimately, permanently `inactive` on this hardware: `ConditionResult=no` for
+# some, and for others (anacron, dmesg) `ActiveState=inactive`/`Result=success` with
+# `ConditionResult=yes` -- i.e. they ran to completion and exited, exactly like a oneshot, but
+# their declared Type (dbus/notify/simple/idle) isn't "oneshot". systemd's own exposed state
+# cannot distinguish "ran once by design" from "never started because a dependency failed" for
+# these -- Result=success either way, which is also why `systemctl --failed` never caught the
+# 2026-10-11 stranding (ActiveState went to inactive, not failed). Scoping to this fleet's own
+# `hermes-` units sidesteps the ambiguity entirely: every hermes-*.service that's meant to run
+# once declares Type=oneshot accurately (we control it, unlike the distro), so the Type filter
+# below is actually reliable within this namespace. `llama-*` backends are deliberately NOT
+# included -- several are on-demand and correctly stopped between uses by their own idle-sleep
+# timers, which an ActiveState check can't tell apart from a real failure; hermes-node-health.py's
+# content-aware model_endpoints probe already covers that ground without this ambiguity.
+UNIT_PREFIXES = ("hermes-",)
+
+
 def list_enabled_units(unit_type):
-    """Concrete (non-template) units systemd will start on its own. `--state=enabled` already
-    excludes disabled/static/masked; template units (name@.service) are skipped here too --
-    systemd never activates the template itself, only instances of it, and an instance that's
-    actually in use shows up under its own instance name regardless."""
+    """Concrete (non-template) units systemd will start on its own, restricted to UNIT_PREFIXES.
+    `--state=enabled` already excludes disabled/static/masked; template units (name@.service) are
+    skipped here too -- systemd never activates the template itself, only instances of it, and an
+    instance that's actually in use shows up under its own instance name regardless."""
     out, rc = run(["systemctl", "list-unit-files", f"--type={unit_type}", "--state=enabled", "--no-legend"])
     if rc != 0:
         return []
     units = []
     for line in out.splitlines():
         parts = line.split()
-        if parts and "@" not in parts[0]:
+        if parts and "@" not in parts[0] and parts[0].startswith(UNIT_PREFIXES):
             units.append(parts[0])
     return units
 

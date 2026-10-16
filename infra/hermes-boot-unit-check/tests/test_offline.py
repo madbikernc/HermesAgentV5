@@ -31,17 +31,23 @@ def check(label, cond, detail=""):
 
 # unit -> (Type, ActiveState). Empty Type means "show" didn't report one (timers don't have it).
 FAKE_SHOW = {
-    "hermes-memory.service": ("simple", "inactive"),    # stranded -- must be flagged
-    "hermes-buzz.service": ("simple", "active"),        # healthy -- must not be flagged
-    "backup-job.service": ("oneshot", "inactive"),       # normal post-run state -- must NOT be flagged
-    "hermes-fleet-health.timer": ("", "active"),         # healthy timer
+    "hermes-memory.service": ("simple", "inactive"),       # stranded -- must be flagged
+    "hermes-buzz.service": ("simple", "active"),           # healthy -- must not be flagged
+    "hermes-backup-job.service": ("oneshot", "inactive"),   # normal post-run state -- must NOT be flagged
+    "hermes-fleet-health.timer": ("", "active"),           # healthy timer
+    # Real false positives found live on spark 2026-10-16: enabled, permanently `inactive` by
+    # design, Type isn't "oneshot" but behaves like one -- never reached because UNIT_PREFIXES
+    # excludes them before the Type check even runs. If this ever showed up flagged, it means
+    # the prefix filter regressed, not that systemd's own state changed.
+    "rsyslog.service": ("notify", "inactive"),
 }
 
 FAKE_UNIT_FILES = {
-    "service": "hermes-memory.service enabled        \n"
-               "hermes-buzz.service enabled           \n"
-               "backup-job.service enabled             \n"
-               "foo@.service enabled                   \n",  # template -- must be skipped
+    "service": "hermes-memory.service enabled          \n"
+               "hermes-buzz.service enabled             \n"
+               "hermes-backup-job.service enabled       \n"
+               "foo@.service enabled                    \n"  # template -- must be skipped
+               "rsyslog.service enabled                 \n",  # non-fleet unit -- must be skipped
     "timer": "hermes-fleet-health.timer enabled        \n",
 }
 
@@ -92,9 +98,11 @@ def main():
           problems)
     check("the healthy service is not flagged", "hermes-buzz.service" not in problems, problems)
     check("the oneshot service is never flagged, even though it's 'inactive'",
-          "backup-job.service" not in problems, problems)
+          "hermes-backup-job.service" not in problems, problems)
     check("the template unit is skipped entirely", "foo@.service" not in problems, problems)
     check("the healthy timer is not flagged", "hermes-fleet-health.timer" not in problems, problems)
+    check("a non-fleet unit is skipped by the prefix filter, even though it's 'inactive'",
+          "rsyslog.service" not in problems, problems)
     check("exactly one real problem found", len(problems) == 1, problems)
 
     print("\n[main(): first run alerts once on the new failure]")
