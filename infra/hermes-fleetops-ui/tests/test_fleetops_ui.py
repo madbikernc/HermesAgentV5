@@ -36,6 +36,9 @@ def load(name, filename):
     import os
     os.environ.setdefault("FLEETOPS_UI_USER", "test")
     os.environ.setdefault("FLEETOPS_UI_PASSWORD", "test")
+    # Required as of 2.3.0: with no MEMORY_TOKEN the page deliberately renders no decide buttons
+    # and the route refuses, so without this the whole decide suite would pass vacuously.
+    os.environ.setdefault("MEMORY_TOKEN", "test-memory-token")
     spec = importlib.util.spec_from_file_location(name, TOOLS / filename)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
@@ -861,6 +864,93 @@ def check_recommendations(ui, tmp):
           "<script>" not in nasty_html and "<img src=x" not in nasty_html)
 
 
+def check_decide_unavailable(ui):
+    print(NL + "[a page must not offer an action it knows it cannot perform]")
+    # 2026-10-16: the service came up during post-reboot vault contention, its wrapper fetches
+    # MEMORY_TOKEN with `|| true`, that fetch failed, and the page then rendered decide buttons
+    # for five days that could not work. main() logged DISABLED at startup; the page said nothing.
+    # The operator found it by clicking and getting five failures.
+    gate = ui.load_gate()
+    ui.GATE = gate
+    real_token = ui.MEMORY_TOKEN
+
+    check("with a gate and a token, decide is available", ui.decide_unavailable() == "",
+          ui.decide_unavailable())
+
+    ui.MEMORY_TOKEN = ""
+    why = ui.decide_unavailable()
+    check("with no MEMORY_TOKEN it is unavailable, and says why", "MEMORY_TOKEN" in why, why)
+    check("and the reason names the best-effort fetch, so the fix is obvious",
+          "restart" in why.lower(), why)
+    html = ui.render_backlog()
+    check("the page renders no decide form at all", 'action="/backlog/decide"' not in html)
+    check("and no checkboxes, so nothing looks selectable",
+          'name="task_id"' not in html, "checkboxes still present")
+    check("it says plainly that decide is unavailable", "Decide is unavailable" in html)
+    check("and reassures that the reports still work", "reports on this page are unaffected" in html)
+    check("the route refuses rather than attempting a write",
+          ui.apply_decision("scout:a:b", "defer") == "notoken")
+    check("`notoken` has a message of its own", "notoken" in ui.RESULTS)
+
+    ui.MEMORY_TOKEN = real_token
+    ui.GATE = None
+    why = ui.decide_unavailable()
+    check("a missing gate is still reported, with its import error", "gate module" in why, why)
+    ui.GATE = gate
+    check("and availability returns once both are present", ui.decide_unavailable() == "")
+
+
+def check_failure_naming(ui):
+    print(NL + "[a read failure must not be reported as a write failure]")
+    # The operator saw `writefail=5` -- "hermes-memory rejected the state write" -- when the real
+    # failure was a 401 on the task LOOKUP and no write was ever attempted. Both halves of that
+    # message were wrong, and the branch that produced it logged nothing at all.
+    import urllib.error
+
+    class Failing(FakeGate):
+        def __init__(self, code):
+            super().__init__({"scout:a:b": {"agent": "model-scout", "state": "proposed",
+                                            "topic": "t"}})
+            self.code = code
+
+        def fetch_task(self, task_id):
+            raise urllib.error.HTTPError(task_id, self.code, "nope", None, None)
+
+    for code, expected in ((401, "unauthorized"), (403, "unauthorized"), (404, "nosuch"),
+                           (500, "readfail")):
+        g = Failing(code)
+        ui.GATE = g
+        got = ui.apply_decision("scout:a:b", "defer")
+        check("HTTP %d on the lookup reports %r, not writefail" % (code, expected),
+              got == expected, got)
+        check("  and nothing was written for HTTP %d" % code, g.state_writes == [],
+              str(g.state_writes))
+
+    check("`unauthorized` says the token is the problem and nothing was written",
+          "MEMORY_TOKEN" in ui.RESULTS["unauthorized"][1]
+          and "nothing was written" in ui.RESULTS["unauthorized"][1],
+          ui.RESULTS["unauthorized"][1])
+    check("`readfail` also says nothing was written",
+          "nothing was written" in ui.RESULTS["readfail"][1], ui.RESULTS["readfail"][1])
+    # writefail must now mean only what it says: the write itself was rejected.
+    g = FakeGate({"scout:a:b": {"agent": "model-scout", "state": "proposed", "topic": "t"}},
+                 write_ok=False)
+    ui.GATE = g
+    check("a genuine write rejection is still `writefail`",
+          ui.apply_decision("scout:a:b", "defer") == "writefail")
+
+    print(NL + "[every decide outcome leaves a journal line]")
+    src = (TOOLS / "hermes-fleetops-ui.py").read_text(encoding="utf-8")
+    body = src[src.index("def apply_decision"):src.index("def split_task_id")]
+    returns = [l.strip() for l in body.splitlines() if l.strip().startswith("return \"")]
+    check("apply_decision has a return for each outcome", len(returns) >= 8, str(len(returns)))
+    # The 401 branch returned bare, which is why the journal held only a 303.
+    check("no outcome returns without a log line nearby",
+          body.count("log(") >= 8, str(body.count("log(")))
+    check("the route logs the action and the candidates it was asked to act on",
+          "decide requested:" in src and "decide result:" in src)
+
+
 def main():
     import tempfile
     ui = load("fleetopsui", "hermes-fleetops-ui.py")
@@ -877,6 +967,8 @@ def main():
         check_gate_contract(ui)
         check_csrf(ui)
         check_decisions(ui)
+        check_decide_unavailable(ui)
+        check_failure_naming(ui)
         check_attribution(ui)
         check_multiselect(ui)
         check_csp(ui)

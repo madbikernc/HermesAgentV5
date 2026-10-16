@@ -170,6 +170,15 @@ RESULTS = {
     "foreign": ("bad", "refused, not a model-scout task"),
     "badaction": ("bad", "refused, unknown action"),
     "writefail": ("bad", "failed, hermes-memory rejected the state write"),
+    # Split out of `writefail` on 2026-10-16. The operator hit five of these and the banner said
+    # "hermes-memory rejected the state write" -- which was wrong twice over: the failure was on
+    # the task LOOKUP, not the write, and no write was ever attempted. Saying so cost real
+    # diagnosis time, so a read failure and an auth failure now name themselves.
+    "unauthorized": ("bad", "refused by hermes-memory as unauthorized (HTTP 401/403) — this "
+                            "service's MEMORY_TOKEN is missing or wrong; nothing was written"),
+    "readfail": ("bad", "failed, the task could not be read from hermes-memory — nothing was "
+                        "written"),
+    "notoken": ("bad", "refused, this service has no MEMORY_TOKEN, so it cannot write at all"),
     "nogate": ("bad", "refused, the scout gate module could not be loaded — this service will not "
                       "guess at the transition rules"),
     "csrf": ("bad", "refused, the request did not come from a page this service served — reload "
@@ -469,6 +478,24 @@ def read_backlog():
         conn.close()
 
 
+def decide_unavailable():
+    """Why the decide buttons cannot work right now, or "" when they can.
+
+    Checked at render time as well as on the route, because 2026-10-16 showed the failure mode
+    this prevents: the service came up during the post-reboot vault contention, its wrapper
+    fetches MEMORY_TOKEN with `|| true`, the fetch failed, and the page then rendered decide
+    buttons for five days that could not possibly work. `main()` logged DISABLED at startup and
+    the page never said a word. **A page must not offer an action it already knows it cannot
+    perform.**"""
+    if not GATE:
+        return (f"the scout gate module could not be imported, so this page will not guess at the "
+                f"transition rules ({GATE_IMPORT_ERROR})")
+    if not MEMORY_TOKEN:
+        return ("this service has no MEMORY_TOKEN, so it cannot write to hermes-memory. Its "
+                "wrapper fetches that credential best-effort; a restart re-fetches it")
+    return ""
+
+
 def legal_actions(state):
     """Which buttons a row gets, derived from the gate's table rather than a list kept here. An
     unknown state yields nothing, which is the safe direction."""
@@ -519,27 +546,50 @@ def apply_decision(task_id, action, who=""):
     path."""
     if not GATE:
         return "nogate"
+    if not MEMORY_TOKEN:
+        log(f"decide refused for {task_id!r}: no MEMORY_TOKEN, so no write is possible")
+        return "notoken"
     if action not in GATE.TRANSITIONS:
+        log(f"decide refused for {task_id!r}: unknown action {action!r}")
         return "badaction"
     try:
         task = GATE.fetch_task(task_id)
     except urllib.error.HTTPError as exc:
-        return "nosuch" if exc.code == 404 else "writefail"
+        # Every branch here logs. The 2026-10-16 incident returned bare "writefail" from a 401 on
+        # this READ, with no log line at all, so the journal showed only a 303 and the banner
+        # blamed a write that never happened.
+        if exc.code == 404:
+            log(f"decide: no such task {task_id!r}")
+            return "nosuch"
+        if exc.code in (401, 403):
+            log(f"decide: hermes-memory refused the lookup of {task_id!r} as unauthorized "
+                f"(HTTP {exc.code}) — MEMORY_TOKEN missing or wrong")
+            return "unauthorized"
+        log(f"decide: task lookup for {task_id!r} failed with HTTP {exc.code}")
+        return "readfail"
     except Exception as exc:
-        log(f"task lookup failed for {task_id!r}: {exc}")
-        return "writefail"
+        log(f"decide: task lookup for {task_id!r} failed: {type(exc).__name__}: {exc}")
+        return "readfail"
     if not task:
+        log(f"decide: hermes-memory returned nothing for {task_id!r}")
         return "nosuch"
     if task.get("agent") != GATE.AGENT:
+        log(f"decide refused for {task_id!r}: belongs to agent {task.get('agent')!r}, "
+            f"not {GATE.AGENT!r}")
         return "foreign"
 
     state = task.get("state")
     legal_from, new_state = GATE.TRANSITIONS[action]
     if state not in legal_from:
+        log(f"decide: {action!r} is not legal for {task_id!r} from state {state!r} "
+            f"(legal from {sorted(legal_from)})")
         return "stale"
 
     facts = GATE.candidate_facts(task_id) if action == "benchmark" else {}
     if not GATE.set_task_state(task_id, new_state, topic=task.get("topic")):
+        # The gate logs the underlying exception itself; this records which decide it belonged to.
+        log(f"decide: hermes-memory rejected the state write for {task_id!r} "
+            f"({state} -> {new_state})")
         return "writefail"
 
     # `decided_by` is the one field this path adds, and the reason it is worth adding: afterwards,
@@ -636,6 +686,7 @@ def size_note(detail):
 
 
 def render_backlog():
+    blocked = decide_unavailable()
     tasks, detail = read_backlog()
     counts = Counter(t["state"] or "?" for t in tasks)
     summary = " · ".join(f'<span class="pill s-{esc(k)}">{esc(k)} {v}</span>'
@@ -655,7 +706,7 @@ def render_backlog():
             advisory = esc(advisory)
         fit = esc(d.get("fit") or "") + size_note(d)
 
-        legal = legal_actions(state)
+        legal = [] if blocked else legal_actions(state)
         # One checkbox per actionable row. A row with no legal transition (`approved`, or anything
         # while the gate is unavailable) gets no checkbox at all, so it cannot be swept up by a
         # bulk action it was never eligible for.
@@ -696,7 +747,7 @@ def render_backlog():
             esc(when(t["updated_at"])),
             copy_cell,
         ])
-    if GATE:
+    if not blocked:
         note = (f'{summary}<br>Showing {len(rows)} of at most {MAX_BACKLOG_ROWS}. '
                 f'Deciding here writes the same transition, through the same code, as replying '
                 f'<span class="mono">benchmark|defer|reject|override &lt;id&gt;</span> in FleetOps '
@@ -705,15 +756,15 @@ def render_backlog():
                 f'<b>Reject is permanent</b>; only <span class="mono">un-reject</span> comes back.')
     else:
         note = (f'{summary}<br>Showing {len(rows)} of at most {MAX_BACKLOG_ROWS}. '
-                f'<b>Decide buttons are unavailable:</b> the scout gate module could not be '
-                f'imported, and this page will not guess at the transition rules. '
-                f'<span class="mono">{esc(GATE_IMPORT_ERROR)}</span>')
+                f'<b>Decide buttons are unavailable</b> and are not rendered, because '
+                f'{esc(blocked)}. The reports on this page are unaffected.')
     body = f'<p class="note">{note}</p>' + table(
         ["", "state", "published", "role", "candidate", "category", "fit", "advisory",
          "updated", "legal"],
         rows)
-    if not GATE:
-        return body
+    if blocked:
+        return ('<p class="err"><b>Decide is unavailable.</b> ' + esc(blocked) +
+                '</p>' + body)
     # ONE form around the whole table, because HTML forms cannot nest: that is what makes
     # multi-select possible, and it is why the copy-command button had to become type="button".
     bar = bulk_bar()
@@ -1325,7 +1376,16 @@ class Handler(BaseHTTPRequestHandler):
         # Several task_id fields, one action -- multi-select posts the same shape as a single row.
         task_ids = [i for i in (form.get("task_id") or []) if i]
         action = (form.get("action") or [""])[0]
-        counts = apply_decisions(task_ids, action, tailnet_identity(self.headers))
+        who = tailnet_identity(self.headers)
+        # Log the request before acting on it. On 2026-10-16 the journal held only a 303 for two
+        # failed decides, so neither the action nor the candidates could be recovered afterwards
+        # and the operator's selection could not be replayed.
+        shown = ", ".join(task_ids[:8]) + (f" (+{len(task_ids) - 8} more)" if len(task_ids) > 8
+                                           else "")
+        log(f"decide requested: action={action!r} on {len(task_ids)} task(s) "
+            f"by {who or 'unidentified'} — {shown}")
+        counts = apply_decisions(task_ids, action, who)
+        log(f"decide result: action={action!r} -> {dict(counts)}")
         self._redirect("/backlog?" + (results_query(counts) or "none=1"))
 
     def _redirect(self, location):

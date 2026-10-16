@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.3.0
+**Version:** 2.4.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog, which checkpoint backs each role, benchmark results, the news digest's stored highlights,
@@ -282,6 +282,36 @@ history anyway. **Not fixed here, and a real follow-up**: the root cause on spar
 missing aide excludes) and the 139,853-row pending backlog itself — this page surfaces the
 problem honestly, it does not clean it up.
 
+## Decide availability, and the five failures of 2026-10-16
+
+The operator selected five candidates, clicked, and got `?writefail=5`. Both halves of that
+message were wrong: the failure was a **401 on the task lookup**, and no write was ever attempted.
+
+**Cause.** The service had been running since 2026-10-11 17:07, started minutes after a reboot
+while the vault was under lock contention. This wrapper fetches `MEMORY_TOKEN`,
+`FLEETOPS_MATRIX_TOKEN` and `FLEETOPS_ROOM` with `|| true` so a vault hiccup degrades the decide
+buttons rather than taking the whole page down. All three fetches failed. Basic Auth survived
+because those two fetches are not guarded that way. The page kept working — the backlog reads
+`memory.db` directly over sqlite — so **reads were fine and only writes failed**, for five days,
+visible only as a `DISABLED` word in a startup line nobody re-reads.
+
+**Three fixes, 2.3.0.**
+
+1. **The page no longer offers what it cannot do.** `decide_unavailable()` is checked at render
+   time: with no `MEMORY_TOKEN`, or no gate module, the checkboxes and buttons are **not rendered**
+   and a banner says why and that the reports are unaffected. A page must not offer an action it
+   already knows will fail.
+2. **A read failure is no longer called a write failure.** `unauthorized` (401/403), `readfail`
+   and `notoken` are distinct outcomes, and each says plainly that nothing was written.
+3. **Every outcome leaves a journal line.** The old 401 branch returned bare, so the journal held
+   only a `303` — the action and the candidate list could not be recovered afterwards and the
+   operator's selection could not be replayed. The route now logs the requested action and task
+   ids before acting, and the result counts after.
+
+**The `|| true` stays**, because the reports are most of this service's value and a vault hiccup
+should not take them down. What changes is that the degradation is now loud at the point of use
+rather than silent. A restart re-fetches the credentials.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -292,3 +322,4 @@ problem honestly, it does not clean it up.
 | 2.1.0 | 2026-10-09 | Multi-select on the backlog, on operator request: checkboxes, a bulk bar above and below, select all/none and a live count — a rendering convenience only, since every selected task still goes through the same per-task guard and a row with no legal transition gets no checkbox. Outcomes return as a count per clause, carried in the URL as codes and integers so nothing from a URL is rendered as text. **Also fixes a defect the CSP had been hiding since 1.0.0**: `default-src 'none'` with no `script-src` blocks inline event handlers, so the copy-command button and the benchmark filter never worked in a browser; all handlers moved into one nonced, delegated script block, with `form-action 'self'` added as a second brake on the write route. 167 offline checks. |
 | 2.2.0 | 2026-10-09 | Backlog shows **how old each candidate is** — publish date plus a relative age, flagged under a week, from the `created_at` the scout now carries (it used to fetch HF's `createdAt`, filter on it and drop it, so all 51 live candidates had no date). The `fit` cell also states how the size was established (`gguf-metadata` vs `safetensors`), since it reads as a measurement either way. |
 | 2.3.0 | 2026-10-09 | **New `/recommendations` page (S21h)**, direct request: surface every `REC-<node>-<date>-<seq>` security/integrity finding written to hermes-memory by `hermes-node-baseline-scan.py` (spark/spark-2/HomeD13, S17) and `hermes-linodemercury-watch.py` (LinodeMercury, S29) — keyed by the `REC-` id prefix rather than an agent allowlist, so a future producer needs no code change here. Read-only; no new write route. **Found a real, large pre-existing problem on first load**: 227,116 `REC-*` rows, 139,853 still pending since 2026-09-07, overwhelmingly `aide` noise against unexcluded rotating paths (`/var/log/sysstat/sa<DD>`) on spark/spark-2 — the same class of gap S29 independently found for LinodeMercury's own directories. A naive capped query buried every node but whichever was churning fastest *right now*; fixed by filtering `state != 'resolved'` in SQL by default (not after the cap), with a separate true-total `COUNT(*)` so "showing N of total" is never misleading, and an explicit `state=all` option to see resolved history anyway. 201 offline checks (19 new). |
+| 2.4.0 | 2026-10-16 | Decide availability is now checked at render time and the buttons are hidden with a reason when `MEMORY_TOKEN` or the gate module is missing — after the service ran five days with an empty token from a post-reboot vault failure, rendering buttons that could not work. A 401 on the task lookup no longer reports as `writefail`: `unauthorized`, `readfail` and `notoken` are distinct and each states that nothing was written. Every decide outcome now logs, and the route logs the action and candidates it was asked to apply — the old 401 branch returned bare, leaving only a `303` in the journal. 226 offline checks. |
