@@ -1,0 +1,7 @@
+[Unit]
+Description=hermes-boot-unit-check - generic check that every enabled unit is actually active
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-boot-unit-check.py

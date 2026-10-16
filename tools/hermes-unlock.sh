@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-16) - S32 item (a): DEPENDENT_UNITS was missing hermes-minecraft-rag.service
+# and hermes-minecraft-triage.service, both RequiresMountsFor=/mnt/hermes-data like the other
+# five but added to the fleet after 1.1.0 was written and never backfilled here. These were
+# exactly "the three stragglers" (minecraft-rag and triage on spark, triage on spark-2) still
+# down at 51h when the 2026-10-11 outage was investigated, after the other four had already
+# self-healed via this same script 10 hours earlier.
 #
 # 1.1.0 (2026-09-03) — real week-long outage found and root-caused: hermes-rag-discovery-portal.service
 # failed once at boot (2026-08-27 22:21:03) because RequiresMountsFor=/mnt/hermes-data wasn't satisfied yet
@@ -39,6 +46,8 @@ DEPENDENT_UNITS=(
   hermes-memory.service
   hermes-guard.service
   hermes-rag-discovery-portal.service
+  hermes-minecraft-rag.service
+  hermes-minecraft-triage.service
 )
 
 restart_stranded_units() {
