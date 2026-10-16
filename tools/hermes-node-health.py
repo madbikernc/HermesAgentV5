@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-10-16) - S32 item (e): split the single `unknown` status into `unknown` (a real
+# probe failure/timeout/unreachable-when-expected) and `na` (routine non-applicability --
+# platform doesn't support the check, a feature isn't configured, --quick skipped it, this is
+# the first run). The 2026-10-11 outage's own fleet-health email read "33 ok / 0 warn / 2
+# critical / 15 unknown" -- most of that 15 was routine, diluting whatever real signal was in
+# there. The one genuinely ambiguous site, a model endpoint that doesn't respond, is resolved by
+# checking whether this node's own node-health.json curates model_endpoints (then a miss is a
+# real `unknown`) or is still running DEFAULT_CONFIG's generic scan list (then a miss is `na`).
+# `na` never elevates overall_status; `unknown` still can (build_summary() unchanged there).
 #
 # 1.2.0 (2026-08-30) — DEFAULT_CONFIG's "services" no longer defaults to expecting
 # hermes-gateway. Root cause of hermes-fleet-health.service's daily failure, traced from
@@ -172,7 +182,14 @@ def human_bytes(n):
 
 
 def check(name, status, value=None, detail=None):
-    """status: ok | warn | critical | unknown"""
+    """status: ok | warn | critical | unknown | na
+
+    S32 item (e): `unknown` and `na` used to be the same status, which conflated a real probe
+    failure/timeout (something expected to answer, didn't) with routine non-applicability
+    (platform doesn't support the check, a feature isn't configured, --quick skipped it, this
+    is the first run). The 2026-10-11 outage's "15 unknown" buried whatever real signal was in
+    there among entries that were never going to say anything else. `na` never elevates overall
+    status (see build_summary()); `unknown` still can."""
     return {"name": name, "status": status, "value": value, "detail": detail}
 
 
@@ -202,22 +219,25 @@ def section_identity(cfg):
     node_name = cfg.get("node_name") or hostname
     checks.append(check("Node name", "ok", node_name))
 
+    # S32 item (e): these five are descriptive identity fields, not operational health signals
+    # -- a blank one just means nothing was configured, same class as "no artifact_dirs
+    # configured" below, so it's `na` rather than `unknown`.
     hw = cfg.get("host_hardware_override")
     if not hw:
         hw = _detect_hardware_model()
-    checks.append(check("Host hardware", "ok" if hw else "unknown", hw or "not detected"))
+    checks.append(check("Host hardware", "ok" if hw else "na", hw or "not detected"))
 
     agent_name = cfg.get("agent_name")
-    checks.append(check("Agent name", "ok" if agent_name else "unknown", agent_name or "not configured"))
+    checks.append(check("Agent name", "ok" if agent_name else "na", agent_name or "not configured"))
 
     agent_role = cfg.get("agent_role")
-    checks.append(check("Agent role", "ok" if agent_role else "unknown", agent_role or "not configured"))
+    checks.append(check("Agent role", "ok" if agent_role else "na", agent_role or "not configured"))
 
     version = _detect_hermes_version()
-    checks.append(check("Agent/framework version", "ok" if version else "unknown", version or "unknown"))
+    checks.append(check("Agent/framework version", "ok" if version else "na", version or "not detected"))
 
     env = cfg.get("operational_environment") or "not configured"
-    checks.append(check("Operational environment", "ok" if cfg.get("operational_environment") else "unknown", env))
+    checks.append(check("Operational environment", "ok" if cfg.get("operational_environment") else "na", env))
 
     return {
         "checks": checks,
@@ -289,7 +309,7 @@ def section_services(cfg, quick=False):
         status = _systemctl_status(name, scope)
         services_seen.append({"name": name, "scope": scope, "status": status})
         if status == "unsupported":
-            checks.append(check(f"Service: {name} ({scope})", "unknown", status, "systemctl not available on this platform"))
+            checks.append(check(f"Service: {name} ({scope})", "na", status, "systemctl not available on this platform"))
         else:
             checks.append(check(f"Service: {name} ({scope})", "ok" if status == "active" else "critical", status))
 
@@ -299,7 +319,7 @@ def section_services(cfg, quick=False):
         checks.append(check("Agent router (hermes-gateway)", "ok" if router_up else "critical",
                              "active" if router_up else "not active"))
     else:
-        checks.append(check("Agent router (hermes-gateway)", "unknown", "not configured to check"))
+        checks.append(check("Agent router (hermes-gateway)", "na", "not configured to check"))
 
     # Scheduled task runners: cron + systemd timers.
     cron_out, cron_rc = run(["crontab", "-l"])
@@ -307,7 +327,7 @@ def section_services(cfg, quick=False):
         n_jobs = len([l for l in cron_out.splitlines() if l.strip() and not l.strip().startswith("#")])
         checks.append(check("Cron jobs (user crontab)", "ok", f"{n_jobs} job(s)"))
     else:
-        checks.append(check("Cron jobs (user crontab)", "unknown", "no crontab or crontab not available"))
+        checks.append(check("Cron jobs (user crontab)", "na", "no crontab or crontab not available"))
 
     if IS_LINUX and which("systemctl"):
         timers_out, _ = run(["systemctl", "list-timers", "--all", "--no-pager"])
@@ -326,14 +346,22 @@ def section_services(cfg, quick=False):
             status = _systemctl_status(timer, "system")
             checks.append(check(f"Timer: {timer}", "ok" if status == "active" else "critical", status))
     else:
-        checks.append(check("Systemd timers", "unknown", "systemctl not available"))
+        checks.append(check("Systemd timers", "na", "systemctl not available"))
 
     # Model serving endpoints (OpenAI-compatible /v1/models probe).
+    #
+    # S32 item (e): DEFAULT_CONFIG's model_endpoints is a generic scan across common ports
+    # (Ollama, vLLM, ...) nobody specifically expects on any given node -- a miss there is
+    # routine `na`. A node's own node-health.json overrides the whole key with a curated list
+    # of what IS expected on that node, so a miss against an override is a real, actionable
+    # `unknown` (the ambiguous case IMPLEMENTATION_PLAN.md S32 named: "not reachable (not
+    # started, or not installed on this node)" read the same either way before this).
+    endpoints_curated = cfg.get("model_endpoints") is not DEFAULT_CONFIG["model_endpoints"]
     loaded, available_not_loaded = [], []
     for ep in cfg.get("model_endpoints", []):
         port, label = ep["port"], ep["name"]
         if quick:
-            checks.append(check(f"Model endpoint: {label}:{port}", "unknown", "skipped (--quick)"))
+            checks.append(check(f"Model endpoint: {label}:{port}", "na", "skipped (--quick)"))
             continue
         out, rc = run(["curl", "-s", "--max-time", "2", f"http://localhost:{port}/v1/models"])
         if rc == 0 and out and '"data"' in out:
@@ -346,7 +374,12 @@ def section_services(cfg, quick=False):
                 checks.append(check(f"Model endpoint: {label}:{port}", "warn", "responded but response was not parseable"))
         else:
             available_not_loaded.append({"endpoint": label, "port": port})
-            checks.append(check(f"Model endpoint: {label}:{port}", "unknown", "not reachable (not started, or not installed on this node)"))
+            if endpoints_curated:
+                checks.append(check(f"Model endpoint: {label}:{port}", "unknown",
+                                     "not reachable — this node's own config expects it"))
+            else:
+                checks.append(check(f"Model endpoint: {label}:{port}", "na",
+                                     "not reachable (generic scan port, not confirmed installed on this node)"))
 
     return {
         "checks": checks,
@@ -378,7 +411,7 @@ def section_compute(cfg):
             load1, _, _ = os.getloadavg()
             checks.append(check("CPU load (1m)", "ok", f"{load1:.2f}"))
         except (AttributeError, OSError):
-            checks.append(check("CPU load", "unknown", "not available on this platform"))
+            checks.append(check("CPU load", "na", "not available on this platform"))
 
     # Memory + swap
     if IS_LINUX:
@@ -398,7 +431,7 @@ def section_compute(cfg):
             s_pct = round(s_used / s_total * 100)
             checks.append(check("Swap", "warn" if s_pct > 50 else "ok", f"{human_bytes(s_used)} / {human_bytes(s_total)} ({s_pct}%)"))
     else:
-        checks.append(check("Memory", "unknown", "detailed memory stats require Linux `free`"))
+        checks.append(check("Memory", "na", "detailed memory stats require Linux `free`"))
 
     # GPU + NVLink (best-effort; absent on nodes without an NVIDIA GPU)
     if which("nvidia-smi"):
@@ -424,8 +457,11 @@ def section_compute(cfg):
         if nvlink_rc == 0 and link_lines:
             checks.append(check("NVLink", "ok", link_lines[0][:80]))
         else:
-            checks.append(check("NVLink", "unknown", "no active NVLink partitions detected (normal for single-GPU nodes like DGX Spark GB10)"))
+            checks.append(check("NVLink", "na", "no active NVLink partitions detected (normal for single-GPU nodes like DGX Spark GB10)"))
     else:
+        # S32 item (e): stays `unknown`, not `na` -- every current fleet node (spark, spark-2,
+        # HomeD13) is a GPU node, so a missing nvidia-smi here is a real "something's wrong",
+        # not routine non-applicability.
         checks.append(check("GPU", "unknown", "nvidia-smi not found — no NVIDIA GPU or driver not installed"))
 
     # Disk
@@ -480,7 +516,7 @@ def section_network(cfg, quick=False):
         socket.setdefaulttimeout(None)
 
     if quick:
-        checks.append(check("Latency / connectivity checks", "unknown", "skipped (--quick)"))
+        checks.append(check("Latency / connectivity checks", "na", "skipped (--quick)"))
         return {"checks": checks, "interfaces": interfaces}
 
     # Latency / packet loss to configured targets
@@ -546,7 +582,7 @@ def section_storage(cfg):
             checks.append(check(f"Artifact store {p}", "unknown", None, str(e)))
 
     if not cfg.get("artifact_dirs"):
-        checks.append(check("Artifact storage", "unknown", "no artifact_dirs configured in node-health.json"))
+        checks.append(check("Artifact storage", "na", "no artifact_dirs configured in node-health.json"))
 
     return {"checks": checks}
 
@@ -581,10 +617,10 @@ def section_security(cfg, quick=False):
             checks.append(check("SSH root login restricted", "ok" if root_ok else "warn",
                                  root_login.group(1) if root_login else "not reported"))
         else:
-            checks.append(check("SSH auth config", "unknown",
+            checks.append(check("SSH auth config", "na",
                                  "`sshd -T` failed or needs root — run as root/with sudo for this check"))
     else:
-        checks.append(check("SSH auth config", "unknown", "sshd not found on this platform"))
+        checks.append(check("SSH auth config", "na", "sshd not found on this platform"))
 
     # Config/secret file permission integrity — every ~/.hermes/config/*.json should be 0600
     cfg_dir = HERMES_HOME / "config"
@@ -604,10 +640,10 @@ def section_security(cfg, quick=False):
         else:
             checks.append(check("Config file permissions", "ok", f"all {len(list(cfg_dir.glob('*.json')))} config file(s) are 0600 or stricter"))
     else:
-        checks.append(check("Config file permissions", "unknown", f"{cfg_dir} not found"))
+        checks.append(check("Config file permissions", "na", f"{cfg_dir} not found"))
 
     if quick:
-        checks.append(check("Open ports scan", "unknown", "skipped (--quick)"))
+        checks.append(check("Open ports scan", "na", "skipped (--quick)"))
         return {"checks": checks}
 
     # Open / listening ports vs an optional allowlist
@@ -616,7 +652,7 @@ def section_security(cfg, quick=False):
         ports = sorted(set(int(m) for m in re.findall(r":(\d+)\s", out)))
         allowed = cfg.get("allowed_listen_ports")
         if allowed is None:
-            checks.append(check("Listening ports", "unknown", f"{len(ports)} port(s) open: {ports}",
+            checks.append(check("Listening ports", "na", f"{len(ports)} port(s) open: {ports}",
                                  "no allowed_listen_ports baseline configured — informational only"))
         else:
             unexpected = [p for p in ports if p not in allowed]
@@ -624,7 +660,7 @@ def section_security(cfg, quick=False):
                                  f"{len(ports)} open, {len(unexpected)} unexpected",
                                  f"unexpected: {unexpected}" if unexpected else None))
     else:
-        checks.append(check("Listening ports", "unknown", "`ss` not available on this platform"))
+        checks.append(check("Listening ports", "na", "`ss` not available on this platform"))
 
     # Recent audit / security check evidence
     audit_log_candidates = [
@@ -638,7 +674,7 @@ def section_security(cfg, quick=False):
         checks.append(check("Recent security audit", "warn" if age_h > 168 else "ok",
                              f"last evidence {age_h:.0f}h ago ({newest.name})"))
     else:
-        checks.append(check("Recent security audit", "unknown",
+        checks.append(check("Recent security audit", "na",
                              "no audit log found — run the security-scanner or canary-monitor skill"))
 
     return {"checks": checks}
@@ -657,7 +693,7 @@ def section_tasks(cfg):
             checks.append(check(f"Failed units ({label})", "critical" if n_failed else "ok",
                                  f"{n_failed} failed unit(s)", out if n_failed else None))
     else:
-        checks.append(check("Failed units", "unknown", "systemctl not available on this platform"))
+        checks.append(check("Failed units", "na", "systemctl not available on this platform"))
 
     # Cron entries matching this node's managed patterns
     cron_out, cron_rc = run(["crontab", "-l"])
@@ -678,7 +714,7 @@ def section_tasks(cfg):
             checks.append(check("Managed cron jobs", "ok" if matched else "warn",
                                  f"{len(matched)}/{len(patterns)} pattern group(s) matched"))
     else:
-        checks.append(check("Managed cron jobs", "unknown", "no crontab found"))
+        checks.append(check("Managed cron jobs", "na", "no crontab found"))
 
     # Queue depth — pluggable, since this is entirely workload-specific.
     # timeout=60, not 15 or 30: a probe that fetches a credential from Vaultwarden
@@ -701,7 +737,7 @@ def section_tasks(cfg):
         else:
             checks.append(check("Queue depth", "unknown", f"probe command failed (exit {rc})", out or None))
     else:
-        checks.append(check("Queue depth", "unknown", "no queue_probe_command configured in node-health.json"))
+        checks.append(check("Queue depth", "na", "no queue_probe_command configured in node-health.json"))
 
     return {"checks": checks}
 
@@ -718,9 +754,9 @@ def section_observability(cfg, previous_state):
             checks.append(check("Time since last health check", "warn" if age_min > 2160 else "ok",
                                  f"{age_min:.0f} min ago"))
         except Exception:
-            checks.append(check("Time since last health check", "unknown", "could not parse previous timestamp"))
+            checks.append(check("Time since last health check", "na", "could not parse previous timestamp"))
     else:
-        checks.append(check("Time since last health check", "unknown", "no previous report found — this is the first run"))
+        checks.append(check("Time since last health check", "na", "no previous report found — this is the first run"))
 
     # Recent error/warning counts from the gateway journal
     if IS_LINUX and which("journalctl"):
@@ -733,9 +769,12 @@ def section_observability(cfg, previous_state):
             checks.append(check("Gateway errors (1h)", "critical" if n_err else "ok", str(n_err)))
             checks.append(check("Gateway warnings (1h)", "warn" if n_warn else "ok", str(n_warn)))
         else:
-            checks.append(check("Gateway log activity", "unknown", "journalctl unit not found or inaccessible"))
+            # S32 item (e): `na`, not `unknown` -- hermes-gateway was retired fleet-wide at S8
+            # (see 1.2.0's header note), so "unit not found" is the expected, permanent state
+            # on every current node, not a real gap to alert on.
+            checks.append(check("Gateway log activity", "na", "journalctl unit not found or inaccessible"))
     else:
-        checks.append(check("Gateway log activity", "unknown", "journalctl not available on this platform"))
+        checks.append(check("Gateway log activity", "na", "journalctl not available on this platform"))
 
     checks.append(check("Latest status report", "ok", str(STATE_PATH)))
 
@@ -770,6 +809,7 @@ def build_summary(sections):
     critical = [c for c in all_checks if c["status"] == "critical"]
     warn     = [c for c in all_checks if c["status"] == "warn"]
     unknown  = [c for c in all_checks if c["status"] == "unknown"]
+    na       = [c for c in all_checks if c["status"] == "na"]
     ok       = [c for c in all_checks if c["status"] == "ok"]
 
     if critical:
@@ -809,6 +849,7 @@ def build_summary(sections):
         "checks_warn": len(warn),
         "checks_critical": len(critical),
         "checks_unknown": len(unknown),
+        "checks_na": len(na),
         "issues": issues,
         "recommended_actions": recommendations,
         "escalation": escalation,
@@ -916,7 +957,7 @@ def render_yaml(report):
         return "\n".join(_yaml_dump(report))
 
 
-_STATUS_MARK = {"ok": "OK", "warn": "WARN", "critical": "CRIT", "unknown": "?"}
+_STATUS_MARK = {"ok": "OK", "warn": "WARN", "critical": "CRIT", "unknown": "?", "na": "N/A"}
 
 
 def render_markdown(report):
@@ -928,7 +969,8 @@ def render_markdown(report):
     lines.append(f"**Timestamp:** {ident.get('timestamp', '?')}  ")
     lines.append(f"**Overall status:** {summ.get('overall_status', '?')}  ")
     lines.append(f"**Checks:** {summ.get('checks_ok', 0)} ok / {summ.get('checks_warn', 0)} warn / "
-                 f"{summ.get('checks_critical', 0)} critical / {summ.get('checks_unknown', 0)} unknown")
+                 f"{summ.get('checks_critical', 0)} critical / {summ.get('checks_unknown', 0)} unknown / "
+                 f"{summ.get('checks_na', 0)} n/a")
     lines.append("")
 
     titles = {

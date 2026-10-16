@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-10-16) - S32 item (e): render_text() now also prints each identity's `checks_na`
+# count alongside `checks_unknown` (hermes-node-health.py 1.3.0 split the one bucket into a
+# real `unknown` and a routine `na`), so a reader of this report isn't shown an undifferentiated
+# "15 unknown" the way the 2026-10-11 outage was.
 #
 # 1.5.0 (2026-08-30) — real bug found live: guard_status()'s spark-2 entry always failed
 # ("stats unavailable — exit 28"), every single run, since the day it was written — traced to
@@ -293,9 +298,13 @@ def render_text(fleet):
             lines.append(f"[{r['label']}] UNREACHABLE — {r['error']}")
             continue
         summ = r["report"]["summary"]
+        # S32 item (e): hermes-node-health.py 1.3.0 split "unknown" into a real `unknown` (a
+        # probe that should have answered, didn't) and routine `na`. .get(..., 0) on checks_na
+        # for a report from an older, unupgraded node that hasn't pulled the split yet.
         lines.append(f"[{r['label']}] {summ['overall_status']} — "
                       f"{summ['checks_ok']} ok / {summ['checks_warn']} warn / "
-                      f"{summ['checks_critical']} critical / {summ['checks_unknown']} unknown")
+                      f"{summ['checks_critical']} critical / {summ['checks_unknown']} unknown / "
+                      f"{summ.get('checks_na', 0)} n/a")
         for issue in summ.get("issues", []):
             lines.append(f"    - {issue}")
     lines.append("")
