@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 2.3.0
+# Version: 2.4.0
+#
+# 2.4.0 (2026-10-18) — S40 Phase C: new /egress-blocks page (read_egress_blocks()/
+# render_egress_blocks()/page_egress_blocks()), modeled directly on /recommendations per the
+# design doc's own §8.4. Reads tools/hermes_egress_guard.py's denial records
+# (task_id="egress-block") straight out of hermes-memory's `turns` table via the same read-only
+# ro_sqlite() connection every other page here already uses -- which turns out to make Phase C's
+# original gate (land a `since` filter on hermes-memory's `/turns` GET, or paginate around its
+# 500-row cap, per S33) moot for this specific page: that cap lives only in the HTTP JSON API,
+# which this page, like /recommendations and /backlog before it, never calls. A direct SQL
+# COUNT(*) has no such limit, so "showing N of true-total" is exact from day one, with no
+# prerequisite stage to land first. New NAV entry and home-page card alongside it.
 #
 # hermes-fleetops-ui — one browser page for the fleet's human-facing surfaces (S21).
 #
@@ -221,6 +232,7 @@ MAX_BACKLOG_ROWS = 400
 MAX_HISTORY_ROWS = 400
 MAX_HIGHLIGHT_ROWS = 100
 MAX_RECOMMENDATION_ROWS = 400
+MAX_EGRESS_BLOCK_ROWS = 400
 
 STYLE = """
 :root { --bg:#12141a; --fg:#e7e9ee; --dim:#9aa3b2; --line:#2a2f3a; --accent:#7fb2ff;
@@ -270,7 +282,7 @@ footer { color:var(--dim); padding:18px 20px; border-top:1px solid var(--line); 
 
 NAV = [("/", "Home"), ("/backlog", "Benchmark backlog"), ("/models", "Models &amp; usage"),
        ("/benchmarks", "Benchmark results"), ("/highlights", "Topic highlights"),
-       ("/recommendations", "Recommendations")]
+       ("/recommendations", "Recommendations"), ("/egress-blocks", "Egress-guard denials")]
 
 
 def log(msg):
@@ -434,6 +446,10 @@ def page_home():
          "Security/integrity findings written to hermes-memory by the fleet's scanners — "
          "aide/lynis/syft+grype on spark/spark-2/HomeD13, the LinodeMercury watch, and any future "
          "node that writes the same REC-&lt;node&gt;-&lt;date&gt;-&lt;seq&gt; shape. Read-only."),
+        ("Egress-guard denials", "/egress-blocks",
+         "Every outbound destination the Layer 3 egress guard (S40) has denied — each one "
+         "already triggered its own Matrix notice and hi-pri email; this is the durable record. "
+         "Read-only."),
     ]
     body = ['<p class="note">Read-only views over data this fleet already produces. '
             'Nothing here starts, stops or approves anything.</p><div class="cards">']
@@ -1273,6 +1289,74 @@ def page_recommendations(query):
     return shell("Recommendations", body)
 
 
+# ── S40c: egress-guard denials ────────────────────────────────────────────────────────────────
+
+def read_egress_blocks():
+    """Reads tools/hermes_egress_guard.py's own denial records directly from `turns`
+    (task_id="egress-block", written by its _record_denial() -- EGRESS_GUARD_DESIGN.md §8.4).
+    Same read-only stdlib-sqlite approach as read_recommendations()/read_backlog(), for the same
+    reason (hermes-memory has no list-by-task_id HTTP route that isn't capped -- see below -- and
+    /usr/bin/python3 cannot load sqlite-vec). Unlike a recommendation there is no `tasks` row at
+    all here and nothing to merge: every denial is its own turn under one shared task_id, so each
+    row IS one event.
+
+    This is why Phase C never needed S40's own original gate (landing a `since` filter on
+    hermes-memory's `/turns` GET, or paginating around its 500-row cap, per S33): that cap lives
+    only in the HTTP JSON API this page was never going to use. A direct SQL `COUNT(*)` has no
+    such limit and gives an exact, honest total, the same way read_recommendations() already
+    proves for the fleet-scanner page this one is modeled on."""
+    conn = ro_sqlite(MEMORY_DB)
+    try:
+        total = conn.execute(
+            "SELECT count(*) FROM turns WHERE task_id = 'egress-block'").fetchone()[0]
+        rows = conn.execute(
+            "SELECT raw, created_at FROM turns WHERE task_id = 'egress-block' "
+            "ORDER BY created_at DESC LIMIT ?", (MAX_EGRESS_BLOCK_ROWS,)).fetchall()
+        events = []
+        for r in rows:
+            try:
+                payload = json.loads(r["raw"]) if r["raw"] else {}
+            except (ValueError, TypeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            events.append({**payload, "created_at": r["created_at"]})
+        return events, total
+    finally:
+        conn.close()
+
+
+def render_egress_blocks():
+    events, total = read_egress_blocks()
+    rows = [
+        [esc(when(e.get("timestamp") or e.get("created_at"))),
+         esc(e.get("caller") or "?"),
+         esc(e.get("attempted") or "?"),
+         esc(e.get("reason") or "")]
+        for e in events
+    ]
+    note = (f"Showing {len(rows)} of {total:,} denial(s) (newest first, capped at "
+            f"{MAX_EGRESS_BLOCK_ROWS}). This total is a real COUNT over the whole table, never "
+            f"silently truncated the way S33 found an HTTP-API-based fetch could be.")
+    search = (f'<p><input type="search" placeholder="filter rows…" data-filter="#egress-blocks">'
+              f'<span class="note">{note}</span></p>')
+    return search + '<div id="egress-blocks">' + table(
+        ["when", "caller", "attempted destination", "reason"], rows) + '</div>'
+
+
+def page_egress_blocks(query):
+    body = section(
+        "Egress-guard denials",
+        "Every outbound destination <span class=\"mono\">tools/hermes_egress_guard.py</span>'s "
+        "<span class=\"mono\">check_destination()</span> has denied — a caller reaching for a "
+        "host that is neither fleet-internal nor on its own entry in "
+        "<span class=\"mono\">infra/firmament-tool-registry.yaml</span> (EGRESS_GUARD_DESIGN.md, "
+        "S40). Each denial already triggered its own Matrix notice and hi-pri email; this page "
+        "is the durable, queryable record of the same events. Read-only.",
+        render_egress_blocks)
+    return shell("Egress-guard denials", body)
+
+
 # ── server ────────────────────────────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -1282,6 +1366,7 @@ ROUTES = {
     "/benchmarks": lambda q: page_benchmarks(),
     "/highlights": page_highlights,
     "/recommendations": page_recommendations,
+    "/egress-blocks": page_egress_blocks,
 }
 
 

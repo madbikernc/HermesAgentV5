@@ -1,17 +1,20 @@
 # Firmament Layer 3 — Tool-Call & Egress Guard: Target Design
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
-**Status:** Phases A and B executed, 2026-10-18 (§10). `tools/hermes_egress_guard.py` (Tier A) and
+**Status:** Phases A, B, and C executed, 2026-10-18 (§10). `tools/hermes_egress_guard.py` (Tier A) and
 `infra/firmament-tool-registry.yaml` exist; the five real call sites §5 named (plus two more real ones
 found while wrapping them, §3's revision note below) call `check_destination()` before reaching their
-destination, and every deny path now also runs §8's Matrix+email report pipeline. Three real duplicate
+destination, and every deny path now also runs §8's Matrix+email+record pipeline. Three real duplicate
 `send_email`/`matrix_notice` implementations Phase A's own wrapping touched are consolidated onto
-`hermes_alert_common.py`. Still open: the `hermes-memory` report-page record is implemented and
-unit-tested but not verified live (no fleet node reached this session); Phase C (the `hermes-fleetops-ui`
-report page) and Phase D (the router-level structural tripwire) remain not executed.
-`IMPLEMENTATION_PLAN.md`'s **S40** is the stage that tracks this and points back here for the full spec,
-the same split S23/S38/S39 use for their own design docs.
+`hermes_alert_common.py`. `hermes-fleetops-ui.py`'s new `/egress-blocks` page reads the report-page record
+directly out of `hermes-memory`'s SQLite file, the same way `/recommendations` already does — which made
+this phase's own originally-planned gate (§8.4) moot; see that section's correction note. Still open: the
+`hermes-memory` write itself is unit-tested but not verified against a live instance (no fleet node
+reached this session); S33 (the underlying HTTP-API cap) remains unresolved as its own stage; Phase D (the
+router-level structural tripwire) remains not executed. `IMPLEMENTATION_PLAN.md`'s **S40** is the stage
+that tracks this and points back here for the full spec, the same split S23/S38/S39 use for their own
+design docs.
 
 **Purpose:** add a third screening layer, symmetric to the existing Layer 1 (`hermes_injection_guard.py`)
 and Layer 2 (`hermes-guard.py`) **input** screens, that constrains what a model's **output** is allowed to
@@ -285,16 +288,20 @@ a new channel invented from scratch:
 4. **Report-page record.** Write one row via the generic `turns` table in `hermes-memory.py`, using the
    same `task_id`-sentinel convention every existing guard-verdict logger already follows (`task_id=
    "egress-block"`, `agent="egress-guard"`, `role="system"`, a JSON blob in `raw`: caller, attempted
-   host/URL, resolution, reason, timestamp). Then add a new `/egress-blocks` page to
-   `hermes-fleetops-ui.py`'s `ROUTES` dict, modeled directly on the existing `/recommendations` page — the
-   closest live analogue, already reading a similarly-shaped scanner-written finding from several other
-   sources.
-   - **Must not repeat S33's own already-documented bug.** `hermes-memory`'s `/turns` GET hard-caps at 500
-     rows with no `since`/time filter — S33 found this exact gap silently zeroed out two of four daily
-     guard-report runs. This page must either land the server-side `since` filter S33 already recommends
-     generally (this stage becomes the forcing function for a fix the plan already wants, benefiting every
-     caller, not just this one), or at minimum paginate and visibly flag suspected truncation — never
-     silently report "0 blocked" when the read may simply have been cut off.
+   host/URL, reason, timestamp). `[DECIDED]`, executed Phase B (the write) and Phase C (the page). Added
+   `/egress-blocks` to `hermes-fleetops-ui.py`'s `ROUTES` dict, modeled directly on `/recommendations` as
+   planned.
+   - **Correction: this bullet's own gate turned out moot, not satisfied by either of its two named
+     options.** `/recommendations` (and `/backlog`) don't call `hermes-memory`'s HTTP API at all — they
+     read its SQLite file directly via a read-only connection (`ro_sqlite()`), because that service has no
+     list-by-task_id HTTP route and `/usr/bin/python3` can't load the `sqlite-vec` extension
+     `hermes-memory.py`'s own `connect()` needs. S33's 500-row cap lives only in the HTTP JSON layer
+     (`_list_turns()`), which `/egress-blocks` never touches, the same way `/recommendations` never did. A
+     direct SQL `COUNT(*)` has no such cap, so "showing N of true-total" is exact from day one — neither
+     landing a `since` filter nor building a truncation flag was needed to satisfy the real requirement
+     (never silently report a count that might be cut off). **S33 itself remains open** — this finding
+     resolves Phase C's own gate, not S33 as a stage; `hermes-guard-report.py` still calls the capped HTTP
+     endpoint and would still benefit from S33's fix.
 
 ---
 
@@ -345,8 +352,11 @@ of the existing ones.
   deliberately left alone (24 independent `smtplib` users, 11 independent `matrix_notice()`s). The
   `hermes-memory` `turns`-table write (`_record_denial()`) is implemented and unit-tested but unverified
   against a live `hermes-memory` instance — no fleet node was reached this session.
-- **Phase C — the `hermes-fleetops-ui` report page.** Gated on either landing `/turns`' `since` filter or
-  building an explicit truncation flag — not on a bare `limit=N` fetch, per §8.4's named risk.
+- **Phase C — the `hermes-fleetops-ui` report page. Executed 2026-10-18.** Added `/egress-blocks`,
+  modeled on `/recommendations`. Its own planned gate (land `/turns`' `since` filter, or build an
+  explicit truncation flag) turned out moot — see §8.4's correction note — because this page reads
+  `hermes-memory`'s SQLite file directly, the same way `/recommendations`/`/backlog` already do, and
+  never touches the HTTP API S33's cap lives in. S33 itself is still open.
 - **Phase D — the router-level structural tripwire (§7, Tier B).** Last, since it is explicitly
   forward-looking and has nothing to catch until a future change introduces real tool-calling.
 
@@ -364,3 +374,4 @@ infrastructure; `[PROPOSED]` to treat it as optional, a Phase E, independent of 
 | 1.0.0 | 2026-10-18 | Initial proposal: audited Layer 1/2's actual scope (input-only, no post-generation hook anywhere) and every real network-call site in the codebase, found that no production path today lets a model's output pick a network destination, anchored "internal" to the fleet's actual documented ranges (`10.129.1.0/24` + two `/30` links + tailnet `100.64.0.0/10`) rather than a blanket `/8`, named the five real external exceptions that must survive the check (Tavily, HuggingFace Hub, LinodeMercury, SMTP relay, Matrix homeserver pending confirmation), proposed the missing tool-call registry, and designed a two-tier guard (egress-destination wrapper now; a router-level structural tripwire for whenever real tool-calling arrives) with the deny/Matrix/email/report pipeline mapped onto mechanisms that already exist in the fleet rather than new ones. |
 | 1.1.0 | 2026-10-18 | **Phase A executed**, resolving both of S40a's open gates: adopted §4's own narrower internal-range recommendation as `[DECIDED]` (four ranges + always-internal loopback; full `10.0.0.0/8` is an explicit opt-in, never the default), and confirmed the Matrix homeserver is control-plane-internal, not a §5 external exception, by reading `infra/continuwuity`'s own config/README. Built `tools/hermes_egress_guard.py`, `infra/firmament-tool-registry.yaml`, and offline unit tests; wrapped `hermes-websearch.py`, `hermes-model-scout.py`, `hermes-model-scan.py`, `hermes-model-watch.py`, `hermes-linodemercury-watch.py`, and `hermes_alert_common.py`. Found and recorded a real gap in §3's own audit table while doing it: `hermes-model-watch.py` also reaches `raw.githubusercontent.com`/`api.github.com`, neither previously named — both are now wrapped and registered. Also surveyed the wider fleet and found roughly ten more scripts with their own real external destinations that §3's original audit never claimed to cover and this phase deliberately does not wrap (§3's revision note) — an explicit scope boundary, not an oversight repeated twice. |
 | 1.2.0 | 2026-10-18 | **Phase B executed** (§8, §10), except the report-page record's live verification. `check_destination()` now runs the Matrix+email report pipeline itself on every deny path, with a single in-flight recursion guard for the one real loop this creates (a registry-load failure denies the hi-pri email's own destination too). `hermes_alert_common.send_email()` gained `priority="critical"` (subject prefix + `Importance`/`X-Priority` headers) and now returns `True`/`False`. Corrected §8.2's "three duplicate implementations" claim after actually counting: a fleet-wide sweep found 24 independent `smtplib` users and 11 independent `matrix_notice()`s, not 3, and neither `hermes-fleet-health.py` nor `hermes-model-scout.py` (the two §8.2 originally named) turned out to have its own — the three real, in-scope duplicates were the ones Phase A's own wrapping had already touched (`hermes-model-scan.py`, `hermes-model-watch.py`, `hermes-linodemercury-watch.py`'s `send_email`s, plus that last file's own `matrix_notice`), now consolidated onto `hermes_alert_common.py`. The other ~20/~10 duplicates are recorded as an explicit, separate, out-of-scope finding, same shape as 1.1.0's external-destination survey. Extended the offline test suite (33 → 43 checks) to cover the report pipeline, the recursion guard, and the new `send_email()` behavior; the `hermes-memory` write itself (`_record_denial()`) is unit-tested but not exercised against a live `hermes-memory` instance. |
+| 1.3.0 | 2026-10-18 | **Phase C executed** (§8.4, §10). Added `/egress-blocks` to `hermes-fleetops-ui.py`, modeled on `/recommendations` as planned. Correction: §8.4's own planned gate (land `hermes-memory`'s `/turns` `since` filter, or build a truncation flag, before this page could be trusted) turned out moot, not satisfied by either option — `/recommendations` and `/backlog` never call the capped HTTP API at all, they read `hermes-memory`'s SQLite file directly via a read-only connection, and `/egress-blocks` does the same. S33's 500-row cap lives only in the HTTP JSON layer, so a direct SQL `COUNT(*)` gives an exact total with no prerequisite stage needed. S33 itself remains open as its own stage — `hermes-guard-report.py` still calls the capped endpoint and would still benefit from that fix; this finding only closes Phase C's own gate, not S33. Extended the offline test suite (`infra/hermes-fleetops-ui/tests/test_fleetops_ui.py`, 226 → 234 checks) covering ordering, an honest true-total, escaping, and a malformed/empty `raw` row degrading instead of crashing the page. |

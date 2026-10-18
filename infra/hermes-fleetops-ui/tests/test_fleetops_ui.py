@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.3.0
+# Version: 2.4.0
+#
+# 2.4.0 (2026-10-18) — S40 Phase C: check_egress_blocks() covers the new /egress-blocks page
+# (read_egress_blocks()/render_egress_blocks()) -- every row is its own event with no `tasks` row
+# at all (unlike a recommendation), newest-first ordering, an honest COUNT(*)-based total, escaping,
+# and that a malformed/empty `raw` value degrades instead of crashing the page.
 #
 # Offline checks for hermes-fleetops-ui.py. No network, no live stores, no server bound.
 #
@@ -864,6 +869,77 @@ def check_recommendations(ui, tmp):
           "<script>" not in nasty_html and "<img src=x" not in nasty_html)
 
 
+def check_egress_blocks(ui, tmp):
+    print(NL + "[egress-guard denials: every row is its own event, no tasks row at all]")
+    db = tmp / "memory-egress.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, agent TEXT, topic TEXT, state TEXT,"
+        " memory_ref TEXT, created_at TEXT, updated_at TEXT);"
+        "CREATE TABLE turns (id INTEGER PRIMARY KEY, task_id TEXT, agent TEXT, role TEXT,"
+        " raw TEXT, presented TEXT, created_at TEXT, conv_id TEXT);")
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                 ("egress-block", "egress-guard", "system",
+                  json.dumps({"caller": "hermes-model-scout.py", "attempted": "huggingface.co",
+                              "reason": "'huggingface.co' is not on this caller's egress whitelist",
+                              "timestamp": "2026-10-18T12:00:00+00:00"}),
+                  "100"))
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                 ("egress-block", "egress-guard", "system",
+                  json.dumps({"caller": "hermes-websearch.py", "attempted": "evil.example.com",
+                              "reason": "tool registry unavailable -- denying non-internal egress "
+                                        "fail-safe", "timestamp": "2026-10-18T13:00:00+00:00"}),
+                  "200"))
+    # Not an egress-block row at all -- a recommendation sharing the same `turns` table. Must
+    # never appear on this page, same discipline read_recommendations() applies in reverse.
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                 ("REC-spark-2026-10-01-001", "node-baseline", "system",
+                  json.dumps({"node": "spark", "tool": "aide"}), "150"))
+    conn.commit()
+    conn.close()
+    ui.MEMORY_DB = str(db)
+
+    events, total = ui.read_egress_blocks()
+    check("only egress-block rows are returned, never a recommendation sharing the table",
+          total == 2, total)
+    check("newest first", [e["caller"] for e in events]
+          == ["hermes-websearch.py", "hermes-model-scout.py"], str(events))
+    check("the reason is carried through intact",
+          "registry unavailable" in events[0]["reason"], events[0]["reason"])
+
+    print(NL + "[rendering: an honest 'showing N of true-total', and escaping]")
+    html = ui.render_egress_blocks()
+    check("the true total appears", "of 2 denial" in html, html[:400])
+    check("both callers appear", "hermes-model-scout.py" in html and "hermes-websearch.py" in html)
+    check("no decide/write form exists on this read-only page", "<form" not in html)
+
+    conn2 = sqlite3.connect(db)
+    conn2.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                  ("egress-block", "egress-guard", "system",
+                   json.dumps({"caller": "<script>steal()</script>", "attempted": "x",
+                               "reason": "<img src=x onerror=alert(1)>", "timestamp": "300"}),
+                   "300"))
+    conn2.commit()
+    conn2.close()
+    nasty_html = ui.render_egress_blocks()
+    check("a hostile caller/reason value is escaped, not rendered as markup",
+          "<script>" not in nasty_html and "<img src=x" not in nasty_html)
+
+    print(NL + "[a malformed row degrades instead of crashing the page]")
+    conn3 = sqlite3.connect(db)
+    conn3.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                  ("egress-block", "egress-guard", "system", "not json at all", "400"))
+    conn3.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                  ("egress-block", "egress-guard", "system", None, "500"))
+    conn3.commit()
+    conn3.close()
+    try:
+        ui.render_egress_blocks()
+        check("malformed/empty raw rows do not crash the page", True)
+    except Exception as exc:
+        check("malformed/empty raw rows do not crash the page", False, f"{type(exc).__name__}: {exc}")
+
+
 def check_decide_unavailable(ui):
     print(NL + "[a page must not offer an action it knows it cannot perform]")
     # 2026-10-16: the service came up during post-reboot vault contention, its wrapper fetches
@@ -974,6 +1050,7 @@ def main():
         check_csp(ui)
         check_published(ui)
         check_recommendations(ui, tmp)
+        check_egress_blocks(ui, tmp)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:
