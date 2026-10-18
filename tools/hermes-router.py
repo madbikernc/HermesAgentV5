@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 2.16.0
+# Version: 2.17.0
+#
+# 2.17.0 (2026-10-18) - S40 Phase D: the router-level structural tripwire (Tier B, design doc
+# §7). A request carrying `tools`/`functions` now gets a buffered response path instead of the
+# usual live chunk-by-chunk relay -- extract_tool_calls() reconstructs every tool_calls/
+# function_call entry (plain JSON or OpenAI's own SSE delta-accumulation shape), and
+# check_tool_calls() runs each through hermes_egress_guard.check_tool_call() before anything is
+# written to the client. A denial sends a 400 instead of relaying, fail closed. No real caller
+# sets `tools`/`functions` today (confirmed, design doc §3), so every existing request still
+# takes the exact unchanged fast path -- this costs today's real traffic nothing and has nothing
+# to catch yet, by design (the design doc's own "closing the gap before it exists" framing, same
+# discipline as S18's exit-gate wording: never claimed as a live fix). New offline test suite at
+# infra/hermes-router/tests/test_tier_b.py.
 #
 # 2.16.0 (2026-10-09) - S27f: ANALYSIS-MODE SCREENING. A caller may send
 # `X-Hermes-Screening: analysis` to say "the payload of this call is gathered data, not a request",
@@ -287,6 +299,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_alert_common  # noqa: E402
+import hermes_egress_guard  # noqa: E402
 import hermes_injection_guard  # noqa: E402
 import hermes_usage_log  # noqa: E402
 
@@ -542,6 +555,84 @@ def extract_usage(body):
     return usage
 
 
+def extract_tool_calls(body):
+    """S40 Phase D (design doc §7, Tier B). Pulls every tool_calls/function_call entry out of
+    either a plain JSON completion response or an SSE stream, mirroring extract_usage()'s own
+    "try plain JSON, then try SSE" shape above. The SSE half reconstructs OpenAI's own
+    delta-accumulation wire format: `function.name`/`id` arrive once per `index`,
+    `function.arguments` arrives as string fragments concatenated in order across many chunks.
+    Returns a list of {"name", "arguments"} dicts, [] if none found. Never raises, same contract
+    as extract_usage()."""
+    if not body:
+        return []
+    text = body.decode("utf-8", errors="replace")
+
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        obj = None
+    if isinstance(obj, dict):
+        calls = []
+        for choice in (obj.get("choices") or []):
+            message = choice.get("message") if isinstance(choice, dict) else None
+            if not isinstance(message, dict):
+                continue
+            for tc in (message.get("tool_calls") or []):
+                fn = tc.get("function") if isinstance(tc, dict) else None
+                if isinstance(fn, dict) and fn.get("name"):
+                    calls.append({"name": fn["name"], "arguments": fn.get("arguments") or ""})
+            fc = message.get("function_call")
+            if isinstance(fc, dict) and fc.get("name"):
+                calls.append({"name": fc["name"], "arguments": fc.get("arguments") or ""})
+        return calls
+
+    by_index = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if data == "[DONE]" or not data:
+            continue
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        for choice in (chunk.get("choices") or []):
+            delta = choice.get("delta") if isinstance(choice, dict) else None
+            if not isinstance(delta, dict):
+                continue
+            for tc in (delta.get("tool_calls") or []):
+                if not isinstance(tc, dict):
+                    continue
+                idx = tc.get("index", 0)
+                entry = by_index.setdefault(idx, {"name": None, "arguments": ""})
+                fn = tc.get("function")
+                if isinstance(fn, dict):
+                    if fn.get("name"):
+                        entry["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        entry["arguments"] += fn["arguments"]
+    return [{"name": e["name"], "arguments": e["arguments"]}
+            for e in by_index.values() if e["name"]]
+
+
+def check_tool_calls(body):
+    """S40 Phase D. Runs Tier B (hermes_egress_guard.check_tool_call()) over every tool call
+    extract_tool_calls() finds in `body`. Returns the first denial's message, or None if every
+    tool call found (zero or more) passed -- never raises, "a bad response is a failure to
+    route, never a silent guess" (hermes-dispatch.py's own VALID_TARGETS discipline), applied
+    here to the router's response path instead of its request path."""
+    for call in extract_tool_calls(body):
+        try:
+            hermes_egress_guard.check_tool_call(call["name"], call["arguments"])
+        except hermes_egress_guard.EgressDenied as exc:
+            return str(exc)
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log(f"{self.address_string()} - {fmt % args}")
@@ -731,6 +822,14 @@ class Handler(BaseHTTPRequestHandler):
 
         prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
 
+        # S40 Phase D (Tier B, design doc §7): a request that asks for real tool-calling gets a
+        # buffered response path below instead of the live chunk-by-chunk relay every other
+        # request still gets unchanged -- a tool call has to be fully assembled before it can be
+        # validated, so "fail closed" is only actually possible before the first byte goes out,
+        # not after. Confirmed (design doc §3): no real caller sets `tools`/`functions` today, so
+        # this never fires on today's real traffic and costs it nothing.
+        wants_tools = bool(payload.get("tools") or payload.get("functions"))
+
         # Ask the backend for a final usage object even on a streaming response, so the log below
         # gets real token counts rather than nothing — only added when the caller didn't already
         # set it, and only changes what's forwarded upstream, never what's relayed back to the
@@ -752,21 +851,52 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             with urllib.request.urlopen(upstream_req, timeout=600) as upstream:
-                self.send_response(upstream.status)
-                for header, value in upstream.getheaders():
-                    if header.lower() not in ("content-length", "connection", "transfer-encoding"):
+                status = upstream.status
+                headers = [(h, v) for h, v in upstream.getheaders()
+                           if h.lower() not in ("content-length", "connection", "transfer-encoding")]
+
+                if not wants_tools:
+                    # Unchanged fast path: relay each chunk the moment it arrives.
+                    self.send_response(status)
+                    for header, value in headers:
                         self.send_header(header, value)
-                self.send_header("Transfer-Encoding", "chunked")
-                self.end_headers()
-                while True:
-                    chunk = upstream.read(4096)
-                    if not chunk:
-                        break
-                    if ttfb_ms is None:
-                        ttfb_ms = int((time.monotonic() - start) * 1000)
-                    response_chunks.append(chunk)
-                    self.wfile.write(b"%x\r\n%b\r\n" % (len(chunk), chunk))
-                self.wfile.write(b"0\r\n\r\n")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    while True:
+                        chunk = upstream.read(4096)
+                        if not chunk:
+                            break
+                        if ttfb_ms is None:
+                            ttfb_ms = int((time.monotonic() - start) * 1000)
+                        response_chunks.append(chunk)
+                        self.wfile.write(b"%x\r\n%b\r\n" % (len(chunk), chunk))
+                    self.wfile.write(b"0\r\n\r\n")
+                else:
+                    # S40 Phase D: read the whole response before writing anything, so a denied
+                    # tool call can still be stripped -- fail closed, not just fail logged.
+                    while True:
+                        chunk = upstream.read(4096)
+                        if not chunk:
+                            break
+                        if ttfb_ms is None:
+                            ttfb_ms = int((time.monotonic() - start) * 1000)
+                        response_chunks.append(chunk)
+                    body = b"".join(response_chunks)
+                    denial_reason = check_tool_calls(body)
+                    if denial_reason:
+                        log(f"BLOCKED by egress guard Tier B: {denial_reason}")
+                        self._send_json(400, {"error": {
+                            "message": f"tool call denied by egress guard: {denial_reason}"}})
+                        self._log_usage(role, "tool-denied", start, ttfb_ms, prompt_chars, body,
+                                         error_message=denial_reason)
+                        return
+                    self.send_response(status)
+                    for header, value in headers:
+                        self.send_header(header, value)
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    self.wfile.write(b"%x\r\n%b\r\n" % (len(body), body))
+                    self.wfile.write(b"0\r\n\r\n")
             self._log_usage(role, "ok", start, ttfb_ms, prompt_chars, b"".join(response_chunks))
         except urllib.error.HTTPError as exc:
             body = exc.read()

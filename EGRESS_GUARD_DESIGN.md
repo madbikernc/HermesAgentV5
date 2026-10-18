@@ -1,18 +1,20 @@
 # Firmament Layer 3 — Tool-Call & Egress Guard: Target Design
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 
-**Status:** Phases A, B, and C executed, 2026-10-18 (§10). `tools/hermes_egress_guard.py` (Tier A) and
+**Status:** All four phases executed, 2026-10-18 (§10). `tools/hermes_egress_guard.py` (Tier A) and
 `infra/firmament-tool-registry.yaml` exist; the five real call sites §5 named (plus two more real ones
 found while wrapping them, §3's revision note below) call `check_destination()` before reaching their
 destination, and every deny path now also runs §8's Matrix+email+record pipeline. Three real duplicate
 `send_email`/`matrix_notice` implementations Phase A's own wrapping touched are consolidated onto
 `hermes_alert_common.py`. `hermes-fleetops-ui.py`'s new `/egress-blocks` page reads the report-page record
 directly out of `hermes-memory`'s SQLite file, the same way `/recommendations` already does — which made
-this phase's own originally-planned gate (§8.4) moot; see that section's correction note. Still open: the
-`hermes-memory` write itself is unit-tested but not verified against a live instance (no fleet node
-reached this session); S33 (the underlying HTTP-API cap) remains unresolved as its own stage; Phase D (the
-router-level structural tripwire) remains not executed. `IMPLEMENTATION_PLAN.md`'s **S40** is the stage
+Phase C's own originally-planned gate (§8.4) moot; see that section's correction note. `hermes-router.py`
+now buffers and validates any response to a request that actually asked for tool-calling (§7 Tier B) —
+real traffic, which never does, is completely unaffected. Still open: the `hermes-memory` write itself is
+unit-tested but not verified against a live instance (no fleet node reached this session); S33 (the
+underlying HTTP-API cap) remains unresolved as its own stage; the optional Phase E (egress-firewall
+defense-in-depth, §10) was never in scope for this pass. `IMPLEMENTATION_PLAN.md`'s **S40** is the stage
 that tracks this and points back here for the full spec, the same split S23/S38/S39 use for their own
 design docs.
 
@@ -242,11 +244,58 @@ ever relied on for anything adversarial.
 
 Forward-looking, explicitly labeled as such rather than claimed as a live fix (matching this repo's own
 discipline — e.g. S18's exit gate framing — of never overclaiming what a change defends against today).
-Add a check in the router's response-handling path: if a backend's response ever contains an OpenAI
-`tool_calls`/`function_call` field (confirmed: never happens today), validate the function name against
-§6's registry, and if any argument is host/URL-shaped, run it through Tier A's `check_destination()` before
-the response reaches the caller. On failure: strip the tool call from the response (fail closed) and run
-§8's pipeline exactly as Tier A does.
+`[DECIDED]`, executed Phase D, 2026-10-18.
+
+**The real fail-closed constraint, found while building this, not assumed.** `hermes-router.py` relays a
+backend's response chunk-by-chunk the instant each one is read from upstream (confirmed by reading the
+write loop directly) — so by the time a full response is available to scan for a tool call, the caller
+already has it. "Strip the tool call from the response" is only actually possible *before* the first byte
+goes out, which means a real implementation cannot be a passive scan bolted onto the existing live-relay
+loop; it has to change *when* bytes are written, for at least some requests.
+
+**The fix: gate the buffered path on `tools`/`functions` being present in the request, not on every
+request.** `do_POST()` now computes `wants_tools = bool(payload.get("tools") or payload.get("functions"))`
+once, up front. When false — every real request today, confirmed (§3) — the relay loop is byte-for-byte
+unchanged: live chunk-by-chunk streaming, same latency, same everything. When true, the router instead
+reads the *entire* upstream response into memory first, validates it, and only then either relays the
+buffered bytes in one shot (allowed) or sends a 400 instead (denied) — a real, working fail-closed gate,
+paid for only by the one request shape nothing in this fleet produces yet. The alternative (buffer and
+scan every response, always) was rejected: it would cost every real request its current low-TTFB streaming
+to guard a condition that cannot occur today, a materially worse trade for zero added protection.
+
+**Validation, in `tools/hermes_egress_guard.py`'s new `check_tool_call(name, arguments_json, caller=
+"hermes-router.py")`:**
+1. `name` must be a published tool — some registry row's own `name` field, any `kind`, checked
+   unconditionally (so an unregistered tool with no URL-shaped argument at all still denies).
+2. `extract_tool_calls()` (new, in `hermes-router.py`) reconstructs every call found, whether the response
+   was a plain JSON object or an SSE stream — the streaming case means replaying OpenAI's own
+   delta-accumulation wire format (`function.name`/`id` arrive once per `index`; `function.arguments`
+   arrives as string fragments concatenated in order across many chunks), done once over the now-complete
+   buffered body rather than incrementally.
+3. Every string found anywhere inside the parsed `arguments` (walked recursively — arguments have no fixed
+   shape) that looks host/URL-shaped is run through Tier A's own `check_destination(value, name)` — **the
+   tool's own name is the caller identity**, not the router process. A registry row's `allowed_callers`
+   therefore has to name the function explicitly before that function can reach the row's destination; it
+   is not implicitly granted by the row existing, the same non-transferable-grant rule §5 already holds
+   Tier A's own callers to.
+
+**Consequence, confirmed rather than assumed: this denies 100% of real invocations today, correctly.** No
+registry row lists a function name among its own `allowed_callers` (every row today lists script
+basenames, Tier A's concern) — so a hypothetical tool call naming an otherwise-real published destination
+(e.g. `web-search-fallback` with a `url` argument pointing at `api.tavily.com`) still denies, verified live
+in this session, not assumed: the function name is registered, but is not *itself* an allowed caller of
+that destination. This is exactly the "nothing to catch yet" state the design has claimed since §3 — now
+asserted by a test rather than taken on faith (`infra/hermes-router/tests/test_tier_b.py`). The day a real
+tool is actually published for a model to call, its registry row's `allowed_callers` needs the function's
+own name added explicitly — an authoring step, not a code change.
+
+**Known, stated limitation.** The host/URL heuristic (`_looks_like_host_or_url()`) requires a dotted,
+TLD-shaped label or a plain IPv4 address — deliberately, so an ordinary decimal argument ("3.14") or a
+version string ("1.2.3") never false-positives into a destination check, found by testing it against
+exactly those two shapes before trusting it. The cost: a bare single-label hostname with no TLD shape
+(e.g. "localhost") inside an argument is not caught. Every real internal call site in this fleet already
+uses a literal IP rather than a bare hostname (§4's own note), so this is not believed to cost real
+coverage today — stated as a real gap in the heuristic, not quietly treated as a complete one.
 
 This tier has nothing to do until some future change gives the fleet real function-calling — its value is
 closing the gap *before* that happens, not patching anything live today.
@@ -357,8 +406,12 @@ of the existing ones.
   explicit truncation flag) turned out moot — see §8.4's correction note — because this page reads
   `hermes-memory`'s SQLite file directly, the same way `/recommendations`/`/backlog` already do, and
   never touches the HTTP API S33's cap lives in. S33 itself is still open.
-- **Phase D — the router-level structural tripwire (§7, Tier B).** Last, since it is explicitly
-  forward-looking and has nothing to catch until a future change introduces real tool-calling.
+- **Phase D — the router-level structural tripwire (§7, Tier B). Executed 2026-10-18.** Gated the new
+  buffered/validated response path on `tools`/`functions` being present in the request, so today's real
+  traffic (none of which sets either) takes the exact unchanged live-streaming path — see §7 Tier B's own
+  revision note for why a passive always-on scan was rejected instead. Verified live, not assumed: every
+  real invocation denies today, because no registry row lists a function name as its own allowed caller
+  yet (`infra/hermes-router/tests/test_tier_b.py`, 12 checks).
 
 `[RISK]`: whether to also add outbound ufw/firewall rules as network-layer
 defense-in-depth alongside this application-layer guard — no egress-firewall precedent exists in this
@@ -375,3 +428,4 @@ infrastructure; `[PROPOSED]` to treat it as optional, a Phase E, independent of 
 | 1.1.0 | 2026-10-18 | **Phase A executed**, resolving both of S40a's open gates: adopted §4's own narrower internal-range recommendation as `[DECIDED]` (four ranges + always-internal loopback; full `10.0.0.0/8` is an explicit opt-in, never the default), and confirmed the Matrix homeserver is control-plane-internal, not a §5 external exception, by reading `infra/continuwuity`'s own config/README. Built `tools/hermes_egress_guard.py`, `infra/firmament-tool-registry.yaml`, and offline unit tests; wrapped `hermes-websearch.py`, `hermes-model-scout.py`, `hermes-model-scan.py`, `hermes-model-watch.py`, `hermes-linodemercury-watch.py`, and `hermes_alert_common.py`. Found and recorded a real gap in §3's own audit table while doing it: `hermes-model-watch.py` also reaches `raw.githubusercontent.com`/`api.github.com`, neither previously named — both are now wrapped and registered. Also surveyed the wider fleet and found roughly ten more scripts with their own real external destinations that §3's original audit never claimed to cover and this phase deliberately does not wrap (§3's revision note) — an explicit scope boundary, not an oversight repeated twice. |
 | 1.2.0 | 2026-10-18 | **Phase B executed** (§8, §10), except the report-page record's live verification. `check_destination()` now runs the Matrix+email report pipeline itself on every deny path, with a single in-flight recursion guard for the one real loop this creates (a registry-load failure denies the hi-pri email's own destination too). `hermes_alert_common.send_email()` gained `priority="critical"` (subject prefix + `Importance`/`X-Priority` headers) and now returns `True`/`False`. Corrected §8.2's "three duplicate implementations" claim after actually counting: a fleet-wide sweep found 24 independent `smtplib` users and 11 independent `matrix_notice()`s, not 3, and neither `hermes-fleet-health.py` nor `hermes-model-scout.py` (the two §8.2 originally named) turned out to have its own — the three real, in-scope duplicates were the ones Phase A's own wrapping had already touched (`hermes-model-scan.py`, `hermes-model-watch.py`, `hermes-linodemercury-watch.py`'s `send_email`s, plus that last file's own `matrix_notice`), now consolidated onto `hermes_alert_common.py`. The other ~20/~10 duplicates are recorded as an explicit, separate, out-of-scope finding, same shape as 1.1.0's external-destination survey. Extended the offline test suite (33 → 43 checks) to cover the report pipeline, the recursion guard, and the new `send_email()` behavior; the `hermes-memory` write itself (`_record_denial()`) is unit-tested but not exercised against a live `hermes-memory` instance. |
 | 1.3.0 | 2026-10-18 | **Phase C executed** (§8.4, §10). Added `/egress-blocks` to `hermes-fleetops-ui.py`, modeled on `/recommendations` as planned. Correction: §8.4's own planned gate (land `hermes-memory`'s `/turns` `since` filter, or build a truncation flag, before this page could be trusted) turned out moot, not satisfied by either option — `/recommendations` and `/backlog` never call the capped HTTP API at all, they read `hermes-memory`'s SQLite file directly via a read-only connection, and `/egress-blocks` does the same. S33's 500-row cap lives only in the HTTP JSON layer, so a direct SQL `COUNT(*)` gives an exact total with no prerequisite stage needed. S33 itself remains open as its own stage — `hermes-guard-report.py` still calls the capped endpoint and would still benefit from that fix; this finding only closes Phase C's own gate, not S33. Extended the offline test suite (`infra/hermes-fleetops-ui/tests/test_fleetops_ui.py`, 226 → 234 checks) covering ordering, an honest true-total, escaping, and a malformed/empty `raw` row degrading instead of crashing the page. |
+| 1.4.0 | 2026-10-18 | **Phase D executed** (§7 Tier B, §10) — all four phases now done. Found while building it that the router's own live chunk-by-chunk relay makes a passive post-hoc scan unable to actually "strip the tool call... fail closed" as originally written, since bytes are already gone by the time a full response exists to scan — fixed by gating a buffered/validate-then-relay path on `tools`/`functions` being present in the *request*, not by scanning every response; real traffic (which never sets either) takes the exact unchanged streaming path, paying nothing for a condition that cannot occur today. Added `hermes-router.py`'s `extract_tool_calls()` (plain JSON and OpenAI's own SSE delta-accumulation shape, reconstructed by index) and `check_tool_calls()`, plus `hermes_egress_guard.py`'s `check_tool_call()`/`is_registered_function()`/`report_denial()`. Verified live, not assumed: every real invocation denies today, because the tool's own name is the caller identity for Tier A's `check_destination()` and no registry row lists a function name among its own `allowed_callers` yet — asserted by a new offline suite (`infra/hermes-router/tests/test_tier_b.py`, 12 checks), not left as a claim. Named a real, stated limitation in the host/URL heuristic (misses a bare single-label hostname with no TLD shape) rather than silently treating it as complete. |

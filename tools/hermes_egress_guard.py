@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-18) — S40 Phase D (Tier B, design doc §7): check_tool_call(name, arguments_json)
+# is the structural tripwire for hermes-router.py's response-handling path. Two checks: `name`
+# must be a published tool in the registry (any row, matched by its `name` field, not its
+# destination), and any host/URL-shaped string found inside the parsed `arguments` is run through
+# check_destination(value, name) -- treating the tool's own name as the caller identity, so a
+# registry row only grants a destination to the function name(s) listed in its own
+# allowed_callers, the same non-transferable-grant rule Tier A already holds callers to (§5).
+# Nothing in the registry lists a function name as an allowed_caller today (every row's own
+# callers are script basenames, Tier A's concern) -- so, correctly, every real call into this
+# function right now denies, matching the design's own "nothing to catch yet" framing exactly:
+# there is no published tool for a model to call in the first place. Added report_denial() as a
+# public wrapper over _report_denial() for exactly this case -- a caller outside this module
+# (hermes-router.py) that needs to run the §8 pipeline for a reason check_destination() itself
+# never sees (an unregistered function name, which never reaches check_destination() at all).
 #
 # 1.1.0 (2026-10-18) — S40 Phase B: check_destination() now also runs the design doc's §8
 # deny-report pipeline before it raises -- a Matrix notice and a hi-pri email (both via
@@ -13,16 +28,23 @@
 """
 hermes_egress_guard.py — Layer 3: constrains what a real outbound network call is allowed to
 target. Symmetric to Layer 1 (hermes_injection_guard.py) and Layer 2 (hermes-guard.py)'s INPUT
-screens; this one screens OUTPUT — any destination a real call site is about to reach. Target
-design: EGRESS_GUARD_DESIGN.md (IMPLEMENTATION_PLAN.md S40). This file is Tier A only (design
-doc §7) — the egress-destination guard real call sites import and use directly. Tier B (a
-router-level structural tripwire for a future real tool-calling surface) does not exist yet —
-there is nothing for it to do until some future change gives the fleet real function-calling
-(design doc §7/§9); this module makes no attempt at that half.
+screens; this one screens OUTPUT — any destination a real call site is about to reach, or (Tier
+B, below) any tool call a backend's response asks the fleet to act on. Target design:
+EGRESS_GUARD_DESIGN.md (IMPLEMENTATION_PLAN.md S40).
 
-One function real call sites use:
+Two entry points:
 
-    check_destination(url_or_host, caller) -> None   # raises EgressDenied if not allowed
+    check_destination(url_or_host, caller) -> None   # Tier A -- raises EgressDenied if not allowed
+    check_tool_call(name, arguments_json, caller="hermes-router.py") -> None   # Tier B, same
+
+Tier A (§7): real call sites import and use this directly, before making their own outbound
+request. Tier B (§7): hermes-router.py's own response-handling path calls this for every
+tool_calls/function_call entry it finds in (or reconstructs from) a backend's response, before
+relaying it to the caller -- forward-looking, explicitly labeled as such rather than claimed as a
+live fix (matching S18's own exit-gate framing): no backend emits one today (confirmed, design
+doc §3), so every real invocation of check_tool_call() right now is necessarily denying something
+that cannot yet happen in production. Its value is closing the gap *before* it can, not patching
+anything live today.
 
 Logic (design doc §7): resolve the destination; if it is fleet-internal (§4), allow. Otherwise,
 look it up in the tool registry (§6) — allow only if `caller` is named in that entry's
@@ -65,6 +87,7 @@ venv) needs no PyYAML just to make this check.
 import ipaddress
 import json
 import os
+import re
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -222,3 +245,91 @@ def check_destination(url_or_host, caller):
         reason = f"{host!r} is not on this caller's egress whitelist"
         _report_denial(caller, host, reason)
         raise EgressDenied(f"{caller}: {reason}")
+
+
+def report_denial(caller, attempted, reason):
+    """Public wrapper over _report_denial() (§8's Matrix+email+record pipeline) for a caller
+    outside this module that needs to run it for a reason check_destination() itself never sees
+    -- Tier B's "unregistered function name" case below never reaches check_destination() at all,
+    since there is no destination to check yet at that point, only a name."""
+    _report_denial(caller, attempted, reason)
+
+
+# ── Tier B: the router-level structural tripwire (§7) ──────────────────────────────────────────
+
+_IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+# Requires a final all-alphabetic label of 2+ characters (a TLD shape) so an ordinary decimal
+# number or version string ("3.14", "1.2.3") never false-positives into a destination check --
+# found while writing this, not assumed; see check_tool_call()'s own docstring for the tradeoff
+# this leaves (a bare hostname with no dot, e.g. "localhost", is not caught by this heuristic).
+_HOSTNAME_RE = re.compile(
+    r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$")
+_URL_RE = re.compile(r"^https?://\S+$", re.I)
+
+
+def _looks_like_host_or_url(value):
+    v = value.strip()
+    return bool(_URL_RE.match(v) or _IP_RE.match(v) or _HOSTNAME_RE.match(v))
+
+
+def _iter_strings(obj):
+    """Walks an arbitrarily-nested JSON value (dict/list/scalar) and yields every string found,
+    at any depth -- a tool call's arguments object has no fixed shape, so there is no single key
+    name to check."""
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_strings(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _iter_strings(v)
+
+
+def is_registered_function(name):
+    """True if `name` appears as some registry row's own `name` field (any kind) -- Tier B's
+    first check: is this even a published tool, regardless of what it was called with. Fail-safe
+    like check_destination(): a registry that can't be loaded means nothing is registered, never
+    that everything is."""
+    try:
+        registry = _load_registry()
+    except Exception:
+        return False
+    return any(entry["name"] == name for entry in registry.values())
+
+
+def check_tool_call(name, arguments_json, caller="hermes-router.py"):
+    """Tier B (design doc §7): validates one model-returned tool call before hermes-router.py
+    ever relays it to the caller. Raises EgressDenied if `name` is not a published tool in the
+    registry (checked unconditionally -- an unregistered tool with no URL-shaped argument at all
+    must still deny, so this cannot be folded into the loop below), or if any host/URL-shaped
+    string found inside `arguments_json` (a JSON-encoded string, the wire shape both OpenAI's
+    `tool_calls[].function.arguments` and the legacy `function_call.arguments` use) fails
+    check_destination() for that same name -- the tool's own name is the caller identity, so a
+    registry row only grants its destination to the function name(s) actually listed in its own
+    allowed_callers, never implicitly to whichever script happens to be running the router.
+
+    Malformed `arguments_json` (not valid JSON, or valid JSON that isn't a string/dict/list) is
+    treated as "no arguments to check" rather than a parse error to raise on -- the name check
+    above already ran and already denies an unregistered tool regardless; a registered tool that
+    sent unparseable arguments has a bug worth noticing elsewhere, not a reason for this function
+    to raise something other than EgressDenied.
+
+    Known, stated limitation (same discipline as check_destination()'s own): the host/URL
+    heuristic below requires a dot (`_HOSTNAME_RE`), so a bare single-label hostname with no TLD
+    shape (e.g. "localhost") inside an argument is not caught. Every real internal call site in
+    this fleet already uses a literal IP or "127.0.0.1" rather than a bare hostname (§4's own
+    note), so this is not believed to cost real coverage today, but it is a real gap in the
+    heuristic, not a secretly-complete one."""
+    if not is_registered_function(name):
+        reason = f"{name!r} is not a published tool in the registry"
+        report_denial(caller, name, reason)
+        raise EgressDenied(f"{caller}: {reason}")
+    try:
+        args = json.loads(arguments_json) if arguments_json else None
+    except (ValueError, TypeError):
+        args = None
+    for value in _iter_strings(args):
+        if _looks_like_host_or_url(value):
+            check_destination(value, name)  # raises + reports on its own, same as Tier A
