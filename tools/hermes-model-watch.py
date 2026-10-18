@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-10-18) — S40 Phase B consolidation (design doc §8.2): send_email() now delegates to
+# hermes_alert_common.py instead of rolling its own password fetch/SMTP -- this file's own
+# vault_get()/VAULT_GET/SMTP_HOST/SMTP_PORT/SMTP_FROM/EMAIL_TO/EMAIL_TO_NAME and the MIMEText
+# import they alone needed are gone, not duplicated. Same name/signature/bool-return shape, so
+# main()'s `if send_email(...)` check is unaffected.
 #
 # 1.2.0 (2026-10-18) — S40 Layer 3: upstream_arch_set(), search_llama_cpp_prs(),
 # search_hf_glm_5_3(), and send_email() now call hermes_egress_guard.check_destination() before
@@ -90,7 +96,6 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timezone
-from email.mime.text import MIMEText
 from pathlib import Path
 
 import requests
@@ -98,9 +103,9 @@ import requests
 TOOLS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS_DIR))
 import hermes_egress_guard  # noqa: E402
+import hermes_alert_common  # noqa: E402
 
 REPO_DIR = os.environ.get("HERMES_REPO_DIR", str(Path.home() / "HermesAgentV5"))
-VAULT_GET = f"{REPO_DIR}/tools/vault-get-secret.sh"
 
 # Confirmed live 2026-09-01 (`which llama-server` / directory ownership check on Spark) — the
 # real checkout this fleet actually builds and serves from, owned by the same `pmoney` identity
@@ -113,12 +118,6 @@ HF_API = "https://huggingface.co/api/models"
 STATE_FILE = Path.home() / ".hermes" / "state" / "model_watch_state.json"
 LEGACY_SEED_FILE = Path(REPO_DIR) / "infra" / "model-watch" / "alert-state.json"
 
-SMTP_HOST = "mail.hover.com"
-SMTP_PORT = 587
-SMTP_FROM = "mercury@canislupisnc.net"
-EMAIL_TO = "notifications@canislupisnc.net"
-EMAIL_TO_NAME = "Fleet Notifications"
-
 ARCH_ENUM_RE = re.compile(r"\bLLM_ARCH_[A-Z0-9_]+\b")
 
 # Human-curated, matching what The Boss has actually asked to track — not meant to be
@@ -128,17 +127,6 @@ WATCHED_TERMS = {
     "qwen4exp": "qwen4exp architecture",
     "qwen4_flash": "Qwen4 Flash",
 }
-
-
-def vault_get(item, field):
-    for _ in range(2):
-        try:
-            result = subprocess.run([VAULT_GET, item, field], capture_output=True, text=True, timeout=60)
-        except subprocess.TimeoutExpired:
-            continue
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    return ""
 
 
 # ── state ────────────────────────────────────────────────────────────────
@@ -317,28 +305,11 @@ def check_hf_releases(state, findings):
 # ── email ────────────────────────────────────────────────────────────────
 
 def send_email(subject, body):
-    import smtplib
-
-    password = vault_get("email-sintra", "password")
-    if not password:
-        print("ERROR: could not fetch email-sintra password from vault", file=sys.stderr)
-        return False
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = SMTP_FROM
-    msg["To"] = f"{EMAIL_TO_NAME} <{EMAIL_TO}>"
-
-    try:
-        hermes_egress_guard.check_destination(SMTP_HOST, "hermes-model-watch.py")  # S40 Layer 3
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.starttls()
-            server.login(SMTP_FROM, password)
-            server.send_message(msg)
-        return True
-    except Exception as exc:
-        print(f"ERROR: email send failed: {exc}", file=sys.stderr)
-        return False
+    """S40 Phase B consolidation: delegates to hermes_alert_common.py (the fleet's one real
+    SMTP/Matrix implementation) instead of rolling its own -- this file's own copy of the
+    password fetch, the message construction, and the egress check are gone, not duplicated.
+    Keeps the same name/signature/bool-return shape this file's own callers already expect."""
+    return hermes_alert_common.send_email(subject, body)
 
 
 # ── main ─────────────────────────────────────────────────────────────────

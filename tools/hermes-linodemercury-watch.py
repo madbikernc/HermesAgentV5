@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-18) — S40 Phase B consolidation (design doc §8.2): matrix_notice() and
+# send_email_digest() now delegate to hermes_alert_common.py instead of rolling their own
+# credential fetch/PUT/SMTP -- this file's own copies (and the now-dead EMAIL_FROM/EMAIL_TO/
+# EMAIL_TO_NAME constants, smtplib/MIMEText/time/urllib.parse imports) are gone, not duplicated.
+# matrix_notice() also gains MATRIX_HOMESERVER env-var configurability its own hardcoded
+# 127.0.0.1:6167 never had. One behavior change, accepted as a consequence of using the shared
+# module's own contract rather than a regression to fix: a missing-Matrix-credentials skip is now
+# silent, same as every other hermes_alert_common.matrix_notice() caller, instead of this file's
+# own former explicit "no FleetOps Matrix credentials" log line.
 #
 # 1.1.0 (2026-10-18) — S40 Layer 3: ssh_run()/pull_bundle() (the SSH/scp path to LinodeMercury),
 # matrix_notice(), and send_email_digest() now all call hermes_egress_guard.check_destination()
@@ -64,17 +74,13 @@ import hashlib
 import json
 import re
 import shutil
-import smtplib
 import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
-from email.mime.text import MIMEText
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -82,6 +88,7 @@ VAULT_SCRIPT = str(REPO_DIR / "tools" / "vault-get-secret.sh")
 
 sys.path.insert(0, str(REPO_DIR / "tools"))
 import hermes_egress_guard  # noqa: E402
+import hermes_alert_common  # noqa: E402
 
 SSH_HOST = "linodemercury"
 NODE_NAME = "linodemercury"
@@ -91,10 +98,6 @@ STATE_FILE = Path.home() / ".hermes" / "state" / "linodemercury-watch-state.json
 
 MEMORY_URL = "http://10.129.1.15:8102"
 EXPECTED_OPEN_ANYWHERE = {"22/tcp", "22/tcp (v6)"}
-
-EMAIL_FROM = "mercury@canislupisnc.net"
-EMAIL_TO = "notifications@canislupisnc.net"
-EMAIL_TO_NAME = "Fleet Notifications"
 
 SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 AGENT_NAME = "linodemercury-watch"
@@ -527,42 +530,19 @@ def resolve_recommendation(rec_id, memory_token, finding_id):
 # ── notification ─────────────────────────────────────────────────────────────
 
 def matrix_notice(text):
-    token = vault_get("matrix-fleetops", "password")
-    room = vault_get("matrix-fleetops", "room")
-    if not token or not room:
-        print("[hermes-linodemercury-watch] no FleetOps Matrix credentials -- skipping notice", file=sys.stderr)
-        return
-    try:
-        hermes_egress_guard.check_destination("http://127.0.0.1:6167", "hermes-linodemercury-watch.py")  # S40 Layer 3
-        txn = f"linodemercury-notice-{int(time.time() * 1000)}"
-        req = urllib.request.Request(
-            f"http://127.0.0.1:6167/_matrix/client/v3/rooms/{urllib.parse.quote(room)}/send/m.room.message/{txn}",
-            data=json.dumps({"msgtype": "m.notice", "body": text}).encode(),
-            method="PUT",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            resp.read()
-    except Exception as exc:
-        print(f"[hermes-linodemercury-watch] FleetOps notice failed: {exc}", file=sys.stderr)
+    """S40 Phase B consolidation: delegates to hermes_alert_common.py (the fleet's one real
+    SMTP/Matrix implementation) instead of rolling its own -- this file's own copy of the
+    credential fetch, the room PUT, and the egress check are gone, not duplicated. Also gains
+    MATRIX_HOMESERVER env-var configurability this file's own hardcoded 127.0.0.1:6167 never had."""
+    hermes_alert_common.matrix_notice(text, log=lambda msg: print(
+        f"[hermes-linodemercury-watch] {msg}", file=sys.stderr))
 
 
 def send_email_digest(subject, body):
-    password = vault_get("email-sintra", "password")
-    if not password:
-        print("[hermes-linodemercury-watch] no email-sintra password -- skipping email", file=sys.stderr)
-        return
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_FROM
-    msg["To"] = f"{EMAIL_TO_NAME} <{EMAIL_TO}>"
-    try:
-        hermes_egress_guard.check_destination("mail.hover.com", "hermes-linodemercury-watch.py")  # S40 Layer 3
-        with smtplib.SMTP("mail.hover.com", 587, timeout=20) as server:
-            server.starttls()
-            server.login(EMAIL_FROM, password)
-            server.send_message(msg)
-    except Exception as exc:
-        print(f"[hermes-linodemercury-watch] digest email failed: {exc}", file=sys.stderr)
+    """S40 Phase B consolidation: delegates to hermes_alert_common.py (the fleet's one real
+    SMTP/Matrix implementation) instead of rolling its own -- this file's own copy of the
+    password fetch, the message construction, and the egress check are gone, not duplicated."""
+    hermes_alert_common.send_email(subject, body)
 
 
 def build_digest(new_recs, upgradable_count, failed_pw_count, probe_count):

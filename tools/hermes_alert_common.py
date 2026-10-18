@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-10-18) - S40 Phase B (design doc §8.3): send_email() gains a `priority="normal"`
+# kwarg. priority="critical" prefixes the subject with "[CRITICAL] " (matching
+# hermes-node-health.py's own live severity-tag convention, skipped if already present) and sets
+# `Importance: high`/`X-Priority: 1`. Every existing caller is unaffected -- the default stays
+# "normal", exactly one subject and one priority, same as before this kwarg existed. Used by
+# hermes_egress_guard.py's new §8 deny-report pipeline for its own hi-pri alert. Also now returns
+# True/False (sent vs. skipped-or-failed) instead of nothing -- added so hermes-model-scan.py/
+# -watch.py/hermes-linodemercury-watch.py's own duplicate send_email()s, each of which returned a
+# boolean its own caller checked, could be consolidated onto this one without losing that check
+# (same §8.2 consolidation the design doc calls out, now actually done for the three real
+# duplicates S40 Phase A's own wrapping touched -- not hermes-fleet-health.py/hermes-model-
+# scout.py, which the design doc named but which turned out not to have their own send_email at
+# all; see EGRESS_GUARD_DESIGN.md's own revision note).
 #
 # 1.2.0 (2026-10-18) - S40 Layer 3: send_email() and matrix_notice() now call
 # hermes_egress_guard.check_destination() before reaching mail.hover.com / MATRIX_HOMESERVER,
@@ -98,8 +112,17 @@ def _resolve_fleetops():
     return _fleetops_cache
 
 
-def send_email(subject, body, log=print):
-    """Best-effort -- never raises."""
+def send_email(subject, body, log=print, priority="normal"):
+    """Best-effort -- never raises. Returns True once the message was actually handed to the
+    SMTP server, False on any skip or failure (no password, egress denied, connection/auth
+    error) -- added in the S40 Phase B consolidation so a caller that used to check its own
+    duplicate send_email()'s return value keeps working after switching to this one.
+
+    `priority="critical"` (S40 §8.3): prefixes the subject with the same `[CRITICAL] ...`
+    convention hermes-node-health.py's own severity tagging already uses live, and sets
+    `Importance: high` / `X-Priority: 1` so a mail client flags it ahead of routine digests.
+    Every other caller is unaffected -- the default stays "normal", one subject, one priority,
+    exactly as before this kwarg existed."""
     global _email_warned
     password = _resolve_email_password()
     if not password:
@@ -107,19 +130,26 @@ def send_email(subject, body, log=print):
             log("no EMAIL_PASSWORD (env or vault email-sintra) — email alerts disabled for "
                 "this process's lifetime")
             _email_warned = True
-        return
+        return False
+    if priority == "critical" and not subject.startswith("[CRITICAL]"):
+        subject = f"[CRITICAL] {subject}"
     msg = MIMEText(body)
     msg["Subject"] = subject
     msg["From"] = EMAIL_FROM
     msg["To"] = f"{EMAIL_TO_NAME} <{EMAIL_TO}>"
+    if priority == "critical":
+        msg["Importance"] = "high"
+        msg["X-Priority"] = "1"
     try:
         hermes_egress_guard.check_destination("mail.hover.com", "hermes_alert_common.py")  # S40 Layer 3
         with smtplib.SMTP("mail.hover.com", 587, timeout=20) as server:
             server.starttls()
             server.login(EMAIL_FROM, password)
             server.send_message(msg)
+        return True
     except Exception as exc:
         log(f"alert email failed: {exc}")
+        return False
 
 
 def matrix_notice(text, log=print):

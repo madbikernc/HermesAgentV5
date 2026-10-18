@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.7.0
+#
+# 1.7.0 (2026-10-18) — S40 Phase B consolidation (design doc §8.2): send_email() now delegates to
+# hermes_alert_common.py instead of rolling its own password fetch/SMTP -- this file's own
+# vault_get()/REPO_DIR/VAULT_GET/SMTP_HOST/SMTP_PORT/SMTP_FROM/EMAIL_TO/EMAIL_TO_NAME and the
+# subprocess/MIMEText imports they alone needed are gone, not duplicated. Same name, signature,
+# and bool-return shape, so main()'s `if send_email(...)` check is unaffected.
 #
 # 1.6.0 (2026-10-18) — S40 Layer 3: _hf_get() and send_email() now call
 # hermes_egress_guard.check_destination() before reaching huggingface.co / mail.hover.com, same
@@ -102,11 +108,9 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from email.mime.text import MIMEText
 from pathlib import Path
 
 import requests
@@ -114,21 +118,13 @@ import requests
 TOOLS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS_DIR))
 import hermes_egress_guard  # noqa: E402
-
-REPO_DIR = os.environ.get("HERMES_REPO_DIR", str(Path.home() / "HermesAgentV5"))
-VAULT_GET = f"{REPO_DIR}/tools/vault-get-secret.sh"
+import hermes_alert_common  # noqa: E402
 
 HF_API = "https://huggingface.co/api/models"
 STATE_FILE = Path.home() / ".hermes" / "state" / "model_scan_state.json"
 
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080")
 LLM_MODEL = os.environ.get("LLM_MODEL", "dispatch")  # V5 S13: nano retired, dispatch is the new stock/always-resident default
-
-SMTP_HOST = "mail.hover.com"
-SMTP_PORT = 587
-SMTP_FROM = "mercury@canislupisnc.net"
-EMAIL_TO = "notifications@canislupisnc.net"
-EMAIL_TO_NAME = "Fleet Notifications"
 
 LOOKBACK_DAYS = 7
 
@@ -226,17 +222,6 @@ MAX_ENRICHED_PER_CATEGORY = {
 DEFAULT_ENRICH_CAP = 4
 
 MOE_HINTS = re.compile(r"\b(moe|a\d+b|mixture[-_ ]of[-_ ]experts)\b", re.IGNORECASE)
-
-
-def vault_get(item, field):
-    for _ in range(2):
-        try:
-            result = subprocess.run([VAULT_GET, item, field], capture_output=True, text=True, timeout=60)
-        except subprocess.TimeoutExpired:
-            continue
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    return ""
 
 
 # ── state ────────────────────────────────────────────────────────────────
@@ -531,28 +516,11 @@ def get_recommendation(candidates):
 # ── email ────────────────────────────────────────────────────────────────
 
 def send_email(subject, body):
-    import smtplib
-
-    password = vault_get("email-sintra", "password")
-    if not password:
-        print("ERROR: could not fetch email-sintra password from vault", file=sys.stderr)
-        return False
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = SMTP_FROM
-    msg["To"] = f"{EMAIL_TO_NAME} <{EMAIL_TO}>"
-
-    try:
-        hermes_egress_guard.check_destination(SMTP_HOST, "hermes-model-scan.py")  # S40 Layer 3
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.starttls()
-            server.login(SMTP_FROM, password)
-            server.send_message(msg)
-        return True
-    except Exception as e:
-        print(f"ERROR: email send failed: {e}", file=sys.stderr)
-        return False
+    """S40 Phase B consolidation: delegates to hermes_alert_common.py (the fleet's one real
+    SMTP/Matrix implementation) instead of rolling its own -- this file's own copy of the
+    password fetch, the message construction, and the egress check are gone, not duplicated.
+    Keeps the same name/signature/bool-return shape this file's own callers already expect."""
+    return hermes_alert_common.send_email(subject, body)
 
 
 # ── main ─────────────────────────────────────────────────────────────────

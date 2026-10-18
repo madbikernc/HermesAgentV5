@@ -1,14 +1,17 @@
 # Firmament Layer 3 — Tool-Call & Egress Guard: Target Design
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
-**Status:** Phase A executed, 2026-10-18 (§10) — `tools/hermes_egress_guard.py` (Tier A) and
-`infra/firmament-tool-registry.yaml` exist, and the five real call sites §5 named (plus two more real ones
-found while wrapping them, §3's revision note below) now call `check_destination()` before reaching their
-destination. Phases B–D (the deny→Matrix→email→record pipeline, the `hermes-fleetops-ui` report page, and
-the router-level structural tripwire) remain not executed. `IMPLEMENTATION_PLAN.md`'s **S40** is the stage
-that tracks this and points back here for the full spec, the same split S23/S38/S39 use for their own
-design docs.
+**Status:** Phases A and B executed, 2026-10-18 (§10). `tools/hermes_egress_guard.py` (Tier A) and
+`infra/firmament-tool-registry.yaml` exist; the five real call sites §5 named (plus two more real ones
+found while wrapping them, §3's revision note below) call `check_destination()` before reaching their
+destination, and every deny path now also runs §8's Matrix+email report pipeline. Three real duplicate
+`send_email`/`matrix_notice` implementations Phase A's own wrapping touched are consolidated onto
+`hermes_alert_common.py`. Still open: the `hermes-memory` report-page record is implemented and
+unit-tested but not verified live (no fleet node reached this session); Phase C (the `hermes-fleetops-ui`
+report page) and Phase D (the router-level structural tripwire) remain not executed.
+`IMPLEMENTATION_PLAN.md`'s **S40** is the stage that tracks this and points back here for the full spec,
+the same split S23/S38/S39 use for their own design docs.
 
 **Purpose:** add a third screening layer, symmetric to the existing Layer 1 (`hermes_injection_guard.py`)
 and Layer 2 (`hermes-guard.py`) **input** screens, that constrains what a model's **output** is allowed to
@@ -253,20 +256,32 @@ The request's four required actions, each mapped to a real mechanism already liv
 a new channel invented from scratch:
 
 1. **Deny.** `check_destination()` raises; every wrapped caller treats this as a hard failure — explicitly
-   never a silent fallback to making the request anyway. This needs a per-call-site review during rollout
-   (e.g. does `hermes-websearch.py`'s existing Tavily-failure handling already fail closed, or would it
-   need a new branch?) rather than being assumed free.
+   never a silent fallback to making the request anyway. `[DECIDED]`, executed Phase B: implemented
+   directly inside `check_destination()` itself (every deny path runs the report pipeline below before it
+   raises), so a wrapped call site gets §8's whole pipeline for free — nothing to review or add per call
+   site, which turned out simpler than the per-site review this bullet originally expected.
 2. **Matrix report.** Reuse `hermes_alert_common.matrix_notice()` — the fleet's one existing
    direct-to-Matrix-room pattern that bypasses `hermes-presenter.py`'s normal reply path, already used by
-   `hermes-router.py` for guard block/unreachable alerts. This stage is also the natural forcing function
-   to finish consolidating the three current independent duplicate implementations (`hermes-fleet-health.py`
-   and `hermes-model-scout.py` each still roll their own) onto this one module, rather than add a fourth.
+   `hermes-router.py` for guard block/unreachable alerts. `[DECIDED]`, executed Phase B.
+   **Correction to this bullet's original "three duplicate implementations" claim:** neither
+   `hermes-fleet-health.py` nor `hermes-model-scout.py` turned out to have their own `matrix_notice()` (a
+   full `def matrix_notice(` sweep found 11 real independent implementations fleet-wide, not 3, and neither
+   named file is among them). The real, in-scope duplicate — the one Phase A's own wrapping had already
+   touched — was `hermes-linodemercury-watch.py`'s; it's now consolidated onto `hermes_alert_common.py`,
+   also gaining `MATRIX_HOMESERVER` configurability its own hardcoded `127.0.0.1:6167` never had. The
+   other ~10 fleet-wide `matrix_notice()` duplicates are an explicit, separate, out-of-scope finding (same
+   shape as §3's external-destination survey) — Phase B does not touch them.
 3. **Hi-pri email.** `hermes_alert_common.send_email()` has no priority concept today — every call goes to
-   the same recipient at the same urgency. Rather than invent a new channel, extend `send_email()` with a
+   the same recipient at the same urgency. `[DECIDED]`, executed Phase B: `send_email()` gained a
    `priority="critical"` kwarg that prefixes the subject and sets an `Importance: high`/`X-Priority: 1`
-   header — reusing the exact `[CRITICAL] ...` subject convention `hermes-fleet-health.py` already uses
-   live (the same convention that correctly fired throughout S32's 41-hour outage), rather than a
-   second, parallel severity scheme.
+   header, reusing the `[CRITICAL] ...` subject convention `hermes-node-health.py`'s own severity tagging
+   already uses live, and now returns `True`/`False` (sent vs. skipped-or-failed) rather than nothing, so a
+   consolidating caller's own `if send_email(...)` check keeps working. **Same correction as above
+   applies**: a `smtplib` sweep found 24 independent implementations fleet-wide, not the "three" originally
+   assumed. The three actually in scope — `hermes-model-scan.py`, `hermes-model-watch.py`, and
+   `hermes-linodemercury-watch.py`, each already touched by Phase A's own `check_destination()` wrapping —
+   are now consolidated onto this module; the other ~20 are the same kind of explicit, out-of-scope finding
+   as the Matrix duplicates above.
 4. **Report-page record.** Write one row via the generic `turns` table in `hermes-memory.py`, using the
    same `task_id`-sentinel convention every existing guard-verdict logger already follows (`task_id=
    "egress-block"`, `agent="egress-guard"`, `role="system"`, a JSON blob in `raw`: caller, attempted
@@ -316,8 +331,20 @@ of the existing ones.
   registry entry or resolves internal. The wider external-destination surface named in §3's revision note
   (Vivint, Generac, Wyze, podcast/RSS feeds, botnet-intel lists, etc.) is explicitly NOT wrapped by this
   phase.
-- **Phase B — the deny→Matrix→email→record pipeline (§8).** Including the `hermes_alert_common.py`
-  priority extension and the three-duplicate-implementation consolidation this stage forces.
+- **Phase B — the deny→Matrix→email→record pipeline (§8). Executed 2026-10-18, except the report-page
+  record's `hermes-memory` write.** `check_destination()` now runs the whole report pipeline (Matrix +
+  hi-pri email) itself before it ever raises, guarded against the one real recursion risk this creates (a
+  registry-load failure denies the hi-pri email's own destination too — see `hermes_egress_guard.py`'s
+  `_report_denial()` docstring for the single in-flight flag that stops it looping). `send_email()` gained
+  the `priority="critical"` kwarg (§8.3) and now returns `True`/`False`. Consolidated the three real
+  duplicate implementations Phase A's own wrapping had already touched (`hermes-model-scan.py`,
+  `hermes-model-watch.py`, `hermes-linodemercury-watch.py`'s `send_email`s, plus
+  `hermes-linodemercury-watch.py`'s own `matrix_notice`) onto `hermes_alert_common.py` — not
+  `hermes-fleet-health.py`/`hermes-model-scout.py` as §8.2 originally named; see that section's own
+  correction note for why, and for the much larger fleet-wide duplication this phase found and
+  deliberately left alone (24 independent `smtplib` users, 11 independent `matrix_notice()`s). The
+  `hermes-memory` `turns`-table write (`_record_denial()`) is implemented and unit-tested but unverified
+  against a live `hermes-memory` instance — no fleet node was reached this session.
 - **Phase C — the `hermes-fleetops-ui` report page.** Gated on either landing `/turns`' `since` filter or
   building an explicit truncation flag — not on a bare `limit=N` fetch, per §8.4's named risk.
 - **Phase D — the router-level structural tripwire (§7, Tier B).** Last, since it is explicitly
@@ -336,3 +363,4 @@ infrastructure; `[PROPOSED]` to treat it as optional, a Phase E, independent of 
 |---|---|---|
 | 1.0.0 | 2026-10-18 | Initial proposal: audited Layer 1/2's actual scope (input-only, no post-generation hook anywhere) and every real network-call site in the codebase, found that no production path today lets a model's output pick a network destination, anchored "internal" to the fleet's actual documented ranges (`10.129.1.0/24` + two `/30` links + tailnet `100.64.0.0/10`) rather than a blanket `/8`, named the five real external exceptions that must survive the check (Tavily, HuggingFace Hub, LinodeMercury, SMTP relay, Matrix homeserver pending confirmation), proposed the missing tool-call registry, and designed a two-tier guard (egress-destination wrapper now; a router-level structural tripwire for whenever real tool-calling arrives) with the deny/Matrix/email/report pipeline mapped onto mechanisms that already exist in the fleet rather than new ones. |
 | 1.1.0 | 2026-10-18 | **Phase A executed**, resolving both of S40a's open gates: adopted §4's own narrower internal-range recommendation as `[DECIDED]` (four ranges + always-internal loopback; full `10.0.0.0/8` is an explicit opt-in, never the default), and confirmed the Matrix homeserver is control-plane-internal, not a §5 external exception, by reading `infra/continuwuity`'s own config/README. Built `tools/hermes_egress_guard.py`, `infra/firmament-tool-registry.yaml`, and offline unit tests; wrapped `hermes-websearch.py`, `hermes-model-scout.py`, `hermes-model-scan.py`, `hermes-model-watch.py`, `hermes-linodemercury-watch.py`, and `hermes_alert_common.py`. Found and recorded a real gap in §3's own audit table while doing it: `hermes-model-watch.py` also reaches `raw.githubusercontent.com`/`api.github.com`, neither previously named — both are now wrapped and registered. Also surveyed the wider fleet and found roughly ten more scripts with their own real external destinations that §3's original audit never claimed to cover and this phase deliberately does not wrap (§3's revision note) — an explicit scope boundary, not an oversight repeated twice. |
+| 1.2.0 | 2026-10-18 | **Phase B executed** (§8, §10), except the report-page record's live verification. `check_destination()` now runs the Matrix+email report pipeline itself on every deny path, with a single in-flight recursion guard for the one real loop this creates (a registry-load failure denies the hi-pri email's own destination too). `hermes_alert_common.send_email()` gained `priority="critical"` (subject prefix + `Importance`/`X-Priority` headers) and now returns `True`/`False`. Corrected §8.2's "three duplicate implementations" claim after actually counting: a fleet-wide sweep found 24 independent `smtplib` users and 11 independent `matrix_notice()`s, not 3, and neither `hermes-fleet-health.py` nor `hermes-model-scout.py` (the two §8.2 originally named) turned out to have its own — the three real, in-scope duplicates were the ones Phase A's own wrapping had already touched (`hermes-model-scan.py`, `hermes-model-watch.py`, `hermes-linodemercury-watch.py`'s `send_email`s, plus that last file's own `matrix_notice`), now consolidated onto `hermes_alert_common.py`. The other ~20/~10 duplicates are recorded as an explicit, separate, out-of-scope finding, same shape as 1.1.0's external-destination survey. Extended the offline test suite (33 → 43 checks) to cover the report pipeline, the recursion guard, and the new `send_email()` behavior; the `hermes-memory` write itself (`_record_denial()`) is unit-tested but not exercised against a live `hermes-memory` instance. |

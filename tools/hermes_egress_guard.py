@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-18) — S40 Phase B: check_destination() now also runs the design doc's §8
+# deny-report pipeline before it raises -- a Matrix notice and a hi-pri email (both via
+# hermes_alert_common.py, imported lazily to avoid a load-time cycle with that module's own S40
+# Phase A import of this one) and a `hermes-memory` `turns` record (task_id "egress-block", same
+# sentinel-task-id convention every existing guard-verdict logger already follows). All
+# best-effort -- a reporting failure never masks or delays the denial itself, which has already
+# happened by the time any of this runs. Guarded against the one real recursion risk this creates
+# (a registry-load failure denies mail.hover.com too, which is exactly the destination the hi-pri
+# email itself would use) with a single in-flight flag -- see _report_denial()'s own docstring.
 """
 hermes_egress_guard.py — Layer 3: constrains what a real outbound network call is allowed to
 target. Symmetric to Layer 1 (hermes_injection_guard.py) and Layer 2 (hermes-guard.py)'s INPUT
@@ -53,13 +63,21 @@ line per entry, deliberately, so every real caller (most run under the bare syst
 venv) needs no PyYAML just to make this check.
 """
 import ipaddress
+import json
 import os
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 REGISTRY_PATH = Path(os.environ.get(
     "HERMES_TOOL_REGISTRY",
     str(Path(__file__).resolve().parent.parent / "infra" / "firmament-tool-registry.yaml")))
+
+MEMORY_URL = os.environ.get("MEMORY_URL", "http://10.129.1.15:8102").rstrip("/")
+MEMORY_TOKEN = os.environ.get("MEMORY_TOKEN", "")
+
+_reporting = False  # recursion guard -- see _report_denial()'s own docstring
 
 _INTERNAL_NETWORKS = [
     ipaddress.ip_network("10.129.1.0/24"),    # control plane
@@ -123,23 +141,84 @@ def _load_registry(path=None):
     return entries
 
 
+def _record_denial(caller, attempted, reason, ts):
+    """Writes one row to hermes-memory's `turns` table (design doc §8.4): task_id sentinel
+    "egress-block", agent "egress-guard", role "system", a JSON blob in `raw` -- the same
+    sentinel-task-id convention every existing guard-verdict logger already follows. Best-effort
+    -- silently skipped with no MEMORY_TOKEN, and any failure here must never mask the denial
+    itself, which has already happened by the time this runs."""
+    if not MEMORY_TOKEN:
+        return
+    raw = json.dumps({"caller": caller, "attempted": attempted, "reason": reason, "timestamp": ts})
+    req = urllib.request.Request(
+        f"{MEMORY_URL}/turns",
+        data=json.dumps({"task_id": "egress-block", "agent": "egress-guard", "role": "system",
+                          "raw": raw}).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {MEMORY_TOKEN}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+    except Exception:
+        pass
+
+
+def _report_denial(caller, attempted, reason):
+    """Best-effort -- never raises, and never delays or masks the denial itself (check_destination()
+    has already decided to deny by the time this runs; this only reports that decision). Design doc
+    §8's pipeline: Matrix notice + hi-pri email, both via hermes_alert_common.py (imported lazily --
+    that module itself imports this one for its own S40 Phase A egress checks, so importing it back
+    at this module's top level would be a load-time cycle), plus the hermes-memory record above.
+
+    Recursion guard: the one real loop this design creates is a registry-load failure, which denies
+    EVERY non-internal destination fail-safe -- including mail.hover.com, the hi-pri email's own
+    destination. Without this flag, that nested denial would call back into this function, try to
+    email again, deny again, and so on. The Matrix notice still gets through in that exact scenario
+    (Matrix resolves fleet-internal and never touches the registry), which is the channel that
+    matters most when non-internal egress is failing fleet-wide."""
+    global _reporting
+    if _reporting:
+        return
+    _reporting = True
+    try:
+        ts = datetime.now(timezone.utc).isoformat()
+        text = f"caller={caller} attempted={attempted!r} reason={reason}"
+        try:
+            import hermes_alert_common
+            hermes_alert_common.matrix_notice(f"[EGRESS DENIED] {text}")
+            hermes_alert_common.send_email(f"Egress denied: {caller} -> {attempted}",
+                                            f"{text}\ntimestamp={ts}", priority="critical")
+        except Exception:
+            pass
+        _record_denial(caller, attempted, reason, ts)
+    finally:
+        _reporting = False
+
+
 def check_destination(url_or_host, caller):
     """Raises EgressDenied if `url_or_host` is neither fleet-internal (§4) nor on `caller`'s own
     whitelist entry in the tool registry (§6). `caller` is the script actually making the
     outbound call (its own basename, e.g. "hermes-websearch.py") -- not whoever invoked it, for a
-    shared module like hermes_alert_common.py that several scripts import."""
+    shared module like hermes_alert_common.py that several scripts import.
+
+    Every deny path below also runs the §8 report pipeline (_report_denial()) before raising --
+    see that function's own docstring."""
     host = _extract_host(url_or_host)
     if not host:
-        raise EgressDenied(f"{caller}: could not parse a destination host out of {url_or_host!r}")
+        reason = f"could not parse a destination host out of {url_or_host!r}"
+        _report_denial(caller, url_or_host, reason)
+        raise EgressDenied(f"{caller}: {reason}")
     if _is_internal(host):
         return
     try:
         registry = _load_registry()
     except Exception as exc:
-        raise EgressDenied(
-            f"{caller}: tool registry unavailable ({exc}) -- denying non-internal egress to "
-            f"{host} fail-safe"
-        ) from exc
+        reason = f"tool registry unavailable ({exc}) -- denying non-internal egress fail-safe"
+        _report_denial(caller, host, reason)
+        raise EgressDenied(f"{caller}: {reason}") from exc
     entry = registry.get(host.lower())
     if entry is None or caller not in entry["allowed_callers"]:
-        raise EgressDenied(f"{caller}: {host!r} is not on this caller's egress whitelist")
+        reason = f"{host!r} is not on this caller's egress whitelist"
+        _report_denial(caller, host, reason)
+        raise EgressDenied(f"{caller}: {reason}")
