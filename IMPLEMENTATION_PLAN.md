@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.42.0
+**Version:** 3.48.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -144,12 +144,16 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S28 | **Optional** — security-benchmark suites (OWASP Juice Shop, WebGoat) in the existing harness, then a VulnHunter bake-off across the local roster | 📋 Planned 2026-10-09, optional, not executed — gates nothing; written from this repo, no fleet node was reachable |
 | S29 | LinodeMercury — the fleet's first deliberately external, one-way-reachable node | ✅ Done 2026-10-09 |
 | S30 | The `aide` exclude gap S21h found, fixed on all three fleet nodes | ✅ Done 2026-10-09 |
-| S31 | **Optional** — `super` candidate bake-off: GLM-5.3-Flash (`autotrust`'s two DGX-Spark GGUF builds) vs. incumbent Huihui-GLM-4.7-Flash-abliterated | 📋 Planned 2026-10-13, deepened 2026-10-13, optional, not executed — the `glm5-next` architecture gate is now confirmed merged and tagged upstream (`b11279`, 2026-09-30); remaining open items are this fleet's own build currency, a memory budget that does not obviously fit alongside `spark`'s other always-resident services, and a scheduling plan around `super`'s three real production callers; gates nothing else; written from this repo plus live upstream GitHub/HF research, no fleet node was reached |
+| S31 | **Optional** — `super` candidate bake-off: GLM-5.3-Flash (`autotrust`'s two DGX-Spark GGUF builds) vs. incumbent Huihui-GLM-4.7-Flash-abliterated | ✅ **Executed 2026-10-18 on `spark-2` — verdict: no-go.** mmlu_pro 0.75 vs. incumbent's 0.614 (win); ifeval 0.60 vs. 0.76 (loss, `--limit 30` not the fleet's usual 75); BFCL 0.0 (inconclusive, matches this harness's own documented handler-mismatch pattern). Candidate's raw decode throughput measured at only ~6.1-6.8 tok/s, likely disqualifying for `super`'s production load on its own; wake-latency/production-equivalence still unmeasured for the same reason. No clean win either way, so no promotion |
 | S32 | A failed LUKS mount took out seven core services for 41 hours, unscreened | 🟡 **Investigated 2026-10-13; operational half repaired, engineering not written.** `/mnt/hermes-data` failed to mount at the 10-11 reboot; `Dependency failed` means `Restart=always` never retried, so memory/guard/broker/buzz/rag/triage/portal never started. Layer 2 fails open: **12,166 requests forwarded unscreened** over 41h with no alert. Three services were still down at 51h and were started by hand. `hermes-fleet-health` did email `[CRITICAL] hermes-broker inactive` daily throughout — the digest's "0 failed, nothing new" contradicted it. **This stage's first draft blamed a readiness race and was wrong** |
 | S33 | `hermes-guard-report` — the window is 500 rows, not 26 hours | 📋 Planned 2026-10-13, not executed — hermes-memory caps `limit` at 500; two of four daily runs hit the cap and reported 0 blocks while blind |
 | S34 | Bot-to-bot chat is screened as player chat, and is being dropped | 📋 Planned 2026-10-13, not executed — 8 Mayor directives blocked at 0.970 on 2026-10-13 |
 | S35 | Backend launch configuration (`/opt/llama.cpp/start-*.sh`) under version control | 📋 Planned 2026-10-13, not executed — model paths, `--ctx-size` and `--parallel` exist only on the hosts |
 | S36 | `coder2` — make it measurable at all | 📋 Planned 2026-10-13, not executed — exceeded a 90-minute ifeval timeout; emits reasoning tokens |
+| S37 | **Optional** — model and evaluate AlphaDiana's harness-ablation concept (arXiv:2610.20675) for Firmament's own agent layer | 📋 Planned 2026-10-16, optional, not executed — gates nothing; a three-arm (bare/full-path/no-memory) paired pilot, written from this repo, no fleet node was reachable |
+| S38 | Firmament Market Watch — daily global-exchange equity tracking, sector/industry + thematic categorization, historical price storage, daily trend/movers report, on-demand Matrix reports | 📋 Planned 2026-10-17, not executed — full design in `MARKET_WATCH_DESIGN.md`; gated on an operator decision on the market-data vendor and starting universe (S38a) |
+| S39 | Firmament Fleet Benchmark Suite — per-role accuracy benchmarks for every live role, folded into one shared comparison schema, with speed scored only for the roles a human/player is synchronously waiting on | 📋 Planned 2026-10-18, not executed — full design in `FLEET_BENCHMARK_DESIGN.md`; six real coverage gaps found (log analyst, vision judge, muse contract adherence, digest faithfulness, dual-coder precision, no shared comparison schema); gated on operator review of the gap list and phasing (S39a) |
+| S40 | Layer 3 — tool-call/egress guard: model output constrained to internal infrastructure or a published tool whitelist, denied+Matrix-reported+hi-pri-emailed+recorded otherwise | 🟡 **Phase A executed 2026-10-18** (registry + `hermes_egress_guard.py` + wrapped six real call sites); Phases B-D not executed. S40a's two gates both resolved during Phase A (internal-range default narrowed per the design's own recommendation; Matrix homeserver confirmed control-plane-internal) — full detail in `EGRESS_GUARD_DESIGN.md` 1.1.0 |
 
 ---
 
@@ -4724,7 +4728,11 @@ default view shows exactly that true total.
 
 ### S31 — `super` candidate bake-off: GLM-5.3-Flash (`autotrust` DGX-Spark builds) vs. the incumbent
 
-**Planned; not executed; optional — gates nothing else in this plan.** Written from a session with no
+**Executed 2026-10-18 — verdict: no-go, on throughput grounds, with the accuracy picture itself mixed
+under constrained test conditions.** See "S31 execution record" after the exit gate below for the real
+run, its real deviations from plan, and why. The sections immediately below (S31a-e) are the pre-execution
+research pass and are kept as-written; they predicted most of what actually went wrong. **Optional — gated
+nothing else in this plan, and nothing else needed to change as a result.** Written from a session with no
 fleet network path (same constraint `infra/model-benchmark/qwen4-coder-bakeoff-runbook.md` §0 and §4.5
 both record for themselves) — every port and memory figure below is repo-sourced, not freshly measured,
 unless marked otherwise. **Deepened 2026-10-13, same day**, from a session that *does* have outbound
@@ -5001,6 +5009,232 @@ after — and per S31c point 1, that same measurement is also where the harder m
 assumed away. No promotion happens inside this stage regardless of outcome; that still goes through S11's
 existing abliteration/promotion path, unchanged.
 
+#### S31 execution record — 2026-10-18
+
+Run live against `spark-2`, not `spark` (see memory finding below). `llama.cpp` rebuilt first:
+`/opt/llama.cpp` was at `4df29be4` (2026-08-16, predates the `glm5-next` merge) on both nodes; pulled to
+`797de63b` (2026-10-17) on `spark-2` and rebuilt against the cached `sm_121a-real` CUDA config —
+`llama_model_glm5_next` symbols confirmed present in the resulting `libllama.so`. Both GGUF shards
+downloaded from `autotrust/GLM-5.3-Flash-GGUF-DGX-Spark` and byte-verified exact against the card's own
+figures (44,984,916,000 / 39,944,534,144 bytes).
+
+**Memory: `spark` ruled out for real, not just by arithmetic.** `spark` had only 27 GiB available with
+`dispatch`+`super` resident (121 GiB total, not the plan's stale 128/105 GiB figures); stopping `super`
+only gets to ~44 GiB, nowhere near the 79.1 GiB the candidate needs. Moved to `spark-2` instead. Stopping
+`coder`/`coder2`/`muse`/`omni` there was empirically tested before trusting it: available jumped from
+11 GiB to **115 GiB** with all four down — confirmed live, not inferred from each service's own
+RSS/cgroup figures, which only summed to ~27 GiB against a real ~80 GiB swing (unexplained by ordinary
+page-cache/slab accounting on this unified-memory GB10 platform; most likely GPU-resident allocations
+that don't map cleanly to per-process RSS here). Side finding, independent of S31: a plain restart of
+those four services recovered 35 GiB of apparent long-uptime bloat on its own (10→45 GiB available for
+the same four services, nothing else changed) — worth a routine restart on this node regardless of this
+stage's outcome.
+
+**A real production-impact gap, caught after the fact, not before.** `llama-coder2.service` came back on
+its own ~20 minutes into the stop window — confirmed via `systemctl status` showing continuous uptime
+from 19:23 EDT, while `coder`/`muse`/`omni` correctly stayed down for the full ~5-hour run until the
+deliberate restart at the end. Most likely `hermes-router`'s on-demand wake path (the same mechanism
+S32 already named) answering a real request — a bot or another caller — while `coder2` was supposed to
+be down. **A one-time `systemctl stop` on an on-demand backend does not hold for the duration of a long
+benchmark window if anything requests that role meanwhile**; this run got lucky on memory headroom, but
+a future one that's tighter on memory should disable the wake path (or the idle-sleep timer's inverse)
+for the window, not just stop the service once at the start.
+
+**Throughput, not just accuracy, is the real finding.** The candidate generates at a measured, stable
+**~6.1–6.8 tokens/second** on this hardware — well below what a smoke test alone suggested (an early
+64-token sample read 12.8 tok/s; that number didn't hold under load and was noise from too short a
+sample). Compounding this: GLM-5.3's own chat template defaults `reasoning_effort` to `max` whenever a
+request doesn't set it, which produced 1000+ generated tokens on individual MMLU-Pro questions — an
+unbounded run at this rate was timed out mid-flight and projected at **16+ days**, not hours. Both are
+new findings, not predicted by S31's own pre-execution research (S31c's memory arithmetic was right to
+flag trouble, but assumed the correctness suites would be cheap; they weren't, for an orthogonal reason).
+Recovered by capping generation (`--gen_kwargs max_gen_toks=400,reasoning_effort=low`) and reducing
+sample size (`--limit 30` per task, not the fleet's usual 75) — a real but reduced-confidence signal, not
+a clean comparison to the incumbent's own baseline methodology.
+
+**Results** (recorded to the shared `history.jsonl`, model_id `autotrust/GLM-5.3-Flash-GGUF-DGX-Spark`):
+
+| suite | candidate | incumbent (`super`) | delta | caveat |
+|---|---|---|---|---|
+| mmlu_pro | **0.75** | 0.614 (S11) | +0.136 | `--limit 30` **per subtask** (mmlu_pro is a 14-subject group task in lm_eval, not a single task — the real sample count was 420, not 30; this cost real time, not a bug) |
+| ifeval | **0.60** | 0.76 (S20f, `--limit 75`) | −0.16 | `--limit 30` vs. the fleet's usual 75, plus the generation cap/reduced reasoning effort above — not the same methodology as the incumbent's own number |
+| bfcl (`simple_python`) | 0.0 | not recorded for `super` | — | matches this harness's own documented failure mode exactly (`run_bfcl()`'s docstring: a real run scored 0.00% once already for handler/model format mismatch, not a broken backend) — treat as inconclusive, not as "the candidate can't call functions," pending a handler that actually matches `glm5-next`'s own tool-call format |
+
+**Two real tooling bugs found and fixed/worked around, not just hit:**
+- `bfcl-eval`'s `glm-4.6-FC` handler now instantiates an `OpenAI()` client directly and requires
+  `OPENAI_API_KEY` set, even with `REMOTE_OPENAI_BASE_URL`/`REMOTE_OPENAI_API_KEY` pointing it at a local
+  server — a version drift since this repo's README last verified BFCL live (2026-08-24). Worked around
+  by also exporting `OPENAI_API_KEY=EMPTY`; `tools/hermes_benchmark_common.py` should set both going
+  forward, not just `REMOTE_OPENAI_API_KEY`.
+- `tools/hermes-benchmark-model.sh`'s own arg parser has a real bug: its `--`) case does
+  `PASSTHROUGH=("$@")`, **overwriting** rather than appending to whatever `--suites`/`--limit`/`--notes`
+  the `*)` catch-all already collected, and never forwards a `--` boundary to
+  `hermes-benchmark-model.py` — so the script's own documented `[-- <extra lm_eval args>]` usage (needed
+  for `--gen_kwargs`) silently drops everything queued before the `--` and then fails with "unrecognized
+  arguments" on the python side. Worked around by calling `hermes-benchmark-model.py` directly, bypassing
+  the wrapper. Not fixed in the script itself — a real, still-open small bug for whoever next needs
+  `-- <extra lm_eval args>` in candidate or role mode.
+
+**Verdict: no-go, not a promotion candidate as measured.** The exit gate's own "a win is necessary, not
+sufficient" standard doesn't even get to the wake-latency question here — there isn't a clean win to
+weigh it against. mmlu_pro is a real, substantial improvement; ifeval is a real, substantial regression
+under the constrained test conditions this run had to use; BFCL is inconclusive. Layered on top, raw
+decode throughput (~6.1-6.8 tok/s) is slow enough on its own to be a likely disqualifier for `super`'s
+real production load (`hermes-news-digest`'s 15-20k-token calls) regardless of how the accuracy picture
+resolves — but that's an inference from the throughput number, not a measurement; the wake-latency/
+production-equivalence check the exit gate asks for was still not run, for the same reason the full
+correctness suites couldn't be: this candidate is too slow on this hardware to cheaply measure the thing
+that would make the throughput concern precise rather than inferred. No promotion follows from this run,
+consistent with the exit gate's own rule either way. Candidate server torn down, `spark-2`'s four
+services restored and confirmed healthy; `spark`'s own `llama-super.service` was never touched.
+
+---
+
+### S37 — Optional: model and evaluate whether AlphaDiana's harness-ablation concept belongs in Firmament
+
+**Planned; not executed. Optional — nothing else in this plan depends on it, and skipping it leaves every
+other stage's exit gate untouched.** Written from a session with no fleet network path, same constraint
+S28/S31 record for themselves: every file and tool named below is read from this repo, nothing is measured
+live.
+
+**The gap this closes.** Direct request, after evaluating **AlphaDiana** (arXiv:2610.20675, Zhou/Han et
+al., submitted 2026-10-14) — a measurement system built to isolate what an agent *harness* (tool calls,
+skill/instruction guidance, retained memory) contributes on top of a bare model, via paired macro
+(whole-agent) and micro (single-component) interventions under matched conditions. Across three open models
+and three open harnesses, its headline finding is that **harnesses do not consistently improve reasoning
+accuracy** — gains on questions the bare model misses are regularly offset by losses on questions it already
+answered correctly unaided. Neither skill guidance nor retained history reliably helps, and token-efficiency/
+entropy metrics mislead if read apart from correctness.
+
+This fleet has never measured that question for its own agent layer. `infra/model-benchmark/`
+(`hermes_benchmark_common.py`, MMLU-Pro/GPQA-Diamond/IFEval/BFCL/SWE-bench) deliberately measures **bare**
+backends — every suite talks directly to a role's own `llama-server` port, bypassing `hermes-router`,
+`hermes-dispatch`, every `skills/*/SKILL.md`, and `hermes-memory`'s retained context entirely (README §2-4,
+the Layer-2/idle-sleep/concurrency findings are all about reaching the bare model cleanly). That bypass is
+the right call for a clean capability number — S11/S28's own reasoning — but it means nothing in this repo
+currently measures whether routing a real request through the full live path (screener, dispatcher, a
+relevant skill, `hermes-memory`'s retained turns) helps or hurts relative to the bare backend this harness
+already reports. S28b's VulnHunter bake-off already has a with-skill/no-skill arm (S28b-4) for one domain;
+S37 is about deciding whether that discipline is worth generalizing fleet-wide, not repeating it.
+
+**Before building anything:** check whether AlphaDiana's own code/benchmarks were released alongside the
+paper (arXiv-only as of this writing) and under what licence — reusing a working measurement harness is
+cheaper and more comparable than re-deriving one from the paper's description alone, the same "read the
+existing harness before specifying anything" rule S28 already applied to its own suites.
+
+1. **One narrow pilot, not a framework.** Pick a single role already in `infra/model-benchmark/`'s roster
+   (e.g. `super` or `dispatch`) and a single small existing suite (an IFEval subset is cheapest to re-run
+   repeatedly). Run it three ways against the same prompts: (a) bare backend, direct to the role's
+   `llama-server` port — this fleet's current, already-recorded number; (b) through the full live path —
+   `hermes-router` → `hermes-dispatch` → the role, with whatever skill and `hermes-memory` context a real
+   request would carry; (c) the live path with `hermes-memory` retention disabled, to isolate memory's
+   contribution from the dispatcher/screener's own overhead. Three arms, not two, because collapsing (b)
+   and (c) would reproduce AlphaDiana's own "harness changed something" finding without being able to say
+   which component did it.
+2. **Score per item, paired — not aggregate deltas.** For every prompt, record whether each arm got it
+   right, keyed to the same prompt id across arms. The number that matters is not "(b) scored X% vs (a)'s
+   Y%" but how many items (b) **lost that (a) already had**, versus how many it **gained that (a) missed** —
+   AlphaDiana's own central finding is that these can net to a wash while looking like a clean win or loss
+   in aggregate. Reuse `hermes_benchmark_common.py`'s existing history/JSONL plumbing for storage; this is a
+   new comparison mode over existing data shapes, not a new storage format.
+2a. **Note the confound the prompt-injection screener introduces specifically here.** S20f already found
+   Layer 2 classifies IFEval's own prompts as injections at p=0.997, which is why every suite in this
+   harness runs direct (`--endpoint`) today. Arm (b) above goes through the router on purpose, so a
+   same-suite regression could be the screener false-positiving, not the harness itself — check the guard
+   verdict log for each failing item before attributing it to the dispatcher or memory.
+3. **Pre-register what would make this worth generalizing**, the same discipline S28b-7 already uses:
+   before scoring, write down the margin (and in which direction — net gain or net wash) that would justify
+   building a permanent "agentic" benchmark mode into `infra/model-benchmark/`, versus leaving the bare-
+   backend harness as the only measured number and treating the live path as unmeasured-but-accepted risk,
+   as it is today.
+
+**S37 exit gate.** One pilot cell (one role, one small suite, three arms) run for real, scored per-item and
+paired, with a written decision — generalize into a standing harness mode, or stop here — and why. A
+decision not to generalize is a legitimate, recorded outcome, not a failed stage; this stage validates
+whether the question is worth a standing investment, it does not itself commit to building one.
+
+#### Risks and open questions
+
+1. **Scope creep.** AlphaDiana evaluates interactive/multi-turn benchmarks too; this fleet has no live
+   multi-turn agent-environment harness today (S28's SWE-bench integration is explicitly single-turn, by
+   its own README's admission). Building one to chase full parity with the paper is a much larger,
+   unrequested project — S37's pilot is deliberately scoped to what `infra/model-benchmark/` already runs.
+2. **The screener confound (step 2a) can masquerade as a harness-vs-memory finding** if not checked per
+   item against the guard verdict log — the same class of false attribution S20f already caught once for
+   this exact harness on this exact benchmark family.
+3. **A null or negative pilot result is itself the useful output.** If arm (b) nets to a wash on a cheap
+   IFEval subset, that is evidence against investing further here, not a failed experiment — record it as
+   such rather than quietly dropping the stage.
+
+---
+
+### S38 — Firmament Market Watch: daily global-exchange equity tracking, sector/mover reporting, on-demand Matrix reports
+
+**Planned; not executed.** Direct operator request, 2026-10-17. Full design:
+[`MARKET_WATCH_DESIGN.md`](MARKET_WATCH_DESIGN.md) (new document, 1.0.0) — this section is the plan-level
+summary and build sequence; that file is the spec of record, the same split S23 draws for
+`MINECRAFT_BOTS_DESIGN.md`.
+
+**The gap this closes.** The fleet has no view of financial markets today — nothing in `tools/`,
+`infra/`, or `skills/` reads a market-data source. The request: daily pull of traded stocks across top
+global exchanges, categorized by sector/industry and thematic tag (information technology, AI-related,
+agricultural, fintech, industrials, energy and utilities, and others), historical price storage, periodic
+refresh "at an appropriate interval, based on the posting tactics of the various exchanges," a daily
+report (sector/industry trend direction, biggest-increasing companies, fastest-decreasing companies,
+strongest positive and negative 30-day trend), and the ability to request any of those reports
+specifically from the Fleet Matrix room.
+
+**Researched before being specified, the same discipline S25 already applied to its own premise.** "Top
+exchanges globally" is not a free, keyless pull the way S26's RSS feeds are — most of the world's major
+exchanges license their market data commercially, directly or through a distributor; broad free/cheap
+coverage realistically exists for US-listed equities and unevenly for the rest. `MARKET_WATCH_DESIGN.md`
+§2 names candidate vendors (Stooq as a free bootstrap; commercial aggregators — Twelve Data, EOD
+Historical Data, Finnhub, Polygon.io, or similar — for broader, more reliable multi-exchange coverage)
+and flags the vendor/budget choice as the single gating open question, the same role S25's OAuth
+discovery played before that stage was deferred. Unlike S25, this is not deferred — it is sequenced with
+the vendor decision as its own first sub-stage (S38a) rather than an assumption baked into the rest of the
+design.
+
+**Realistic cadence.** Free/affordable global equity data is end-of-day, not intraday streaming —
+real-time quotes are a separately priced, materially larger capability, named out of scope for this stage
+(design doc §11) rather than assumed. "Appropriate interval" therefore means one sync per covered
+exchange, timed after that exchange's own close, not one global timer — exchanges close at very different
+times worldwide.
+
+**On-demand Matrix reports follow this fleet's existing pattern, not a new one.** §4.4 records that a
+general conversational Matrix persona is still a deferred decision — every existing user-triggered
+FleetOps-room capability today is a dedicated gate script watching a strict command grammar
+(`hermes-model-scout-gate.py`, `hermes-self-repair-promote-gate.py`). `hermes-market-gate.py` (S38e)
+follows the same shape: `market report`, `market sector <name>`, `market movers up/down`,
+`market trend30 up/down`, `market ticker <SYMBOL>` — each read back from real stored state, never from a
+model, with the same "re-fetch and re-check real state, never trust the chat message alone" rule its two
+precedents already apply.
+
+**Build sequence** (detail in the design doc §12): **S38a** vendor decision + bounded starting universe;
+**S38b** `tools/hermes-market-sync.py` and the dedicated `/mnt/hermes-data/market/market.db` store (own
+file — bulk time-series reference data, not `hermes-memory`'s conversational/task state); **S38c**
+`tags.yaml` thematic categorization, config-driven like `feeds.yaml`/`topics.yaml`; **S38d**
+`tools/hermes-market-report.py` — deterministic sector-trend/movers/30-day computation, email + Matrix
+push, STE100-lite per `STYLE_GUIDE.md`; **S38e** `hermes-market-gate.py`; **S38f** offline tests + live
+verification.
+
+**No model call anywhere in the MVP pipeline** — every number in the daily report and every gate reply is
+computed directly from stored price data. If a narrative "why" line is ever added, it goes through
+`hermes-router.py` like S20b's advisory call, screened by Layer 1/2 (live since S22) and labeled as
+advisory, never as a source of fact.
+
+#### Risks and open questions
+
+Full list in the design doc §11; the two worth repeating here because they block everything else: (1) the
+vendor/universe decision (S38a) is unresolved, and nothing past it can be built against real data until
+it is; (2) corporate actions (splits, dividends, delistings) must be checked against the chosen vendor's
+own adjusted-close data before the 30-day trend numbers can be trusted — a naive close-to-close comparison
+is wrong by the split ratio.
+
+**Exit gate.** A real daily email and Matrix post on a real trading day, citing real sector movement and
+movers an operator can check independently; and a real `market <command>` reply through the actual gate
+and actual Matrix round trip, not a dry run.
+
 ---
 
 ### 5.1 Hard ordering constraints
@@ -5078,6 +5312,10 @@ existing abliteration/promotion path, unchanged.
 - **S28 does not trip the S22-before rules**, and the reason is worth stating rather than assuming: it ingests
   no live internet text — target source is pinned and fetched once. It does deliberately **bypass** the
   router's screening (S28a-4), which is exactly why that path must never carry real traffic.
+- **S22 (screener) before S38** — already satisfied, S22 shipped 2026-10-09. Recorded for the same reason
+  the S9/registry-before-S20 line above is: S38's MVP makes no model call at all, but any vendor-supplied
+  free text that might reach a model later (a company description, an index-membership note) must go
+  through the router's Layer 1/2 first, same as every other inbound call.
 
 ---
 
@@ -5254,3 +5492,9 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.40.0 | 2026-10-13 | **Plan review for new items: five new stages, a standing risk closed, and the plan's own drift recorded.** Grounded in three days of live evidence rather than a re-read. **S32 (urgent)** — on 2026-10-12 the news digest failed **5 of 6 topics with HTTP 503**, then emailed "nothing new" six times and logged `0 failed`: `super` is on-demand, `wake_role()` waits for `systemctl start` rather than for a servable model, and `router_chat()` has no retry — and S27's correct "absence means nothing new" rule makes the failure indistinguishable from a quiet day. The readiness trap was already written down in `infra/model-benchmark/README.md` on 10-10 and never applied to the wake path. **S33** — `hermes-guard-report` asks for 1000 turns and `hermes-memory` caps `limit` at 500, so its "last 26h" is the newest 500 rows; two of four daily runs logged exactly `500 analysis-allowed, 0 blocks` — blind, not quiet, in the very tool S22e built so screening could not fail silently. **S34** — the 2026-10-09 bot-to-bot finding has crossed the alert threshold (8 Mayor directives blocked at 0.970), so inter-bot coordination is being dropped; the spec requires a username allowlist, never a pattern, since a player can call themselves Mayor. **S35** — every backend's model path, ctx-size and the new `--parallel` live only in untracked `/opt/llama.cpp/start-*.sh`. **S36** — `coder2` has no baseline because it emits reasoning tokens; its lone 0.28 needs confirming before it is read as a verdict. **§7 risk 2 closed with its own answer:** the stock-vs-abliterated A/B it called "unusually cheap" was measured twice, six weeks apart, identically — ifeval@75 **0.9067 stock vs 0.8933 abliterated, so abliteration costs 1.3 points (−1.5%)** on identical architecture and quant — and sat unread in `history.jsonl`, which is the argument for both S20f and S24. **S24 gains the plan's own drift:** §0 called S21 unexecuted while it serves TLS in production, S29/S30 had no §0 rows at all, four stage headers (S20/S22/S26/S27) still open with "Planned; not executed" and a specific false claim each, and §7 risk 6 is obsolete — the structural cause being that an execution record appends a substage and a Revision History row and touches neither the stage's opening line nor §0. §0 rows added/corrected here; the four stale headers and risk 6 left for S24 to verify against. Also folded three clean days of zero bot timeouts into S20f(b), superseding the two ten-minute windows it shipped with. Minor bump — stages added, one risk resolved, no prior guidance reversed. |
 | 3.41.0 | 2026-10-13 | **S32 rewritten against the real cause, which its own first draft got wrong, and the operational half repaired.** The draft blamed a readiness race — "`wake_role()` waits for `systemctl start` rather than for a servable model" — which is false: the wake worker already polls `/health` to 200 against a deadline. Reading the journals instead found that **`/mnt/hermes-data`, the LUKS container, failed to mount at the 2026-10-11 17:03 reboot** (all three nodes rebooted), failing `local-fs.target` and leaving seven services with `Dependency failed`: memory, guard, broker, buzz, minecraft-rag, triage and the RAG portal. **`Restart=always` does not apply to a start job that failed on a dependency**, so systemd gave up once and nothing retried — 41 hours for the four core services, and **51 hours for three that were still down when this was investigated** and were started by hand. **The security consequence: the router's Layer 2 call fails open, and that path was taken 12,166 times** — twelve thousand requests forwarded with Layer 1 only, zero alerts. The exact inverse of S22d, where a screener that started working broke the fleet loudly; this one stopped working silently. **It was not unmonitored:** `hermes-fleet-health` emailed `[CRITICAL] Service: hermes-broker inactive` and `[Broker] UNREACHABLE` daily throughout, so the signal existed for 41 hours — blunted by the digest emailing six "nothing new" notices and `0 failed` on the same morning, by `15 unknown` reading the same as "not applicable" when a check cannot run because its target is dead, and by nothing watching the fail-open path at all (and `hermes-guard-report` could not have: it reads the verdict log from the memory service that was also down). Scope now has five items, with the original digest-reporting fix demoted from the whole stage to item (c), and an exit gate that kills `hermes-guard` to prove the alert fires. Minor bump — a stage re-specified against measured evidence; the wrong first draft is recorded, not deleted, because "the symptom suggested the wrong layer" is the reusable lesson. |
 | 3.42.0 | 2026-10-13 | **S31 deepened against live upstream evidence, not re-read from memory.** The `glm5-next` architecture gate S31a flagged as unresolved is confirmed cleared: PR #27773 merged 2026-09-30 (commit `649dcb1`), tagged release `b11279` the same day, `LLM_ARCH_GLM5_NEXT` confirmed present in current `llama-arch.h`, four correctness fixes landed since (a data race, a graph-reallocation bug, a bad gather path, MTP support) — build from the latest tag (`b11606`), not just the first one. **Corrects a real error in 3.39.0's own S31a**: nothing was ever added to `alert-state.json` — checked directly, no such key exists in either repo's copy, `hermes-model-watch.py`'s real `WATCHED_TERMS` has no `glm5_next` entry, and editing that file would have been inert regardless (a one-time migration seed, superseded once the real runtime state file exists). **Corrects S31c point 1's backwards claim**: `coder` moved *off* `spark` onto `spark-2` on 2026-10-07, not onto it — the real new memory pressure on `spark` is `embed`'s 0.6B→8B growth and S16b's reranker addition. New findings read directly from both autotrust model cards: exact byte counts for both shards, the Flash build's own stated ≈40 GiB post-load headroom (which does not obviously fit alongside `spark`'s ≈45 GB fixed baseline of `dispatch`/`embed`/`rerank`/`guard` at production context), a still-unverified reference to extra metadata/UTF-8 patches in autotrust's own tooling repo, and a possible architecture mismatch between the two candidates' cards (`glm5-next` vs the older, separate `glm-dsa`). `hermes-benchmark-model.sh --candidate` mode's auto-stop list, its default port (8093), and its default ctx-size (16384) are now shown to be actively wrong for this bake-off rather than merely incomplete — built for `spark-2`, where none of its target services exist, and 8093 collides with `spark`'s own always-resident `rerank`. Named `super`'s three real production callers precisely (`hermes-news-digest`, `hermes-canary-report`, `hermes-logs`) with their actual timers/trigger shape, for scheduling around them. S31e's dual-Spark stretch goal sharpened with S18's own structural finding (GPU↔host staging, not the wire, capped NCCL at 1.4 GB/s) and a currently open upstream RPC bug filed directly against `glm5-next` (#28360). Still planned, not executed — no fleet node was reached and no command run against one; everything above is upstream GitHub/HF research plus a closer re-read of this repo's own code. Minor bump — depth added and errors corrected within one optional substage, same pattern 3.41.0 itself just established; nothing else in the plan touched. |
+| 3.43.0 | 2026-10-16 | Added **S37** (planned, not executed, optional): evaluate whether AlphaDiana's (arXiv:2610.20675) finding — that agent harnesses (tools, skill guidance, retained memory) do not consistently improve accuracy over the bare model, gains and losses can net to a wash — applies to Firmament's own agent layer. `infra/model-benchmark/` only ever measures bare backends (direct to a role's `llama-server` port, bypassing router/dispatcher/skills/`hermes-memory` entirely); S28b's VulnHunter bake-off is the only existing precedent with a with/without-intervention arm, scoped to one domain. S37 specifies a narrow three-arm pilot (bare backend vs. full live path vs. live path with memory disabled) on one role and one small existing suite, scored per-item and paired rather than by aggregate delta, with a named confound to check first (S20f's own finding that Layer 2 flags IFEval prompts as injections at p=0.997, so a live-path regression could be the screener, not the harness). Exit gate is a real pilot cell plus a written generalize-or-stop decision, not adoption of the method itself. Minor bump — new optional stage added, nothing prior reversed. |
+| 3.44.0 | 2026-10-17 | Added **S38** (planned, not executed): a new daily capability, direct operator request — global-exchange equity tracking with sector/industry and thematic categorization, historical price storage, a daily sector-trend/movers/30-day-trend report, and on-demand report requests from the Fleet Matrix room via a new strict-grammar gate script (`hermes-market-gate.py`), the same pattern `hermes-model-scout-gate.py`/`hermes-self-repair-promote-gate.py` already establish rather than the still-deferred general conversational persona (§4.4). Full spec in new document `MARKET_WATCH_DESIGN.md` 1.0.0; this stage points to it the same way S23 points to `MINECRAFT_BOTS_DESIGN.md`. Names the realistic data-licensing constraint up front — most global exchanges commercially license their market data, so a vendor/budget decision and a bounded starting universe (S38a) gate the rest of the build, researched before being specified the same way S25's OAuth discovery was. New §5.1 ordering line (S22 before S38, already satisfied). Minor bump — new stage added, nothing prior reversed. |
+| 3.45.0 | 2026-10-18 | **S31 executed — verdict: no-go.** Rebuilt `llama.cpp` on `spark-2` (`4df29be4`→`797de63b`), confirmed `glm5-next` symbols present. `spark` ruled out for real (27 GiB available with `dispatch`+`super` resident, nowhere near the 79.1 GiB candidate); moved to `spark-2`, where stopping `coder`/`coder2`/`muse`/`omni` was empirically confirmed to free 115 GiB (not inferred from per-service RSS, which undercounted by ~80 GiB on this unified-memory platform for reasons not fully explained). Found live, not predicted: the candidate's raw decode throughput is only ~6.1-6.8 tok/s, and GLM-5.3's chat template defaults `reasoning_effort` to `max`, which together made the planned correctness suites run at 1000+ generated tokens per question and project to 16+ days unbounded — recovered with `--limit 30` (not the fleet's usual 75) and a generation cap, a reduced-confidence measurement, not a clean one. Results: mmlu_pro 0.75 vs. incumbent 0.614 (real win), ifeval 0.60 vs. 0.76 (real loss), BFCL 0.0 (matches this harness's own documented handler-mismatch failure mode, inconclusive). Also found and worked around two real tooling bugs (`bfcl-eval`'s `glm-4.6-FC` handler now needs `OPENAI_API_KEY` even in remote-endpoint mode; `hermes-benchmark-model.sh`'s own arg parser silently drops queued flags when a literal `--` appears, breaking its documented `-- <extra lm_eval args>` usage), and a real operational gap (`llama-coder2.service` self-restarted ~20 minutes into the stop window via the fleet's own wake path, which a one-time `systemctl stop` doesn't prevent). No clean win, so no promotion; wake-latency/production-equivalence still unmeasured, for the same throughput reason the full suites weren't run. `spark-2` fully restored and verified healthy afterward. Minor bump — a stage executed and its real record written in, consistent with how prior executed stages in this plan are closed out; nothing prior reversed. |
+| 3.46.0 | 2026-10-18 | Added **S39** (planned, not executed): direct operator request for a comprehensive custom benchmark suite covering every live fleet role, with accuracy as the universal primary axis and speed scored only for the roles a human/player is synchronously waiting on (`dispatch`, `guard`, presenter styling, RAG synthesis/`embed`/`rerank`, `muse`) — never for async roles like `super`, `coder`/`coder2`, `omni`'s media judge, model-scout, or VulnHunter. Cross-checked the full role roster (`hermes-router.py`'s `ROLES`, the Minecraft bot roster, every Buzz-topic specialist) against every existing eval harness (`infra/model-benchmark/`, the bake-off scripts, `hermes-guard-eval.py`, `hermes-rag-eval.py`, the Minecraft baseline suite, S28's planned security suites) and found six real gaps: `super` as log analyst has no correctness ground truth at all (only a refusal-rate heuristic exists); `omni`'s generate-evaluate-regenerate judge is never scored against a hand-labelled answer; `muse`'s written contract (`agents/minecraft-common.md`) has no compliance check; `hermes-news-digest`'s summarization has no faithfulness check against its own cited chunks; dual-coder review has no precision/recall against `hermes-code-security-scan.py`'s real findings; and every existing custom suite writes its own output format, so none of them reach `hermes-benchmark-model.py`'s shared `history.jsonl`/`hermes-benchmark-compare.py` comparison layer that MMLU-Pro/IFEval/BFCL already use. Full spec, the six new suite designs, a four-tier structure, and a pre-registered promotion-gate rubric are in new document `FLEET_BENCHMARK_DESIGN.md` 1.0.0; this stage points to it the same way S23 points to `MINECRAFT_BOTS_DESIGN.md` and S38 points to `MARKET_WATCH_DESIGN.md`. Minor bump — new stage added, nothing prior reversed. |
+| 3.47.0 | 2026-10-18 | Added **S40** (planned, not executed): direct operator request to evaluate `hermes-guard` and add a new output-side check — any tool call a model's response makes must target internal infrastructure or a published Firmament tool whitelist, with anything foreign denied, Matrix-reported, hi-pri-emailed, and recorded for a FleetOps report page. Audited Layer 1 (`hermes_injection_guard.py`) and Layer 2 (`hermes-guard.py`) in full: both are confirmed input-only, invoked once per request on the newest message in `hermes-router.py`'s `do_POST()`, with the backend's response streamed back completely unexamined — a categorical gap (no Layer 3), not a defect in the first two. A full egress-point audit across `tools/`/`services/`/`skills/` found the load-bearing, slightly surprising result: **no production code path today lets a model's output pick a network destination** — every real external call (Tavily, HuggingFace Hub, LinodeMercury, the SMTP relay) is to a fixed, operator-set host, Minecraft's `skills.js` already prevents this exact class of risk by design (skills are `{action, args}` data checked against a closed verb enum, never raw code), and BFCL's function-calling is test-only. Corrected the request's own stated internal-range definition: anchored to the fleet's actual documented ranges (`10.129.1.0/24` + two `/30` fabric links + tailnet `100.64.0.0/10`) rather than a blanket `10.0.0.0/8`, which is far wider than anything this fleet's own network design uses, and named five real external exceptions (Tavily/HF Hub/LinodeMercury/SMTP relay/Matrix homeserver pending confirmation) that any whitelist must carry forward rather than break. Found no existing manifest of the fleet's own tools (`skills/*/SKILL.md` is operator-facing documentation, not a model-facing registry) — proposed building one. Designed a two-tier control (an egress-destination guard module wrapping the real existing external call sites now; a router-level structural tripwire for a future tool-calling capability that doesn't exist yet) and mapped the deny/Matrix/email/record pipeline onto mechanisms already live in the fleet (`hermes_alert_common.py`, the generic `turns`-table guard-verdict logging convention, `hermes-fleetops-ui`'s `/recommendations` page pattern), explicitly flagging that any new report page must not repeat S33's own already-documented `/turns` 500-row-cap-with-no-truncation-signal bug. Full spec in new document `EGRESS_GUARD_DESIGN.md` 1.0.0; this stage points to it the same way S39 points to `FLEET_BENCHMARK_DESIGN.md`. Minor bump — new stage added, nothing prior reversed. |
+| 3.48.0 | 2026-10-18 | **S40 Phase A executed.** Built `tools/hermes_egress_guard.py` (Tier A's `check_destination()`), `infra/firmament-tool-registry.yaml` (deliberately not real YAML — same `feeds.yaml`/`topics.yaml` precedent, so no caller needs PyYAML/a venv just to check egress), and offline unit tests (`infra/hermes-egress-guard/tests/test_egress_guard.py`, 33/33 passing). Wrapped the five real call sites S40's design named — `hermes-websearch.py`, `hermes-model-scout.py`, `hermes-model-scan.py`, `hermes-model-watch.py`, `hermes-linodemercury-watch.py`, `hermes_alert_common.py` — plus two more real ones a design-doc re-check found live in `hermes-model-watch.py` while wrapping it (`raw.githubusercontent.com`, `api.github.com`), neither named in the original audit. Resolved both of S40a's open gates: adopted the design's own narrower internal-range recommendation as decided (four documented planes + always-internal loopback; the fuller `10.0.0.0/8` is an explicit opt-in, never the default), and confirmed via `infra/continuwuity`'s own config/README that the Matrix homeserver is control-plane-internal, not a named external exception. Also surveyed the wider fleet and found roughly ten more scripts (Vivint, Generac, Wyze, podcast/RSS feeds, botnet-intel lists, etc.) with their own real external destinations that this phase deliberately does not wrap — recorded as an open scope boundary in `EGRESS_GUARD_DESIGN.md` 1.1.0, not silently left implied as covered. Phases B-D (deny/Matrix/email/record pipeline, the `hermes-fleetops-ui` report page, the router-level structural tripwire) remain not executed. Minor bump — a stage executed and its real record written in, nothing prior reversed. |

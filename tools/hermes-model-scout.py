@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-10-18) — S40 Layer 3: publisher_claim() now calls
+# hermes_egress_guard.check_destination() before reaching huggingface.co, same as every other
+# real external call site this stage wraps. This script's own entry on the tool registry's
+# allowlist (infra/firmament-tool-registry.yaml) covers it, so this is pure hardening.
 #
 # hermes-model-scout — S20's daily pass: discover what's new, compare it against what each
 # Firmament role is actually running, and write one tracked backlog entry per candidate that a
@@ -154,6 +159,7 @@ watch = _load_sibling("hermes_model_watch", "hermes-model-watch.py")
 
 sys.path.insert(0, str(TOOLS))
 import hermes_benchmark_common as bc  # noqa: E402  (underscored, imports normally)
+import hermes_egress_guard  # noqa: E402
 
 
 # ── ids ───────────────────────────────────────────────────────────────────
@@ -512,6 +518,7 @@ def publisher_claim(model_id):
     try:
         url = (f"https://huggingface.co/api/models/{urllib.parse.quote(model_id)}"
                f"?expand%5B%5D=cardData&expand%5B%5D=safetensors&expand%5B%5D=pipeline_tag")
+        hermes_egress_guard.check_destination(url, "hermes-model-scout.py")  # S40 Layer 3
         with urllib.request.urlopen(url, timeout=25) as r:
             info = json.loads(r.read().decode())
     except Exception as exc:

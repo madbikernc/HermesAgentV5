@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-18) — S40 Layer 3: ssh_run()/pull_bundle() (the SSH/scp path to LinodeMercury),
+# matrix_notice(), and send_email_digest() now all call hermes_egress_guard.check_destination()
+# before reaching their real destination, same as every other real external call site this stage
+# wraps. The Matrix call resolves as fleet-internal (127.0.0.1) and needs no registry entry;
+# LinodeMercury and mail.hover.com are on this script's own entries in the tool registry's
+# allowlist (infra/firmament-tool-registry.yaml). A denial degrades the same way a real
+# connection failure already would at each of these call sites -- a soft "" result for
+# ssh_run()/pull_bundle(), a logged-and-skipped no-op for the two notification functions -- never
+# a raise, matching their existing never-crashes contracts. Pure hardening; nothing changes about
+# what a normal run does.
 """
 hermes-linodemercury-watch.py — daily Fleet-side check of LinodeMercury, the first deliberately
 external, one-way-reachable (Fleet -> Linode only) node in this repo (IMPLEMENTATION_PLAN.md S28).
@@ -69,6 +80,9 @@ from pathlib import Path
 REPO_DIR = Path(__file__).resolve().parent.parent
 VAULT_SCRIPT = str(REPO_DIR / "tools" / "vault-get-secret.sh")
 
+sys.path.insert(0, str(REPO_DIR / "tools"))
+import hermes_egress_guard  # noqa: E402
+
 SSH_HOST = "linodemercury"
 NODE_NAME = "linodemercury"
 REMOTE_BUNDLE_DIR = "/var/local/hermes-bundle"
@@ -114,6 +128,10 @@ def run(cmd, timeout=60):
 
 
 def ssh_run(remote_cmd, timeout=60):
+    try:
+        hermes_egress_guard.check_destination(SSH_HOST, "hermes-linodemercury-watch.py")  # S40 Layer 3
+    except hermes_egress_guard.EgressDenied as exc:
+        return "", -1, str(exc)
     return run(["ssh", "-o", "ConnectTimeout=10", SSH_HOST, remote_cmd], timeout=timeout)
 
 
@@ -189,6 +207,11 @@ def list_remote_bundles():
 
 
 def pull_bundle(remote_path, dest_dir):
+    try:
+        hermes_egress_guard.check_destination(SSH_HOST, "hermes-linodemercury-watch.py")  # S40 Layer 3
+    except hermes_egress_guard.EgressDenied as exc:
+        print(f"[hermes-linodemercury-watch] {exc}", file=sys.stderr)
+        return None
     out, rc, err = run(["scp", "-q", f"{SSH_HOST}:{remote_path}", str(dest_dir)], timeout=120)
     if rc != 0:
         return None
@@ -510,6 +533,7 @@ def matrix_notice(text):
         print("[hermes-linodemercury-watch] no FleetOps Matrix credentials -- skipping notice", file=sys.stderr)
         return
     try:
+        hermes_egress_guard.check_destination("http://127.0.0.1:6167", "hermes-linodemercury-watch.py")  # S40 Layer 3
         txn = f"linodemercury-notice-{int(time.time() * 1000)}"
         req = urllib.request.Request(
             f"http://127.0.0.1:6167/_matrix/client/v3/rooms/{urllib.parse.quote(room)}/send/m.room.message/{txn}",
@@ -532,6 +556,7 @@ def send_email_digest(subject, body):
     msg["From"] = EMAIL_FROM
     msg["To"] = f"{EMAIL_TO_NAME} <{EMAIL_TO}>"
     try:
+        hermes_egress_guard.check_destination("mail.hover.com", "hermes-linodemercury-watch.py")  # S40 Layer 3
         with smtplib.SMTP("mail.hover.com", 587, timeout=20) as server:
             server.starttls()
             server.login(EMAIL_FROM, password)

@@ -1,0 +1,48 @@
+# Firmament tool/egress registry — one row per real external destination a caller is allowed to
+# reach. S40 (EGRESS_GUARD_DESIGN.md §6). Boss-edited directly: tools/hermes_egress_guard.py's
+# check_destination() reads this file verbatim on every non-internal check; no NLP, no LLM
+# judgment is involved in parsing it. Blank lines and lines starting with # are ignored.
+#
+# The `.yaml` extension is kept for continuity with the design doc's own illustrative syntax, but
+# — same precedent as infra/hermes-feed-reader/feeds.yaml and infra/hermes-news-digest/
+# topics.yaml — no YAML is actually parsed: a flat `|`-delimited line per entry, deliberately, so
+# every real caller (most run under the bare system python3, no venv) needs no PyYAML to use
+# this file.
+#
+# Format:   name | kind | allowed_callers (comma-separated) | destination
+#
+#   name             Human-readable identity of the tool/action.
+#   kind             external-endpoint is the only kind Tier A (check_destination()) consults
+#                    today. topic | game-verb | future-function-call are reserved for Tier B
+#                    (design doc §7, not built yet — see hermes_egress_guard.py's own module
+#                    docstring) and are not populated here; VALID_TARGETS (hermes-dispatch.py)
+#                    and SKILL_ACTION_VERBS (Minecraft skills.js) remain their own source of
+#                    truth for those until Tier B actually needs a mirrored copy here.
+#   allowed_callers  Script basename(s) permitted to reach this destination. An entry does not
+#                    grant access to a sibling script that happens to share the same destination
+#                    (design doc §5's own point: web-search-fallback grants hermes-websearch.py
+#                    access to Tavily, not every script that happens to know the URL).
+#   destination      The literal hostname check_destination() matches against, case-insensitive.
+#
+# Fleet-internal destinations (control/data/RDMA planes, the tailnet, loopback — see
+# infra/network-planes.md and hermes_egress_guard.py's own _INTERNAL_NETWORKS) need no row here
+# at all: check_destination() allows them before ever consulting this file. The Matrix homeserver
+# (Continuwuity) is one such case — confirmed control-plane-internal (infra/continuwuity's own
+# config binds 0.0.0.0:6167, ufw-scoped to allow only from 10.129.1.0/24), not an external
+# exception, resolving one of S40a's two open gates.
+#
+# Phase A (EGRESS_GUARD_DESIGN.md §10) wraps exactly the real call sites named in design doc §5,
+# plus two real external destinations that same audit missed in hermes-model-watch.py (GitHub's
+# raw-content and search APIs) — found while wrapping that file, not assumed. A broader fleet-wide
+# external-destination surface (Vivint, Generac, Wyze status pulls, podcast/RSS feeds, botnet
+# threat-intel lists, the Nous Research/Typesafe inference APIs, this repo's own GitHub remote,
+# etc.) exists and is NOT covered by this file yet — see EGRESS_GUARD_DESIGN.md §3's revision
+# note. Extending Phase A's scope to any of those is an explicit follow-up decision, not assumed
+# here.
+
+web-search-fallback | external-endpoint | hermes-websearch.py | api.tavily.com
+model-discovery-lookup | external-endpoint | hermes-model-scout.py,hermes-model-scan.py,hermes-model-watch.py | huggingface.co
+llamacpp-upstream-arch-diff | external-endpoint | hermes-model-watch.py | raw.githubusercontent.com
+llamacpp-pr-search | external-endpoint | hermes-model-watch.py | api.github.com
+linodemercury-remote | external-endpoint | hermes-linodemercury-watch.py | linodemercury
+email-alert-relay | external-endpoint | hermes_alert_common.py,hermes-model-scan.py,hermes-model-watch.py,hermes-linodemercury-watch.py | mail.hover.com

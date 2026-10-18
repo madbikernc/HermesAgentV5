@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-18) — S40 Layer 3: tavily_search() now calls hermes_egress_guard.check_destination()
+# before reaching Tavily, same as every other real external call site this stage wraps. Tavily is
+# on the tool registry's allowlist for this script specifically (infra/firmament-tool-registry.yaml),
+# so this is pure hardening -- nothing changes about what a normal run does.
 #
 # 1.1.0 (2026-10-13) — direct operator request: SYNTHESIS_SYSTEM_PROMPT now also requires the
 # fleet's STE100-lite language register (STYLE_GUIDE.md) -- short declarative sentences, one fact
@@ -55,6 +60,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_injection_guard  # noqa: E402
 import hermes_conversation_common  # noqa: E402
+import hermes_egress_guard  # noqa: E402
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
@@ -180,6 +186,7 @@ def screen(text, role="user", tag="request"):
 
 
 def tavily_search(query):
+    hermes_egress_guard.check_destination(TAVILY_URL, "hermes-websearch.py")  # S40 Layer 3
     body = {
         "api_key": TAVILY_API_KEY,
         "query": query,

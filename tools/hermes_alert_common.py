@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-18) - S40 Layer 3: send_email() and matrix_notice() now call
+# hermes_egress_guard.check_destination() before reaching mail.hover.com / MATRIX_HOMESERVER,
+# same as every other real external call site this stage wraps. mail.hover.com is on this
+# module's own entry in the tool registry's allowlist (infra/firmament-tool-registry.yaml); the
+# Matrix homeserver resolves as fleet-internal under its default (127.0.0.1) and needs no entry.
+# Both functions keep their "never raises" contract -- a denial is caught by the same try/except
+# that already handles every other failure here. Pure hardening; nothing changes about what a
+# normal call does.
 #
 # 1.1.0 (2026-10-16) - real gap found deploying hermes-boot-unit-check.py (S32 item a): it has
 # no wrapper script, so EMAIL_PASSWORD/FLEETOPS_MATRIX_TOKEN/FLEETOPS_ROOM were never set and
@@ -33,12 +42,16 @@ import json
 import os
 import smtplib
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from email.mime.text import MIMEText
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hermes_egress_guard  # noqa: E402
 
 VAULT_SCRIPT = str(Path(__file__).resolve().parent / "vault-get-secret.sh")
 
@@ -100,6 +113,7 @@ def send_email(subject, body, log=print):
     msg["From"] = EMAIL_FROM
     msg["To"] = f"{EMAIL_TO_NAME} <{EMAIL_TO}>"
     try:
+        hermes_egress_guard.check_destination("mail.hover.com", "hermes_alert_common.py")  # S40 Layer 3
         with smtplib.SMTP("mail.hover.com", 587, timeout=20) as server:
             server.starttls()
             server.login(EMAIL_FROM, password)
@@ -114,6 +128,7 @@ def matrix_notice(text, log=print):
     if not token or not room:
         return
     try:
+        hermes_egress_guard.check_destination(MATRIX_HOMESERVER, "hermes_alert_common.py")  # S40 Layer 3
         txn = f"alert-note-{int(time.time() * 1000)}"
         req = urllib.request.Request(
             f"{MATRIX_HOMESERVER}/_matrix/client/v3/rooms/"

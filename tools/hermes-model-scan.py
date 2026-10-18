@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-10-18) — S40 Layer 3: _hf_get() and send_email() now call
+# hermes_egress_guard.check_destination() before reaching huggingface.co / mail.hover.com, same
+# as every other real external call site this stage wraps. Both destinations are on this script's
+# own entries in the tool registry's allowlist (infra/firmament-tool-registry.yaml), so this is
+# pure hardening -- nothing changes about what a normal run does.
 #
 # 1.3.0 (2026-09-24) — two things, one of them a real bug.
 #
@@ -104,6 +110,10 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 import requests
+
+TOOLS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(TOOLS_DIR))
+import hermes_egress_guard  # noqa: E402
 
 REPO_DIR = os.environ.get("HERMES_REPO_DIR", str(Path.home() / "HermesAgentV5"))
 VAULT_GET = f"{REPO_DIR}/tools/vault-get-secret.sh"
@@ -252,6 +262,7 @@ def _hf_get(params, timeout=30, attempts=4):
     can now brush HF's rate limit on the listing calls alone. Without backoff
     a 429 on one tag silently empties that whole category — the same class of
     quiet partial failure the expand[] bugs above already caused once."""
+    hermes_egress_guard.check_destination(HF_API, "hermes-model-scan.py")  # S40 Layer 3
     delay = 5.0
     last = None
     for attempt in range(attempts):
@@ -533,6 +544,7 @@ def send_email(subject, body):
     msg["To"] = f"{EMAIL_TO_NAME} <{EMAIL_TO}>"
 
     try:
+        hermes_egress_guard.check_destination(SMTP_HOST, "hermes-model-scan.py")  # S40 Layer 3
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
             server.starttls()
             server.login(SMTP_FROM, password)

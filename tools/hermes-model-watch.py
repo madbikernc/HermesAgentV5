@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.1.1
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-18) — S40 Layer 3: upstream_arch_set(), search_llama_cpp_prs(),
+# search_hf_glm_5_3(), and send_email() now call hermes_egress_guard.check_destination() before
+# reaching raw.githubusercontent.com / api.github.com / huggingface.co / mail.hover.com. The
+# first two were a real gap in EGRESS_GUARD_DESIGN.md §3's own audit, found while wrapping this
+# file, not assumed -- that audit's table only named this script's huggingface.co call. All four
+# destinations are on this script's own entries in the tool registry's allowlist
+# (infra/firmament-tool-registry.yaml), so this is pure hardening -- nothing changes about what a
+# normal run does.
 #
 # 1.1.1 (2026-09-01) — real bug found by inspecting the state file after the real (non-dry-run)
 # first run: qwen4exp silently migrated as unresolved, losing its real historical evidence (PR
@@ -85,6 +94,10 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 import requests
+
+TOOLS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(TOOLS_DIR))
+import hermes_egress_guard  # noqa: E402
 
 REPO_DIR = os.environ.get("HERMES_REPO_DIR", str(Path.home() / "HermesAgentV5"))
 VAULT_GET = f"{REPO_DIR}/tools/vault-get-secret.sh"
@@ -200,6 +213,7 @@ def fetch_upstream_ref():
 
 
 def upstream_arch_set():
+    hermes_egress_guard.check_destination(LLAMA_CPP_UPSTREAM_ARCH_URL, "hermes-model-watch.py")  # S40 Layer 3
     resp = requests.get(LLAMA_CPP_UPSTREAM_ARCH_URL, timeout=30)
     resp.raise_for_status()
     return set(ARCH_ENUM_RE.findall(resp.text))
@@ -235,6 +249,7 @@ def search_llama_cpp_prs(term):
     """Real evidence only — a merged PR/issue result from GitHub's own search API, same
     "deterministic fetch, no judgment call" shape hermes-model-scan.py's own HF search uses.
     Unauthenticated (60 req/hr) — plenty for a handful of weekly queries."""
+    hermes_egress_guard.check_destination(GITHUB_SEARCH_API, "hermes-model-watch.py")  # S40 Layer 3
     resp = requests.get(
         GITHUB_SEARCH_API,
         params={"q": f'repo:ggml-org/llama.cpp "{term}"', "sort": "updated", "order": "desc", "per_page": 5},
@@ -284,6 +299,7 @@ def check_watched_terms(state, findings):
 # ── check 3: HF release tracking (informational only) ──────────────────────
 
 def search_hf_glm_5_3():
+    hermes_egress_guard.check_destination(HF_API, "hermes-model-watch.py")  # S40 Layer 3
     resp = requests.get(HF_API, params={"search": "GLM-5.3", "limit": 30}, timeout=30)
     resp.raise_for_status()
     return [rec["id"] for rec in resp.json()]
@@ -314,6 +330,7 @@ def send_email(subject, body):
     msg["To"] = f"{EMAIL_TO_NAME} <{EMAIL_TO}>"
 
     try:
+        hermes_egress_guard.check_destination(SMTP_HOST, "hermes-model-watch.py")  # S40 Layer 3
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
             server.starttls()
             server.login(SMTP_FROM, password)
