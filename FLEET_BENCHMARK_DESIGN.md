@@ -1,6 +1,6 @@
 # Firmament Fleet Benchmark Suite — Target Design
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-18. This is a *target-state* design
 for a comprehensive, unified benchmark suite covering every role the fleet actually runs — most of the
@@ -99,8 +99,11 @@ any one script, is the source of truth for which suites get a speed column at al
 
 ## 4. Gaps — roles and questions with no accuracy ground truth today
 
-Six real gaps, found by cross-checking the role list above against §2's existing coverage. These are the
-actual new benchmark designs this proposal adds (§6); everything else in §2 stays as is.
+Eight real gaps: the original six, found by cross-checking the role list above against §2's existing
+coverage, plus two more (7-8) found in a 2026-10-20 follow-up pass that asked a narrower question — not
+"which roles have no accuracy ground truth" but "does any existing or proposed suite test `coder`/`coder2`
+on tasks actually shaped like this fleet's own real work." These are the actual new benchmark designs this
+proposal adds (§6); everything else in §2 stays as is.
 
 1. **`super` as log analyst has no correctness ground truth at all.** S11 explicitly scoped "the log
    analyst" to `super`'s own general-capability numbers (mmlu_pro/ifeval) rather than a dedicated eval, and
@@ -140,6 +143,19 @@ actual new benchmark designs this proposal adds (§6); everything else in §2 st
    This is the single structural gap that makes "comprehensive" the right word for what's missing: the
    *individual* measurements already exist, but there is no one place to compare them.
 
+7. **Neither `coder` nor `coder2` has a benchmark for general fix capability on this fleet's own code.**
+   Gap 5's `fleet_dualcoder_precision` measures review-*agreement* with a static scanner — a judgment task.
+   Nothing measures the more basic thing the role spends most of its real time on: given a real bug in a
+   real custom tool this fleet has built, can the model actually produce a correct fix. Today's only signal
+   for this is Tier 0's general BFCL/SWE-bench numbers, and neither is drawn from this fleet's own code —
+   a candidate could score well on both while being no good at the actual shape of work it's assigned.
+
+8. **Neither role has a benchmark for building a new capability from a stated requirement, either.** This
+   fleet's own history is full of exactly this shape of work — a direct operator request, a vendor
+   integration or parsing pipeline built from nothing to satisfy it (§6.8 names eight real examples) — and
+   nothing currently measures whether a candidate model can do that well, only whether it can review
+   existing code (gap 5) or code generically (Tier 0).
+
 ---
 
 ## 5. Proposed structure: four tiers, one schema
@@ -172,7 +188,7 @@ are already judged acceptable, and it is never even run for a role not listed in
 
 ---
 
-## 6. New suite designs (the six gaps from §4)
+## 6. New suite designs (the eight gaps from §4)
 
 Each follows the same shape the fleet already uses for `guard`/`rag`: hand-labelled or real-sampled ground
 truth, imported by reference from the real production prompt/contract wherever one exists, explicitly
@@ -281,6 +297,83 @@ synthesis/`embed`/`rerank`, and `muse`. Three corrections carried over from real
    for the same reason: the router's own injection screen can false-positive on the harness's own synthetic
    prompts.
 
+### 6.7 `fleet_coder_fix` — closes gap 7
+
+- **What it scores:** given the pre-fix state of a real file from this fleet's own tools and a plain,
+  symptom-only description of what broke (never the diagnosis, never the fix), does the model produce a
+  correct patch? This is a generation task, deliberately distinct from 6.5's review-agreement task.
+- **Ground truth:** real commits, not invented fixtures — sourced from this repo's own git history (and,
+  where a candidate tool's real bug-fix history predates the V4→V5 consolidation, from the sibling
+  `HermesAgentV4`/`HermesAgentRedo` repos on the same disk — confirmed reachable by ordinary `git log`
+  across repo boundaries, not actually inaccessible as a first pass over this repo alone wrongly assumed).
+  Nine candidates already identified and verified as genuine, self-contained, nontrivial fixes (not
+  version bumps, not comment-only changes), spanning both Python and JS:
+
+  | Task | Source | Category |
+  |---|---|---|
+  | AI-detection poll returns `None` forever (`get_host_data()` never called after `login()`) | `hermes-reolink.py` @ `31e4bd4` | vendor API response-shape assumption |
+  | Single-channel → multi-camera migration | `hermes-reolink.py` @ `f42264d` | API response-shape / data-model expansion |
+  | Replace HEAD-probing/guessing with real feed discovery | `hermes-podcast-retriever.py` @ `c5e2714` | parsing/discovery replaced by a better source |
+  | `recipesFor()` vs `recipesAll()` — table-need check always false | `services/minecraft-bots/actions.js` @ `08f950b` | library/SDK contract mismatch |
+  | Same-day follow-up: dye-recycling recipe breaks the fix above | `actions.js` @ `f8d6986` | state-machine/condition-ordering bug |
+  | `enchantments.concat is not a function` — API returns an object, not an array | `actions.js` @ `35df5ec` | library/SDK contract mismatch |
+  | Bed-placement + wood-sequencing fix, driven by 78 real failed-craft logs | `actions.js` @ `3be33e4` | live-log-driven, multi-part fix |
+  | `BED_WORDS` checked before `SHELTER_WORDS` — directive misrouted | `services/minecraft-bots/index.js` @ `c7c984d` | keyword/condition-ordering bug |
+
+  `[PROPOSED]` target size: this nine plus whatever a `HermesAgentV4`/`HermesAgentRedo` mining pass adds for
+  the single-vendor Python tools (Vivint/Wyze/Generac/pfSense/Synology/Moen Flo/mediawiki) whose real
+  bug-fix history lives there, not here — needed to balance the pool, since as-is it skews toward
+  mineflayer-shaped JS tasks.
+- **Metric, two tiers by category:** (a) **repro-testable** — routing/condition-ordering bugs and pure-function
+  library-contract mismatches get a real minimal-repro test (e.g. feed the exact failing scenario, assert
+  the previously-wrong behavior is now right) and score binary pass/fail, the gold standard, used wherever
+  the bug doesn't need a live vendor API or a running Minecraft server to reproduce; (b) **LLM-judge** — for
+  everything else, an independent judge (never the model being scored, §8.7) compares the patch against the
+  real fix and the original symptom on a rubric: root cause addressed, behavior-equivalent, no obvious new
+  bug introduced — labelled `llm-judged` in the result, never blended with tier (a)'s deterministic number
+  (§8.6).
+- **Speed:** out of scope per §3, same as 6.5.
+- `[RISK]`: if this repo is public on GitHub, a candidate could have memorized these exact fixes from
+  training data rather than solved them — unverified as of this writing. Mitigation if confirmed public:
+  grow the corpus with new real bugs as they're found going forward rather than relying solely on
+  already-published history.
+
+### 6.8 `fleet_coder_build` — closes gap 8
+
+- **What it scores:** given a plain statement of a real requirement this fleet actually had — ideally the
+  operator's own original request, stripped of anything that hints at the implementation — and the repo
+  state immediately before the capability existed, can the model build it from nothing?
+- **Ground truth:** eight real "build from scratch" commits, traced to their genuine first-build moment
+  (not a later bugfix/extension) across all three repos on disk, each with the requirement pulled from the
+  commit's own framing of *why* it was built rather than *how*:
+
+  | Task | Source | Requirement | Size |
+  |---|---|---|---|
+  | Camera capability, no cloud/OAuth | `hermes-reolink.py` @ `6d7d9cd` | outdoor/battery/solar camera support — local CGI API, person/motion alerting | 423 ln |
+  | Rebuild the botnet/C2 cache | `hermes_botnet_intel.py`+sync @ `6b88214` (`HermesAgentRedo`) | "rebuild v1's documented-but-never-committed" threat-intel cache (Spamhaus/Feodo/TweetFeed) | 390 ln |
+  | PDF/DOCX → structured Markdown | `hermes_doc_to_markdown.py` @ `295589c` | flat-text extraction has no heading/table/list structure for RAG | 237 ln |
+  | Daily RSS ingestion | `hermes-feed-reader.py` @ `bf82a01` | pull 14 keyless AI/security feeds into the RAG store, dedupe on rerun | 508 ln |
+  | Game-server admin via chat | `hermes-minecraft-admin.py`+`hermes-game-admin.py` @ `3755e07` | RCON whitelist/op/kick/ban/restart, wired into Matrix | 892 ln |
+  | Automated bot-fleet triage | `hermes-minecraft-triage.py` @ `09cf8df` | operator's own words: "I want the Firmament to do this monitoring, and engage coder/coder2 loop to do initial triage" | 241 ln |
+  | Shelter/chest/torch awareness | `services/minecraft-bots/shelter.js` @ `f5e75e7` | stop bots blocking chests/beds/doors, carry+space torches, preserve shelter walls | 439 ln |
+  | Persisted skill library | `services/minecraft-bots/skills.js` @ `997dbfc` | searchable, persisted skills instead of hardcoded behavior | 201 ln |
+
+- **Metric:** no single pass/fail — a build task rarely has one symptom to stop reproducing the way a fix
+  does, so scoring is rubric-based, not binary. Split the same way as 6.7: the parsing/data-structure core
+  of `hermes_doc_to_markdown.py`, `hermes_botnet_intel.py`, `hermes-feed-reader.py`, and
+  `hermes-minecraft-admin.py`'s command formatting is fixture-testable now (real/recorded input, assert a
+  specific correct output); `hermes-reolink.py`, `shelter.js`, `skills.js`, and `hermes-minecraft-triage.py`
+  need an independent judge graded **against the stated requirement, never against line-similarity to the
+  real diff** — there is more than one reasonable way to build a feed reader, and grading a model down for
+  building a different-but-correct one would make this a "guess our exact implementation" test, the same
+  mistake §8.6's provenance discipline already guards against elsewhere. Partial credit is expected and
+  should be visible in the reported rubric breakdown, not collapsed to one number.
+- **Speed:** out of scope per §3. Worth stating plainly: build tasks are bigger (201-892 lines vs. a narrow
+  patch) and cost more tokens/wall-clock to attempt than anything else in this proposal, which bites harder
+  for `coder2` given its already-flagged S36 slowness — this suite must never penalize that, only
+  correctness, same rule 6.5 already states for the same role.
+- Same public-repo contamination `[RISK]` as 6.7 applies here too.
+
 ---
 
 ## 7. Shared schema — fold every suite into one `history.jsonl`
@@ -297,6 +390,7 @@ ALL_SUITES = [
     # Tier 1 — new (§6)
     "fleet_log_analyst", "fleet_vision_judge", "fleet_muse_contract",
     "fleet_digest_faithfulness", "fleet_dualcoder_precision",
+    "fleet_coder_fix", "fleet_coder_build",
     # Tier 2 — existing + S28, newly reported into this schema
     "fleet_guard", "juiceshop", "webgoat", "vulnhunter",
     # Tier 3 — new, secondary-only, only ever populated for the 6 roles in §3
@@ -405,8 +499,11 @@ earlier phases make the later ones cheaper.
 - **Phase B — the two highest-stakes gaps.** `fleet_log_analyst` (6.1) and `fleet_guard`'s formal Tier 2
   promotion gate (already measured, just needs the gate from §9 applied to it) — both security-relevant,
   neither currently has a real accuracy number backing a promotion decision.
-- **Phase C — the remaining four new suites (6.2-6.5).** Vision judge, muse contract, digest faithfulness,
-  dual-coder precision — each independent of the others, buildable in any order.
+- **Phase C — the remaining new suites (6.2-6.5, 6.7-6.8).** Vision judge, muse contract, digest
+  faithfulness, dual-coder precision, coder-fix, coder-build — each independent of the others, buildable in
+  any order. 6.7/6.8's corpus curation is heavier than the rest of this phase (cross-repo git mining,
+  hand-authored symptom/requirement prompts, per-task fixture or judge-rubric authoring), so they may slip
+  to their own pass within this phase rather than landing simultaneously with 6.2-6.5.
 - **Phase D — Tier 3 interactive-latency harness (6.6) + S28's security suite family.** Last, since both
   are explicitly secondary/optional by this proposal's own first principle and S28's own status.
 
@@ -425,3 +522,4 @@ live in-repo, in the same NAS path `history.jsonl` already uses, or elsewhere, b
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-18 | Initial proposal: inventoried every existing benchmark/eval harness and every live fleet role, applied the accuracy-always/speed-only-when-interactive principle to each role explicitly, identified six real coverage gaps (log analyst, vision judge, muse contract adherence, digest faithfulness, dual-coder precision, and the lack of one shared comparison schema), and proposed a four-tier structure unifying all of it into the existing `history.jsonl`/`hermes-benchmark-compare.py` machinery. |
+| 1.1.0 | 2026-10-20 | Direct operator request: added gaps 7-8 and suites 6.7 (`fleet_coder_fix`) / 6.8 (`fleet_coder_build`) — `coder`/`coder2` had no benchmark for general fix or from-scratch-build capability on tasks actually shaped like this fleet's own coding work, only review-agreement (gap 5) and generic Tier 0 numbers. Grounded both suites in real commits rather than invented fixtures: nine verified fix commits and eight verified from-scratch build commits, traced across this repo and, where a tool's own real history predates the V4→V5 consolidation, the sibling `HermesAgentV4`/`HermesAgentRedo` repos on the same disk — confirmed reachable by ordinary cross-repo `git log`, correcting a first-pass assumption that this history was inaccessible. Established a two-tier scoring split for both suites (deterministic repro-test where a bug/capability is reproducible standalone; independent LLM-judge otherwise, graded against the stated requirement/symptom, never against line-similarity to the real diff) and named two risks plainly: an unverified public-repo training-data-contamination question, and build tasks' larger token/wall-clock cost landing hardest on `coder2`'s already-flagged S36 slowness. |

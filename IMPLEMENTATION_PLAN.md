@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.51.0
+**Version:** 3.54.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -144,7 +144,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S28 | **Optional** — security-benchmark suites (OWASP Juice Shop, WebGoat) in the existing harness, then a VulnHunter bake-off across the local roster | 📋 Planned 2026-10-09, optional, not executed — gates nothing; written from this repo, no fleet node was reachable |
 | S29 | LinodeMercury — the fleet's first deliberately external, one-way-reachable node | ✅ Done 2026-10-09 |
 | S30 | The `aide` exclude gap S21h found, fixed on all three fleet nodes | ✅ Done 2026-10-09 |
-| S31 | **Optional** — `super` candidate bake-off: GLM-5.3-Flash (`autotrust`'s two DGX-Spark GGUF builds) vs. incumbent Huihui-GLM-4.7-Flash-abliterated | ✅ **Executed 2026-10-18 on `spark-2` — verdict: no-go.** mmlu_pro 0.75 vs. incumbent's 0.614 (win); ifeval 0.60 vs. 0.76 (loss, `--limit 30` not the fleet's usual 75); BFCL 0.0 (inconclusive, matches this harness's own documented handler-mismatch pattern). Candidate's raw decode throughput measured at only ~6.1-6.8 tok/s, likely disqualifying for `super`'s production load on its own; wake-latency/production-equivalence still unmeasured for the same reason. No clean win either way, so no promotion |
+| S31 | **Optional** — `super` candidate bake-off: GLM-5.3-Flash (`autotrust`'s two DGX-Spark GGUF builds) vs. incumbent Huihui-GLM-4.7-Flash-abliterated | ✅ **Executed 2026-10-18/20 on `spark-2` — final verdict: no-go.** Full-accuracy final numbers: mmlu_pro **0.776** vs. `super`'s 0.614 (real win, 1050 real samples, 14 subjects × `--limit 75`); ifeval **0.587** (full `reasoning_effort`) vs. every live role's own ifeval@75 — behind `super` (0.76), `coder` (0.88), `muse` (0.893), `dispatch`/`omni` (0.907), `nano` (0.933) — a real loss against the whole fleet, not just `super`; BFCL 0.0 (tied with `super`'s own 0.0, not a differentiator). Real throughput ~16.5 tok/s isolated, but the model uses its full generation budget on many questions, so wall-clock cost stays high regardless. A system-wide OOM crash occurred and was resolved mid-run (`hermes-restart-fleet.sh` unconditionally restarting `muse`/`omni` during a deliberate stop window); fleet fully restored. No promotion case either way |
 | S32 | A failed LUKS mount took out seven core services for 41 hours, unscreened | 🟡 **Investigated 2026-10-13; operational half repaired, engineering not written.** `/mnt/hermes-data` failed to mount at the 10-11 reboot; `Dependency failed` means `Restart=always` never retried, so memory/guard/broker/buzz/rag/triage/portal never started. Layer 2 fails open: **12,166 requests forwarded unscreened** over 41h with no alert. Three services were still down at 51h and were started by hand. `hermes-fleet-health` did email `[CRITICAL] hermes-broker inactive` daily throughout — the digest's "0 failed, nothing new" contradicted it. **This stage's first draft blamed a readiness race and was wrong** |
 | S33 | `hermes-guard-report` — the window is 500 rows, not 26 hours | 📋 Planned 2026-10-13, not executed — hermes-memory caps `limit` at 500; two of four daily runs hit the cap and reported 0 blocks while blind |
 | S34 | Bot-to-bot chat is screened as player chat, and is being dropped | 📋 Planned 2026-10-13, not executed — 8 Mayor directives blocked at 0.970 on 2026-10-13 |
@@ -152,7 +152,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S36 | `coder2` — make it measurable at all | 📋 Planned 2026-10-13, not executed — exceeded a 90-minute ifeval timeout; emits reasoning tokens |
 | S37 | **Optional** — model and evaluate AlphaDiana's harness-ablation concept (arXiv:2610.20675) for Firmament's own agent layer | 📋 Planned 2026-10-16, optional, not executed — gates nothing; a three-arm (bare/full-path/no-memory) paired pilot, written from this repo, no fleet node was reachable |
 | S38 | Firmament Market Watch — daily global-exchange equity tracking, sector/industry + thematic categorization, historical price storage, daily trend/movers report, on-demand Matrix reports | 📋 Planned 2026-10-17, not executed — full design in `MARKET_WATCH_DESIGN.md`; gated on an operator decision on the market-data vendor and starting universe (S38a) |
-| S39 | Firmament Fleet Benchmark Suite — per-role accuracy benchmarks for every live role, folded into one shared comparison schema, with speed scored only for the roles a human/player is synchronously waiting on | 📋 Planned 2026-10-18, not executed — full design in `FLEET_BENCHMARK_DESIGN.md`; six real coverage gaps found (log analyst, vision judge, muse contract adherence, digest faithfulness, dual-coder precision, no shared comparison schema); gated on operator review of the gap list and phasing (S39a) |
+| S39 | Firmament Fleet Benchmark Suite — per-role accuracy benchmarks for every live role, folded into one shared comparison schema, with speed scored only for the roles a human/player is synchronously waiting on | 📋 Planned 2026-10-18, not executed — full design in `FLEET_BENCHMARK_DESIGN.md` 1.1.0; eight real coverage gaps found (log analyst, vision judge, muse contract adherence, digest faithfulness, dual-coder precision, no shared comparison schema, plus a 2026-10-20 follow-up: `coder`/`coder2` has no fix-capability or build-capability benchmark grounded in this fleet's own real coding work); gated on operator review of the gap list and phasing (S39a) |
 | S40 | Layer 3 — tool-call/egress guard: model output constrained to internal infrastructure or a published tool whitelist, denied+Matrix-reported+hi-pri-emailed+recorded otherwise | ✅ **All four phases executed 2026-10-18.** Every deny runs a Matrix+hi-pri-email+memory-record report (recursion-guarded) before raising; `hermes-fleetops-ui.py`'s `/egress-blocks` page reads that record straight from `hermes-memory`'s SQLite file (same pattern `/recommendations` uses), which made Phase C's own planned gate moot rather than satisfied; S33 (the underlying HTTP-API cap) is still open as its own stage. Consolidated the three real `send_email`/`matrix_notice` duplicates Phase A's own wrapping touched onto `hermes_alert_common.py`, correcting the design's original "three duplicates" claim (fleet-wide sweep found 24/11, not 3). Phase D gated the router's new buffered/validated response path on the request itself carrying `tools`/`functions` — real traffic, which never does, keeps its exact unchanged live-streaming behavior; verified live that every real tool-call invocation denies today, since no registry row lists a function name as its own allowed caller yet. Full detail in `EGRESS_GUARD_DESIGN.md` 1.4.0 |
 
 ---
@@ -5088,6 +5088,119 @@ that would make the throughput concern precise rather than inferred. No promotio
 consistent with the exit gate's own rule either way. Candidate server torn down, `spark-2`'s four
 services restored and confirmed healthy; `spark`'s own `llama-super.service` was never touched.
 
+#### S31 follow-up — accuracy-first all-roles attempt, 2026-10-18/19, operator-directed
+
+Direct request to re-run at full/default `reasoning_effort` (not the low-effort/400-token cap above) and
+compare against every live role's own recorded baseline, not just `super`'s. Scope: all 9 Minecraft bots
+(5 on `spark`, 4 on `spark-2`) plus both `hermes-minecraft-triage` instances, the shared
+`hermes-minecraft-rag` server, and the activity-log mirror stopped fleet-wide — closing the exact gap the
+first run left open (`coder2` self-waking mid-run) by removing every bot that could trigger a role wake,
+not just the roles themselves. `spark-2`'s `coder`/`coder2`/`muse`/`omni` stopped as before.
+
+**Only `ifeval` has a recorded baseline for every live role** — `mmlu_pro` only exists for `super` (0.614,
+2026-08-29) and a decommissioned `nemotron35` checkpoint; `bfcl` only exists for `super` (0.0). An
+"all-roles" comparison is really an `ifeval`-vs-everyone comparison; `mmlu_pro`/`bfcl` remain
+`super`-only regardless of how this stage is scoped.
+
+**Real throughput, isolated from all other load, is ~16.5-16.6 tok/s — 2.5x the first run's ~6.2 tok/s.**
+That earlier number was contention-skewed (swap pressure, `coder2`'s mid-run resurrection), not the
+model's real speed. But the model uses its *full* generation budget on a large fraction of questions
+rather than stopping early — several ifeval samples ran the complete 4096-token cap (~247s each, exactly
+4096÷16.6), so total wall-clock time tracks "fraction of questions that max out," not raw tok/s alone.
+
+**A real production incident: a system-wide OOM crash, not a benchmark hiccup.** ~4 hours into the
+`mmlu_pro` leg, `hermes-repo-autopull.timer` fired its routine ~30-minute sync cycle, which ran
+`hermes-restart-fleet.sh --node spark2`. That script's own code treats `omni`/`muse` as **always
+resident by design** (correct under normal operation) and restarts them unconditionally — unlike
+`super`/`coder`, which got a "restarted only if already active" guard specifically because they're
+on-demand. With the candidate's 79 GiB already resident, the unconditional restart of both pushed the
+node over the edge: the kernel OOM-killed `llama-muse`, `llama-omni`, the candidate's own `llama-server`,
+`tailscaled`, `docker`, `hermes-reolink`, `unattended-upgrades`, `networkd-dispatcher`,
+`hermes-model-wake-worker`, and two user sessions in one sweep. `tailscaled`/`docker` self-recovered with
+no lasting damage; everything else needed a manual restart. **Fix applied for the remainder of the run:**
+`hermes-repo-autopull.timer` disabled, re-enabled after. **Not yet fixed in the script itself** — a real,
+open gap: `hermes-restart-fleet.sh` needs the same "checked, not assumed" guard for `muse`/`omni` that
+`super`/`coder` already have, for the case where they've been deliberately, temporarily stopped (a
+benchmark, a manual maintenance window) rather than simply crashed.
+
+**`mmlu_pro` structurally cannot complete at this scope under full `reasoning_effort`.** Retried after the
+OOM with a clean candidate restart; `run_lm_eval_task()`'s hardcoded `timeout=3600*6` killed the
+subprocess at exactly 6 hours with zero partial credit — not merely slow, but incapable of finishing
+1050 real samples (14 subtasks × `--limit 75`) in one call at this generation rate. The following `bfcl`
+leg then produced a suspicious `overall_acc=0.0` in ~2 minutes with **zero real requests reaching the
+candidate server** (confirmed via the server's own request log) — the forced kill of the timed-out
+subprocess left something in a state where `bfcl generate` failed near-instantly rather than running;
+discarded as a null result, not a real measurement, despite superficially matching the harness's own
+known handler-mismatch failure mode.
+
+**Net result of this attempt:** only `ifeval@75 (full reasoning_effort) = 0.5867` is real and
+trustworthy — essentially the same as the first run's capped/low-effort `ifeval@30 = 0.60`, suggesting
+`reasoning_effort` doesn't move this metric much for this model on this suite, which weakens the original
+case for insisting on uncapped reasoning at real multi-day cost. `mmlu_pro` and `bfcl` were not
+successfully re-measured at full accuracy settings; the only trustworthy `mmlu_pro`/`bfcl` numbers for
+this candidate remain the first run's reduced-confidence `0.75`/`0.0`. All 9 bots, both triage instances,
+the RAG server, the activity-log mirror, `spark-2`'s four backends, and `hermes-repo-autopull.timer` were
+restored/re-enabled and confirmed healthy afterward. Decision on how (or whether) to pursue a complete
+full-accuracy `mmlu_pro` number — e.g. by splitting it into its 14 individual subject tasks so each stays
+under the 6-hour ceiling, at a multi-day aggregate cost — was hanging after this stage closed; see
+whatever follow-up record (if any) picks this back up.
+
+#### S31 follow-up, part 2 — mmlu_pro completed via per-subject split, 2026-10-19/20
+
+Operator chose the per-subject split. Re-stopped all 9 bots, both triage instances, the RAG server, the
+activity-log mirror, `spark-2`'s four backends, and `hermes-repo-autopull.timer` (same scope as part 1).
+A small driver script (not added to the repo — a one-off orchestration helper) called
+`hermes_benchmark_common.run_lm_eval_task()` directly once per subject (`mmlu_pro_biology` ...
+`mmlu_pro_psychology`, the 14 real task names, not the `mmlu_pro` group name), each its own subprocess
+call so each got its own 6-hour timeout budget, `--limit 75`, `max_gen_toks=4096`, full default
+`reasoning_effort`, with a checkpoint file written after every subject so progress would survive a crash.
+
+**All 14 completed cleanly this time — real, full-accuracy signal:**
+
+| subject | score | subject | score | subject | score |
+|---|---|---|---|---|---|
+| biology | 0.880 | health | 0.693 | other | 0.653 |
+| business | 0.813 | history | 0.707 | philosophy | 0.680 |
+| chemistry | 0.853 | law | 0.587 | physics | 0.947 |
+| computer_science | 0.840 | math | 0.880 | psychology | 0.787 |
+| economics | 0.920 | engineering | 0.627 | | |
+
+Equal-weighted mean (each subject has exactly 75 samples, so equal-weight = sample-weighted) =
+**0.7762**. Recorded to the shared `history.jsonl` with the full per-subject breakdown nested inside the
+`mmlu_pro` entry, not just the aggregate.
+
+**BFCL still would not produce a real measurement — a third attempt, a third null result, now clearly
+not tied to the earlier OOM/forced-kill.** Ran immediately after the per-subject driver exited cleanly
+(no crash, no SIGKILL, candidate server healthy and undisturbed throughout); finished in under 2 minutes
+reporting `overall_acc=0.0`, but the candidate server's own request log shows **zero** real requests
+during that window (1052 total requests server-wide = exactly the 1050 real mmlu_pro samples + 2 from an
+earlier sanity check — none from BFCL). Same failure signature as the post-OOM attempt, this time with
+no crash to blame. Root cause not found; not pursued further given the first run's own BFCL leg (run
+cleanly, in the original ~2-hour window, before any of this session's crashes) already produced a real,
+trustworthy `0.0` — treated as the standing number. **A real, still-open small tooling gap**: something
+about invoking `bfcl generate` right after a long-running python process in the same shell session
+appears to make it fail near-instantly without ever reaching the target endpoint, independent of whether
+that prior process crashed or exited cleanly — worth a dedicated look before the next person relies on
+BFCL output immediately following a long benchmark leg.
+
+**Final, consolidated picture for this candidate** (`autotrust/GLM-5.3-Flash-GGUF-DGX-Spark`), full
+accuracy settings except where noted:
+
+| suite | candidate | comparison | delta |
+|---|---|---|---|
+| `mmlu_pro` | **0.776** (full, `--limit 75`×14 subjects, 1050 samples) | `super` 0.614 (only role with this baseline) | **+0.162** |
+| `ifeval` | **0.587** (full reasoning_effort, `--limit 75`) | `super` 0.76 / `coder` 0.88 / `muse` 0.893 / `dispatch`+`omni` 0.907 / `nano` 0.933 | **behind every live role**, including `super` |
+| `bfcl` (`simple_python`) | 0.0 (trustworthy, from the first run) | `super` 0.0 | tied — both score 0 under this harness's known handler-mismatch pattern against this model family; not a real differentiator either way |
+
+**Still no promotion case.** `mmlu_pro` is now a real, solid win, not just a reduced-confidence one — but
+`ifeval` is a real, solid loss against *every* live role this fleet runs, not just `super`, confirmed at
+full accuracy settings specifically to rule out the generation-cap explanation (it didn't move the
+number). Combined with the still-unmeasured wake-latency/production-equivalence question and the
+~16.5 tok/s real throughput ceiling, this candidate reads as "stronger general knowledge, weaker
+instruction-following, unknown production latency" — not a case for promoting it into any role, `super`
+included. Fleet-wide restoration (9 bots, 2 triage instances, RAG server, activity-log mirror, 4 `spark-2`
+backends, `hermes-repo-autopull.timer`) confirmed complete and healthy.
+
 ---
 
 ### S37 — Optional: model and evaluate whether AlphaDiana's harness-ablation concept belongs in Firmament
@@ -5501,3 +5614,6 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.49.0 | 2026-10-18 | **S40 Phase B executed**, except the report-page record's live verification. `check_destination()` now runs §8's Matrix+hi-pri-email report pipeline itself on every deny path (not per-call-site wiring — simpler than planned), with a single in-flight recursion guard for the one real loop this creates (a registry-load failure denies the hi-pri email's own destination too, since mail.hover.com is itself non-internal). `hermes_alert_common.send_email()` gained `priority="critical"` (subject prefix + `Importance`/`X-Priority` headers) and now returns `True`/`False` instead of nothing. Corrected the design's original "three duplicate implementations" claim after actually counting them: a fleet-wide sweep found 24 independent `smtplib` users and 11 independent `matrix_notice()`s, not 3, and neither of the two files the design had named (`hermes-fleet-health.py`, `hermes-model-scout.py`) turned out to have its own — the three real, in-scope duplicates were the ones Phase A's own wrapping had already touched (`hermes-model-scan.py`/`hermes-model-watch.py`'s `send_email`s, `hermes-linodemercury-watch.py`'s `send_email`+`matrix_notice`), now consolidated onto `hermes_alert_common.py` and removed from each of those three files rather than left duplicated. The other ~20/~10 duplicates are recorded as an explicit, separate, out-of-scope finding, same shape as S40's own prior external-destination survey. Extended the offline test suite 33 → 43 checks (`infra/hermes-egress-guard/tests/test_egress_guard.py`); all pass, plus the existing 108-check model-scout suite regression-free. Full detail in `EGRESS_GUARD_DESIGN.md` 1.2.0. Minor bump — a stage executed and its real record written in, nothing prior reversed. |
 | 3.50.0 | 2026-10-18 | **S40 Phase C executed.** Added `/egress-blocks` to `hermes-fleetops-ui.py`, modeled on `/recommendations` as planned. Found while building it that Phase C's own planned gate (land `hermes-memory`'s `/turns` `since` filter, or build an explicit truncation flag, before this page could be trusted — needed because of S33's 500-row HTTP cap) was moot, not satisfied by either option: `/recommendations` and `/backlog` never call that capped HTTP API at all, they read `hermes-memory`'s SQLite file directly via a read-only connection, and the new page does the same, so a direct SQL `COUNT(*)` gives an exact "showing N of true-total" with no prerequisite stage needed. S33 itself remains open as its own stage — `hermes-guard-report.py` still calls the capped endpoint and would still benefit from that fix; this finding only closes Phase C's own gate, not S33 as a whole. Extended the offline test suite 226 → 234 checks (`infra/hermes-fleetops-ui/tests/test_fleetops_ui.py`); all pass, plus the existing 43-check egress-guard and 108-check model-scout suites regression-free. Full detail in `EGRESS_GUARD_DESIGN.md` 1.3.0. Minor bump — a stage executed and its real record written in, nothing prior reversed. |
 | 3.51.0 | 2026-10-18 | **S40 Phase D executed — all four phases of S40 now done.** Found while building the router-level structural tripwire (§7 Tier B) that a passive scan bolted onto `hermes-router.py`'s existing response path could not actually fail closed: the router relays each chunk the instant it's read from upstream, so by the time a full response exists to scan the caller already has it. Fixed by gating a buffered/validate-then-relay path on the *request* itself carrying `tools`/`functions` (`do_POST()`'s new `wants_tools` check) rather than scanning every response — real traffic, which never sets either (confirmed, same S3 audit), keeps its exact unchanged live chunk-by-chunk streaming, paying nothing for a condition that cannot occur today. Added `extract_tool_calls()` (plain JSON and OpenAI's own SSE delta-accumulation shape, reconstructed by index across fragmented chunks) and `check_tool_calls()` to `hermes-router.py`, and `check_tool_call()`/`is_registered_function()`/`report_denial()` to `tools/hermes_egress_guard.py`. Verified live, not assumed, that every real tool-call invocation denies today: the tool's own name is the caller identity Tier A's `check_destination()` checks, and no registry row lists a function name among its own `allowed_callers` yet. New offline suite `infra/hermes-router/tests/test_tier_b.py` (12 checks); the existing 43/108/234-check egress-guard/model-scout/fleetops-ui suites stay regression-free. Full detail in `EGRESS_GUARD_DESIGN.md` 1.4.0. Minor bump — a stage executed and its real record written in, nothing prior reversed. |
+| 3.52.0 | 2026-10-19 | **S31 accuracy-first all-roles follow-up, operator-directed.** Stopped all 9 Minecraft bots fleet-wide (not just the roles) plus both triage instances, the shared Minecraft RAG server, and the activity-log mirror, closing the wake-trigger gap the first S31 run left open. Real isolated throughput measured at ~16.5-16.6 tok/s (2.5x the first run's contention-skewed ~6.2 tok/s), but the model uses its full generation budget on a large fraction of questions rather than stopping early, so wall-clock time didn't improve proportionally. **A real production incident:** ~4 hours into `mmlu_pro`, `hermes-repo-autopull.timer`'s routine sync cycle ran `hermes-restart-fleet.sh`, which restarts `muse`/`omni` unconditionally (correct for their normal always-resident design, not for a deliberate temporary stop) — with the candidate's 79 GiB already resident, this triggered a system-wide OOM killing `muse`, `omni`, the candidate server, `tailscaled`, `docker`, `hermes-reolink`, `unattended-upgrades`, and two user sessions. Timer disabled for the remainder, re-enabled after; `hermes-restart-fleet.sh` itself still needs the same "checked, not assumed" guard for `muse`/`omni` that `super`/`coder` already have — a real, open gap, not fixed here. Retried mmlu_pro after a clean restart; it hit `run_lm_eval_task()`'s hardcoded 6-hour subprocess timeout with zero partial credit (1050 real samples at this generation rate structurally can't finish in one call), and the following BFCL leg produced a null `0.0` with zero real requests reaching the candidate server (the timed-out subprocess's forced kill left something in a bad state) — discarded, not a real measurement. Net: only `ifeval@75` (full `reasoning_effort`) `= 0.5867` is trustworthy from this attempt — close to the first run's capped-effort `ifeval@30 = 0.60`, suggesting `reasoning_effort` doesn't move this metric much here. `mmlu_pro`/`bfcl` real numbers remain the first run's reduced-confidence `0.75`/`0.0`; a full-accuracy `mmlu_pro` (e.g. split into its 14 subject tasks to dodge the 6h ceiling) was left as an open decision rather than pushed through at further multi-day cost. All bots/services/timer restored and confirmed healthy. Minor bump — a stage's follow-up executed and its real record (including a real incident) written in, nothing prior reversed. |
+| 3.53.0 | 2026-10-20 | **S31 follow-up part 2 — mmlu_pro completed via per-subject split, final verdict recorded.** Operator chose to split `mmlu_pro` into its 14 individual subject tasks (`mmlu_pro_biology` ... `mmlu_pro_psychology`) rather than the grouped `mmlu_pro` name, each its own subprocess call with its own 6-hour timeout budget, so none could hard-fail the way the combined call did. Re-stopped the same fleet-wide scope as the first follow-up (9 bots, 2 triage instances, RAG server, activity-log mirror, `spark-2`'s 4 backends, `hermes-repo-autopull.timer`). All 14 completed cleanly: equal-weighted mean **0.776** (range 0.587-0.947 across subjects), a real win over `super`'s 0.614 and a stronger signal than the first run's reduced-confidence 0.75. BFCL failed a third time with the identical null-result signature (zero real requests reaching the candidate server in under 2 minutes) — this time with no crash to blame, so the root cause is still unknown and recorded as an open tooling gap rather than chased further; the first run's clean `0.0` stands as the trustworthy BFCL number. **Final consolidated picture:** mmlu_pro 0.776 (win vs. `super`'s only-recorded baseline), ifeval 0.587 (loss against every live role, confirmed at full accuracy settings so the generation cap wasn't the cause), BFCL 0.0 (tied with `super`, not a differentiator) — stronger general knowledge, weaker instruction-following, unknown production latency, no case for promotion into any role. §0's S31 row and the stage body updated with these final numbers. Fleet-wide restoration (9 bots, 2 triage instances, RAG server, activity-log mirror, 4 `spark-2` backends, `hermes-repo-autopull.timer`) confirmed complete and healthy. Minor bump — a stage's second follow-up executed and its real final record written in, nothing prior reversed. |
+| 3.54.0 | 2026-10-20 | **S39 scope extended, direct operator request — gaps 7-8 added, not yet executed.** `coder`/`coder2` had no benchmark for general fix capability or from-scratch build capability grounded in this fleet's own real coding work — only review-agreement against a scanner (gap 5) and generic Tier 0 numbers (MMLU-Pro/IFEval/BFCL/SWE-bench), neither of which is drawn from this fleet's own code. Added `fleet_coder_fix` (§6.7) and `fleet_coder_build` (§6.8) to `FLEET_BENCHMARK_DESIGN.md` (now 1.1.0), each grounded in real commits rather than invented fixtures: nine verified fix commits and eight verified from-scratch build commits, found by mining not just this repo's history but the sibling `HermesAgentV4`/`HermesAgentRedo` repos on the same disk for tools whose real bug/build history predates the V4→V5 consolidation — confirmed reachable by ordinary cross-repo `git log`, correcting a first-pass assumption that this history was inaccessible. Both suites split scoring into a deterministic repro-test tier (where a bug/capability is reproducible standalone) and an independent-LLM-judge tier graded against the stated requirement/symptom, never against line-similarity to the real diff, extending the same label-provenance discipline (§8.6) already applied to this design's other suites. Named two risks plainly rather than building around them unstated: an unverified public-repo training-data-contamination question, and build tasks' larger token/wall-clock cost landing hardest on `coder2`'s already-flagged S36 slowness. Still gated on S39a like the rest of this design — scoping only, nothing executed. Minor bump — new gaps/suites added to a planned stage's design, nothing prior reversed. |
