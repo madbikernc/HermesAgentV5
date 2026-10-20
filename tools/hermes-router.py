@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 2.17.0
+# Version: 2.18.0
+#
+# 2.18.0 (2026-10-20) - `coder2` retired from ROLES on both branches, direct operator request
+# (IMPLEMENTATION_PLAN.md S31's coder2 follow-up): real usage measured at ~1 wake/week over 30
+# days, and its own code comments (hermes-dualcoder.py) already documented chronic reasoning-
+# token-bloat/timeout problems identical to what the S31 bake-off just found in an unrelated
+# candidate. Muse-Glimmer-30B unloaded (llama-coder2.service stopped) and unregistered (removed
+# from ROLES here and from WAKE_TARGETS in hermes-model-wake-worker.py 1.5.0) -- weights kept on
+# disk, not deleted. Two real stock-model replacement candidates (Devstral-Small-2507,
+# Seed-OSS-36B-Instruct) are staged on spark-2 pending benchmarking in a parallel session.
+# hermes-dualcoder.py's own security_review()/meta_review() calls still hard-code the role name
+# "coder2" and are left untouched -- they will now error if that path is ever exercised, an
+# accepted consequence until a replacement is chosen, not silently patched around here.
 #
 # 2.17.0 (2026-10-18) - S40 Phase D: the router-level structural tripwire (Tier B, design doc
 # §7). A request carrying `tools`/`functions` now gets a buffered response path instead of the
@@ -328,13 +340,6 @@ if NODE == "spark":
         "super": ("http://127.0.0.1:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
         # coder moved to spark-2 2026-10-07 (fleet-health investigation: spark was chronically
         # at ~97% memory / swapping; coder was its single largest avoidable resident consumer).
-        # coder2 already lives on spark-2 -- the two coding backends now share a node, which is
-        # exactly what the old placement was built to avoid (see coder2's own comment below), but
-        # hermes-dualcoder.py's own task log shows zero real dual-coder-review runs in the prior
-        # 30 days (claim_next() only ever timing out / connection-refused), and its two
-        # security_review() calls are sequential, never concurrent, even when it does run -- so
-        # the contention this was guarding against is dormant risk, not an active one. Revisit if
-        # dual-coder-review ever becomes real traffic again.
         "coder": (f"http://{SPARK2_IP}:8094", True, "Qwen3.8-27B-abliterated", True),
         "muse": (f"http://{SPARK2_IP}:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
         "omni": (f"http://{SPARK2_IP}:8091", False, "gemma-4-26B-A4B-it (Google, stock)", False),
@@ -343,12 +348,12 @@ if NODE == "spark":
         # and S12's DISPATCH_CHAT_URL standby override in the same pass for a cosmetic port-number
         # match with no functional benefit. Deferred, not forgotten -- see IMPLEMENTATION_PLAN.md S13.
         "dispatch": ("http://127.0.0.1:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
-        # coder2 (dual-coder review's second reviewer) is cross-node like muse/omni. Originally kept
-        # off the same node as coder so the two coding backends would never contend for memory
-        # bandwidth during a long back-and-forth review -- now moot, see coder's own comment above:
-        # coder lives alongside coder2 on spark-2 as of 2026-10-07. Muse Glimmer 30B (Meta, stock,
-        # Apache-2.0) -- not abliterated.
-        "coder2": (f"http://{SPARK2_IP}:8099", True, "Muse-Glimmer-30B (Meta, stock, Apache-2.0)", False),
+        # "coder2" retired 2026-10-20 -- see this file's own 2.18.0 changelog entry below and
+        # IMPLEMENTATION_PLAN.md S31's coder2 follow-up. Muse-Glimmer-30B unloaded/unregistered,
+        # weights kept on disk. hermes-dualcoder.py's security_review()/meta_review() calls hard-code
+        # the role name "coder2" and will now get a routing error if that path is ever actually
+        # exercised -- a known, accepted consequence pending a replacement model decision, not
+        # silently patched around here.
     }
 else:
     ROLES = {
@@ -358,7 +363,7 @@ else:
         "muse": ("http://127.0.0.1:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
         "omni": ("http://127.0.0.1:8091", False, "gemma-4-26B-A4B-it (Google, stock)", False),
         "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
-        "coder2": ("http://127.0.0.1:8099", True, "Muse-Glimmer-30B (Meta, stock, Apache-2.0)", False),
+        # "coder2" retired 2026-10-20 -- see spark branch's own comment above.
     }
 
 ON_DEMAND_ROLES = {role for role, (_, on_demand, _, _) in ROLES.items() if on_demand}

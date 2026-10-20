@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-10-20) — `coder2` removed from spark-2's WAKE_TARGETS, direct operator request
+# (IMPLEMENTATION_PLAN.md S31's coder2 follow-up). See the removed entry's own replacement
+# comment for why. spark-2's WAKE_TARGETS now holds only `coder`.
 #
 # 1.4.0 (2026-10-07) — `coder` moved from spark's WAKE_TARGETS to spark-2's, alongside `coder2`
 # (see hermes-router.py 2.14.0's changelog for the full rationale: spark's chronic ~97%
@@ -114,11 +118,11 @@ if NODE == "spark":
     }
 else:
     WAKE_TARGETS = {
-        # coder2 = Muse Glimmer 30B (Meta, stock, Apache-2.0), byte-verified 17,306,324,000 bytes
-        # (16.12GiB) via a live HF content-length check before download, same gate every model file
-        # in this fleet goes through. 24 = 16.12GiB * the same ~1.46 margin ratio coder's/super's
-        # own figures used, rounded up.
-        "coder2": ("http://127.0.0.1:8099/health", "llama-coder2", 24),
+        # "coder2" retired 2026-10-20, direct operator request (IMPLEMENTATION_PLAN.md S31's
+        # coder2 follow-up) -- real usage measured at ~1 wake/week over 30 days, and its own
+        # reasoning-token-bloat/timeout problems (hermes-dualcoder.py's own comments) matched what
+        # an unrelated S31 bake-off just found. Unloaded (llama-coder2.service stopped) and
+        # unregistered here plus in hermes-router.py 2.18.0's ROLES -- weights kept on disk.
         # coder = Huihui-Qwen3.8-27B-abliterated, byte-verified 16,810,714,400 bytes (15.65GiB).
         # Moved here from spark 2026-10-07 (fleet-health investigation: spark was chronically at
         # ~97% memory/swapping; coder was its single largest avoidable resident consumer) -- was
