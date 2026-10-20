@@ -1,4 +1,15 @@
-// Version: 1.90.0
+// Version: 1.91.0
+//
+// 1.91.0 (2026-10-18, direct request): bed claiming removed entirely -- "any bed not already
+// occupied," trying the next one until she finds one free (no more priority-banded "her own
+// claimed bed, then unclaimed, then others' as a last resort" candidate list, and no more
+// claim-write on success). "sleep" and nearbyBeds() simplified accordingly; the whole
+// loadClaimedBed/saveClaimedBed/checkClaimedBed/BED_CLAIMS_AGENT subsystem is gone (index.js's
+// three "home" lookups that preferred it now just use bot.spawnPoint, same as everywhere else).
+// Separately, findBedSites() now always prefers a site inside an existing, qualifying shelter
+// (shelterInteriorsNear, shelter.js 1.2.0 -- any shape/size, no openings but doors, walls any
+// material but sand) when one nearby has room, falling through to today's nearest/under-a-roof
+// scoring only when no such shelter is found.
 //
 // 1.90.0 (2026-10-13, direct report after a full fleet reset: "combat seems better, but
 // building and tooling do not"). Two real, live-confirmed bugs:
@@ -1097,7 +1108,7 @@ import { searchMemory } from "./longterm.js";
 import { listState, setState } from "./memory.js";
 import { holdDoorsOpen, isDoorway } from "./swim-movements.js";
 import { bedHalves, chestHalves, wouldBlockAccess, findAccessObstructions, isLivingSpaceWall,
-         ACCESS_SCAN_RADIUS } from "./shelter.js";
+         ACCESS_SCAN_RADIUS, shelterInteriorsNear, posKey } from "./shelter.js";
 
 const { goals } = pathfinderPkg;
 
@@ -2311,12 +2322,6 @@ function findPlantableSpotNear(bot, center, radius) {
   return null;
 }
 
-// Item #4 of "fix all the above" (bed ownership) -- see "sleep"'s own changelog note below for
-// why. One small file per bot, same hermes-data-mount-backed pattern skills.js's SKILLS_DIR
-// already uses for exactly this "small, durable, per-process state that must survive a restart"
-// need.
-const BEDS_DIR = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/beds`; // MC_MEMORY_ROOT: test isolation
-
 // Hoisted to module scope 2026-09-11 (direct request "fix the pen herding") so both "breed" and
 // the new "herd_to_pen" case below can share one definition -- it used to live only inside
 // "breed"'s own case block, which meant the herding verb would otherwise need a second,
@@ -2559,6 +2564,14 @@ export function findBedSites(bot, home) {
     solid(p.offset(dx, 0, dz)) && solid(p.offset(-dx, 0, -dz)) && solid(p.offset(dx, 1, dz)) && solid(p.offset(-dx, 1, -dz)));
   const beds = bot.findBlocks({ matching: (b) => bot.isABed(b), maxDistance: 16, count: 32, point: new Vec3(hx, hy, hz) });
   const anchor = (p) => (beds.length ? Math.min(...beds.map((b) => b.distanceTo(p))) : p.distanceTo(new Vec3(hx, hy, hz)));
+  // Direct request, 2026-10-18: "beds will always be placed within a shelter if space is
+  // available in an existing shelter" -- any shape/size, not just the Builder's own fixed room
+  // (shelterInteriorsNear, shelter.js). Computed once per call, not per candidate: every site
+  // below gets tagged, and the whole list is filtered down to the tagged ones afterwards, but
+  // only when that subset isn't empty -- with no qualifying shelter nearby yet (the common case
+  // before one's built), this falls through to exactly today's nearest/under-a-roof scoring.
+  const shelterInterior = shelterInteriorsNear(bot, new Vec3(hx, hy, hz));
+  const inShelter = (p) => shelterInterior.has(posKey(p));
   const sites = [];
   for (let dx = -10; dx <= 10; dx++) {
     for (let dz = -10; dz <= 10; dz++) {
@@ -2576,12 +2589,15 @@ export function findBedSites(bot, home) {
           // Under a roof (a shelter's room) beats anywhere in the open (2026-09-27).
           const covered = solid(foot.offset(0, 3, 0)) && solid(head.offset(0, 3, 0));
           if (nearSpawn && !covered) continue;
-          sites.push({ foot, head, stand, score: anchor(foot) - (covered ? 100 : 0) });
+          sites.push({ foot, head, stand, score: anchor(foot) - (covered ? 100 : 0),
+            shelter: inShelter(foot) && inShelter(head) });
         }
       }
     }
   }
-  return sites.sort((a, b) => a.score - b.score);
+  const ranked = sites.sort((a, b) => a.score - b.score);
+  const withinShelter = ranked.filter((s) => s.shelter);
+  return withinShelter.length ? withinShelter : ranked;
 }
 
 // Shelters (2026-09-26, "what's wrong with shelter building?"): in two days the Builder got "build a
@@ -2811,8 +2827,8 @@ export function farmStatus(bot, near) {
 // dedup-based, built for "is this roughly the same fact as one already noted," not "replace this
 // chest's exact contents with what's true right now." A chest's contents change every time
 // anyone opens it, so this needs real point-in-time overwrites, not a growing pile of similar
-// notes -- same "small shared JSON file under the durable mount" pattern PEN_FILE/BEDS_DIR
-// already use, keyed by chest position (rounded -- a chest occupies one exact block, no need for
+// notes -- same "small shared JSON file under the durable mount" pattern PEN_FILE already uses,
+// keyed by chest position (rounded -- a chest occupies one exact block, no need for
 // SwimMovements-style fuzziness). Recording a FULL snapshot on every real interaction means
 // "redaction" is a side effect of always writing the current truth, never a separate
 // delete-this-one-item operation that could drift from reality.
@@ -2882,101 +2898,11 @@ async function findKnownChestWithItem(bot, itemName, wantCount) {
   return best;
 }
 
-// Exported 2026-09-09 so index.js's storeSurplusNearHome() ("after any crafting activity,
-// surplus materials should be stored in a chest as close to their sleeping home as possible")
-// can read the same real claimed-bed position "sleep" itself already tries first every night,
-// rather than a second, drifting notion of "home."
-export async function loadClaimedBed(bot) {
-  return (await readBedClaims(bot))[bot.username] || null; // null: no claim -- fresh search
-}
-
-// Direct request, 2026-09-25: bed assignments shared between hosts. Claims live in hermes-memory's
-// agent_state (agent "minecraft-beds", key = bot name), which every bot on spark and spark2 already
-// reaches, so a spark2 bot sees spark's claims and vice versa. The service has no delete, so {} is
-// "no claim". BEDS_DIR stays as this host's fallback copy for when hermes-memory is unreachable,
-// and a local claim the shared store has never seen is published on the owner's first read.
-const BED_CLAIMS_AGENT = "minecraft-beds";
-const BED_CLAIMS_SHARED = (process.env.MC_BED_CLAIMS_SHARED ?? "true") !== "false";
-const BED_CLAIMS_TIMEOUT_MS = 5000;
-let bedClaimsSharedDown = false; // log the fallback once per outage, not every read
-
-const toBedPos = (v) => (Number.isFinite(v?.x) && Number.isFinite(v?.y) && Number.isFinite(v?.z)
-  ? new Vec3(v.x, v.y, v.z) : null);
-
-async function readLocalBedClaims() {
-  const claims = {};
-  let files = [];
-  try {
-    files = await readdir(BEDS_DIR);
-  } catch {}
-  for (const file of files.filter((f) => f.endsWith(".json"))) {
-    try {
-      const pos = toBedPos(JSON.parse(await readFile(path.join(BEDS_DIR, file), "utf8")));
-      if (pos) claims[file.slice(0, -5)] = pos;
-    } catch {} // a half-written or corrupt claim just doesn't count
-  }
-  return claims;
-}
-
-async function writeLocalBedClaim(username, position) {
-  const file = path.join(BEDS_DIR, `${username}.json`);
-  try {
-    if (!position) return await unlink(file).catch(() => {});
-    await mkdir(BEDS_DIR, { recursive: true });
-    await writeFile(file, JSON.stringify({ x: position.x, y: position.y, z: position.z }), "utf8");
-  } catch (err) {
-    console.error("beds: failed to write local claim:", err.message);
-  }
-}
-
-// Every bot's claim, { username: Vec3 } -- the shared store when reachable, else this host's copy.
-async function readBedClaims(bot) {
-  const local = await readLocalBedClaims();
-  if (!BED_CLAIMS_SHARED) return local;
-  let rows;
-  try {
-    rows = await listState(BED_CLAIMS_AGENT, BED_CLAIMS_TIMEOUT_MS);
-  } catch (err) {
-    if (!bedClaimsSharedDown) console.log(`[beds] shared claims unreachable, using this host's: ${err.message}`);
-    bedClaimsSharedDown = true;
-    return local;
-  }
-  if (bedClaimsSharedDown) console.log("[beds] shared claims reachable again.");
-  bedClaimsSharedDown = false;
-  const claims = {};
-  for (const row of rows) {
-    const pos = toBedPos(row.value);
-    if (pos) claims[row.key] = pos;
-  }
-  const mine = local[bot.username];
-  if (!rows.some((r) => r.key === bot.username)) {
-    if (mine) { // first read since sharing began: publish this host's claim
-      await setState(BED_CLAIMS_AGENT, bot.username, { x: mine.x, y: mine.y, z: mine.z }, BED_CLAIMS_TIMEOUT_MS)
-        .catch((err) => console.error("beds: failed to publish claim:", err.message));
-      claims[bot.username] = mine;
-    }
-  } else {
-    const shared = claims[bot.username] || null; // keep the fallback copy in step with the store
-    if (!(mine && shared ? mine.equals(shared) : !mine && !shared)) await writeLocalBedClaim(bot.username, shared);
-  }
-  return claims;
-}
-
-async function writeBedClaim(bot, position) {
-  await writeLocalBedClaim(bot.username, position);
-  if (!BED_CLAIMS_SHARED) return;
-  const value = position ? { x: position.x, y: position.y, z: position.z } : {};
-  await setState(BED_CLAIMS_AGENT, bot.username, value, BED_CLAIMS_TIMEOUT_MS)
-    .catch((err) => console.error("beds: failed to share claim:", err.message));
-}
-
-async function saveClaimedBed(bot, position) {
-  await writeBedClaim(bot, position);
-}
-
-async function clearClaimedBed(bot) {
-  await writeBedClaim(bot, null);
-}
+// Direct request, 2026-10-18: bed claiming (the shared hermes-memory "minecraft-beds" agent_state
+// plus BEDS_DIR per-host fallback that used to live here -- loadClaimedBed/saveClaimedBed/
+// clearClaimedBed/readBedClaims/writeBedClaim and their local-file counterparts) is removed
+// entirely. "Home" for lighting/surplus/rally (index.js) is bot.spawnPoint now, same as everywhere
+// else in that file; "sleep" (below) just tries any bed that isn't actually occupied.
 
 // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 -- "ownable by whichever bot is idle
 // and able, not pinned to whoever's primary role happens to be Builder"). Same shape as
@@ -3173,70 +3099,26 @@ export async function holdsGuardAnchor(bot, isLiveSoldier) {
   return true;
 }
 
-// Direct request, 2026-09-25: "if a bot's bed is destroyed, it should just claim another
-// unclaimed bed." A bed is two blocks and a claim may name either half (sleep saved whichever
-// block findBlocks returned), so claims are compared against both halves. Vanilla places the head
-// one block along `facing` from the foot.
-//
-// 2026-10-07: bedHalves() and its facing table moved to shelter.js (as FACING_STEP, shared with
-// doors and fence gates, which carry the same property) and are imported at the top of this file.
-// The living-space shell and the bed access rules both need a bed's real extent, and this is the
-// same one-definition move chestHalves() just made for chests.
+// A bed is two blocks; bedHalves() (shelter.js, as FACING_STEP, shared with doors and fence gates
+// which carry the same `facing` property) resolves either half to the head, so every caller here
+// compares/stores against one canonical position per bed regardless of which half findBlocks or
+// the server happened to hand back.
 
-// Every OTHER bot's claim, { username, position }.
-async function loadOtherBedClaims(bot) {
-  return Object.entries(await readBedClaims(bot))
-    .filter(([username]) => username !== bot.username)
-    .map(([username, position]) => ({ username, position }));
-}
-
-function bedClaimant(block, claims) {
-  const halves = bedHalves(block);
-  return claims.find((c) => halves.some((h) => h.equals(c.position)))?.username || null;
-}
-
-// Nearby usable beds, one entry per bed (its head block), nearest to `near` first, each tagged
-// with the other bot that has already claimed it (null = unclaimed).
-function nearbyBeds(bot, claims, near) {
+// Direct request, 2026-10-18: no more claiming -- "any bed not already occupied" is fair game, so
+// this is now just every usable bed (one entry per bed, its head block), nearest to `near` first.
+// bot.sleep() itself is what actually tells a real occupied bed apart from a free one (its own
+// specific "occupied" rejection); this is just the candidate order "sleep" tries them in.
+function nearbyBeds(bot, near) {
   const seen = [];
   for (const pos of bot.findBlocks({ matching: (block) => bot.isABed(block), maxDistance: 32, count: 64 })) {
     const block = bot.blockAt(pos);
     if (!block) continue;
     const head = bedHalves(block)[0];
-    if (seen.some((b) => b.position.equals(head)) || bedNearHazard(bot, head)) continue;
-    seen.push({ position: head, claimant: bedClaimant(block, claims) });
+    if (seen.some((p) => p.equals(head)) || bedNearHazard(bot, head)) continue;
+    seen.push(head);
   }
   const origin = near || bot.entity.position;
-  return seen.sort((a, b) => a.position.distanceTo(origin) - b.position.distanceTo(origin));
-}
-
-// Checked periodically by index.js. A claimed bed that's loaded but no longer a bed was destroyed:
-// claim the nearest unclaimed bed right away instead of waiting for bedtime, so "home" (lighting,
-// surplus storage) moves too. Two bots claiming one bed (a claim race, or legacy claims from
-// before this check) is settled deterministically: the lower-sorted name keeps it.
-export async function checkClaimedBed(bot) {
-  const claimed = await loadClaimedBed(bot);
-  if (!claimed) return { status: "none" };
-  const block = bot.blockAt(claimed);
-  if (!block) return { status: "unloaded" }; // can't see it from here -- don't guess
-  const claims = await loadOtherBedClaims(bot);
-  let reason;
-  if (!bot.isABed(block)) {
-    reason = "destroyed";
-  } else {
-    const rival = bedClaimant(block, claims);
-    if (!rival || rival > bot.username) return { status: "ok", position: claimed };
-    reason = `also claimed by ${rival}`;
-  }
-  const next = nearbyBeds(bot, claims, claimed).find((b) => !b.claimant);
-  if (!next) {
-    await clearClaimedBed(bot);
-    console.log(`[beds] ${bot.username}'s bed at ${claimed} is ${reason}; no unclaimed bed nearby, claim cleared.`);
-    return { status: "lost", from: claimed, reason };
-  }
-  await saveClaimedBed(bot, next.position);
-  console.log(`[beds] ${bot.username}'s bed at ${claimed} is ${reason}; claimed the bed at ${next.position}.`);
-  return { status: "replaced", from: claimed, to: next.position, reason };
+  return seen.sort((a, b) => a.distanceTo(origin) - b.distanceTo(origin));
 }
 
 // Direct request, 2026-09-10 ("write up a plan for that single arbiter..." -> the approved
@@ -4148,34 +4030,16 @@ async function performActionAs(bot, action, speaker, token) {
       // needs to find a bed and try it, same multi-candidate pattern as "loot" (1.8.2) since one
       // bad bed (occupied, monsters nearby right there) shouldn't block trying another.
       if (bot.isSleeping) return ok("already asleep.");
-      const MAX_CANDIDATES = 3;
 
-      // Direct follow-up to "what other autonomous behaviors are solvable" -> "fix all the
-      // above": bed ownership. Real gap: every bot re-ran the SAME "nearest N beds" search every
-      // single night with zero memory of what worked before -- on a shared map with fewer beds
-      // than bots, several would converge on the same nearest bed the same night, only one
-      // succeeding (bot.sleep()'s own real "occupied" rejection was already caught and skipped
-      // below, so this never crashed anything, just wasted a travel-then-fail cycle for whoever
-      // lost the race). Persists whichever bed actually worked last time (one small per-bot file,
-      // same hermes-data-mount-backed pattern skills.js's SKILLS_DIR already uses) and tries that
-      // SPECIFIC position FIRST, ahead of the normal broad search -- a bot that already has a
-      // working bed stops competing for "nearest" every night and just goes home, only falling
-      // back to the broad candidate list if her own bed is gone, occupied, or unreachable.
-      // 2026-09-25: a destroyed claim is replaced with an unclaimed bed first (checkClaimedBed),
-      // then candidates are one per bed (both halves used to fill two of the 3 slots): her own,
-      // then unclaimed beds, and other bots' claimed beds only as a last resort, never re-claimed.
-      await checkClaimedBed(bot);
-      const claimed = await loadClaimedBed(bot);
-      const claimedBlock = claimed && bot.blockAt(claimed);
-      const candidates = claimedBlock && bot.isABed(claimedBlock) && !bedNearHazard(bot, claimed)
-        ? [{ position: bedHalves(claimedBlock)[0], claimant: null }] : [];
-      const beds = nearbyBeds(bot, await loadOtherBedClaims(bot), null)
-        .filter((b) => !candidates.some((c) => c.position.equals(b.position)));
-      candidates.push(...beds.filter((b) => !b.claimant), ...beds.filter((b) => b.claimant));
-      candidates.length = Math.min(candidates.length, MAX_CANDIDATES);
+      // Direct request, 2026-10-18: no bed ownership -- "any bed not already occupied," trying the
+      // next one until she finds one free, rather than a short, priority-banded candidate list
+      // (her own claimed bed, then unclaimed, then others' as a last resort). nearbyBeds() (above)
+      // is now just every usable bed nearest-first; bot.sleep()'s own real "occupied" rejection is
+      // what actually tells a free bed from a taken one, caught and skipped below same as always.
+      const candidates = nearbyBeds(bot, null);
       if (!candidates.length) return fail("couldn't find a bed nearby.");
 
-      for (const { position: pos, claimant } of candidates) {
+      for (const pos of candidates) {
         if (token.cancelled) return ok("stopped on the way to bed.");
         const bedBlock = bot.blockAt(pos);
         if (!bedBlock) continue;
@@ -4207,9 +4071,6 @@ async function performActionAs(bot, action, speaker, token) {
           console.log(`[sleep] couldn't use bed at ${bedBlock.position}: ${err.message}`);
           continue; // this bed didn't work (occupied, monsters nearby, too far, etc) -- try next
         }
-        // This bed worked -- go straight back to it next time, unless it's another bot's.
-        if (!claimant) await saveClaimedBed(bot, bedHalves(bedBlock)[0]);
-
         // Asleep now. Wait for the real 'wake' event (fires when day comes, or when everyone
         // sleeping lets the server skip the night) rather than guessing a duration -- a plain
         // safety timeout forces a wake only if something has gone genuinely wrong (SLEEP_TIMEOUT_MS
@@ -5758,7 +5619,6 @@ async function performActionAs(bot, action, speaker, token) {
         return fail(tried.length ? `the server refused the bed at ${tried.length} spot(s) near home (${tried.join(", ")}).`
           : "couldn't find two free, flat blocks in a row near home for a bed.");
       }
-      if (!(await loadClaimedBed(bot))) await saveClaimedBed(bot, site.head); // her own, if she had none
       return { ...ok(`placed a ${bedItem.name} at home.`), bedAt: { x: site.foot.x, y: site.foot.y, z: site.foot.z } };
     }
 

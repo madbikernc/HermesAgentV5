@@ -1,4 +1,4 @@
-// Version: 1.30.0
+// Version: 1.31.0
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -89,6 +89,12 @@
 //   the directive's own mention of "bed"); dedicated runners (farmTask-tagged or
 //   survivalPriorityItem="weapon") get a 20-failure leash instead of sharing the freeform
 //   planner's 3, so transient terrain failures no longer wipe accumulated goal progress.
+// 1.31.0 | 2026-10-18 | Direct request: bed claiming removed -- the old bedWorld()/claim-conflict
+//   checks (1.7.0/1.8.0/1.16.0/1.17.0's bed-shortage half) are replaced with sleep trying every
+//   usable bed nearest-first, skipping occupied ones, no cap at 3, no claim file ever written.
+//   New shelter-detection checks (enclosedInterior/isSandWallName/shelterInteriorsNear, any shape,
+//   no openings but doors, walls any material but sand) and findBedSites' own preference for a
+//   site inside one. bedSiteWorld()'s findBlocks fixed to honour its own `matching` filter.
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -697,7 +703,7 @@ async function builderClaimsWorld(username, { shared } = {}) {
   const c = vm.createContext({ bot, Date, console: { log() {}, error() {} }, process: { env: {} },
     BUILDER_CLAIMS_DIR: dir, path: pathMod, readFile: fs.readFile, writeFile: fs.writeFile,
     mkdir: fs.mkdir, readdir: fs.readdir, unlink: fs.unlink, listState, setState });
-  vm.runInContext(between(actions, 'const BUILDER_CLAIMS_DIR', '\n// Direct request, 2026-09-25'), c);
+  vm.runInContext(between(actions, 'const BUILDER_CLAIMS_DIR', '\n// Direct request, 2026-10-11'), c);
   return { bot, c };
 }
 
@@ -748,7 +754,7 @@ async function guardAnchorWorld(username, { shared } = {}) {
   };
   const c = vm.createContext({ bot, Date, console: { log() {}, error() {} }, process: { env: { MC_MEMORY_ROOT: dir } },
     path: pathMod, readFile: fs.readFile, writeFile: fs.writeFile, mkdir: fs.mkdir, unlink: fs.unlink, listState, setState });
-  vm.runInContext(between(actions, 'const GUARD_ANCHOR_AGENT', '\n// Direct request, 2026-09-25'), c);
+  vm.runInContext(between(actions, 'const GUARD_ANCHOR_AGENT', '\n// A bed is two blocks;'), c);
   return { bot, c };
 }
 
@@ -1329,20 +1335,13 @@ await check('Fight-or-flee: the mob that just hurt the bot is the threat, not me
   assert.equal(c.pickThreat(24), skeleton, 'the archer that just hit it');
 });
 
-// Beds (2026-09-25): a fake world of bed blocks plus a temp claims directory, with the real claim
-// helpers and the real "sleep" action.
-// `shared`: hermes-memory's minecraft-beds rows as { name: value } (mutated by writes); omitted =
-// hermes-memory unreachable, so claims fall back to this host's files.
-async function bedWorld(username, { claims = {}, standAt = new V3(0, 64, 0), shared } = {}) {
-  const fs = await import('node:fs/promises');
-  const pathMod = (await import('node:path')).default;
-  const dir = await fs.mkdtemp(pathMod.join((await import('node:os')).tmpdir(), 'mbtest-beds-'));
-  for (const [name, [bx, by, bz]] of Object.entries(claims)) {
-    await fs.writeFile(pathMod.join(dir, `${name}.json`), JSON.stringify({ x: bx, y: by, z: bz }));
-  }
+// Beds (2026-10-18): a fake world of bed blocks, with the real "sleep" action and no claim
+// plumbing at all. `occupied`: positions (either half) where bot.sleep() rejects as taken, same
+// way the real server does for a bed someone is actually in.
+function bedWorld({ standAt = new V3(0, 64, 0), occupied = [] } = {}) {
   const blocks = new Map();
   const key = (p) => `${p.x},${p.y},${p.z}`;
-  // A bed facing east: foot at (bx, by, bz), head at (bx + 1, by, bz).
+  const occupiedSet = new Set(occupied.map(key));
   const addBed = (bx, by, bz) => {
     for (const [dx, part] of [[0, 'foot'], [1, 'head']]) {
       const position = new V3(bx + dx, by, bz);
@@ -1352,127 +1351,66 @@ async function bedWorld(username, { claims = {}, standAt = new V3(0, 64, 0), sha
   const bot = makeBot();
   const tried = [];
   Object.assign(bot, {
-    username, entity: { position: standAt }, isSleeping: false,
+    entity: { position: standAt }, isSleeping: false,
     blockAt: (p) => blocks.get(key(p)) || { name: 'air', position: p, getProperties: () => ({}) },
     isABed: (b) => !!b?.name?.endsWith('_bed'),
     findBlocks: ({ matching, count }) => [...blocks.values()].filter(matching)
       .sort((a, b) => a.position.distanceTo(standAt) - b.position.distanceTo(standAt))
       .slice(0, count).map((b) => b.position),
-    sleep: async (b) => { tried.push(key(b.position)); setTimeout(() => bot.emit('wake'), 5); },
+    sleep: async (b) => {
+      tried.push(key(b.position));
+      // Either half can be in `occupied` -- a bed's head is what nearbyBeds/sleep track, but the
+      // server's own real rejection is keyed off whichever half she actually tries to use.
+      if (occupiedSet.has(key(b.position)) || occupiedSet.has(key(b.position.offset(-1, 0, 0))) ||
+          occupiedSet.has(key(b.position.offset(1, 0, 0)))) throw new Error('occupied.');
+      setTimeout(() => bot.emit('wake'), 5);
+    },
   });
   bot.pathfinder.goto = async () => {};
-  const listState = async (agent) => {
-    if (!shared) throw new Error('connect ECONNREFUSED');
-    assert.equal(agent, 'minecraft-beds');
-    return Object.entries(shared).map(([key, value]) => ({ key, value }));
-  };
-  const setState = async (agent, k, value) => {
-    if (!shared) throw new Error('connect ECONNREFUSED');
-    shared[k] = value;
-  };
-  const c = context(bot, { BEDS_DIR: dir, Vec3: V3, path: pathMod, readFile: fs.readFile, listState, setState, process: { env: {} },
-    writeFile: fs.writeFile, mkdir: fs.mkdir, readdir: fs.readdir, unlink: fs.unlink, SLEEP_TIMEOUT_MS: 1000 });
+  const c = context(bot, { Vec3: V3, SLEEP_TIMEOUT_MS: 1000 });
   vm.runInContext(between(actions, 'function bedNearHazard(', '\n// Direct request, 2026-09-09') +
-    between(actions, 'async function loadClaimedBed(', '\n// Direct request, 2026-09-10') + timeoutFn + actionFn, c);
-  const claimOf = async (name) => {
-    try { return JSON.parse(await fs.readFile(pathMod.join(dir, `${name}.json`), 'utf8')); } catch { return null; }
-  };
-  return { bot, c, addBed, blocks, tried, claimOf, destroy: (p) => { blocks.delete(key(p)); blocks.delete(`${p.x + 1},${p.y},${p.z}`); } };
+    between(actions, '// A bed is two blocks;', '\n// Direct request, 2026-09-10') + timeoutFn + actionFn, c);
+  return { bot, c, addBed, blocks, tried };
 }
 
-await check('Beds: a destroyed claimed bed is replaced by the nearest bed no other bot claimed', async () => {
-  // Amy's bed at x=0 is gone; x=4 is nearer but Babs claimed it by its FOOT half; x=10 is free.
-  const w = await bedWorld('Amy', { claims: { Amy: [1, 64, 0], Babs: [4, 64, 0] } });
-  w.addBed(4, 64, 0); w.addBed(10, 64, 0);
-  const result = await w.c.checkClaimedBed(w.bot);
-  assert.equal(result.status, 'replaced');
-  assert.deepEqual(await w.claimOf('Amy'), { x: 11, y: 64, z: 0 }, 'the free bed, by its head');
-  assert.deepEqual(await w.claimOf('Babs'), { x: 4, y: 64, z: 0 }, "Babs's claim is untouched");
-});
-
-await check('Beds: no unclaimed bed left clears the dead claim; a live or unloaded claim is kept', async () => {
-  const w = await bedWorld('Amy', { claims: { Amy: [1, 64, 0], Babs: [5, 64, 0] } });
-  w.addBed(4, 64, 0);
-  assert.equal((await w.c.checkClaimedBed(w.bot)).status, 'lost');
-  assert.equal(await w.claimOf('Amy'), null);
-  const live = await bedWorld('Amy', { claims: { Amy: [4, 64, 0] } });
-  live.addBed(4, 64, 0);
-  assert.equal((await live.c.checkClaimedBed(live.bot)).status, 'ok');
-  const unloaded = await bedWorld('Amy', { claims: { Amy: [900, 64, 0] } });
-  unloaded.bot.blockAt = () => null;
-  assert.equal((await unloaded.c.checkClaimedBed(unloaded.bot)).status, 'unloaded');
-  assert.deepEqual(await unloaded.claimOf('Amy'), { x: 900, y: 64, z: 0 });
-});
-
-await check('Beds: two bots on one bed -- the lower-sorted name keeps it, the other moves', async () => {
-  const claims = { Amy: [4, 64, 0], Babs: [5, 64, 0] }; // same bed, different halves
-  const babs = await bedWorld('Babs', { claims });
-  babs.addBed(4, 64, 0); babs.addBed(10, 64, 0);
-  assert.equal((await babs.c.checkClaimedBed(babs.bot)).status, 'replaced');
-  assert.deepEqual(await babs.claimOf('Babs'), { x: 11, y: 64, z: 0 });
-  const amy = await bedWorld('Amy', { claims });
-  amy.addBed(4, 64, 0); amy.addBed(10, 64, 0);
-  assert.equal((await amy.c.checkClaimedBed(amy.bot)).status, 'ok');
-});
-
-await check('Beds: sleep after the bed is destroyed goes to an unclaimed bed and claims it', async () => {
-  // Nearest beds: x=2 (Babs's), x=6 (Cal's), x=12 (free). The old code tried the 3 nearest
-  // bed BLOCKS -- both halves of x=2 and one of x=6 -- and never reached the free bed.
-  const w = await bedWorld('Amy', { claims: { Amy: [0, 64, 5], Babs: [2, 64, 0], Cal: [6, 64, 0] } });
+await check('Beds: sleep tries every usable bed nearest-first, with no claim ever written', async () => {
+  const w = bedWorld({ standAt: new V3(0, 64, 5) });
   w.addBed(2, 64, 0); w.addBed(6, 64, 0); w.addBed(12, 64, 0);
   const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
   assert.equal(result.ok, true, result.text);
-  assert.deepEqual(w.tried, ['13,64,0'], 'the free bed first, by its head');
-  assert.deepEqual(await w.claimOf('Amy'), { x: 13, y: 64, z: 0 });
+  assert.deepEqual(w.tried, ['3,64,0'], 'nearest bed, by its head, first try');
 });
 
-await check("Beds: sleeping in another bot's bed as a last resort doesn't claim it", async () => {
-  const w = await bedWorld('Amy', { claims: { Babs: [3, 64, 0] } });
-  w.addBed(2, 64, 0);
+await check('Beds: an occupied bed is skipped and the next nearest is tried', async () => {
+  const w = bedWorld({ standAt: new V3(0, 64, 5), occupied: [new V3(2, 64, 0)] });
+  w.addBed(2, 64, 0); w.addBed(6, 64, 0); w.addBed(12, 64, 0);
   const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
   assert.equal(result.ok, true, result.text);
-  assert.deepEqual(w.tried, ['3,64,0']);
-  assert.equal(await w.claimOf('Amy'), null);
+  assert.deepEqual(w.tried, ['3,64,0', '7,64,0'], 'the occupied nearest bed, then the next nearest, which works');
 });
 
-await check('Shared beds: a claim made on the other host is seen, and the later name moves', async () => {
-  // Amy (spark) claimed the bed at x=4 in the shared store; Wade (spark2) has the same bed only in
-  // his own host's file. Amy sorts first, so Wade moves to the free bed.
-  const shared = { Amy: { x: 5, y: 64, z: 0 } };
-  const w = await bedWorld('Wade', { claims: { Wade: [4, 64, 0] }, shared });
-  w.addBed(4, 64, 0); w.addBed(10, 64, 0);
-  assert.equal((await w.c.checkClaimedBed(w.bot)).status, 'replaced');
-  assert.deepEqual({ ...shared.Wade }, { x: 11, y: 64, z: 0 }, 'published to the shared store');
-  assert.deepEqual(await w.claimOf('Wade'), { x: 11, y: 64, z: 0 }, 'and kept as the local fallback');
-});
-
-await check("Shared beds: a host's existing claim is published on first read; the store then wins", async () => {
-  const shared = {};
-  const w = await bedWorld('Nell', { claims: { Nell: [4, 64, 0] }, shared });
-  w.addBed(4, 64, 0);
-  assert.deepEqual(await w.c.loadClaimedBed(w.bot), new V3(4, 64, 0));
-  assert.deepEqual({ ...shared.Nell }, { x: 4, y: 64, z: 0 }, 'migrated');
-  shared.Nell = {}; // cleared elsewhere (e.g. by the same bot on a restart elsewhere)
-  assert.equal(await w.c.loadClaimedBed(w.bot), null, 'the store is authoritative once it knows the bot');
-  assert.equal(await w.claimOf('Nell'), null, 'local fallback follows the store');
-});
-
-await check('Shared beds: losing the bed with nothing free clears the claim in the store', async () => {
-  const shared = { Dale: { x: 1, y: 64, z: 0 }, Bob: { x: 4, y: 64, z: 0 } };
-  const w = await bedWorld('Dale', { shared });
-  w.addBed(4, 64, 0);
-  assert.equal((await w.c.checkClaimedBed(w.bot)).status, 'lost');
-  assert.deepEqual({ ...shared.Dale }, {});
-});
-
-await check('Shared beds: sleep skips a bed claimed on the other host', async () => {
-  const shared = { Amy: { x: 3, y: 64, z: 0 } };
-  const w = await bedWorld('Wade', { shared });
-  w.addBed(2, 64, 0); w.addBed(8, 64, 0);
+await check('Beds: an occupied nearest bed is skipped, and every further bed is still tried (no cap at 3)', async () => {
+  const w = bedWorld({ standAt: new V3(0, 64, 5), occupied: [new V3(2, 64, 0), new V3(6, 64, 0), new V3(10, 64, 0)] });
+  w.addBed(2, 64, 0); w.addBed(6, 64, 0); w.addBed(10, 64, 0); w.addBed(20, 64, 0);
   const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
   assert.equal(result.ok, true, result.text);
-  assert.deepEqual(w.tried, ['9,64,0']);
-  assert.deepEqual({ ...shared.Wade }, { x: 9, y: 64, z: 0 });
+  assert.deepEqual(w.tried, ['3,64,0', '7,64,0', '11,64,0', '21,64,0'], 'all four tried in distance order, 3-candidate cap gone');
+});
+
+await check('Beds: every nearby bed occupied fails with the exact text checkSleep pattern-matches', async () => {
+  const w = bedWorld({ standAt: new V3(0, 64, 5), occupied: [new V3(2, 64, 0), new V3(6, 64, 0)] });
+  w.addBed(2, 64, 0); w.addBed(6, 64, 0);
+  const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
+  assert.equal(result.ok, false);
+  assert.equal(result.text, 'found beds nearby, but couldn\'t use any of them.',
+    'index.js checkSleep() regex-matches this exact string to decide whether to self-propose a bed goal');
+});
+
+await check('Beds: no bed anywhere fails with the exact text checkSleep pattern-matches', async () => {
+  const w = bedWorld();
+  const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
+  assert.equal(result.ok, false);
+  assert.equal(result.text, "couldn't find a bed nearby.");
 });
 
 // Doors (2026-09-25): pathfinder's own getBlock() marks every door and gate unsafe and physical from
@@ -1907,9 +1845,14 @@ await check('Enchants: the 1.21 component shape becomes [{ name, lvl }], so digg
   assert(Array.isArray(held)); assert.equal([].concat(held).length, 2, 'what digTime does with it');
 });
 
-// Beds (2026-09-26).
+// Beds (2026-09-26). findBedSites (inside this slice) calls shelter.js's shelterInteriorsNear/
+// posKey (2026-10-18) -- wired from the real shelter() context, same pattern context() already
+// uses for actions.js's own geometry imports, so the default (no doors in bedSiteWorld) behaves
+// exactly like today and a test can still override shelterInteriorsNear to prove the preference.
 const bedFns = () => {
-  const c = vm.createContext({ Vec3: V3, Math, Object });
+  const s = shelter();
+  const c = vm.createContext({ Vec3: V3, Math, Object, shelterInteriorsNear: s.shelterInteriorsNear,
+    posKey: shelterConst('posKey') });
   vm.runInContext(between(actions, 'function woolCounts(', 'export const CROP_MAX_AGE'), c);
   return c;
 };
@@ -2084,17 +2027,22 @@ await check('Craft: finding an already-placed utility block nearby gets remember
 function bedSiteWorld({ beds = [], doors = [], walls = [] } = {}) {
   const key = (p) => `${p.x},${p.y},${p.z}`;
   const bedSet = new Set(beds.map(key)), doorSet = new Set(doors.map(key)), wallSet = new Set(walls.map(key));
+  const blockAt = (p) => {
+    if (p.y < 64) return { name: 'grass_block', boundingBox: 'block' };
+    if (bedSet.has(key(p))) return { name: 'red_bed', boundingBox: 'block' };
+    if (doorSet.has(key(p))) return { name: 'oak_door', boundingBox: 'block' };
+    if (wallSet.has(key(p))) return { name: 'cobblestone', boundingBox: 'block' };
+    return { name: 'air', boundingBox: 'empty' };
+  };
   return {
-    blockAt: (p) => {
-      if (p.y < 64) return { name: 'grass_block', boundingBox: 'block' };
-      if (bedSet.has(key(p))) return { name: 'red_bed', boundingBox: 'block' };
-      if (doorSet.has(key(p))) return { name: 'oak_door', boundingBox: 'block' };
-      if (wallSet.has(key(p))) return { name: 'cobblestone', boundingBox: 'block' };
-      return { name: 'air', boundingBox: 'empty' };
-    },
+    blockAt,
     isABed: (b) => b.name.endsWith('_bed'),
     entity: {}, entities: {},
-    findBlocks: () => beds.map((b) => new V3(b.x, b.y, b.z)),
+    // 2026-10-18: used to ignore `matching` entirely and always return bed positions -- harmless
+    // while only findBedSites' own bed lookup ever called this, but shelterInteriorsNear now
+    // scans the same world for doors, so this has to honour its own filter for real.
+    findBlocks: ({ matching } = {}) => [...beds, ...doors, ...walls].map((p) => new V3(p.x, p.y, p.z))
+      .filter((p) => (typeof matching === 'function' ? matching(blockAt(p)) : true)),
   };
 }
 
@@ -2552,6 +2500,35 @@ await check('Beds: the first choice is a spot under a roof -- the shelter room, 
   assert.deepEqual([atSpawn.foot.x, atSpawn.foot.z], [5, 6], 'the room is still used when it sits on spawn');
 });
 
+await check('Beds: always placed inside an existing shelter when one has room, else falls back as before', async () => {
+  // Direct request, 2026-10-18: "beds will always be placed within a shelter if space is
+  // available in an existing shelter." bedFns() wires the real shelterInteriorsNear in (from
+  // shelter()); overridden here (same pattern tryTakeFromNearbyChest already uses elsewhere in
+  // this file) to isolate findBedSites' OWN consumption of it from shelter.js's own flood-fill
+  // correctness, which gets its own dedicated tests next to shelterLivingSpace() below.
+  const c = bedFns();
+  const world = bedSiteWorld();
+  const home = new V3(0, 64, 0);
+  const open = c.findBedSites(world, home)[0];
+  assert(open, 'an open-ground site exists with no shelter nearby');
+
+  // (8,64,8)/(8,64,9): a real candidate findBedSites' own loop generates in this flat, open
+  // world, but scored far worse than the open pick above -- only the shelter preference, not the
+  // ordinary nearest/under-a-roof scoring, can explain it winning below.
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  const shelterFoot = new V3(8, 64, 8), shelterHead = new V3(8, 64, 9);
+  c.shelterInteriorsNear = () => new Set([key(shelterFoot), key(shelterHead)]);
+  const preferred = c.findBedSites(world, home)[0];
+  assert.deepEqual([preferred.foot.x, preferred.foot.z, preferred.head.x, preferred.head.z],
+    [shelterFoot.x, shelterFoot.z, shelterHead.x, shelterHead.z],
+    'the shelter-interior site wins even though it scores worse than the open one');
+
+  c.shelterInteriorsNear = () => new Set(); // nothing qualifies -- the common case before any shelter exists
+  const fallback = c.findBedSites(world, home)[0];
+  assert.deepEqual([fallback.foot.x, fallback.foot.z], [open.foot.x, open.foot.z],
+    "with no qualifying shelter nearby, falls back to today's ordinary scoring unchanged");
+});
+
 // ---- 2026-10-07: access to chests/beds/doors, shelter walls, tunnelling torches --------------
 
 // A flat world: solid stone at y <= groundY, air above, plus blocks placed by name. Beds, doors
@@ -2785,6 +2762,67 @@ await check('Shelter walls: pathfinder refuses to dig one, and still digs ordina
   assert.equal(movements.safeToBreak(w.bot.blockAt(base.offset(0, 3, 0))), false, 'its roof');
   assert.equal(movements.safeToBreak(w.bot.blockAt(base.offset(20, -1, 20))), true, 'stone out in the open');
   assert.equal(movements.safeToBreak({ name: 'stone' }), true, "a block with no position (the library's own null stub)");
+});
+
+// Any enclosed structure, for bed placement (2026-10-18): "not a set size or shape... no openings
+// other than doors," walls any material "including glass, but not sand." A 1x1x3 room, walls of
+// `wallName` on all four sides, a roof and a floor, one real door -- built with blockWorld()'s own
+// primitives, not shelterPositions(), to prove this works on a shape the Builder's own fixed room
+// never uses.
+function smallRoom({ wallName = 'cobblestone' } = {}) {
+  const w = blockWorld();
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      w.place([dx, 63, dz], wallName); // floor
+      w.place([dx, 67, dz], wallName); // roof
+      if (dx === 0 && dz === 0) continue; // the interior column (y 64-66) stays open air
+      for (let dy = 64; dy <= 66; dy++) {
+        if (dx === 0 && dz === 1 && dy <= 65) continue; // the doorway (two cells tall), filled below
+        w.place([dx, dy, dz], wallName);
+      }
+    }
+  }
+  w.door([0, 64, 1], 'oak_door', 'south'); // faces south (+z): inside is -z, outside is +z
+  return w;
+}
+
+await check('Shelter detection: a fully enclosed room with one real door is sealed; a missing wall is not', async () => {
+  const c = shelter();
+  const w = smallRoom();
+  // doorPassageSides' two sides are [+facing, -facing]; south steps +z, so [1] (-z) is the inside.
+  const inside = c.doorPassageSides(w.bot, w.bot.blockAt(new V3(0, 64, 1)))[1];
+  const { inside: cells, sealed } = c.enclosedInterior(w.bot, inside);
+  assert.equal(sealed, true, 'four walls, a roof and a floor, one real door -- nothing else open');
+  assert(cells.has('0,64,0'), 'the room interior itself is in it');
+  assert(!cells.has('0,64,2'), 'the far side of the door (outside) is a different flood, not merged in by this call');
+
+  w.open([-1, 65, 0]); // knock a hole in the west wall, one block up
+  const holed = c.enclosedInterior(w.bot, inside);
+  assert.equal(holed.sealed, false, 'a real gap in the wall leaks out into the open world instead of terminating');
+});
+
+await check('Shelter detection: a sand wall disqualifies an otherwise-sealed room; glass does not', async () => {
+  const c = shelter();
+  assert.equal(c.isSandWallName('sand'), true);
+  assert.equal(c.isSandWallName('red_sand'), true);
+  assert.equal(c.isSandWallName('gravel'), false, "the user's ask was sand specifically, not gravel");
+  assert.equal(c.isSandWallName('glass'), false, 'walls may be any material, including glass');
+
+  const sandy = smallRoom({ wallName: 'sand' });
+  const glassy = smallRoom({ wallName: 'glass' });
+  const doorsNear = (w) => c.shelterInteriorsNear(w.bot, new V3(0, 64, 1), 8);
+  assert.equal(doorsNear(sandy).size, 0, 'sealed, but a sand wall is not an acceptable shelter wall');
+  assert(doorsNear(glassy).size > 0, 'glass is an acceptable wall');
+});
+
+await check('Shelter detection: shelterInteriorsNear finds a room from its door, and nothing from open terrain', async () => {
+  const c = shelter();
+  const w = smallRoom();
+  const found = c.shelterInteriorsNear(w.bot, new V3(0, 64, 1), 8);
+  assert(found.has('0,64,0'), 'the room is found starting from its own door');
+
+  const field = blockWorld();
+  assert.equal(c.shelterInteriorsNear(field.bot, new V3(0, 64, 0), 8).size, 0, 'no doors at all -- nothing qualifies');
 });
 
 await check('Access: "place" takes another side rather than blocking a door, and says so when every side would', async () => {

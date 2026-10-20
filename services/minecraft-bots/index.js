@@ -1,4 +1,11 @@
-// Version: 2.117.0
+// Version: 2.118.0
+//
+// 2.118.0 (2026-10-18, direct request): bed claiming removed (actions.js 1.91.0) -- "home" for
+// nearestRallyPoint/storeSurplusNearHome/lightHomeOnce is now just bot.spawnPoint, dropping the
+// "a claimed bed is a more precise home" preference all three used to read via loadClaimedBed().
+// The BED_CHECK_MS interval and its checkClaimedBed() call are gone (nothing left to repair).
+// checkSleep()'s own self-propose-a-bed-goal trigger is unchanged -- it already only depended on
+// sleep's fail text and a bed count, neither of which claims ever touched.
 //
 // 2.117.0 (2026-10-16, direct report: "check the last 24 hours behavior logs for incorrect
 // behaviors," against the freshly reinitialized world). Two real, live-confirmed bugs:
@@ -1607,7 +1614,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadClaimedBed, checkClaimedBed, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor, communalShelterPositions, communalDoorwayPosition, findCommunalShelterSite, isCommunalShelterMaterial, communalShelterMaterialCount } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor, communalShelterPositions, communalDoorwayPosition, findCommunalShelterSite, isCommunalShelterMaterial, communalShelterMaterialCount } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -5157,8 +5164,8 @@ function isCurriculumItem(name) {
 }
 
 // Persisted so Mayor's own process restarting doesn't reset the whole fleet back to "basic
-// tools" -- same small-JSON-file-under-the-durable-mount pattern actions.js's bed-ownership fix
-// (loadClaimedBed/saveClaimedBed, 1.31.0) already uses. Only curriculumStageIndex is persisted,
+// tools" -- same small-JSON-file-under-the-durable-mount pattern actions.js's PEN_FILE already
+// uses. Only curriculumStageIndex is persisted,
 // not per-bot within-stage progress -- a Mayor restart mid-stage just re-observes completions as
 // they're (re-)broadcast or re-checked, an acceptable, low-cost simplification given stages take
 // a while regardless.
@@ -5522,8 +5529,9 @@ async function checkSleep() {
     const result = await performAction(bot, { type: "sleep" }, USERNAME, handle);
     console.log(`[${USERNAME}] sleep (attempt ${sleepTonight.attempts}): ${result.text} (ok=${result.ok})`);
     if (result.ok) sleepTonight.done = true;
-    // No bed at all, or beds but none free while home has fewer beds than bots (2026-09-27: with
-    // five beds taken, spark2's four bots only ever saw "found beds nearby, but couldn't use any").
+    // No bed at all, or beds but none free (occupied, hazardous, unreachable) while home has
+    // fewer beds than bots (2026-09-27: with five beds taken, spark2's four bots only ever saw
+    // "found beds nearby, but couldn't use any").
     if (!result.ok && !result.cancelled && (/couldn't find a bed/.test(result.text) ||
         (/found beds nearby, but couldn't use any/.test(result.text) && bedsNearHome() < BOT_USERNAMES.size))) await wantBed();
     if (!result.cancelled && (result.ok || sleepTonight.attempts >= MAX_NIGHT_ATTEMPTS)) {
@@ -5839,7 +5847,7 @@ async function nearestRallyPoint(bot) {
   // is better off falling through to its own plain maximize-distance goal below (no specific
   // destination required, just any nearby improvement, exactly what a real doorway or gap needs).
   const HOME_RALLY_MIN_DISTANCE = 20;
-  const home = (await loadClaimedBed(bot)) || bot.spawnPoint || null;
+  const home = bot.spawnPoint || null;
   if (home && home.distanceTo(bot.entity.position) >= HOME_RALLY_MIN_DISTANCE) return home;
   return null;
 }
@@ -6272,11 +6280,9 @@ async function storeSurplusValuables(reason) {
 // reflex (picks the single largest non-essential stack, nearest-to-wherever-she-is chest, "get
 // rid of it quickly"), this one is a CLEANUP reflex after a specific activity (batches every
 // distinct surplus item, always aimed at home specifically) -- different triggers, different
-// goals, worth keeping legible as two functions rather than one with a mode flag. Reuses
-// actions.js's own loadClaimedBed() -- the exact real position "sleep" itself already tries
-// first every night -- as "home," rather than inventing a second notion of it; null (no claimed
-// bed yet) just falls through to "store"'s own normal nearest-to-current-position search, still
-// useful, just not the more specific "near home" behavior this exists for.
+// goals, worth keeping legible as two functions rather than one with a mode flag. "Home" is
+// bot.spawnPoint (2026-10-18: no more claimed bed to prefer over it -- "sleep" itself now just
+// tries any unoccupied bed nearest-first, with no persistent notion of "hers").
 const STORE_NEAR_HOME_BATCH_LIMIT = 5;
 
 // Review MB-09, 2026-09-24: post-craft cleanup ran immediately after every craft/smelt/loot, while
@@ -6343,22 +6349,13 @@ setInterval(() => {
     console.error(`[${USERNAME}] location sharing sweep failed:`, err.message));
 }, LOCATION_SHARING_CHECK_MS);
 
-// Direct request, 2026-09-25: a bot whose bed was destroyed claims another unclaimed bed right
-// away (actions.js checkClaimedBed), not only when she next tries to sleep -- her claimed bed is
-// also "home" for lighting and surplus storage. Reads and writes claim files only; no movement.
-const BED_CHECK_MS = parseInt(process.env.MC_BED_CHECK_MS || "60000", 10);
-setInterval(() => {
-  if (!bot.entity) return;
-  checkClaimedBed(bot).catch((err) => console.error(`[${USERNAME}] bed check failed:`, err.message));
-}, BED_CHECK_MS);
-
 async function storeSurplusNearHome(reason) {
   if (Date.now() < storageBlockedUntil) return;
   const surplusNames = [...new Set(bot.inventory.items()
     .filter((i) => !isEssentialItem(i.name) && !isKeptItem(i.name) && !i.name.endsWith("_sapling"))
     .map((i) => i.name))].slice(0, STORE_NEAR_HOME_BATCH_LIMIT);
   if (!surplusNames.length) return;
-  const home = await loadClaimedBed(bot);
+  const home = bot.spawnPoint;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note. Called
   // fire-and-forget after the caller (runAction/goalTick) has already released its own handle,
@@ -6501,23 +6498,12 @@ setInterval(() => {
 // bot's self-defense fighting one threat at a time was never going to survive an actual swarm.
 // checkLighting() above only ever reacted to wherever a bot personally happened to be standing
 // the moment its own tile went dark -- nothing proactively lit up the area bots actually live
-// and sleep in. New checkHomeLighting(): when she's carrying torches and has a claimed bed
-// (loadClaimedBed(), the same real "home" storeSurplusNearHome already uses), runs actions.js's
-// new "light_area" centered on that position -- a real area sweep, not a per-tile reflex, so a
+// and sleep in. New checkHomeLighting(): when she's carrying torches, runs actions.js's new
+// "light_area" centered on home (bot.spawnPoint) -- a real area sweep, not a per-tile reflex, so a
 // longer interval than checkLighting's own 20s is appropriate. Self-limiting across the whole
 // fleet by construction (see light_area's own header): no explicit cross-bot coordination needed.
 const HOME_LIGHTING_CHECK_MS = parseInt(process.env.MC_HOME_LIGHTING_CHECK_MS || "90000", 10);
 
-// Real bug found live 2026-09-12: this required a CLAIMED BED to have a "home" to light around
-// -- but claiming a bed requires a bed to exist, which (per nextBuilderPriority's own ladder,
-// §15.6) only happens well after crafting_table/furnace/chest. Result, confirmed live: zero
-// "home lighting" log lines in 6+ hours straight -- every single call hit this exact early
-// return, the base never got lit, and dark-area mob spawns compounded on top of the sleep-
-// deprivation phantom swarm (see nextBuilderPriority's own comment for the fuller chain). Falls
-// back to bot.spawnPoint (the same real anchor nextBuilderPriority/checkTerrainDamage already
-// use for exactly this "before a bed exists yet" bootstrapping reason) instead of giving up
-// outright -- a claimed bed is still preferred once one exists, since it's a more precise
-// "where she actually sleeps" point than the wider world spawn.
 // Efficiency pass, 2026-09-24 (measured: 6,195 home-lighting attempts/day across the fleet, 96
 // successful -- every bot tried every ~90s, most walking to a chest for torches that weren't
 // there). Now one maintainer (the Builder by default; MC_HOME_LIGHTING=true/false overrides per
@@ -6545,8 +6531,8 @@ async function checkHomeLighting() {
 
 // One home-lighting attempt; true only if the area actually got (or already was) lit.
 async function lightHomeOnce() {
-  const home = (await loadClaimedBed(bot)) || bot.spawnPoint;
-  if (!home) return false; // no claimed bed AND no spawn point known yet -- genuinely nothing to anchor on
+  const home = bot.spawnPoint;
+  if (!home) return false; // spawn point not known yet -- genuinely nothing to anchor on
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);

@@ -1,4 +1,9 @@
-// Version: 1.18.0
+// Version: 1.19.0
+//
+// 1.19.0 (2026-10-18, direct request): bed claiming removed -- the "destroyed claimed bed moves
+// to the nearest unclaimed one" scenario (checkClaimedBed, a bedsDir fixture, placeBed()) is gone
+// along with the subsystem it exercised; "places a bed at home" no longer asserts she claimed it.
+// MC_BED_CLAIMS_SHARED is no longer read by actions.js, so this file stops setting it.
 //
 // 1.18.0 (2026-10-11, direct report: a shelter needs "complete walls, ceiling, floor, and at
 // least one door..., no other openings..., with at least one bed"; damage "becomes a temporary
@@ -73,7 +78,7 @@ import { fileURLToPath } from "node:url";
 import mineflayer from "mineflayer";
 import pathfinderPkg from "mineflayer-pathfinder";
 import { Vec3 } from "vec3";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -81,8 +86,7 @@ import path from "node:path";
 const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
 process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
 process.env.MC_RAG_DISABLED = "true";
-process.env.MC_BED_CLAIMS_SHARED = "false"; // never write test claims into the fleet's hermes-memory
-const { loadActionPlugins, performAction, checkClaimedBed, loadPenLocation, countInPen, loadClaimedBed, findBedSites, shelterPositions } = await import("../actions.js");
+const { loadActionPlugins, performAction, loadPenLocation, countInPen, findBedSites, shelterPositions } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor, installEnchantsFix } = await import("../equipment.js");
 const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
@@ -304,29 +308,6 @@ scenario("Craft: a table-needing recipe is detected even with the wrong material
   assert.equal(tables.length, 1, "used the table that was already standing there, not a second one");
 });
 
-// A bed facing east: foot at (dx, dz), head one block east.
-async function placeBed(dx, dz) {
-  await rcon(`setblock ${x + dx} ${y + 1} ${z + dz} minecraft:red_bed[facing=east,part=foot]`,
-    `setblock ${x + dx + 1} ${y + 1} ${z + dz} minecraft:red_bed[facing=east,part=head]`);
-  await waitFor(() => bot.isABed(bot.blockAt(new Vec3(x + dx + 1, y + 1, z + dz))), 5000, "bed placed");
-}
-
-scenario("Beds: a destroyed claimed bed is replaced by the nearest unclaimed one", async () => {
-  const bedsDir = path.join(process.env.MC_MEMORY_ROOT, "beds");
-  const claim = (name, dx, dz) => writeFileSync(path.join(bedsDir, `${name}.json`),
-    JSON.stringify({ x: x + dx, y: y + 1, z: z + dz }));
-  mkdirSync(bedsDir, { recursive: true });
-  scenarioCleanup.push(() => rmSync(bedsDir, { recursive: true, force: true }));
-  await placeBed(2, 3); await placeBed(-3, 3); await placeBed(-6, -5);
-  claim(TESTER, 2, 3);     // the tester's own bed, by its foot half
-  claim("MBRival", -3, 3); // the nearest other bed belongs to someone else
-  await rcon(`setblock ${x + 2} ${y + 1} ${z + 3} minecraft:air`, `setblock ${x + 3} ${y + 1} ${z + 3} minecraft:air`);
-  await waitFor(() => !bot.isABed(bot.blockAt(new Vec3(x + 3, y + 1, z + 3))), 5000, "bed destroyed");
-  const result = await checkClaimedBed(bot);
-  assert.equal(result.status, "replaced", JSON.stringify(result));
-  const now = JSON.parse(readFileSync(path.join(bedsDir, `${TESTER}.json`), "utf8"));
-  assert.deepEqual(now, { x: x - 5, y: y + 1, z: z - 5 }, "claimed the free bed's head, not MBRival's");
-});
 
 // Doors (2026-09-25): a glass room around the arena centre whose only opening is one door or gate
 // on its south wall, and the bot's real movement setup (index.js: SwimMovements, canOpenDoors,
@@ -520,7 +501,7 @@ scenario("Beds: crafts \"bed\" as the colour of the wool she holds", async () =>
   assert(bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, maxDistance: 6 }), "the table she made is standing");
 });
 
-scenario("Beds: places a bed at home as two blocks facing away from her, and claims it", async () => {
+scenario("Beds: places a bed at home as two blocks facing away from her", async () => {
   const home = new Vec3(x - 4, y + 1, z - 4);
   const worldSpawn = bot.spawnPoint;
   bot.spawnPoint = home;
@@ -541,7 +522,6 @@ scenario("Beds: places a bed at home as two blocks facing away from her, and cla
     .filter((b) => bot.isABed(b));
   assert(bot.isABed(bot.blockAt(foot)) && halves.length >= 1, "both halves of the bed are there");
   assert(foot.distanceTo(home) >= 2 && foot.distanceTo(home) <= 11, `near home but not on it: ${foot}`);
-  assert(await loadClaimedBed(bot), "she claimed the bed she placed");
   assert(!bot.isABed(bot.blockAt(best.foot)), "not on the cell the cow stands in");
 });
 

@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.17.1
+**Version:** 2.18.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -75,9 +75,9 @@ reinit-world` now SIGKILLs for that reason; `sudo systemctl stop minecraft-bots`
 re-apply the gamerules and confirm all 9 bots reconnected (`list`). Bot memory under
 `/mnt/hermes-data/minecraft-memory/` lives on spark/spark2 and is **not** covered by a world
 restore. A fresh start also wipes, with the bots stopped and after a tarball backup: `world/`,
-`bots/`, `known_chests.json`, `beds/`, `pen.json`, `mayor-curriculum.json` and `achievements/` on
-both hosts (not `skills/` or logs); the `mc-*` turns (and their `vec_turns` rows) and the
-`minecraft-beds` state in hermes-memory; then a `minecraft` corpus reindex prunes the index.
+`bots/`, `known_chests.json`, `pen.json`, `mayor-curriculum.json` and `achievements/` on
+both hosts (not `skills/` or logs); the `mc-*` turns (and their `vec_turns` rows) in hermes-memory;
+then a `minecraft` corpus reindex prunes the index.
 
 **Two traps the 2026-10-08 wipe hit, both already documented above and still easy to walk into:**
 `gamerule mobGriefing false` is a Brigadier parse error on this build — the names are snake_case
@@ -155,15 +155,18 @@ queued action/goal. A CHAT reply may never promise a future action that isn't ac
   only when a baby is actually born.
 - **Bed goals too** (the Builder's "set up more beds", any "craft a bed"): place a held bed with
   `place_bed` (two free, supported cells near home, next to existing beds, facing away from where
-  she stands; checked it appeared; claimed if she has no bed), else `craft` "bed" in the colour she
+  she stands; checked it appeared), else `craft` "bed" in the colour she
   holds 3 wool of, else wool from a chest (once), else `get_wool` (shear, or hunt a sheep and pick
   up the drop); before crafting she gets the wood (3 planks, +4 if she must make the table: planks
   from held logs, else the nearest tree). The server refuses a bed whose foot cell has someone in
   it, and the fleet crowds spawn, so `place_bed` skips occupied spots and tries up to 4 spots
   instead of retrying one. It prefers a spot under a roof (the shelter room, even when that sits on
-  spawn) and never puts a bed in a chokepoint (a doorway, a corridor). A bot takes on "make myself
-  a bed" for the morning when it finds no bed at night, or finds beds but none free while home has
-  fewer beds than bots.
+  spawn) and never puts a bed in a chokepoint (a doorway, a corridor). **Always inside an existing
+  shelter when one has room**: `findBedSites` restricts itself to cells inside any
+  `shelterInteriorsNear` result (`shelter.js`, §"Bed claims" below has the full shelter definition)
+  whenever that's non-empty, falling back to its ordinary nearest/under-a-roof scoring only when no
+  qualifying shelter is found nearby yet. A bot takes on "make myself a bed" for the morning when it
+  finds no bed at night, or finds beds but none free while home has fewer beds than bots.
   `craft` makes and places a crafting table itself when none is within 32 blocks.
 - **Shelter goals too** (the Builder's "build a small shelter", any self-proposed one). A shelter
   must fit a bed: 4x4 outside, a 2x2 room inside (a bed along one side, placed from the doorway,
@@ -209,14 +212,26 @@ failing `eat` every 15 s. Hunger escalates to HUNGER_CRITICAL at food ≤ 6. Hom
 maintainer (the Builder, or `MC_HOME_LIGHTING`) with exponential backoff. Every check that loses
 its turn to other work is counted and logged as `ROUTINE_SKIPS` every 10 minutes.
 
-**Bed claims.** Each bot claims one bed; it is also her "home" for lighting and surplus storage.
-Claims are shared by both hosts in hermes-memory `agent_state` (agent `minecraft-beds`, key = bot
-name, `{}` = no claim); `beds/<name>.json` is the per-host fallback when hermes-memory is down, and a
-host's existing claim is published on the bot's first read. Every 60s (`MC_BED_CHECK_MS`, no
-movement) a claim whose bed is loaded but gone moves to the nearest bed no other bot has claimed,
-or is cleared if none is left; two
-bots on one bed resolve by name order. `sleep` tries her own bed, then unclaimed beds, then other
-bots' beds as a last resort without claiming them, one candidate per bed rather than per half.
+**Bed claims: there are none (2026-10-18).** No bot owns a specific bed, and nothing persists
+which one she slept in last. `sleep` tries every usable bed nearest-first (one candidate per bed,
+not per half) until `bot.sleep()` itself accepts one; its own real "occupied" rejection (vanilla:
+someone is actually sleeping there) is what tells a free bed from a taken one, not a memory of who
+claimed what. "Home" for lighting, surplus storage and the flee rally point is `bot.spawnPoint` --
+the same anchor every other "near home" check in the fleet already uses, with no claimed-bed
+preference layered on top of it.
+
+**What counts as a shelter, for bed placement.** Not a set size or shape: any structure with no
+openings other than doors, walls of any material (including glass) except sand.
+`shelterInteriorsNear` (`shelter.js`) finds every door/gate near a point, flood-fills the passable
+space on each side of it (never crossing back through a doorway), and keeps whichever side forms a
+genuine enclosure -- the fill empties its own queue rather than running out to a cell cap -- with
+no sand block anywhere in its walls/floor/roof. `findBedSites` always prefers a site inside one of
+these when any has room, so a new bed lands in an existing shelter -- the Builder's own fixed
+2x2/communal room, or any other enclosed structure -- before it ever falls back to open ground near
+home. This is a different, stricter test than the `hasShelterNearHome`/`hasCommunalShelterStructure`
+checks a few paragraphs up, which still only recognize the ONE specific shape `build`/
+`build_communal_shelter` constructs -- those drive the Builder's own goal-completion and curriculum
+credit and are unchanged; everything they call complete also satisfies this broader test.
 
 ## 5. Model routing
 
@@ -248,7 +263,6 @@ routing decision is still open (§12).
 | `minecraft-world` RAG corpus | Shared world facts: resource and feature locations | Any bot writes, all read |
 | `minecraft-skills` RAG corpus | Reusable skills, indexed on description | Same two scripts, `--corpus minecraft-skills` |
 | `known_chests.json` | Chest contents, position-keyed | Structured JSON, overwritten on every open |
-| hermes-memory `agent_state`, agent `minecraft-beds` | Claimed beds, both hosts | Key = bot name; `beds/` files are the per-host fallback |
 | `pen.json`, `mayor-curriculum.json`, `achievements/`, `skills/` | Pen gate, curriculum stage, verified achievements, skill store | Files under `/mnt/hermes-data/minecraft-memory/` |
 
 Chest contents are deliberately **not** in RAG: they change on every open and need real
@@ -490,7 +504,8 @@ the original incident number, still cited throughout the code. Narrative is in g
   is no round-up of an existing herd, and a penned animal can still slip out when the gate opens.
 - **spark2 keeps its own copies of non-RAG shared state** — `known_chests.json`, `pen.json` and
   per-bot goal files live on spark2's local `/mnt/hermes-data`, so its four bots don't share the
-  chest registry with spark's five. Bed claims are shared through hermes-memory since 2026-09-25. RAG memory and skills are shared via
+  chest registry with spark's five (no bed claims to share either, since 2026-10-18 -- see "Bed
+  claims: there are none" above). RAG memory and skills are shared via
   `hermes-minecraft-rag` since 2026-09-25; spark2's ~91k never-indexed local world notes were left
   in place, not imported.
 

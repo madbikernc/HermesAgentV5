@@ -273,8 +273,28 @@ itself.
 
 ---
 
+## 14. Benchmark evaluation (`CLAUDE.md` 1.2.0)
+
+Evaluated against `FLEET_BENCHMARK_DESIGN.md` §4's gap structure, call recorded rather than skipped:
+**no new benchmark scenario needed.** Every piece of this design that actually ships in the MVP — the
+sync, the report computation, the Matrix gate — makes no model call at all (§7, §8), so there is no role
+with a new accuracy question to measure. The one path that would touch a role is the optional, explicitly
+deferred narrative "why" line (§7), routed through `dispatch` like S20b's advisory call — `dispatch`
+already has coverage (`FLEET_BENCHMARK_DESIGN.md` §2's role-fitness bake-off, Tier 0 general capability),
+so even building that later opens no new gap.
+
+What this design *is* relevant to, once actually built: `FLEET_BENCHMARK_DESIGN.md` gap 8 / §6.8
+(`fleet_coder_build`) draws its corpus from exactly this shape of work — a direct operator request, a
+vendor integration or parsing pipeline built from nothing to satisfy it. S38b/S38d/S38e's eventual build
+commits are real candidates for that table. Not added now, because §6.8 and §8.6 both require real
+commits as provenance, not a hypothetical future one — this is a note for whoever builds S38 to add its
+own commit to that table in the same change, not a thing done here.
+
+---
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-17 | Initial design — direct operator request for a daily global-exchange equity tracking capability: sector/industry and thematic categorization, historical price storage, a daily sector-trend/movers/30-day-trend report, and on-demand report requests from the Fleet Matrix room. Tracked as `IMPLEMENTATION_PLAN.md` S38. |
+| 1.1.0 | 2026-10-20 | Added §14, recording the `CLAUDE.md` 1.2.0 benchmark-evaluation call: no new `FLEET_BENCHMARK_DESIGN.md` scenario needed (the MVP makes no model call; the one optional model-touching path reuses `dispatch`'s existing coverage), but the eventual build is a real candidate for §6.8's `fleet_coder_build` corpus once it has a commit. Also: §8's `market sector list` gate command was added to this file's body at some point without a version bump, breaking this project's own enforced convention — caught and folded into this bump rather than left unaccounted, since nothing else in this file's content changed meaning. Minor bump — new section, no prior guidance reversed. |

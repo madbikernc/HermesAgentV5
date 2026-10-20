@@ -1,4 +1,12 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-10-18) -- new enclosedInterior()/isSandWallName()/shelterInteriorsNear(): "shelters
+// are not a set size or shape... any structure with no openings other than doors," walls any
+// material "including glass, but not sand" (direct request, dropping bed claiming in favour of
+// any-unoccupied-bed in actions.js). coveredInterior/isCovered below answer a related but looser
+// question (roofed, for wall-digging protection) -- this answers the stricter one findBedSites
+// needs: is a candidate spot actually inside a sealed room, so a new bed always goes in an
+// existing shelter when one has room, of ANY shape, not just the Builder's own fixed 2x3/NxM room.
 //
 // 1.1.0 (2026-10-07) -- roofed() is exported as isCovered(): tunneling.js needs the same
 // "is this cell indoors" test after block.light turned out to be frozen at chunk-load time
@@ -387,6 +395,84 @@ export function livingSpaceExitBlockedBy(bot, pos) {
   const cells = exits.get(`${pos.x},${pos.z}`);
   if (!cells?.has(posKey(pos))) return null;
   return { fixture: "doorway", at: pos, reason: "the only way out of a shelter at" };
+}
+
+// ---- any enclosed structure, for bed placement ----------------------------------------------
+//
+// Direct request, 2026-10-18: beds stop being claimed (actions.js) and should instead always land
+// inside an EXISTING shelter when one has room, where "shelter" is explicitly "not a set size or
+// shape... any structure with no openings other than doors," walls of any material "including
+// glass, but not sand." coveredInterior/shellAround above answer a related but different question
+// ("is this cell roofed, for wall-digging protection") -- roofed is not sealed, a three-walled lean
+// -to with a roof is "covered" but has an open side. This answers the stricter question directly,
+// reusing the same flood-fill vocabulary: real walls, not just a roof, and no cutoff that would
+// call an open structure "sealed" just because the search gave up at its edge.
+
+// Passable cells reachable from `starts` without ever crossing a doorway (same reasoning
+// exitColumns above already needs: the interior would otherwise leak out its own front door).
+// Bounded ONLY by SHELL_MAX_CELLS, deliberately with no SHELL_RADIUS cutoff -- a radius bound
+// would make a genuinely open structure (a missing wall, a hole, no roof at all) look sealed
+// merely because the search stopped at an arbitrary distance rather than at a real wall. `sealed`
+// is true only when the fill empties its own queue before the cap -- an open structure keeps
+// finding new cells until the cap and is correctly rejected; a real room of any reasonable size
+// (comfortably more than the communal shelter's own largest room) terminates well under it.
+export function enclosedInterior(bot, starts) {
+  const inside = new Set();
+  const queue = [];
+  const consider = (cell) => {
+    const key = posKey(cell);
+    if (inside.has(key) || inside.size >= SHELL_MAX_CELLS) return;
+    if (!passable(bot, cell) || isDoorwayName(bot.blockAt(cell)?.name)) return;
+    inside.add(key);
+    queue.push(cell);
+  };
+  starts.forEach(consider);
+  while (queue.length) {
+    if (inside.size >= SHELL_MAX_CELLS) break;
+    const cell = queue.shift();
+    for (const [dx, dy, dz] of STEPS_6) consider(cell.offset(dx, dy, dz));
+  }
+  return { inside, sealed: queue.length === 0 };
+}
+
+// The user's literal exception: "including glass, but not sand." isFallingBlockName's broader
+// sand/gravel/concrete-powder/anvil list is a different concern (what lands on a fixture) and is
+// untouched by this.
+const SAND_WALL_NAMES = new Set(["sand", "red_sand"]);
+export function isSandWallName(name) {
+  return !!name && SAND_WALL_NAMES.has(name);
+}
+
+function hasSandWall(bot, shell) {
+  for (const key of shell) {
+    if (isSandWallName(bot.blockAt(fromKey(key))?.name)) return true;
+  }
+  return false;
+}
+
+// Every sealed shelter interior findable from a door/gate near `point`, any shape or size, merged
+// into one Set of posKeys. Tries both doorPassageSides() of every nearby doorway as a flood-fill
+// seed -- whichever side is real "inside" terminates on its own; the far side (open world) almost
+// always hits the cap and is dropped. Empty when nothing qualifies, which is the common case
+// before any real shelter exists nearby -- callers fall back to their own default placement then.
+export function shelterInteriorsNear(bot, point, radius = BED_SEARCH_DISTANCE) {
+  const merged = new Set();
+  const tried = new Set();
+  const doors = bot.findBlocks({ matching: (b) => isDoorwayName(b?.name), point, maxDistance: radius, count: 32 }) || [];
+  for (const pos of doors) {
+    const block = bot.blockAt(pos);
+    const sides = doorPassageSides(bot, block);
+    if (!sides) continue;
+    for (const side of sides) {
+      const seedKey = posKey(side[0]);
+      if (merged.has(seedKey) || tried.has(seedKey)) continue;
+      tried.add(seedKey);
+      const { inside, sealed } = enclosedInterior(bot, side);
+      if (!sealed || !inside.size || hasSandWall(bot, shellAround(bot, inside))) continue;
+      for (const key of inside) merged.add(key);
+    }
+  }
+  return merged;
 }
 
 // ---- clearing an obstruction ------------------------------------------------------------------
