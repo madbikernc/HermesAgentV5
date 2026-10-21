@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 2.0.0
+#
+# 2.0.0 (2026-10-20) — the volumetric fallback is CGAL alpha wrapping, not screened Poisson.
+# Exit gate 4 failed on real output: Bambu Studio showed gaps that stop a print. Measured cause --
+# TRELLIS.2's UDF path emits a HOLLOW CRUST (every raw GLB is 1.3-3.6%% solid), Poisson faithfully
+# wraps a crust as a thin crust, and the result is ~0.35mm walls at a 100mm print, under the two
+# 0.4mm perimeters a slicer needs, so it drops them. 1.1.0's QEM decimation was a second, separate
+# defect: Poisson alone self-intersects 0 faces, after decimation 4,475. Alpha wrapping fixes both
+# -- it bridges to a printable solid and needs no decimation. On a real figure it took genus
+# 14,461 -> single digits, self-intersections 4,418 -> 0, and walls 0.35mm -> printable.
+# Degenerate input is still refused: a component with negligible volume for its bounding box is
+# not wrapped, because alpha wrapping would turn a zero-thickness fan into a confident solid.
 #
 # 1.1.0 (2026-10-08) — volumetric fallback. Real TRELLIS.2 output defeats the surgical chain:
 # repairing non-manifold edges deletes faces, which opens holes that meshing_close_holes then
@@ -25,13 +36,16 @@
 #   2. PyMeshLab — per remaining component: remove non-manifold edges/vertices, close holes up to
 #                  --max-hole-edges, re-orient faces coherently (repeated, since removing a
 #                  non-manifold face opens a new hole)
-#   2b. PyMeshLab (fallback) — if a component still is not a manifold after step 2, rebuild it with
-#                  screened Poisson reconstruction, which produces a closed surface by construction
-#                  rather than by repair, then decimate back to the component's original face count.
-#                  This is a LOSS of fine detail and is recorded in the report under
-#                  "reconstructed" every time it happens. Poisson also leaves small spurious
-#                  shells ("bubbles"); those below --bubble-fraction of the largest reconstructed
-#                  shell's volume are dropped and counted. Disable with --no-reconstruct.
+#   2b. PyMeshLab (fallback) — if a component still is not a manifold after step 2, rebuild it by
+#                  CGAL alpha wrapping (--wrap-alpha, a percentage of the bounding-box diagonal),
+#                  which returns a watertight, non-self-intersecting solid by construction. It is a
+#                  shrink-wrap: it bridges detail finer than alpha, so it is a LOSS of fidelity and
+#                  is recorded in the report under "reconstructed" every time it happens, with the
+#                  measured deviation. Small spurious shells below --bubble-fraction of the largest
+#                  one's volume are dropped and counted. A component whose own volume is negligible
+#                  for its bounding box is NOT wrapped — wrapping a zero-thickness fan would
+#                  manufacture a solid out of nothing. Disable the whole fallback with
+#                  --no-reconstruct.
 #   3. manifold3d — accept each component only if it is a true manifold, union overlapping
 #                  components into one solid, and emit a guaranteed-watertight result. Enclosed
 #                  voids are FILLED (an inside-out input shell is flipped in step 2 and absorbed by
@@ -55,7 +69,7 @@
 #
 # Usage: hermes-mesh-repair.py <input> <output.stl> [--report <path>] [--keep-largest]
 #                              [--min-shell-fraction F] [--max-hole-edges N]
-#                              [--no-reconstruct] [--reconstruct-depth N]
+#                              [--no-reconstruct] [--wrap-alpha PCT]
 #   stdout: the output path as the final line (the render worker's artifact convention)
 #   report: JSON written to --report (default <output>.json), on failure as well as success
 #   exit:   0 viable STL written, 2 unreadable input / bad usage, 5 not repairable,
@@ -89,9 +103,16 @@ mesh_verify = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mesh_verify)
 
 REPAIR_ROUNDS = 3
-# Screened-Poisson octree depth for the volumetric fallback. 10 measured on a real TRELLIS.2 figure:
-# watertight and manifold in ~11s, against ~6s at depth 9 which kept 4x as many spurious shells.
-RECONSTRUCT_DEPTH = 10
+# Alpha for the wrap, as a percentage of the bounding-box diagonal. Measured on a real TRELLIS.2
+# figure (2026-10-20): the smallest alpha whose wrap still clears two 0.4mm perimeters at a 100mm
+# print. Smaller keeps more detail and thinner walls; larger is blunter and safer.
+WRAP_ALPHA_PCT = 0.5
+# The wrap's offset, as a percentage of the same diagonal. CGAL's own guidance is alpha/10.
+WRAP_OFFSET_RATIO = 10.0
+# A component with less volume than this, relative to its bounding box, is not wrapped: alpha
+# wrapping turns anything into a solid, including a zero-thickness fan (measured 0.003 for a bare
+# fan against 0.022 for a real generated figure), and that is a success that did not happen.
+MIN_INPUT_SOLIDITY = 0.01
 # Poisson emits small closed bubbles away from the data. Same spirit as --min-shell-fraction, but by
 # volume, and applied only to reconstruction output.
 BUBBLE_FRACTION = 0.01
@@ -182,38 +203,40 @@ def to_manifold(vertices, faces, label):
     return solid
 
 
-def volumetric_reconstruct(vertices, faces, label, depth):
-    """Rebuild a component as a closed surface instead of repairing it into one.
+def input_solidity(vertices, faces):
+    """|volume| as a fraction of the bounding box — how solid the input even claims to be."""
+    t = trimesh.Trimesh(vertices, faces, process=False)
+    box = float(np.prod(t.extents))
+    return abs(float(t.volume)) / box if box > 0 else 0.0
 
-    Screened Poisson fits an implicit surface to the input and meshes its level set, so the result
-    is watertight by construction however non-manifold the input was. The cost is fidelity: fine
-    detail is smoothed and the face count explodes, so it is decimated back to where it started.
+
+def volumetric_reconstruct(vertices, faces, label, alpha_pct):
+    """Rebuild a component as a solid instead of repairing it into one.
+
+    CGAL alpha wrapping shrink-wraps the input at a resolution of alpha, returning a watertight,
+    non-self-intersecting solid by construction however non-manifold the input was. Unlike the
+    screened-Poisson reconstruction this replaces, it bridges across detail finer than alpha rather
+    than following it, which is exactly what turns TRELLIS.2's hollow crust into something with
+    walls a slicer can actually extrude. The cost is fidelity, measured and reported by the caller.
     """
+    solidity = input_solidity(vertices, faces)
+    if solidity < MIN_INPUT_SOLIDITY:
+        raise Unrepairable(
+            f"{label}: encloses almost nothing ({solidity:.4f} of its bounding box, under "
+            f"{MIN_INPUT_SOLIDITY:g}) — wrapping it would manufacture a solid that is not in the "
+            f"input")
     ms = pymeshlab.MeshSet()
     ms.add_mesh(pymeshlab.Mesh(vertex_matrix=np.asarray(vertices, dtype=np.float64),
                                face_matrix=np.asarray(faces, dtype=np.int32)))
     try:
-        ms.generate_surface_reconstruction_screened_poisson(depth=depth, preclean=True)
-        if ms.current_mesh().face_number() == 0:
-            raise Unrepairable(f"{label}: volumetric reconstruction produced no faces")
-        if ms.current_mesh().face_number() > len(faces):
-            ms.meshing_decimation_quadric_edge_collapse(
-                targetfacenum=int(len(faces)), preservenormal=True, preservetopology=True,
-                planarquadric=True)
-        # Measured: Poisson leaves a boundary where the input was missing a large region (an open
-        # cap comes back open), and decimation can leave duplicate or null faces behind. Close and
-        # tidy here, or manifold3d rejects an otherwise good reconstruction.
-        ms.meshing_close_holes(maxholesize=CLOSE_EVERY_HOLE)
-        ms.meshing_remove_duplicate_vertices()
-        ms.meshing_remove_duplicate_faces()
-        ms.meshing_remove_null_faces()
-        ms.meshing_re_orient_faces_coherently()
+        ms.generate_alpha_wrap(alpha=pymeshlab.PercentageValue(alpha_pct),
+                               offset=pymeshlab.PercentageValue(alpha_pct / WRAP_OFFSET_RATIO))
     except pymeshlab.PyMeshLabException as exc:
-        raise Unrepairable(f"{label}: volumetric reconstruction failed: {exc}")
+        raise Unrepairable(f"{label}: alpha wrapping failed: {exc}")
     m = ms.current_mesh()
     v, f = m.vertex_matrix(), m.face_matrix()
     if len(f) == 0:
-        raise Unrepairable(f"{label}: volumetric reconstruction left no faces")
+        raise Unrepairable(f"{label}: alpha wrapping left no faces")
     if trimesh.Trimesh(v, f, process=False).volume < 0:
         f = f[:, ::-1]
     return v, f
@@ -284,7 +307,7 @@ def stl_clean(vertices, faces):
 
 
 def repair(in_path, out_path, report, keep_largest=False, min_shell_fraction=0.01,
-           max_hole_edges=2000, reconstruct=True, reconstruct_depth=RECONSTRUCT_DEPTH):
+           max_hole_edges=2000, reconstruct=True, wrap_alpha=WRAP_ALPHA_PCT):
     mesh = clean(load(in_path))
     report["input"] = {
         "faces": int(len(mesh.faces)),
@@ -318,14 +341,21 @@ def repair(in_path, out_path, report, keep_largest=False, min_shell_fraction=0.0
                 raise
             # Surgical repair cannot close this one. Rebuild it instead of giving up -- but say so,
             # because the result is a smoothed approximation of the input, not the input repaired.
-            log(f"{label}: surgical repair failed ({exc}) - rebuilding volumetrically")
-            v, f = volumetric_reconstruct(comp.vertices, comp.faces, label, reconstruct_depth)
-            rebuilt = drop_bubbles(to_manifold(v, f, f"{label} after volumetric reconstruction"),
+            log(f"{label}: surgical repair failed ({exc}) - alpha-wrapping it instead")
+            v, f = volumetric_reconstruct(comp.vertices, comp.faces, label, wrap_alpha)
+            rebuilt = drop_bubbles(to_manifold(v, f, f"{label} after alpha wrapping"),
                                    label, report, BUBBLE_FRACTION)
+            wrapped = trimesh.Trimesh(v, f, process=False)
             report.setdefault("reconstructed", []).append({
-                "component": i, "reason": str(exc), "poisson_depth": reconstruct_depth,
+                "component": i, "reason": str(exc), "method": "cgal_alpha_wrap",
+                "wrap_alpha_pct": wrap_alpha,
                 "faces_in": int(len(comp.faces)), "faces_out": int(len(f)),
-                "detail": "closed by construction, not by repair — fine detail is smoothed"})
+                "input_solidity": round(input_solidity(comp.vertices, comp.faces), 5),
+                "wall_thickness_over_diagonal": round(
+                    (2 * abs(float(wrapped.volume)) / float(wrapped.area))
+                    / float(np.linalg.norm(wrapped.extents)), 5),
+                "detail": "shrink-wrapped to a solid, not repaired — detail finer than alpha is "
+                          "bridged over"})
             solids.append(rebuilt)
     solid = single_solid(solids[0] if len(solids) == 1
                          else manifold3d.Manifold.batch_boolean(solids, manifold3d.OpType.Add),
@@ -380,11 +410,12 @@ def main(argv):
     ap.add_argument("--max-hole-edges", type=int, default=2000,
                     help="largest hole, in boundary edges, that will be closed (default 2000)")
     ap.add_argument("--no-reconstruct", action="store_true",
-                    help="do not fall back to volumetric (screened Poisson) reconstruction for a "
-                         "component that cannot be repaired surgically; fail instead")
-    ap.add_argument("--reconstruct-depth", type=int, default=RECONSTRUCT_DEPTH,
-                    help=f"screened-Poisson octree depth for that fallback "
-                         f"(default {RECONSTRUCT_DEPTH}; higher is finer and slower)")
+                    help="do not fall back to alpha wrapping for a component that cannot be "
+                         "repaired surgically; fail instead")
+    ap.add_argument("--wrap-alpha", type=float, default=WRAP_ALPHA_PCT,
+                    help=f"alpha for that wrap, as a percentage of the bounding-box diagonal "
+                         f"(default {WRAP_ALPHA_PCT}; smaller keeps more detail but gives thinner "
+                         f"walls, larger is blunter and safer to print)")
     try:
         args = ap.parse_args(argv)
     except SystemExit:
@@ -396,7 +427,7 @@ def main(argv):
     try:
         repair(args.input, args.output, report, keep_largest=args.keep_largest,
                min_shell_fraction=args.min_shell_fraction, max_hole_edges=args.max_hole_edges,
-               reconstruct=not args.no_reconstruct, reconstruct_depth=args.reconstruct_depth)
+               reconstruct=not args.no_reconstruct, wrap_alpha=args.wrap_alpha)
         report["viable"] = True
     except Unreadable as exc:
         report["error"], code = str(exc), 2

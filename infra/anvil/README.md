@@ -1,14 +1,15 @@
 # Anvil — mesh node setup checklist
 
-**Version:** 2.6.0
+**Version:** 2.7.0
 
 Ordered steps to stand up `Anvil`, the fleet's mesh node (IMPLEMENTATION_PLAN.md S19): a Windows box that
 turns a finished render into a viable STL. This file is the recipe; S19 in the plan is the
 reasoning (why not the Sparks, why TRELLIS.2, what "viable" means). Like `Kiln`, Anvil is a **tooling
 endpoint** — no agent, no persona, no Matrix identity. Its only job is pulling `mesh` jobs from the broker.
 
-**Status (2026-10-08): the workflow exists and runs. Generation is proven end to end on the node;
-the repair chain is not — it fails on real TRELLIS.2 output (see step 4a).** `Anvil` is the operator's own Windows workstation,
+**Status (2026-10-20): generation and repair both work on the node, and the output is now
+printable rather than merely valid (see 4a). Exit gate 4 — slicing one in Bambu Studio — is the
+outstanding confirmation.** `Anvil` is the operator's own Windows workstation,
 `PMWIN11` — see "1. The hardware" for what is actually in it. Everything below that does not need the node
 is already built and tested — see "What already exists".
 
@@ -227,53 +228,83 @@ faces with the seed alone, and VRAM tracks it, so this does fit on 16GB but **no
 margin is seed-dependent rather than fixed**. Size `JOB_TIMEOUT` against 120 s, not 85 s, and treat an
 occasional OOM as expected rather than anomalous until more runs exist.
 
-## 4a. The repair chain and real TRELLIS.2 output — resolved 2026-10-08
+## 4a. Making the STL printable, not merely valid — 2026-10-20
 
-`hermes-mesh-repair.py` 1.1.0 now produces a viable STL from real generated output. Getting there
-turned up two separate problems, and only the second was the chain's fault.
+**Exit gate 4 earned its place here.** The pipeline produced STLs that passed every check this
+project had — watertight, manifold, consistent winding, single shell — and whose slicer preview
+showed gaps that stop a print. This section is what that turned out to be.
 
-**Framing, not the pipeline.** The first real photo produced a *technically viable* STL that was
-geometrically useless: extents `0.7965 x 0.9888 x 0.0030`, a 1:330 sheet. The raw GLB was already
-flat, so this came out of ComfyUI, not the repair. The birefnet mask spanned `(0,156)-(1071,1599)`
-on a 1072x1600 image — the subject touched the left, right and bottom edges. TRELLIS.2 needs a
-closed silhouette with background margin on all sides; a subject running off the frame collapses to
-a relief. **Reframed with the whole subject inside the frame, z/x went 0.0038 -> 0.98.** This is the
-single most important thing to get right about the input image.
+### The cause: a hollow crust, not a solid
 
-**The chain's own gap.** With real geometry it then failed at manifolding, and no parameter fixed
-it. All measured on the node, all failing:
+| Measure | Old output | Needed |
+|---|---|---|
+| Volume as % of bounding box | **1.46%** | tens of % |
+| Wall thickness at a 100 mm print | **0.35 mm** | ≥0.8 mm (two 0.4 mm perimeters) |
+| Genus | **14,461** | single digits |
+| Self-intersecting faces | **4,418** | 0 |
 
-| Attempt | Result |
-|---|---|
-| default `method='Remove Faces'` | Kills all 4,205 non-manifold edges by *deleting faces*, which opens boundary edges 228 -> 2,664; `close_holes` plateaus at 2,118. Manifold but **open** -> manifold3d `NotManifold` |
-| `--max-hole-edges` 20000, 200000 | No change — `close_holes` is *skipping* these holes, not size-limited |
-| `method='Split Vertices'` | Mesh stays non-2-manifold; `close_holes` throws |
-| `selfintersection=False` | Holes close, but non-manifoldness returns; `reorient` throws |
-| upstream `sign_mode='sdf'` | Far worse: 650,049 boundary edges, 660 components. Its tooltip's "needs consistent winding" caveat is real. **UDF is correct** |
+At any sane print size the walls were 0.18–0.70 mm, so the slicer dropped them. Slicing the mesh in
+software reproduced it: **856 open contours across 162 of 200 layers** (the metric was validated
+first — sphere, box, torus and capsule all score zero).
 
-So the fix is not a knob. 1.1.0 adds a **volumetric fallback**: a component that cannot be repaired
-surgically is rebuilt with screened-Poisson reconstruction, which is closed by construction rather
-than by repair, then decimated back to its original face count. Two things measured while building
-it and now in the code: Poisson fits a surface only where it has evidence, so a large missing region
-comes back as an open boundary and must be closed afterwards; and it leaves small spurious shells,
-so those below `BUBBLE_FRACTION` of the largest reconstructed shell's volume are dropped and counted.
+**The crust comes from ComfyUI, not from the repair.** Every raw GLB measures 1.3–3.6% solid:
+TRELLIS.2's UDF path emits a shell, and screened Poisson faithfully wraps a shell as a thin crust.
+A second, separate defect was ours: 1.1.0's QEM decimation created all 4,418 self-intersections
+(Poisson alone measures 0 at every depth).
 
-**It is never silent.** A rebuild is an approximation of the input, not the input repaired — fine
-detail is smoothed — so every one is recorded in the report under `reconstructed`, with the reason,
-the Poisson depth and the face counts. `--no-reconstruct` restores the pre-1.1.0 behaviour.
+### The fix: CGAL alpha wrapping
 
-Result on the real mesh: **688,046 triangles, extents `0.3264 x 1.0 x 0.3208`, viable, 61 s** (34 MB
-STL), with 1 component rebuilt and 6 bubbles dropped, and every independent check passing.
+`hermes-mesh-repair.py` **2.0.0** replaces the Poisson fallback with `generate_alpha_wrap`, which
+returns a watertight, non-self-intersecting solid by construction and needs no decimation — so the
+self-intersection defect goes away by deletion rather than by swapping decimators.
 
-Two things it does **not** do, deliberately:
+On the real figure, same input, default settings:
 
-- It does not lower the bar. A zero-thickness fan encloses no volume, so reconstruction cannot
-  rescue it either, and the job still exits 5 with no artifact. `test_mesh_pipeline.py` covers both
-  directions — the rebuild that works, and the one that must still be refused.
-- It does not catch the flat-billboard case above. Everything S19c names passed on that 3 mm sheet.
-  `hermes-mesh-verify.py` should probably fail, or loudly warn, when the smallest bbox extent is a
-  tiny fraction of the largest, or volume is negligible against the bbox — **still open**, because
-  the threshold is a judgement call. Exit gate 4 (open it in Bambu Studio) is the current answer.
+| | before | after |
+|---|---|---|
+| Self-intersecting faces | 4,418 | **0** |
+| Genus | 14,461 | **74** |
+| Wall @100 mm | 0.35 mm | **1.33 mm** |
+| Layers with an open contour | 162 / 200 | **74 / 200** |
+| Triangles / file | 672,812 / 34 MB | 137,274 / **6.9 MB** |
+| Time | ~60 s | ~75 s |
+
+**`--wrap-alpha` defaults to 0.5%** of the bounding-box diagonal, chosen from a measured sweep
+rather than taste:
+
+| alpha | faces | genus | wall @100 mm | mean deviation | open contours |
+|---|---|---|---|---|---|
+| 1.00% | 29,712 | 4 | 2.05 mm | 0.164 mm | 1.4% |
+| **0.50%** | **137,312** | **71** | **1.33 mm** | **0.082 mm** | **5.7%** |
+| 0.30% | 425,374 | 248 | 0.92 mm | 0.049 mm | 9.4% |
+| 0.25% | 688,634 | 527 | 0.72 mm | 0.041 mm | 12.5% |
+
+The deciding fact is that **the fidelity differences are below what the printer can render**: 0.082 mm
+mean deviation is under half a 0.2 mm layer. Dropping to 0.3% buys 0.033 mm of detail that cannot be
+printed and costs 31% of the wall thickness. Smaller alpha keeps more detail *and* gives thinner
+walls, which is why the smallest usable value had to be measured.
+
+### Two things this does not claim
+
+- **Alpha wrapping does not solidify a thin surface.** It bridges structure finer than alpha. It
+  thickened this mesh because the crust is noisy at that scale; wrapping a clean thin shell leaves a
+  clean thin shell (measured: the test suite's own open-shell fixture wraps to 0.001 thickness
+  ratio). It is not a general "make it solid" button.
+- **It does not make degenerate input succeed.** Alpha wrapping will turn anything into a solid,
+  including a zero-thickness fan, so a component whose own volume is negligible for its bounding box
+  is refused rather than wrapped. Measured separation: bare fan 0.003, real generated figure 0.022,
+  open shell 0.571; the guard sits at 0.01.
+
+Every wrap is recorded in the report under `reconstructed` — method, alpha, face counts, input
+solidity and the resulting wall-thickness ratio — because a wrap is an approximation of the input,
+not the input repaired. `--no-reconstruct` restores surgical-only behaviour.
+
+### Still open
+
+`hermes-mesh-verify.py` does not yet **reject** on thickness or self-intersection; the test suite
+measures the thickness ratio (`good` solids >0.05, old pipeline output 0.0021, a wrapped crust
+0.0124) but the tool does not enforce a threshold, because where to put it is a judgement call. Exit
+gate 4 remains the real arbiter: **slice one in Bambu Studio before trusting any of the above.**
 
 ## 4. The mesh worker's Python
 
@@ -429,3 +460,4 @@ In this order, each after the one before it works:
 | 2.4.0 | 2026-10-08 | **The workflow is built, committed and proven to run; and the repair chain is proven not to.** `infra/anvil/workflows/trellis2-mesh-only.api.json` (29 nodes) was derived from ComfyUI's shipped 66-node template rather than hand-written or GUI-exported — branch selected, a file-writing export added, then pruned by reachability — and validated by three real runs on the node. Step 3 is rewritten from a GUI instruction into a record of what exists, including the trap that the template's only `Save3DAdvanced` sits on the **texture** chain, so stripping texture the obvious way yields no file at all; that `PreviewImage#302` is load-bearing despite its name; and the `widgets_values` alignment rules (`control_after_generate`, `LoadImage.upload`, and `COMFY_DYNAMICCOMBO_V3` expanding to `parent.child` inputs). One measured tuning change: `sign_mode.drop_inverted_components=true`, isolated in its own run, which took 24 significant components to 3. **First real measurements, for exit gate 2: 85.3 s / 12,797 MiB and 120.4 s / 15,492 MiB — the latter 95% of the card with 819 MiB spare**, with the raw mesh varying 12.6M→47.2M faces on seed alone, so the fit is real but seed-dependent. New §4a records a reproducible gap: `hermes-mesh-repair.py` fails on all three real meshes at PyMeshLab's `meshing_re_orient_faces_coherently`, which requires manifoldness the generated mesh does not have — it needs a non-manifold repair step first. Flagged prominently that every run used ComfyUI's `example.png` (a flat drawing of a figure plus sky and hill), so the component counts are not a fair test and nothing should be tuned against them. Also corrected: ComfyUI on the node is **0.38.0**, not the 0.38.2 of 2026-10-04 — StabilityMatrix moved it back on 2026-10-05, which is risk 4 of the plan happening within a day of being written. |
 | 2.5.0 | 2026-10-08 | Added `workflows/trellis2-mesh-only.ui.json`, the same graph in the **editor's** format, after loading the stock template in the GUI raised a missing-model dialog for `pixal3d_int8_convrot.safetensors` and `moge_2_vitl_normal_fp16.safetensors` — the Pixal3D branch this node deliberately lacks. In the GUI copy those nodes are removed rather than left unused, so the dialog does not appear, and every model it references was verified present on disk. It is generated and **self-validating**: the builder round-trips it back to API format and refuses to write unless it matches `trellis2-mesh-only.api.json` exactly, so the two cannot drift. Documented which file is authoritative — the API copy is what the worker runs; the GUI copy is for working visually, and an edit there must be re-exported with Export (API) and have the two placeholders re-inserted. Also recorded while checking this: the template nodes carry `widgets_values_named`, which independently confirmed every widget value in the committed API workflow (the only differences being `control_after_generate` and `upload`, both frontend pseudo-widgets absent from the backend schema, and the two intentional overrides). |
 | 2.6.0 | 2026-10-08 | **§4a rewritten: the repair chain now handles real TRELLIS.2 output.** Two separate problems, only one of them the chain's. First, **framing**: a real photo produced a structurally viable but useless 1:330 sheet, traced to a birefnet mask touching three frame edges — reframing the subject inside the frame took z/x from 0.0038 to 0.98, and that is now written down as the thing to get right about input images. Second, the chain's own gap, with the full table of measured dead ends (`--max-hole-edges` to 200000, `method='Split Vertices'`, `selfintersection=False`, and upstream `sign_mode='sdf'`, which is far worse and confirms UDF is correct). `hermes-mesh-repair.py` 1.1.0's volumetric fallback resolves it: 688,046 triangles, extents `0.3264 x 1.0 x 0.3208`, viable in 61 s, 1 component rebuilt and 6 bubbles dropped. Recorded that a rebuild is reported every time and never silent, that it still refuses the impossible, and that the flat-billboard hole in S19c's "viable" definition remains **open** pending a threshold decision. |
+| 2.7.0 | 2026-10-20 | **§4a rewritten again: the STLs were valid but not printable, and now are.** Exit gate 4 found gaps in a slicer on a mesh that passed every check. Measured cause: a hollow crust — 1.46% solid, 0.35 mm walls at a 100 mm print, genus 14,461 — which comes from ComfyUI (every raw GLB is 1.3–3.6% solid), plus 4,418 self-intersections that were ours, created by 1.1.0's QEM decimation. `hermes-mesh-repair.py` 2.0.0 replaces the Poisson fallback with CGAL alpha wrapping: self-intersections 4,418→0, genus 14,461→74, walls 0.35→1.33 mm, file 34→6.9 MB. `--wrap-alpha` defaults to 0.5% from a measured sweep, chosen because fidelity differences below ~0.08 mm are under half a layer height and therefore unprintable, while thinner alphas cost real wall thickness. Recorded two things it does **not** claim — wrapping does not solidify a clean thin surface, and degenerate input is still refused via a negligible-volume guard (fan 0.003 vs figure 0.022, threshold 0.01). Noted as still open: the verifier measures thickness but does not enforce a threshold, and Bambu Studio remains the arbiter. |

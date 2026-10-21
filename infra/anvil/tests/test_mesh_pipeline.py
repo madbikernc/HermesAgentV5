@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
 #
 # Checks for the S19 viable-STL pipeline (IMPLEMENTATION_PLAN.md S19c): tools/hermes-mesh-verify.py
 # must catch each named viability failure on its own, and tools/hermes-mesh-repair.py must either
@@ -14,6 +14,12 @@
 #                   1.1.0 | 2026-10-08 | Added the volumetric-fallback check, from the first real
 #                                        TRELLIS.2 output on Anvil: a component that surgical
 #                                        repair cannot close must be rebuilt, not abandoned.
+#                   1.2.0 | 2026-10-20 | Fallback is alpha wrapping, not Poisson (exit gate 4 found
+#                                        the Poisson output unprintable). Added the printability
+#                                        check -- wall thickness relative to the bounding-box
+#                                        diagonal -- which is what actually failed in the slicer,
+#                                        and retargeted the honest-failure check at the new
+#                                        negligible-volume guard.
 import importlib.util
 import json
 import os
@@ -170,6 +176,21 @@ FIXTURES["tiny"] = TMP / "tiny.stl"
 
 
 # ---- verifier -------------------------------------------------------------------------------
+
+def stl_arrays(path):
+    m = trimesh.load(str(path), force="mesh")
+    return m.vertices, m.faces
+
+
+def thickness_ratio(vertices, faces):
+    """2V/A over the bounding-box diagonal: a unit-free stand-in for wall thickness, since an STL
+    carries no units (S19c). Below ~0.005 a slicer starts dropping walls it cannot extrude."""
+    t = trimesh.Trimesh(vertices, faces, process=False)
+    diag = float(np.linalg.norm(t.extents))
+    if diag <= 0 or t.area <= 0:
+        return 0.0
+    return (2 * abs(float(t.volume)) / float(t.area)) / diag
+
 
 def verdict(name):
     return mesh_verify.verify_file(str(FIXTURES[name]))
@@ -335,21 +356,49 @@ def repair_rebuilds_what_surgery_cannot_fix():
     assert "reconstructed" not in refused, refused
 
     # With the fallback the same input becomes a viable STL -- and says so in the report, because a
-    # rebuilt component is an approximation of the input, not the input repaired.
+    # wrapped component is an approximation of the input, not the input repaired.
     report, result = expect_repaired("unclosable_shell", "--max-hole-edges", "0")
     rebuilt = report.get("reconstructed")
-    assert rebuilt, f"expected a volumetric rebuild, report says: {report}"
+    assert rebuilt, f"expected an alpha-wrapped rebuild, report says: {report}"
     assert any("not a manifold" in r["reason"] for r in rebuilt), rebuilt
-    assert all(r["faces_out"] > 0 and r["poisson_depth"] >= 1 for r in rebuilt), rebuilt
+    assert all(r["method"] == "cgal_alpha_wrap" and r["faces_out"] > 0 and r["wrap_alpha_pct"] > 0
+               for r in rebuilt), rebuilt
+    assert all("wall_thickness_over_diagonal" in r for r in rebuilt), rebuilt
     assert result["stats"]["shells"] == 1, result["stats"]
     assert result["stats"]["volume"] > 0, result["stats"]
 
 
+def thickness_metric_separates_solids_from_shells():
+    """Exit gate 4, reduced to a number -- the measurement only, not an enforced gate.
+
+    Bambu Studio found gaps in a mesh that passed every check this suite had (2026-10-20). The
+    measured cause was wall thickness: the pipeline emitted a hollow crust whose walls came to
+    ~0.35mm at a 100mm print, under the two 0.4mm perimeters a slicer needs, so it dropped them.
+    2V/A over the bounding-box diagonal expresses that without units, which an STL has none of.
+    Reference values: the hollow pipeline output scored 0.0021, an alpha wrap of the same mesh
+    0.0124, and ordinary solids score an order of magnitude higher again.
+
+    What this does NOT assert: that a wrap is always thick enough. Alpha wrapping bridges structure
+    finer than alpha; it does not inflate a clean thin surface, and the wrapped open shell below
+    stays genuinely thin. Whether the tool should REFUSE output under some threshold is still an
+    open decision, so this guards the measurement rather than the pipeline.
+    """
+    for name in ("good_sphere", "good_box", "good_torus"):
+        v, f = stl_arrays(FIXTURES[name])
+        assert thickness_ratio(v, f) > 0.05, (name, thickness_ratio(v, f))
+    # a wrapped thin shell stays thin, and the metric has to show that rather than hide it
+    proc, out, _ = run_repair("unclosable_shell", "--max-hole-edges", "0")
+    assert proc.returncode == 0, proc.stderr
+    v, f = stl_arrays(out)
+    assert thickness_ratio(v, f) < 0.01, thickness_ratio(v, f)
+
+
 def repair_fallback_does_not_paper_over_the_impossible():
-    # A zero-thickness fan encloses nothing, so reconstruction cannot rescue it either. The job must
-    # still exit 5 with the real reason and leave no file -- the fallback widens what can be
-    # repaired, it does not lower the bar for what counts as viable.
-    report = expect_refused("nonmanifold_fin", 5, reason="not a manifold")
+    # A zero-thickness fan encloses nothing. Alpha wrapping would happily turn it into a confident
+    # solid (measured: it does), so the tool refuses to wrap a component whose own volume is
+    # negligible for its bounding box. The job must still exit 5 and leave no file -- the fallback
+    # widens what can be repaired, it does not lower the bar for what counts as viable.
+    report = expect_refused("nonmanifold_fin", 5, reason="encloses almost nothing")
     assert "reconstructed" not in report, report
     assert not report["viable"], report
 
@@ -388,6 +437,8 @@ check("repair rebuilds a component surgery cannot fix, and reports that it did",
       repair_rebuilds_what_surgery_cannot_fix)
 check("the volumetric fallback still fails honestly when reconstruction cannot help",
       repair_fallback_does_not_paper_over_the_impossible)
+check("the wall-thickness metric separates solids from shells (exit gate 4, as a number)",
+      thickness_metric_separates_solids_from_shells)
 check("render worker screens mesh artifacts by format; other types unchanged",
       worker_screens_mesh_by_format)
 print(f"\n{passed} checks passed (fixtures in {TMP})")
