@@ -1,6 +1,13 @@
 [Unit]
 Description=hermes-guard-report - daily account of what the screening layers blocked, by caller
 Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-guard/README.md
+# S33 fix (2026-10-21): hermes-guard-report.py 1.4.0 reads /mnt/hermes-data/memory/memory.db
+# directly instead of calling hermes-memory over HTTP, so it now has the same real dependency on
+# the LUKS mount every other reader of that file declares explicitly. This is a Type=oneshot
+# triggered by its own timer, not Restart=always, so a run that hits Dependency failed here does
+# not strand anything the way the seven long-running services in S32 did -- the next scheduled
+# timer firing is a fresh start job and tries again on its own.
+RequiresMountsFor=/mnt/hermes-data
 After=network-online.target hermes-memory.service
 Wants=network-online.target
 

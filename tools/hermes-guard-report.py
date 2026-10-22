@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.3.1
+# Version: 1.4.0
+#
+# 1.4.0 (2026-10-21, direct request "S33 fix" — IMPLEMENTATION_PLAN.md S33): fetch_turns() no
+# longer calls hermes-memory's HTTP /turns API, which clamps limit at 500 server-side regardless
+# of what this tool asked for. Two of four daily runs had already hit that cap and reported
+# "0 blocks" while blind to anything past the newest 500 rows. Reads the same memory.db file
+# directly, read-only, filtered by created_at in SQL with no row cap at all — the same pattern
+# hermes-fleetops-ui.py and hermes-model-scout.py already use against this exact database.
+# MEMORY_TOKEN/MEMORY_URL/GUARD_REPORT_SCAN_LIMIT are gone; MEMORY_DB replaces them.
 #
 # hermes-guard-report — daily account of what the screening layers blocked, grouped by caller.
 #
@@ -33,12 +41,11 @@
 # real regressions and on neither of the one-off blocks.
 #
 # Config (environment):
-#   MEMORY_URL / MEMORY_TOKEN       required — reads the `guard-log` task's turns
+#   MEMORY_DB                       default /mnt/hermes-data/memory/memory.db — read-only
 #   FLEETOPS_MATRIX_TOKEN / FLEETOPS_ROOM   optional; without them the report only prints
 #   MATRIX_HOMESERVER               default http://127.0.0.1:6167
 #   GUARD_REPORT_HOURS              default 26 — a day plus timer jitter
 #   GUARD_REPORT_ALERT_THRESHOLD    default 5 — blocks of one fingerprint before it is an alert
-#   GUARD_REPORT_SCAN_LIMIT         default 1000 — turns fetched
 #
 # Usage:
 #   hermes-guard-report.py                 # report, and notify FleetOps if anything tripped
@@ -50,6 +57,7 @@ import datetime
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -60,15 +68,23 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
 
-MEMORY_URL = os.environ.get("MEMORY_URL", "http://10.129.1.15:8102").rstrip("/")
-MEMORY_TOKEN = os.environ.get("MEMORY_TOKEN", "")
+# S33 fix (2026-10-21): this used to be an HTTP GET against hermes-memory's `/turns` endpoint,
+# which clamps `limit` at 500 server-side (hermes-memory.py's _list_turns()) no matter what this
+# tool asked for — on a busy day the 26h window silently got only the newest 500 rows, which
+# could all be from the last hour, and the report printed "0 blocks" while actually blind to
+# everything older that never arrived. Switched to the same direct, read-only SQLite pattern
+# hermes-fleetops-ui.py's read_egress_blocks()/read_recommendations() and
+# hermes-model-scout.py's list_scout_tasks() already use against this exact file — no HTTP cap
+# applies to a local SQL query, and co-located hosting (confirmed: this service's own unit runs
+# on the same host as hermes-memory.service) means no network hop either. MEMORY_TOKEN/MEMORY_URL
+# are gone — a read-only local file open needs no bearer token.
+MEMORY_DB = os.environ.get("MEMORY_DB", "/mnt/hermes-data/memory/memory.db")
 MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER", "http://127.0.0.1:6167").rstrip("/")
 FLEETOPS_TOKEN = os.environ.get("FLEETOPS_MATRIX_TOKEN", "")
 FLEETOPS_ROOM = os.environ.get("FLEETOPS_ROOM", "")
 
 WINDOW_HOURS = int(os.environ.get("GUARD_REPORT_HOURS", "26"))
 ALERT_THRESHOLD = int(os.environ.get("GUARD_REPORT_ALERT_THRESHOLD", "5"))
-SCAN_LIMIT = int(os.environ.get("GUARD_REPORT_SCAN_LIMIT", "1000"))
 # How recently a caller must have been blocked for the report to hint that it is still
 # happening. 15 minutes, not an hour: the planner and the triage watcher each call several
 # times a minute, so an hour of silence from them means repaired, and the 2026-10-09 run
@@ -141,12 +157,21 @@ def coarse_key(text):
     return fingerprint(text)
 
 
-def fetch_turns():
-    url = f"{MEMORY_URL}/turns?task_id=guard-log&limit={SCAN_LIMIT}"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {MEMORY_TOKEN}")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode()).get("turns", [])
+def fetch_turns(since_ts):
+    """Reads hermes-memory's turns table directly, read-only, filtered to the real window in SQL
+    — no row cap, so a busy window can never silently lose its oldest rows the way the capped
+    HTTP /turns API did (S33)."""
+    conn = sqlite3.connect(f"file:{MEMORY_DB}?mode=ro", uri=True, timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, task_id, agent, role, raw, presented, conv_id, created_at FROM turns "
+            "WHERE task_id = 'guard-log' AND created_at >= ? ORDER BY created_at",
+            (since_ts,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def stamp(ts):
@@ -328,14 +353,12 @@ def main():
                     help="post nothing when there is nothing repeated (default posts the summary)")
     args = ap.parse_args()
 
-    if not MEMORY_TOKEN:
-        sys.exit("MEMORY_TOKEN is required")
-    try:
-        turns = fetch_turns()
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-        sys.exit(f"cannot read the guard log from hermes-memory: {exc}")
-
     since = time.time() - args.hours * 3600
+    try:
+        turns = fetch_turns(since)
+    except sqlite3.OperationalError as exc:
+        sys.exit(f"cannot read the guard log from hermes-memory's database ({MEMORY_DB}): {exc}")
+
     collected = collect(turns, since)
     lines, repeated = build_report(collected, args.hours)
     report = "\n".join(lines)

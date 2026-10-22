@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.17.0
+**Version:** 1.18.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -100,6 +100,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.16.0 | 2026-10-07 | Two findings from first running the 2.15.0 tests on spark, both recorded as §11 rules: `block.light` is frozen at chunk-load time on this stack (proved three ways — a sealed cell, a chunk reload, and a torch the bot placed itself), so the torch trail gates on `isCovered()` plus a registry-`emitLight` scan instead; and `craftItem`'s auto-chain read `recipe.ingredients`, which minecraft-data fills for shapeless recipes only, so it silently skipped every shaped one — the real reason `checkHomeLighting`'s "craft from any wood source" gate never worked. New §12 Open: `checkLighting`/`light_area` still depend on the frozen field. |
 | 2.15.0 | 2026-10-07 | Access and shelters (direct request, four parts): every placement verb refuses a cell that would impede a chest, bed or door, or seal a shelter's only doorway; new `clear_access` destroys one that already does; a living space's walls are refused by position in `safeToBreak` rather than by cost, which is what three rounds of `digCost` tuning could not express; tunnels are lit by a torch trail at a derived spacing, topped up from carried coal. New `shelter.js` and `tunneling.js`. |
 | 2.18.0 | 2026-10-18 | Direct request: bed claims removed from §4 -- any bed not already occupied is fair game, tried nearest-first, no persistent ownership. New §4 rule: a new bed always goes inside an existing shelter when one has room, where "shelter" is any enclosed structure of any shape (no openings but doors, walls any material but sand), not just the Builder's own fixed room -- `shelterInteriorsNear` (`shelter.js`). §6's memory table and §12's spark2 item lost their `minecraft-beds` row; §2's fresh-start wipe checklist dropped `beds/`. |
+| 2.19.0 | 2026-10-21 | Direct request "fix the mayor bot screening" (IMPLEMENTATION_PLAN.md S34): new §5 exception, by verified sender identity rather than message content -- `classifyIntent()`/`generateReply()` now pass `analysis: true` to `callRole()` when `isAnotherBot(speaker)` is true, which (by `handleIncoming()`'s own upstream gate) only ever happens for Mayor's real directives or Mark's fallback-coordinator ones, never a player. Closes the gap where the matching generation-side calls (`proposeDirectiveForOthers()`, `proposeFallbackDirective()`, `narrateAction()`) already had this exemption but the receiving side never did -- Layer 2 blocked 8 of Mayor's real directives at 0.970 on 2026-10-13 as a result. Layer 1 is unaffected and still blocks regardless. `maybeRemember()`'s own `<speaker>` call site is deliberately left unflagged (fire-and-forget background memory write, not a player/bot-facing reply). |
 
 ## services/minecraft-bots/README.md
 
@@ -200,3 +201,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.15.0 | 2026-10-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.16.0 row and the `services/minecraft-bots/README.md` 4.2.0 row. |
 | 1.16.0 | 2026-10-08 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.17.0 row (the fresh-world reset). |
 | 1.17.0 | 2026-10-18 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.18.0 row (bed claims removed, the generalized shelter definition). |
+| 1.18.0 | 2026-10-21 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.19.0 row (S34 fix — the bot-to-bot screening exemption threaded through to the receiving side). |

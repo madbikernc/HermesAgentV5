@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-21, S32 fix): two new scenarios for hermes-boot-unit-check.py 1.2.0's auto-
+# recovery -- mount_is_up() is monkeypatched directly (never the real os.path.ismount, and never
+# the real hermes-unlock.sh, which fake_run_with_recovery intercepts the same way fake_run
+# already intercepts systemctl) so this stays a real offline check with no live mount or
+# systemctl needed.
 #
 # 1.0.0 (2026-10-16) - S32 item (a): offline checks for hermes-boot-unit-check.py's parsing and
 # alert-dedup logic. No real systemctl needed -- `run()` is monkeypatched to canned
@@ -137,6 +143,45 @@ def main():
     check("no further alerts of either kind",
           len(alerts.emails) == 2 and len(alerts.notices) == 2,
           (alerts.emails, alerts.notices))
+
+    print("\n[S32: auto-recovery is never attempted while the mount itself is down]")
+    FAKE_SHOW["hermes-memory.service"] = ("simple", "inactive")  # stranded again, fresh scenario
+    d2, alerts2 = load_tool()
+    d2.STATE_PATH = Path(tempfile.mkdtemp()) / "state.json"
+    d2.mount_is_up = lambda: False
+    rc5 = d2.main()
+    check("still exits 1 when the mount itself is down", rc5 == 1, f"rc={rc5}")
+    check("no auto-recovery email when the mount is down",
+          not any("auto-recovered" in subj for subj, _ in alerts2.emails), alerts2.emails)
+    check("real hermes-unlock.sh is never invoked while the mount is down",
+          d2.attempt_auto_recovery(d2.find_not_active()) is None)
+
+    print("\n[S32: mount is up -- hermes-unlock.sh runs automatically and clears the strand]")
+    d3, alerts3 = load_tool()
+    d3.STATE_PATH = Path(tempfile.mkdtemp()) / "state.json"
+    d3.mount_is_up = lambda: True
+    d3.UNLOCK_SCRIPT = TOOLS / "hermes-unlock.sh"  # must exist for the .exists() gate; never really run
+
+    recovery_calls = []
+
+    def fake_run_with_recovery(cmd, timeout=15):
+        if cmd[:1] == ["bash"]:
+            recovery_calls.append(cmd)
+            FAKE_SHOW["hermes-memory.service"] = ("simple", "active")  # simulate the real restart
+            return "Restarting hermes-memory.service (found inactive/failed...)", 0
+        return fake_run(cmd, timeout)
+
+    d3.run = fake_run_with_recovery
+    rc6 = d3.main()
+    check("hermes-unlock.sh was actually invoked", len(recovery_calls) == 1, recovery_calls)
+    check("exit code is clean -- the restart fixed it within this same run", rc6 == 0, f"rc={rc6}")
+    check("exactly one auto-recovery email, no separate newly-failing or recovered email",
+          len(alerts3.emails) == 1 and "auto-recovered" in alerts3.emails[0][0], alerts3.emails)
+    check("the auto-recovery email names the unit",
+          "hermes-memory.service" in alerts3.emails[0][1], alerts3.emails)
+    check("exactly one auto-recovery matrix notice", len(alerts3.notices) == 1, alerts3.notices)
+    check("state file records no failing units -- the strand never outlived this run",
+          json.loads(d3.STATE_PATH.read_text())["failing"] == [])
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

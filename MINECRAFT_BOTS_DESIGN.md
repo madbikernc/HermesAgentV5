@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.18.0
+**Version:** 2.19.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -247,6 +247,18 @@ Reuses `hermes-router.py`'s stock roles; there is no Minecraft-specific tier.
 
 Untrusted player text needs no separate guard step — every router call already gets
 hermes-router's two-layer injection screening.
+
+**Exception, by verified sender identity, never by message content (S34, 2026-10-21).**
+`classifyIntent()` and `generateReply()` pass `analysis: true` to `callRole()` when `speaker` is
+a verified bot (`isAnotherBot(speaker)`, which by construction is only ever true there for
+Mayor's real directives or Mark's fallback-coordinator ones — `handleIncoming()`'s own
+`isAnotherBot`/`isActingCoordinator` gate filters everything else before either function is ever
+called). That flag relaxes Layer 2's hard block for this one call, the same mechanism
+`proposeDirectiveForOthers()`/`proposeFallbackDirective()`/`narrateAction()` already used for
+their own generation calls — Layer 1 still runs and still blocks regardless, and a player's own
+chat never sets this flag no matter what it says. Before this fix, Layer 2 blocked 8 of Mayor's
+real directives at 0.970 on 2026-10-13; the receiving side had simply never gotten the same
+exemption the sending side already had.
 
 **Benchmarked 2026-09-15, no change made (§26).** Against `planNextStep`'s real prompt,
 `dispatch` is 3–10× faster than `coder` but produced the only outright-wrong answer (swapped

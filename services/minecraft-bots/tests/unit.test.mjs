@@ -1162,11 +1162,16 @@ await check('MB-21 a stalled router call times out instead of hanging', async ()
   assert(Date.now() - started < 2000);
 });
 
-await check('S27f analysis mode is opt-in, and the chat paths never opt in', async () => {
+await check('S27f analysis mode is opt-in, and the chat paths only opt in for a verified bot sender (S34)', async () => {
   // Regression for the 2026-10-09 breakage: S22d gave Layer 2 a screener that actually detects
   // injections, and it scored the bots' own planning prompt as malicious -- 189 blocked planning
   // calls in six hours. callRole() can now declare the payload is bot state, but player chat
   // must keep being screened, which is the half that is easy to get wrong silently.
+  //
+  // Widened 2026-10-21 (S34): classifyIntent()/generateReply() now conditionally pass
+  // analysis: fromVerifiedBot (isAnotherBot(speaker)) at their own <speaker> content site --
+  // this must stay tied to that verified-bot variable, never a bare `analysis: true` literal,
+  // which would silently re-open "a player can type anything" for every one of these sites.
   const seen = [];
   const mkContext = () => vm.createContext({
     process: { env: {} }, AbortSignal, JSON,
@@ -1187,22 +1192,46 @@ await check('S27f analysis mode is opt-in, and the chat paths never opt in', asy
   await c.callRole('dispatch', [], { analysis: false });
   assert.equal(seen[2]['X-Hermes-Screening'], undefined, 'analysis: false must not set it');
 
-  // And the real call sites: every one that carries `<speaker> message` must be unflagged.
+  // And the real call sites: every one that carries `<speaker> message` must either stay
+  // unflagged (player chat, screened in full) or flag only via `fromVerifiedBot` -- never a
+  // literal `analysis: true`, which has no way to tell a verified bot sender from a player.
   const src = await readFile(root + 'index.js', 'utf8');
   const lines = src.split(String.fromCharCode(10));
   const chatSites = lines
     .map((l, i) => ({ l, i }))
     .filter(({ l }) => /\{ role: "user", content: `<\$\{speaker\}>/.test(l));
-  assert(chatSites.length >= 2, 'expected to find the player-chat call sites');
+  assert(chatSites.length >= 3, 'expected to find the player-chat call sites');
+  let conditionalSites = 0;
   for (const { i } of chatSites) {
     // the options object for a call site sits within ~25 lines after its user message
     const window = lines.slice(i, i + 25).join(String.fromCharCode(10));
     const opts = window.match(/\{ *maxTokens:[^}]*\}/);
-    if (opts) {
-      assert(!/analysis/.test(opts[0]),
-        `player chat at index.js line ${i + 1} must stay screened, found: ${opts[0]}`);
-    }
+    if (!opts || !/analysis/.test(opts[0])) continue;
+    assert(!/analysis:\s*true\b/.test(opts[0]),
+      `index.js line ${i + 1}: a literal analysis:true on a <speaker> content site cannot tell a player from a bot -- found: ${opts[0]}`);
+    assert(/analysis:\s*fromVerifiedBot\b/.test(opts[0]),
+      `index.js line ${i + 1}: expected analysis tied to fromVerifiedBot, found: ${opts[0]}`);
+    conditionalSites++;
   }
+  assert.equal(conditionalSites, 2,
+    'expected exactly classifyIntent() and generateReply() to carry the S34 verified-bot exemption; maybeRemember() deliberately stays unflagged');
+});
+
+await check('MB-23 classifyIntent() exempts a verified bot sender from full screening, never a player (S34)', async () => {
+  let lastOptions;
+  const c = vm.createContext({ console: { log() {}, error() {} },
+    OTHER_BOTS: [], USERNAME: 'Amy', SCOUT_FEATURE_BLOCKS: {},
+    isAnotherBot: (s) => ['Mark', 'Mayor', 'Luke'].includes(s),
+    callRole: async (_role, _messages, options) => { lastOptions = options; return 'NONE'; } });
+  vm.runInContext(between(index, 'async function classifyIntent(', 'async function narrateAction('), c);
+
+  await c.classifyIntent('Mayor', 'Everyone, let\'s get full iron armor');
+  assert.equal(lastOptions.analysis, true,
+    'a verified bot sender (Mayor, already gated through isAnotherBot upstream) must not take the full-screening path');
+
+  await c.classifyIntent('SomePlayer', 'Amy, gather wood');
+  assert.equal(lastOptions.analysis, false,
+    'an ordinary player must still take the full-screening path, even typing a Mayor-shaped directive');
 });
 
 const ragBackend = await readFile(root + 'rag-backend.js', 'utf8');

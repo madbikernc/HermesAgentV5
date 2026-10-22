@@ -1,4 +1,23 @@
-// Version: 2.118.0
+// Version: 2.119.0
+//
+// 2.119.0 (2026-10-21, direct request: "fix the mayor bot screening" -- IMPLEMENTATION_PLAN.md
+// S34): classifyIntent() and generateReply() now pass analysis: isAnotherBot(speaker) to
+// callRole() instead of always leaving the flag unset. handleIncoming()'s own isAnotherBot()/
+// isActingCoordinator() gate (above, before either function is ever called) already guarantees
+// that whenever isAnotherBot(speaker) is true at that point, it's a verified bot coordinator --
+// Mayor's real directive, or Mark's fallback-coordinator directive -- never an arbitrary other
+// bot's chatter and never a player's text, since isAnotherBot() checks the authenticated
+// mineflayer `speaker`, never the message body. proposeDirectiveForOthers()/
+// proposeFallbackDirective() already marked their own generation calls analysis:true ("bot-to-
+// bot message, no player input"); this was the matching receive side that still took the full-
+// screening path, and Layer 2 blocked 8 of Mayor's real directives at 0.970 on 2026-10-13 as a
+// result. Layer 1 still runs and still blocks regardless of this flag -- hermes-router.py's
+// analysis mode only ever relaxes Layer 2's hard block (S27f), and the router's own doctrine
+// there is that it has no bearer auth and must never trust a caller's identity claim on its
+// own; the actual verification happens upstream, in handleIncoming(), against the real speaker,
+// never inside the router. maybeRemember()'s own <speaker> call site is deliberately untouched:
+// it is a fire-and-forget background memory write, not a player/bot-facing reply, and widening
+// scope there was not needed to close this gap.
 //
 // 2.118.0 (2026-10-18, direct request): bed claiming removed (actions.js 1.91.0) -- "home" for
 // nearestRallyPoint/storeSurplusNearHome/lightHomeOnce is now just bot.spawnPoint, dropping the
@@ -2471,6 +2490,20 @@ async function classifyIntent(speaker, message) {
       `clearly names one of them instead of ${USERNAME}, respond NONE even if it looks like an ` +
       `action request.`
     : "";
+  // S34 fix (2026-10-21): handleIncoming()'s own isAnotherBot()/isActingCoordinator() gate
+  // (above, before classifyIntent() is ever called) already guarantees that whenever
+  // isAnotherBot(speaker) is true here, it's a verified bot coordinator -- Mayor's real
+  // directive, or Mark's fallback-coordinator directive -- never an arbitrary other bot's
+  // chatter and never a player's text, since isAnotherBot() checks the authenticated mineflayer
+  // `speaker`, never the message body. proposeDirectiveForOthers()/proposeFallbackDirective()
+  // already mark their own generation calls analysis:true ("bot-to-bot message, no player
+  // input"); this was the one place the matching receive side still took the full-screening
+  // path, and Layer 2 blocked 8 of Mayor's real directives at 0.970 on 2026-10-13
+  // (IMPLEMENTATION_PLAN.md S34). Layer 1 still runs and still blocks regardless of this flag --
+  // hermes-router.py's analysis mode only ever relaxes Layer 2's hard block, per its own S27f
+  // doctrine that the router has no bearer auth and must never trust a caller's identity claim
+  // on its own; the actual verification happens here, upstream, against the real speaker.
+  const fromVerifiedBot = isAnotherBot(speaker);
   const reply = await callRole(
     "dispatch",
     [
@@ -2556,7 +2589,7 @@ async function classifyIntent(speaker, message) {
       },
       { role: "user", content: `<${speaker}> ${message}` },
     ],
-    { maxTokens: 16, temperature: 0 },
+    { maxTokens: 16, temperature: 0, analysis: fromVerifiedBot },
   );
   const trimmed = reply.trim().toUpperCase();
   if (trimmed.startsWith("ACTION")) {
@@ -2695,6 +2728,11 @@ function currentActivityNote() {
 
 async function generateReply(speaker, message) {
   const conv = convId(speaker);
+  // S34: same verified-bot exemption as classifyIntent() above -- a non-action utterance from
+  // Mayor/Mark's fallback-coordinator path (isAnotherBot(speaker), already gated upstream in
+  // handleIncoming before generateReply is ever reached with a bot speaker) must not take the
+  // full-screening path either, same reasoning, same safety argument.
+  const fromVerifiedBot = isAnotherBot(speaker);
 
   // Best-effort: record the incoming line, then read back recent history for this speaker
   // (this call already includes the line just recorded, oldest-first -- see
@@ -2736,7 +2774,7 @@ async function generateReply(speaker, message) {
     [{ role: "system", content:
         `${persona}\n\n---\n\n${CHAT_INSTRUCTION}${bossNote}${memoryNote}${currentActivityNote()}` },
      ...history],
-    { maxTokens: 80, temperature: 0.9 },
+    { maxTokens: 80, temperature: 0.9, analysis: fromVerifiedBot },
   );
   const reply = text.slice(0, MAX_CHAT_LEN);
 

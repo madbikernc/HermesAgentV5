@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-10-21, S33 fix): added a real temp-sqlite-backed check for fetch_turns() itself --
+# nothing in this file exercised it before, since every other check builds `turns` lists by hand
+# and calls collect() directly. Proves the uncapped read past the old HTTP API's 500-row clamp,
+# and that task_id/window filtering both still work against a real database file. load() no
+# longer fakes MEMORY_TOKEN -- hermes-guard-report.py 1.4.0 doesn't read it at all anymore.
 #
 # Offline checks for hermes-guard-report.py. No network, no hermes-memory, no Matrix.
 #
@@ -9,7 +15,10 @@
 # injection into Minecraft chat. The report has to separate the first two from the last one, which
 # is the entire reason it exists.
 import importlib.util
+import os
+import sqlite3
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -30,8 +39,6 @@ def check(label, cond, detail=""):
 
 
 def load():
-    import os
-    os.environ.setdefault("MEMORY_TOKEN", "test-token")
     spec = importlib.util.spec_from_file_location("guardreport", TOOLS / "hermes-guard-report.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules["guardreport"] = mod
@@ -244,6 +251,46 @@ def main():
     check("the fingerprint is bounded", len(g.fingerprint("z" * 5000)) <= 48)
     check("missing text is labelled, not blank", "no text" in g.fingerprint(None))
     check("missing text is labelled for the coarse key too", "no text" in g.coarse_key(None))
+
+    print("\n[fetch_turns / S33 - no row cap]")
+    db_fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(db_fd)
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, "
+            "agent TEXT NOT NULL, role TEXT NOT NULL, raw TEXT NOT NULL, presented TEXT, "
+            "conv_id TEXT, created_at REAL NOT NULL)"
+        )
+        rows_in_window = 600  # past the old HTTP API's 500-row cap on purpose
+        for i in range(rows_in_window):
+            conn.execute(
+                "INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?, ?, ?, ?, ?)",
+                ("guard-log", "guard", "assistant",
+                 '{"node": "spark", "layer": "L2", "severity": "block", "score": 0.9, "text": "x"}',
+                 now - i),
+            )
+        conn.execute(  # outside the window -- must not come back
+            "INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("guard-log", "guard", "assistant", "{}", now - 1_000_000),
+        )
+        conn.execute(  # a different task_id -- must not come back either
+            "INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("something-else", "guard", "assistant", "{}", now),
+        )
+        conn.commit()
+        conn.close()
+
+        g.MEMORY_DB = db_path
+        fetched = g.fetch_turns(now - 26 * 3600)
+        check("fetch_turns returns every row in the window, past the old 500-row cap",
+              len(fetched) == rows_in_window, f"got {len(fetched)}")
+        check("fetch_turns excludes a row outside the window",
+              all(t["created_at"] >= now - 26 * 3600 for t in fetched))
+        check("fetch_turns excludes a different task_id",
+              all(t["task_id"] == "guard-log" for t in fetched))
+    finally:
+        os.unlink(db_path)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.0.0
+**Version:** 1.2.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -37,48 +37,66 @@ demand from the Fleet Matrix room.
 
 ---
 
-## 2. The first wall: "top exchanges globally" is a licensing question, not just an engineering one `[RISK]` `[UNKNOWN]`
+## 2. Vendor decision — verified live, 2026-10-21 `[DECIDED]`
 
-Read against reality before specifying behavior around it — the same discipline S25 applied to its own
-"keyless X reader" premise, which turned out to be false and got the stage deferred rather than built
-against a wrong assumption.
+Direct operator instruction: use free services only, for now, and limit market coverage to whatever
+those free services can actually support. Checked against the real endpoints before writing this down —
+the same discipline S25 applied to its own "keyless X reader" premise, which turned out to be false and
+got that stage deferred rather than built against a wrong assumption. This section replaces the original
+vendor survey below with what was actually measured.
 
-Real-time, and often even delayed or end-of-day, data for most of the world's major exchanges (London
-Stock Exchange, Euronext, Deutsche Börse, Tokyo Stock Exchange, Hong Kong Exchange, Shanghai/Shenzhen, and
-others) is commercially licensed by the exchange or a designated distributor. It is not a free, keyless
-pull the way an RSS feed is — this fleet cannot simply "connect to" a global exchange the way
-`hermes-feed-reader.py` connects to a public feed URL. Free, broad, keyless coverage realistically exists
-for:
+**Ruled out: Stooq.** Named in the first draft of this section as the best free bootstrap candidate —
+live-tested 2026-10-21 and it no longer qualifies. Every `stooq.com/q/d/l/` request from this environment
+(plain `curl`, and again with a real browser user-agent) is met with a client-side JavaScript proof-of-
+work challenge — a server-issued nonce, a SHA-256 grind, a `/__verify` POST — before it serves anything,
+the same class of anti-bot gate `hermes-feed-reader.py`'s own finding 2 already warned about for CISA's
+feeds, except this one cannot be worked around with a different HTTP client or header set, since it
+requires executing JavaScript. Ruled out for a fleet whose whole pipeline discipline is deterministic,
+headless, no-browser calls.
 
-- US-listed equities (NYSE, Nasdaq, OTC) — several free or low-cost sources exist.
-- A patchwork of other markets, via aggregators that have already licensed redistribution — coverage
-  depth and update latency vary by provider and by exchange, and terms change over time.
+**Decided: Yahoo Finance's unofficial chart endpoint, for price data.**
+`https://query1.finance.yahoo.com/v8/finance/chart/<SYMBOL>?range=<r>&interval=1d` — live-tested
+2026-10-21 with a plain `curl`, no API key, no JS challenge: real data back for a US ticker (`AAPL`,
+NasdaqGS), an LSE ticker (`VOD.L`, priced in GBp), and a Tokyo ticker (`7203.T`, JPX, priced in JPY), plus
+a full `range=1y` pull (28 KB, ~252 trading days). The response carries `timestamp`,
+`open`/`high`/`low`/`close`/`volume`, **and `adjclose`** — split/dividend-adjusted close comes for free,
+which directly resolves §11 risk 5 (corporate actions) for whatever this source covers.
+`[RISK]`, carried forward honestly rather than dropped now that it's chosen: this is the same unofficial
+endpoint `yfinance` wraps, undocumented and known historically to be throttled or reshaped without
+notice — today's free option, not a guaranteed-stable one. `tools/hermes-market-sync.py` must degrade
+loudly (a logged failure, not a silent empty day) if Yahoo ever blocks or reshapes this, the same honesty
+convention `hermes-news-digest.py` applies to "nothing new."
 
-**Candidate vendors, named for research — none chosen, none vetted against current terms:**
+**Decided: Wikipedia's "List of S&P 500 companies" for the instrument list and categorization.**
+`en.wikipedia.org/wiki/List_of_S%26P_500_companies` — live-tested 2026-10-21, HTTP 200, a real
+`id="constituents"` `wikitable` with columns `Symbol | Security | GICS Sector | GICS Sub-Industry |
+Headquarters Location | Date added | CIK | Founded`. Free, keyless, no JS challenge, and it gives the
+GICS sector/industry categorization §4 already calls for directly — no separate classification step
+needed for this market.
 
-| Vendor | Rough shape |
-|---|---|
-| Stooq | Free, bulk CSV download, broad end-of-day coverage across many world markets, no account required. Informal terms, uneven per-exchange depth. Best free bootstrap candidate. |
-| Yahoo Finance (unofficial, e.g. via `yfinance`) | Free, wide symbol coverage, but unofficial — Yahoo has intermittently throttled or blocked scraping in the past; not a stable foundation to build a daily production pipeline on without a fallback. |
-| Commercial aggregators (e.g. Twelve Data, EOD Historical Data, Finnhub, Polygon.io, or similar) | Paid tiers typically required for genuinely broad multi-exchange symbol directories, sector/industry metadata, and years of adjusted daily history without hand-rolled per-exchange scraping. Free tiers usually skew US-centric or rate-limited. |
-| Exchange-direct listing files | Some exchanges publish their own free listed-company directory (symbol/name/sector); historical pricing is rarely included. |
-
-**`[DECIDE — operator]` Before any code is written:** pick (a) a vendor/budget tier and (b) a bounded
-starting universe. "Every stock on every top exchange" is a ceiling to grow toward, not a day-one build —
-the same lesson S27 learned measuring 38 candidate topics down to a workable 8 before specifying any
-digest behavior around them. §3 proposes a default scope precisely so the rest of this design isn't
-blocked on an answer that has to come from the operator either way.
+**What this rules in, for now: the US market only.** Checked the same way for a European and an Asian
+leg before assuming they'd follow the same shape, and they don't, cleanly, yet: the FTSE 100 Wikipedia
+article's "Constituents" section has no embedded per-company table, and the Nikkei 225 article has no
+constituent table at all. Yahoo's price endpoint already reaches both markets fine (confirmed live
+against `VOD.L` and `7203.T` above) — there is simply no equally clean free *list-plus-sector* source
+confirmed yet for either. Rather than build against an assumed source, §3 narrows the MVP to the one
+market where both halves are verified today; international coverage is a named follow-up gated on
+finding (or building) an equivalent free constituent list per additional exchange, not guessed at here.
 
 ---
 
-## 3. Scope for the MVP `[PROPOSED]`
+## 3. Scope for the MVP `[DECIDED]`
 
-Start with a named set of large-cap indices rather than "every exchange" — a few thousand tickers, not
-tens of thousands, so sector-trend aggregation and movers/trend reporting are statistically meaningful
-from day one and the vendor choice in §2 can be validated cheaply. Illustrative starting set, to be
-confirmed against whatever the chosen vendor actually covers well: one US index (e.g. S&P 500), one
-European index (e.g. FTSE 100 or STOXX Europe 600), one Asian index (e.g. Nikkei 225 or Hang Seng).
-Widening the universe later is a config/data change (§5's `instruments` table gains rows), not a rebuild.
+**S&P 500 (US) only**, sourced entirely from the two free services decided in §2: the instrument list,
+names, and GICS sector/industry from Wikipedia's constituents table; daily price history and ongoing
+sync from Yahoo's chart endpoint, one call per ticker. ~500 tickers — small enough that sector-trend
+aggregation and movers/30-day-trend reporting are meaningful from day one, and small enough to sync well
+within a single daily run against an unofficial, rate-limit-unknown endpoint.
+
+Widening past the US is a real follow-up, not assumed into this design: it needs its own free, keyless,
+no-JS instrument-list-plus-sector source per additional exchange, confirmed live the same way §2
+confirmed this one — not before. Widening the universe later is otherwise just a data change (§5's
+`instruments` table gains rows), not a rebuild.
 
 ---
 
@@ -108,7 +126,7 @@ This is bulk time-series reference data, not conversational/task state, the same
 instruments(ticker, exchange, name, currency, sector, industry, first_seen, last_seen,
             UNIQUE(ticker, exchange))
 tags(ticker, exchange, tag)                                  -- re-derived from tags.yaml each sync, not hand-edited per row
-prices(ticker, exchange, date, open, high, low, close, volume,
+prices(ticker, exchange, date, open, high, low, close, adj_close, volume,
        UNIQUE(ticker, exchange, date))
 sync_state(exchange, last_synced_date)                        -- per-exchange watermark; a non-trading day is "nothing new," not an error
 report_items(report_date, category, item_type, rank, ticker_or_group, metric_value, text,
@@ -118,25 +136,32 @@ report_items(report_date, category, item_type, rank, ticker_or_group, metric_val
 **`[RISK]` Percentage change, not raw price delta, is the metric for every cross-company/cross-exchange
 ranking** (movers, 30-day trend). Returns are currency-invariant; raw price deltas across different
 reporting currencies are not comparable and would silently rank a weak JPY mover above a strong GBP one.
-Stated explicitly so the price-delta version is never the one that ships by accident.
+Stated explicitly so the price-delta version is never the one that ships by accident. Moot for the MVP's
+single-currency (USD) S&P 500 universe, but the column and the rule both stay in from day one since §3
+already names international expansion as the next step.
+
+**`adj_close` resolves §11 risk 5 (corporate actions) for this source.** Yahoo's chart endpoint (§2)
+returns split/dividend-adjusted close directly — movers and 30-day trend are computed from `adj_close`,
+never raw `close`, so a stock split never shows up as a fake multi-hundred-percent move.
 
 ---
 
-## 6. Sync cadence `[PROPOSED]`
+## 6. Sync cadence `[DECIDED]`
 
 "An appropriate interval, based on the posting tactics of the various exchanges" — read against what's
 actually available: free/affordable global equity data is end-of-day, not intraday streaming. Real-time
 or intraday quotes are a separately priced, materially larger product and a materially larger build —
 named out of scope for this design (§11), not assumed as a later phase of it.
 
-Given end-of-day is the realistic grain, "appropriate interval" means **one sync per covered exchange,
-timed after that exchange's own close** — not one global timer, since exchanges close at very different
-times worldwide (illustratively, Asian markets close hours before European ones, which close hours before
-US markets). One `hermes-market-sync.timer`, or one script iterating covered exchanges and skipping any
-not yet closed on this pass (re-checked next run) — the same per-source skip-and-retry discipline
-`hermes-feed-reader.py` already uses — each with this fleet's usual timer jitter. A non-trading day
-(weekend or holiday) is logged as "nothing new," the same honesty convention `hermes-news-digest.py`
-already applies to "no news today."
+Given end-of-day is the realistic grain and §3 scopes the MVP to one market (US), "appropriate interval"
+means **one daily sync, timed after NYSE/Nasdaq close** (21:00 UTC during EDT, 20:00 UTC during EST) —
+one `hermes-market-sync.timer`, not a per-exchange fleet of them. A non-trading day (weekend or holiday)
+is logged as "nothing new," the same honesty convention `hermes-news-digest.py` already applies to "no
+news today." **The per-exchange design this section originally specified is the right shape for
+international expansion** (§3) — exchanges close at very different times worldwide, so a second covered
+exchange needs its own timer, staggered after its own close, the same per-source skip-and-retry
+discipline `hermes-feed-reader.py` already uses — kept here as the scaling path, not built for a
+single-market MVP that doesn't need it yet.
 
 ---
 
@@ -222,28 +247,29 @@ added later.
 
 ## 11. Explicitly out of scope, risks, and open questions
 
-1. **`[UNKNOWN]` Vendor and budget.** The single highest-priority open item, gating everything else —
-   see §2. Nothing past the first build sub-stage can be built against real data until this is decided.
+1. **RESOLVED 2026-10-21 — vendor and starting universe decided, per §2/§3.** Yahoo's chart endpoint +
+   Wikipedia's S&P 500 list, US-only MVP. Carried the same way other resolved risks in this project's
+   docs stay visible rather than being deleted once answered.
 2. **Intraday/real-time quotes are a separate, larger, costlier capability** — not assumed as a future
    phase of this design, just named as a different project if ever wanted.
-3. **"List of traded stocks" as a literal daily bulk pull may not match how the chosen vendor's API is
-   shaped.** Many aggregators sell a symbol *directory* (refreshed occasionally, not re-pulled whole every
-   day) separately from daily *price* updates. The build must read the real vendor API before assuming
-   both are the same call — the same "read the real API before specifying behavior" discipline
-   `hermes-model-scout.py`/S20a already applied to Hugging Face's.
-4. **Unbounded storage growth.** Thousands of tickers × daily OHLCV rows, indefinitely — the same class
-   of "no retention policy stated yet" gap S27 flagged for its own highlight table. Worth a pruning or
-   archive decision once real volume is observed, not guessed at before there is any.
-5. **Corporate actions (splits, dividends, delistings, ticker changes) are not addressed by the schema in
-   §5 as written.** A naive close-to-close % change across a stock split is wrong by the split ratio. The
-   chosen vendor must be checked for split/dividend-adjusted closes; if it doesn't provide them, this
-   needs its own fix before the 30-day trend numbers can be trusted.
+3. **"List of traded stocks" as a literal daily bulk pull is not how this vendor pairing actually
+   works, and that's by design, not a gap.** Wikipedia's constituents table is a slow-changing directory
+   (re-read, not expected to change daily); Yahoo's chart endpoint is the daily price call, one ticker at
+   a time. S38a already confirmed this split live rather than assuming a single bulk endpoint existed —
+   the same "read the real API before specifying behavior" discipline `hermes-model-scout.py`/S20a
+   applied to Hugging Face's.
+4. **Unbounded storage growth.** ~500 tickers × daily OHLCV rows, indefinitely — smaller than the global-
+   universe version of this risk, but the same class of "no retention policy stated yet" gap S27 flagged
+   for its own highlight table. Worth a pruning or archive decision once real volume is observed.
+5. **RESOLVED for this source, per §5 — `adj_close`.** Yahoo's chart endpoint returns split/dividend-
+   adjusted close directly; movers/30-day trend read `adj_close`, never raw `close`. Revisit only if a
+   future non-Yahoo source for an additional market doesn't provide the same field.
 6. **Thematic tag drift.** `tags.yaml` is operator-maintained prose/ticker matching, the same
    "editorial, not computed" category `topics.yaml` already is — it will need occasional upkeep as
    company classifications shift, same as `feeds.yaml`.
-7. **Exchange trading-hours and holiday calendars per market.** §6's "appropriate interval" needs each
-   covered exchange's real close time and holiday calendar — get this from the chosen vendor's own
-   calendar data where available, rather than hand-maintaining one in this repo.
+7. **Exchange trading-hours and holiday calendars.** §6's single daily sync needs NYSE/Nasdaq's real
+   close time and holiday calendar for the MVP — a fixed, well-documented single calendar, not the
+   multi-exchange version of this risk international expansion will reopen.
 
 ---
 
@@ -251,10 +277,11 @@ added later.
 
 Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
 
-- **S38a** — Vendor decision and bounded starting universe (operator decision plus a short research pass
-  against the real, current API docs — not assumed).
-- **S38b** — `tools/hermes-market-sync.py`, the `instruments`/`prices`/`sync_state` schema, per-exchange
-  timers.
+- **S38a** — **Done 2026-10-21.** Vendor decision and bounded starting universe, verified live against
+  the real endpoints (§2/§3): Yahoo's chart endpoint for price, Wikipedia's S&P 500 list for
+  instruments/sector, US-only MVP.
+- **S38b** — Not yet built. `tools/hermes-market-sync.py`, the `instruments`/`prices`/`sync_state`
+  schema, the single daily timer (§6).
 - **S38c** — `tags.yaml` and the sector/industry/thematic categorization pass.
 - **S38d** — `tools/hermes-market-report.py` — daily sector-trend/movers/30-day-trend computation,
   `report_items` write, email + Matrix push.
@@ -297,4 +324,5 @@ own commit to that table in the same change, not a thing done here.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-17 | Initial design — direct operator request for a daily global-exchange equity tracking capability: sector/industry and thematic categorization, historical price storage, a daily sector-trend/movers/30-day-trend report, and on-demand report requests from the Fleet Matrix room. Tracked as `IMPLEMENTATION_PLAN.md` S38. |
-| 1.1.0 | 2026-10-20 | Added §14, recording the `CLAUDE.md` 1.2.0 benchmark-evaluation call: no new `FLEET_BENCHMARK_DESIGN.md` scenario needed (the MVP makes no model call; the one optional model-touching path reuses `dispatch`'s existing coverage), but the eventual build is a real candidate for §6.8's `fleet_coder_build` corpus once it has a commit. Also: §8's `market sector list` gate command was added to this file's body at some point without a version bump, breaking this project's own enforced convention — caught and folded into this bump rather than left unaccounted, since nothing else in this file's content changed meaning. Minor bump — new section, no prior guidance reversed. |
+| 1.1.0 | 2026-10-20 | Added §14, recording the `CLAUDE.md` 1.2.0 benchmark-evaluation call: no new `FLEET_BENCHMARK_DESIGN.md` scenario needed (the MVP makes no model call; the one optional model-touching path reuses `dispatch`'s existing coverage), but the eventual build is a real candidate for §6.8's `fleet_coder_build` corpus once it has a commit. Also: §8's `market sector list` gate command was added to this file's body at some point without a version bump, breaking this project's own enforced convention — caught and folded into this bump rather than left unaccounted, since nothing else in this file's content changed meaning. Minor bump — new section, no prior guidance reversed. **Note added 2026-10-21: the top `**Version:**` header line was not actually updated when this row was written, the identical gap this row itself called out one paragraph up — caught and fixed in the 1.2.0 bump below, not silently left.** |
+| 1.2.0 | 2026-10-21 | **S38a decided, direct operator instruction ("use whatever free services we can for now, limit markets to ones free services can report on") verified live before being written down.** §2 rewritten: Stooq ruled out (a real client-side JS proof-of-work challenge blocks every `stooq.com/q/d/l/` request from this environment, confirmed by curl with and without a browser user-agent) — Yahoo Finance's unofficial chart endpoint decided instead for price data (live-tested against a US/LSE/Tokyo ticker and a full 1-year pull, returns `adjclose` for free) and Wikipedia's "List of S&P 500 companies" decided for the instrument list/GICS sector (live-tested, real `wikitable`). §3 narrowed to US/S&P-500-only for the MVP after confirming FTSE 100/Nikkei 225 have no equally clean free constituent-list table yet — international expansion named as a real, gated follow-up rather than guessed at. §5 gained `adj_close`, resolving risk 5 (corporate actions) for this source. §6 simplified from a per-exchange timer fleet to one daily US-close timer, with the per-exchange design kept as the documented scaling path. §11 risks 1 and 5 marked resolved; §12's S38a marked done. Minor bump — open questions resolved and one early recommendation corrected against real evidence, nothing restructured. |

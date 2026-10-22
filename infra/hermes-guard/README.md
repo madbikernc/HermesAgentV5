@@ -1,6 +1,6 @@
 # hermes-guard — recreate checklist
 
-**Version:** 4.1.0
+**Version:** 4.2.0
 
 Layer 2 of screening (HermesAgentV5 S5, `../../HermesAgentV5/IMPLEMENTATION_PLAN.md`) — Meta's
 `Llama-Prompt-Guard-2-22M`, stock weights, permanently (target §12.1: never a candidate for
@@ -205,6 +205,15 @@ fleet-wide, so a second copy would only duplicate the notice. Posts to FleetOps 
 caller has been blocked `ALERT_THRESHOLD` (5) or more times in the window, so the regression is visible
 in `systemctl list-timers` and the journal as well as in chat. Offline checks: `tests/test_guard_report.py`.
 
+**S33 fix, 2026-10-21: the window is now really 26 hours, not the newest 500 rows.**
+`hermes-guard-report.py` used to call `hermes-memory`'s HTTP `/turns` endpoint, which clamps
+`limit` at 500 server-side no matter what was asked for — on a busy day the report could read
+only the newest 500 rows (sometimes the last hour or two) and print "0 blocks" while actually
+blind to everything older. It now opens `memory.db` directly, read-only, filtered by
+`created_at` in SQL with no cap at all — the same pattern `hermes-fleetops-ui.py` and
+`hermes-model-scout.py` already use against this exact file. `MEMORY_TOKEN`/`MEMORY_URL` are
+gone; a local read-only file open needs no bearer token.
+
 **Why it exists.** S22d gave Layer 2 a classifier that actually detects injections, and it began blocking
 the fleet's own analysis prompts: 351 calls over six and a half hours — 189 of the bots' planning calls
 and 162 of `hermes-minecraft-triage`'s — and nothing alerted. A blocked call is an HTTP 400 that each
@@ -243,3 +252,4 @@ elapsed time and leaves the judgement to the reader.
 | 3.0.0 | 2026-10-09 | **Major — Layer 2 is no longer Prompt Guard 2.** S22c swapped it for a stock LLM asked a narrow yes/no question: 18/18 on the case set, all three bands 6/6, verified end to end through the router. Records that `omni`, the chosen independent arm, was measured non-viable (94.4% timeout at 6-way concurrency against `dispatch`'s 0%) and that `dispatch` is therefore an interim arm with the independence objection unresolved; the measured latency cost (~150ms to ~380-460ms sequential, ~1.2s p50 under concurrency, paid on every router request); and that rollback is the one-line `GUARD_MODE=classifier`. |
 | 4.0.0 | 2026-10-09 | **Major — Layer 2 is now a dedicated prompt-injection classifier**, `proventra/mdeberta-v3-base-prompt-injection` (279M, MIT), replacing the stock-LLM arm S22c deployed hours earlier. 17/18 alone with 6/6 on indirect injections, **18/18 composite at tool role**, and the only option that is both independent of the protected model and contention-free: 0% failures at 6-way concurrency with p50 317ms, against `omni`'s 94.4% failures and `dispatch`'s 1175ms. Records the three measured-and-rejected candidates (including the Hub's most-downloaded, which scored 13/18), that label orientation is now read from `id2label` rather than assumed, the role=tool vs role=user composite distinction, and the two one-line rollbacks. |
 | 4.1.0 | 2026-10-09 | Added the `hermes-guard-report` daily blocked-call report (Watch only, 07:45): why screening could silently stop the bot fleet for six hours with nothing alerting, why attribution is a table of prompt templates rather than a caller id or any generic key length, and why each caller's last-blocked age is printed instead of a still-broken verdict. |
+| 4.2.0 | 2026-10-21 | S33 fix, direct request: `hermes-guard-report.py` 1.4.0 reads `memory.db` directly, read-only, instead of calling `hermes-memory`'s HTTP `/turns` API, which silently clamped the real 26h window to its newest 500 rows and had already blinded two of four daily runs to "0 blocks". `MEMORY_TOKEN`/`MEMORY_URL` config dropped; `hermes-guard-report.service` now declares `RequiresMountsFor=/mnt/hermes-data` explicitly, matching every other direct reader of that file. `tests/test_guard_report.py` now 1.4.0, 50 checks (new: a real temp-sqlite-backed check proving the uncapped read past 500 rows, and correct task_id/window filtering). |
