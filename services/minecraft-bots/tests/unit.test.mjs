@@ -1,4 +1,8 @@
-// Version: 1.31.0
+// Version: 1.31.1
+// 1.31.1 (2026-10-21): the S34 "S27f analysis mode..." test's chat-site scan window was 25
+// lines, too short to reach generateReply()'s callRole() options (36 lines from its <speaker>
+// content line) -- found live on spark, crashed the whole suite on an uncaught assertion.
+// Widened to 40. No other test changed.
 // Fix-validation checks for docs/reviews/2026-09-24-minecraft-bots-review.md. Each case is the
 // matching reproduction from 2026-09-24-minecraft-bots-repro.mjs, inverted to assert the corrected
 // behavior. Source-extraction harness: no Minecraft server or npm install needed.
@@ -1203,8 +1207,14 @@ await check('S27f analysis mode is opt-in, and the chat paths only opt in for a 
   assert(chatSites.length >= 3, 'expected to find the player-chat call sites');
   let conditionalSites = 0;
   for (const { i } of chatSites) {
-    // the options object for a call site sits within ~25 lines after its user message
-    const window = lines.slice(i, i + 25).join(String.fromCharCode(10));
+    // the options object for a call site sits within ~40 lines after its user message --
+    // generateReply()'s is the farthest, 36 lines away (its <speaker> content line builds
+    // `history`, which the real callRole() invocation only joins in later, after the
+    // memory-lookup/bossNote work in between); classifyIntent()'s and maybeRemember()'s are
+    // both within 2. Found live on spark (2026-10-21): a 25-line window missed generateReply()
+    // entirely and crashed the whole suite on an uncaught assertion -- the fix itself was
+    // already correct, only this scan's window was too short.
+    const window = lines.slice(i, i + 40).join(String.fromCharCode(10));
     const opts = window.match(/\{ *maxTokens:[^}]*\}/);
     if (!opts || !/analysis/.test(opts[0])) continue;
     assert(!/analysis:\s*true\b/.test(opts[0]),
