@@ -1,0 +1,25 @@
+{
+  "_provenance": "4 real hermes-media.py output images pulled from this fleet's own NFS archive (/mnt/nas2-hermes-images on HomeD13, exported from NAS2) on 2026-10-23. Of 111 real files found there, 106 (amy_gen_*) are explicit sexual-content generations deliberately excluded from this fixture set -- not a judgment of the operator's own private fleet use, a hard content boundary. These 4 (hermes_gen_*) are the entire usable set; well under FLEET_BENCHMARK_DESIGN.md S6.2's own proposed 20-30 image target, reported honestly as a small real floor rather than padded. Each 'prompt' field below is the real ComfyUI positive prompt read directly from the PNG's own embedded workflow metadata, never retyped. Each 'label'/'reasoning' pair is this session's own direct visual judgment of the actual rendered image, against hermes-media.py's own real EVAL_SYSTEM_PROMPT rubric: no obvious rendering artifacts, anatomy errors, or missing/garbled elements the prompt asked for; a plausible-looking image that still doesn't match the prompt is a FAIL.",
+  "images": {
+    "hermes_gen_00001_.png": {
+      "prompt": "a red bicycle leaning against a white brick wall",
+      "label": "pass",
+      "reasoning": "Clean, well-formed render. A red bicycle, correctly proportioned, leaning against a white brick wall exactly as described. No anatomy/artifact issues (bicycles have no anatomy to get wrong), no missing or garbled elements."
+    },
+    "hermes_gen_00002_.png": {
+      "prompt": "Create an image of a playful fluffy puppy",
+      "label": "pass",
+      "reasoning": "Clean, well-formed render of a fluffy puppy with correct anatomy (four legs, two eyes, one nose, proportioned head/body) and no visible artifacts. 'Playful' is a soft mood descriptor the pose (sitting, calm) doesn't strongly depict, but nothing in the image contradicts it or is objectively wrong -- not the kind of concrete, checkable miss the real rubric is built to catch."
+    },
+    "hermes_gen_00003_.png": {
+      "prompt": "generate an image of a digital warrior fighting against cybernetically enhanced sharks",
+      "label": "fail",
+      "reasoning": "A real, specific prompt-mismatch, not a rendering-quality issue: the prompt explicitly asks for 'cybernetically enhanced sharks' and every shark in the image is an ordinary, unmodified shark -- no visible mechanical parts, implants, plating, wiring, or any other cybernetic element anywhere. This is exactly the case hermes-media.py's own EVAL_SYSTEM_PROMPT calls out by name: 'a plausible-looking image that still doesn't match the prompt is a FAIL.' The render itself is technically clean (no anatomy errors on the warrior or sharks), which is what makes this a meaningful, non-trivial defect case rather than an obvious one."
+    },
+    "hermes_gen_00004_.png": {
+      "prompt": "Draft an image of an ironic sarcastic North Star, representing a product that is held to be the best of breed, but it's all untrue",
+      "label": "pass",
+      "reasoning": "Clean, symmetric, well-rendered compass-star/North-Star motif with no anatomy/artifact issues. The 'ironic/sarcastic/untrue' framing is an abstract mood a static symbolic image can't literally depict one way or the other -- there's no concrete object or element the prompt names that's missing or garbled, so there's nothing objectively wrong to fail it on."
+    }
+  }
+}

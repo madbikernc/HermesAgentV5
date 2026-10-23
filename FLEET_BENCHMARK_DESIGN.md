@@ -1,21 +1,23 @@
 # Firmament Fleet Benchmark Suite — Target Design
 
-**Version:** 1.10.0
+**Version:** 1.11.0
 
-**Status:** S39a cleared, Phases A-B-D(6.6) executed (2026-10-22/23), Phase C complete except §6.2
-(2026-10-23) — operator reviewed the gap list (§4) and phasing (§10), approved proceeding; schema
-unification (§7), the two highest-stakes gaps (`fleet_log_analyst`, the formal `fleet_guard` Tier 2
-gate), five of Phase C's six suites (`fleet_muse_contract`, `fleet_dualcoder_precision`,
+**Status:** S39a cleared, Phases A-B-C-D(6.6) all executed (2026-10-22/23) — operator reviewed the
+gap list (§4) and phasing (§10), approved proceeding; schema unification (§7), the two
+highest-stakes gaps (`fleet_log_analyst`, the formal `fleet_guard` Tier 2 gate), all six of Phase
+C's suites (`fleet_vision_judge`, `fleet_muse_contract`, `fleet_dualcoder_precision`,
 `fleet_digest_faithfulness`, `fleet_coder_fix`, `fleet_coder_build`), and the Tier 3
-interactive-latency harness (§6.6) are built, 238 offline checks total, no live fleet node reachable
+interactive-latency harness (§6.6) are built, 263 offline checks total, no live fleet node reachable
 to verify a real run or real backend numbers yet. Every case set built so far is synthetic,
-pattern-adapted, or drawn from real git history with only a small executable subset (this dev
-machine has no `node` binary at all, and lacks a couple of Python vendor libraries), stated plainly
-(§8.6). §6.2 is deferred by direct operator instruction (2026-10-23) and genuinely blocked anyway (no
-real render images reachable from this session); S28's security suite family stays deferred,
-genuinely gated on a different stage's own incomplete prerequisite (S10's network isolation).
-Direct operator request, 2026-10-18; scope extended 2026-10-20 (gaps 7-8); reviewed and approved
-2026-10-22. This
+pattern-adapted, or drawn from real git history or real fleet-generated data, with only a small
+executable subset runnable from this session (this dev machine has no `node` binary at all, lacks a
+couple of Python vendor libraries, and `fleet_vision_judge`'s own n=4 is well under its own
+`[PROPOSED]` 20-30 target), stated plainly (§8.6). `fleet_vision_judge` (§6.2) was unblocked when the
+operator pointed this session at a real NFS archive of `hermes-media.py` output, of which only 4 of
+111 real files were usable — the rest explicit content this session deliberately excludes. Only S28's
+security-suite family remains deferred, genuinely gated on a different stage's own incomplete
+prerequisite (S10's network isolation). Direct operator request, 2026-10-18; scope extended
+2026-10-20 (gaps 7-8); reviewed and approved 2026-10-22. This
 is a *target-state* design for a comprehensive, unified benchmark suite covering every role the fleet
 actually runs — most of the individual pieces already exist and are live; what does not yet exist is the
 per-role coverage map, the gap-fill suites for roles that currently have no accuracy ground truth at all,
@@ -231,7 +233,7 @@ new key.
   by import from `hermes-logs.py` so the eval and production can never drift apart, the same guarantee
   `test_guard_llm.py` already enforces for `guard`.
 
-### 6.2 `fleet_vision_judge` — closes gap 2
+### 6.2 `fleet_vision_judge` — closes gap 2 — **built 2026-10-23** (`tools/hermes-vision-judge-eval.py`)
 
 - **What it scores:** `omni`'s PASS/FAIL agreement with a human-labelled ground truth over a fixed set of
   renders.
@@ -246,6 +248,38 @@ new key.
   false-reject — matters independently, since one burns render compute forever and the other ships broken
   output), reported as two numbers, not one blended accuracy.
 - **Speed:** out of scope per §3.
+- **Built, n=4, stated plainly — well under the `[PROPOSED]` 20-30 target above, not padded to look more
+  complete:** unblocked when the operator pointed this session at the real NFS archive of
+  `hermes-media.py` output (`/mnt/nas2-hermes-images` on HomeD13, reachable over the fleet's existing
+  `homed13` SSH alias). Of 111 real files found there, 106 (`amy_gen_*`) are explicit sexual-content
+  generations this suite deliberately excludes — confirmed by reading the real ComfyUI prompt metadata
+  embedded in each PNG, not by viewing the rendered images themselves, and one sample pulled down to
+  confirm this was deleted immediately without being viewed. This is a hard content boundary this session
+  does not cross for viewing, labelling, storing, or building eval infrastructure around, independent of
+  it being the operator's own private fleet use. The remaining 4 (`hermes_gen_*`) are ordinary test-shaped
+  renders (a bicycle, a puppy, a warrior-vs-sharks battle scene, an abstract "North Star" graphic) and are
+  the entire usable set, checked into `infra/fleet-vision-judge/fixtures/` (7.1MB total — modest enough to
+  track directly, resolving the `[RISK]` note above pragmatically for this small n rather than standing up
+  a separate NAS convention for 4 files). Each fixture's prompt is the real ComfyUI positive prompt read
+  directly from the PNG's own embedded workflow metadata, confirming these are genuinely real generations,
+  not relabeled stock images. All 4 were viewed and hand-labelled directly against `hermes-media.py`'s own
+  real `EVAL_SYSTEM_PROMPT` rubric: 3 PASS, 1 FAIL (the warrior-vs-sharks render's sharks show no
+  cybernetic/mechanical enhancement at all despite the prompt explicitly asking for "cybernetically
+  enhanced sharks" — a real, specific prompt-mismatch, not a cherry-picked example) — this 3:1 split is
+  what these 4 real images actually are, reported honestly rather than rebalanced toward this section's
+  own "half good half bad" framing, which was written for a larger notional set than 4. `evaluate_image()`
+  is called completely UNMODIFIED, imported directly from `hermes-media.py` (confirmed import-safe), with
+  its one network dependency (the module-level `ROUTER_URL` constant, read at call time) monkeypatched to
+  `omni`'s backend directly (S8.1) — the real `EVAL_SYSTEM_PROMPT`, the real data-URI/`image_url`
+  construction, and the real PASS/FAIL parsing all run for real, verified against a real local HTTP server
+  that explicitly checks for the real request shape before replying. One correction found while building,
+  not assumed: this section's own "false-accept vs. false-reject" phrasing read ambiguously against which
+  error has which consequence on a close pass, so the harness instead names the two error types by their
+  real operational consequence directly — `false_pass_rate` (a real defect slips through, ships broken
+  output) and `false_fail_rate` (a real good image gets wrongly rejected, burns render compute on a
+  needless regeneration) — alongside precision/recall, never a bare blended key. 25 offline checks
+  (`infra/model-benchmark/tests/test_vision_judge.py`); no fleet node reachable to run against a live
+  `omni` endpoint yet.
 
 ### 6.3 `fleet_muse_contract` — closes gap 3 — **built 2026-10-22** (`tools/hermes-muse-contract-eval.py`)
 
@@ -694,12 +728,14 @@ earlier phases make the later ones cheaper.
   any order. 6.7/6.8's corpus curation is heavier than the rest of this phase (cross-repo git mining,
   hand-authored symptom/requirement prompts, per-task fixture or judge-rubric authoring), so they may slip
   to their own pass within this phase rather than landing simultaneously with 6.2-6.5.
-  **Complete except §6.2.** `fleet_muse_contract` (6.3) executed 2026-10-22; `fleet_dualcoder_precision`
-  (6.5), `fleet_digest_faithfulness` (6.4), `fleet_coder_fix` (6.7), and `fleet_coder_build` (6.8) executed
-  2026-10-23 — 204 new offline checks across the five (above). `fleet_vision_judge` (6.2), deferred by
-  direct operator instruction 2026-10-23, is genuinely blocked from this session anyway: it needs real
-  render images already sitting on Kiln/Anvil, which this dev machine cannot reach or fabricate. Phase C
-  is otherwise done; only Phase D and §6.2 (whenever it's unblocked) remain.
+  **Complete.** `fleet_muse_contract` (6.3) executed 2026-10-22; `fleet_dualcoder_precision` (6.5),
+  `fleet_digest_faithfulness` (6.4), `fleet_coder_fix` (6.7), and `fleet_coder_build` (6.8) executed
+  2026-10-23 — 204 new offline checks across the five (above). `fleet_vision_judge` (6.2), initially
+  deferred by direct operator instruction 2026-10-23 for lacking real render images, was unblocked the
+  same day when the operator pointed this session at a real NFS archive of `hermes-media.py` output —
+  only 4 of the 111 real files found there were usable (the rest explicit content this session
+  deliberately excludes), a small real floor well under this section's own 20-30 target, built and
+  checked in rather than left deferred (25 more offline checks, above). Phase C is now fully done.
 - **Phase D — Tier 3 interactive-latency harness (6.6) + S28's security suite family.** Last, since both
   are explicitly secondary/optional by this proposal's own first principle and S28's own status.
   **6.6 executed 2026-10-23** (above) — `tools/hermes-latency-eval.py`, verified against a real local
@@ -738,3 +774,4 @@ live in-repo, in the same NAS path `history.jsonl` already uses, or elsewhere, b
 | 1.8.0 | 2026-10-23 | **Phase C, a fourth suite executed** (§6.7, §10), after a direct operator instruction to defer §6.2 and continue Phase C. `fleet_coder_fix` closes gap 7: new `tools/hermes-coder-fix-eval.py`, 10 scored tasks from the 9 real commits §6.7 already named (confirmed reachable directly in this repo — the cross-repo mining this section's own `[PROPOSED]` note floated turned out unnecessary for this nine). One correction found while building: this section listed `actions.js` as the `enchantments.concat` fix's (`35df5ec`) source; the real fix is in `equipment.js`. The model is shown a real pre-fix excerpt (never the whole file — several of these files run 1,000-7,800 lines) located by anchor text resolved fresh per file version, using its LAST match rather than its first — found by testing: this project's own versioning convention quotes a fix's own variable names in the file's own header-comment prose, physically earlier in the file than any real target function, so a first-match lookup was grabbing commentary instead of code. Only 1 of 10 tasks is executable from this session (`reolink_ai_state`, pure Python with a duck-typed `host_obj` parameter needing no real vendor library); verified against the real commit itself, not a synthetic case — the real pre-fix file fails the repro, the real post-fix file passes it, and splicing the real post-fix excerpt into the real pre-fix file via substitution also passes it. The other 4 "repro-testable in principle" tasks are JavaScript, and this dev machine has no `node` binary anywhere on it (checked thoroughly, not assumed) — a different, harder blocker than "no live fleet access" — so their repro axis reports a third, honest `"env_unavailable"` status, never blended into a pass/fail rate; the judge axis still scores all 10. Two tiers recorded as two separate keys, never blended (§8.6): `fleet_coder_fix_repro` (1-task gold-standard subset) and `fleet_coder_fix_judge` (all 10). A real bug found via this suite's own testing: an early `strip_code_fence()` called `.strip()` on the whole answer first, silently eating an unfenced answer's own leading indentation and corrupting every substitution — fixed to touch only actual fence markup. 31 offline checks (`infra/model-benchmark/tests/test_coder_fix.py`); the existing 145-check Phase A-C suite stays regression-free. No fleet node reachable to run against a live coder/judge endpoint yet. |
 | 1.9.0 | 2026-10-23 | **Phase C complete except §6.2** (§6.8, §10) — operator confirmed continuing straight into `fleet_coder_build` after `fleet_coder_fix`. New `tools/hermes-coder-build-eval.py` closes gap 8: 8 scored tasks from the 8 real "build from scratch" commits §6.8 already named; 7 reachable directly in this repo, 1 (`botnet_intel_build`) from the sibling `HermesAgentRedo` repo via ordinary cross-repo `git show`, same precedent §6.7's corpus already set — `HermesAgentV4` turned out not to be needed for either suite. Unlike a fix prompt, there's no pre-existing file to excerpt for a build task, so the model is shown only the requirement (from the real commit's own stated "why"); the 3 fixture-tier tasks additionally specify the exact real function signature to implement, a real interface contract rather than an implementation hint. Those 3 (`botnet_intel_build`, `feed_reader_build`, `minecraft_admin_build`) each target a pure, dependency-free function, with every fixture's expected output run against the REAL post-build implementation before being written down, never hand-computed; one real discriminating-power check caught during testing — a plausible RSS parser using `Element.text` instead of `Element.itertext()` (missing text after a nested tag) correctly fails the fixture while a minimal correct one passes. `doc_to_markdown_build` is explicitly NOT fixture-tested despite this section's own text calling it so: its real substance needs `pymupdf4llm`/`python-docx`, neither installed on this dev machine — scored judge-only, a real environment constraint, not a design reversal. Two tiers, never blended (§8.6): `fleet_coder_build_fixture` (3-task subset) and `fleet_coder_build_judge` (all 8). 28 offline checks (`infra/model-benchmark/tests/test_coder_build.py`); the existing 176-check Phase A-C suite stays regression-free. Phase C is now complete except §6.2, which stays deferred. No fleet node reachable to run against a live coder/judge endpoint yet. |
 | 1.10.0 | 2026-10-23 | **Phase D's §6.6 executed**, after a direct operator instruction ("D") to continue into Phase D. New `tools/hermes-latency-eval.py`: the Tier 3 interactive-latency harness for the six roles §3 marks "Yes" (`dispatch`, `guard`, `muse`, and RAG's `embed`/`rerank`/synthesis hops), implementing all three corrections this section already names. Verified against a real local HTTP server (an in-process background thread, no subprocess, no external network) rather than a stubbed Python call — against that server's fixed, known per-call delay, concurrency 1→4 reproduced correction #1's own cited finding directly: aggregate tok/s roughly quadrupled while per-request p50 latency stayed flat, the same "13.0→51.9 tok/s... flat per-request latency" shape already cited from real `muse` history, now demonstrated rather than only asserted. `rag_embed`/`rag_rerank` call the REAL `hermes_rag_common.embed()`/`rerank()` functions directly (their `EMBED_URL`/`RERANK_URL` globals monkeypatched to the test endpoint, same pattern `hermes-digest-faithfulness-eval.py` already uses), so those hops' real parsing runs unmodified. `fleet_rag_latency` is written per-hop, never as one fabricated bare number. 34 offline checks (`infra/model-benchmark/tests/test_latency_eval.py`); the existing 204-check suite stays regression-free. **S28's security suite family stays explicitly deferred, not attempted**: it's gated on a different stage's own incomplete prerequisite (`IMPLEMENTATION_PLAN.md` S10's network isolation, still an operator checklist) and needs real deployed vulnerable web apps (Juice Shop/WebGoat) a dev-machine session shouldn't fake infrastructure around — stated plainly rather than built untested. No live fleet node reachable to measure a real backend's actual latency numbers yet — only the harness's own correctness is verified. Minor bump — a stage's phase executed and its real record written in, nothing prior reversed. |
+| 1.11.0 | 2026-10-23 | **S6.2 (`fleet_vision_judge`) built, unblocking it after same-day deferral.** Operator pointed this session at a real NFS archive of `hermes-media.py` output (`/mnt/nas2-hermes-images` on HomeD13, over the existing `homed13` SSH alias). Of 111 real files found there, 106 (`amy_gen_*`) are explicit sexual-content generations — confirmed by reading the real ComfyUI prompt metadata embedded in each PNG, never by viewing the rendered images; one sample pulled down to confirm this was deleted immediately, unviewed. This is a hard content boundary, independent of it being the operator's own private fleet use, applied the same way this session has applied every other real-data-access constraint. The remaining 4 (`hermes_gen_*`) are ordinary test-shaped renders and are the entire usable set — n=4, well under this section's own `[PROPOSED]` 20-30 target, checked into `infra/fleet-vision-judge/fixtures/` (7.1MB) with their real embedded prompts and this session's own direct hand labels (3 pass, 1 fail — a real warrior-vs-"cybernetically enhanced sharks" render whose sharks show no cybernetic element at all). New `tools/hermes-vision-judge-eval.py` calls `hermes-media.py`'s real `evaluate_image()` completely unmodified (its one network dependency, `ROUTER_URL`, monkeypatched to `omni`'s backend directly per S8.1), verified against a real local server that checks for the real image_url/data-URI request shape. One correction found while building: this section's own "false-accept/false-reject" phrasing read ambiguously against which error has which consequence, so the harness names the two error types by consequence directly (`false_pass_rate`/`false_fail_rate`) instead. 25 offline checks (`infra/model-benchmark/tests/test_vision_judge.py`); the existing 238-check suite stays regression-free. Phase C is now fully complete. No fleet node reachable to run against a live `omni` endpoint yet. Minor bump — a stage's previously-deferred item unblocked and executed, its real record written in, nothing prior reversed. |
