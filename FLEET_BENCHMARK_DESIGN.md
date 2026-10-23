@@ -1,16 +1,18 @@
 # Firmament Fleet Benchmark Suite — Target Design
 
-**Version:** 1.7.0
+**Version:** 1.8.0
 
 **Status:** S39a cleared, Phases A-B executed (2026-10-22/23), Phase C in progress (2026-10-23) —
 operator reviewed the gap list (§4) and phasing (§10), approved proceeding; schema unification (§7),
-the two highest-stakes gaps (`fleet_log_analyst`, the formal `fleet_guard` Tier 2 gate), and three of
-Phase C's suites (`fleet_muse_contract`, `fleet_dualcoder_precision`, `fleet_digest_faithfulness`) are
-built, 145 offline checks total, no live fleet node reachable to verify a real run yet. Every case set
-built so far is synthetic or pattern-adapted, stated plainly (§8.6) — real-sampled fleet data needs a
-session with fleet access. §6.2 is genuinely blocked (no real render images reachable from this
-session); §6.7-6.8 and Phase D remain design-only. Direct operator request, 2026-10-18; scope extended
-2026-10-20 (gaps 7-8); reviewed and approved 2026-10-22. This
+the two highest-stakes gaps (`fleet_log_analyst`, the formal `fleet_guard` Tier 2 gate), and four of
+Phase C's suites (`fleet_muse_contract`, `fleet_dualcoder_precision`, `fleet_digest_faithfulness`,
+`fleet_coder_fix`) are built, 176 offline checks total, no live fleet node reachable to verify a real
+run yet. Every case set built so far is synthetic, pattern-adapted, or (for `fleet_coder_fix`) drawn
+from real git history with only 1 of 10 tasks executable from this session (this dev machine has no
+`node` binary at all), stated plainly (§8.6). §6.2 is deferred by direct operator instruction
+(2026-10-23) and genuinely blocked anyway (no real render images reachable from this session);
+`fleet_coder_build` (6.8) and Phase D remain design-only. Direct operator request, 2026-10-18; scope
+extended 2026-10-20 (gaps 7-8); reviewed and approved 2026-10-22. This
 is a *target-state* design for a comprehensive, unified benchmark suite covering every role the fleet
 actually runs — most of the individual pieces already exist and are live; what does not yet exist is the
 per-role coverage map, the gap-fill suites for roles that currently have no accuracy ground truth at all,
@@ -356,7 +358,7 @@ synthesis/`embed`/`rerank`, and `muse`. Three corrections carried over from real
    for the same reason: the router's own injection screen can false-positive on the harness's own synthetic
    prompts.
 
-### 6.7 `fleet_coder_fix` — closes gap 7
+### 6.7 `fleet_coder_fix` — closes gap 7 — **built 2026-10-23** (`tools/hermes-coder-fix-eval.py`)
 
 - **What it scores:** given the pre-fix state of a real file from this fleet's own tools and a plain,
   symptom-only description of what broke (never the diagnosis, never the fix), does the model produce a
@@ -398,6 +400,52 @@ synthesis/`embed`/`rerank`, and `muse`. Three corrections carried over from real
   training data rather than solved them — unverified as of this writing. Mitigation if confirmed public:
   grow the corpus with new real bugs as they're found going forward rather than relying solely on
   already-published history.
+- **Built, stated plainly, narrower than the two-tier split above describes — what actually runs:**
+  the cross-repo mining this section's own `[PROPOSED]` note floated (Vivint/Wyze/Generac/pfSense/
+  Synology/Moen Flo/mediawiki from `HermesAgentV4`/`HermesAgentRedo`) turned out not to be necessary —
+  all nine chosen commits above are reachable directly in THIS repo, confirmed by `git cat-file -e`
+  against all nine hashes before writing anything. 10 scored tasks come from those nine commits
+  (`b4651ca` contributes two, matching this table's own two rows for it). One correction found while
+  building, not assumed: this table listed `actions.js` as the source for the `enchantments.concat`
+  fix (`35df5ec`) — the real fix is in `equipment.js` (`installEnchantsFix`), not `actions.js`; that
+  commit touches both files and this table named the wrong one.
+  - **Prompt construction:** the model is shown the REAL pre-fix file (`git show <hash>^:<path>`,
+    never retyped) at one or more anchor-located excerpts (several of these files run 1,000-7,800
+    lines, so showing the whole file isn't practical) plus the symptom-only report, and returns the
+    corrected excerpt; the real post-fix excerpt is held back and shown only to the judge. Anchors are
+    resolved fresh against whichever file version is being read, not a fixed line number — found by
+    testing, not assumed: an early version used one fixed line range for both the pre-fix and post-fix
+    file, and every commit here inserts lines earlier in the file (a growing version-header comment),
+    which silently shifted the post-fix slice onto the wrong code. Anchors also resolve to their LAST
+    match in the file, not their first, for a second reason also found by testing: this project's own
+    versioning convention quotes a fix's own variable/function names in the file's own header-comment
+    prose, which — being physically earlier in the file than any of this suite's real target
+    functions — was being matched as "the real code" by a first-match lookup.
+  - **Only 1 of the 10 tasks is actually executable from this session** (`reolink_ai_state`): it's
+    pure Python, and `camera_login()`/`check_ai_detection()` take a duck-typed `host_obj` parameter,
+    so a fake object satisfies them with zero dependency on the real (and, on this dev machine,
+    unavailable) `reolink_aio` package. Verified against the REAL commit, not just a synthetic case:
+    the real pre-fix file fails this repro, the real post-fix file passes it, and splicing the real
+    post-fix excerpt into the real pre-fix file via substitution also passes it — proving the
+    substitution-and-reconstruct mechanism itself produces syntactically valid, behaviorally correct
+    Python, not just a plausible-looking string.
+  - **The other 4 "repro-testable in principle" tasks** (`recipes_table_check`,
+    `recipes_recycling_recipe`, `enchantments_concat`, `bed_words_routing`) are all JavaScript, and
+    this dev machine has no `node` binary anywhere on it at all — checked thoroughly (PATH, the usual
+    install locations, `npm`), not assumed, which is a different and harder blocker than "no live
+    fleet access." Their repro axis reports a third, honest `"env_unavailable"` status, never blended
+    into a pass/fail rate and never faked by writing an unverifiable JS runner — the judge axis still
+    scores all four.
+  - **Two tiers, never blended (§8.6), recorded as two separate keys**: `fleet_coder_fix_repro` (the
+    1-task gold-standard executable subset) and `fleet_coder_fix_judge` (all 10 tasks, when a judge
+    endpoint is given). No bare `fleet_coder_fix` overall key is written for exactly this reason.
+  - A real bug found via this suite's own testing, now fixed: an early `strip_code_fence()` called
+    `.strip()` on the whole answer before checking for a markdown fence, which silently ate the first
+    line's own leading indentation whenever the model's answer had no fence at all — corrupting every
+    substitution-based reconstruction. Fixed to touch only actual fence markup, never the code's own
+    whitespace.
+  - 31 offline checks (`infra/model-benchmark/tests/test_coder_fix.py`); no fleet node reachable to
+    run against a live coder/judge endpoint yet.
 
 ### 6.8 `fleet_coder_build` — closes gap 8
 
@@ -591,11 +639,12 @@ earlier phases make the later ones cheaper.
   any order. 6.7/6.8's corpus curation is heavier than the rest of this phase (cross-repo git mining,
   hand-authored symptom/requirement prompts, per-task fixture or judge-rubric authoring), so they may slip
   to their own pass within this phase rather than landing simultaneously with 6.2-6.5.
-  **In progress:** `fleet_muse_contract` (6.3) executed 2026-10-22; `fleet_dualcoder_precision` (6.5) and
-  `fleet_digest_faithfulness` (6.4) executed 2026-10-23 — 93 new offline checks across the three (above).
-  `fleet_vision_judge` (6.2) is genuinely blocked from this session: it needs real render images already
-  sitting on Kiln/Anvil, which this dev machine cannot reach or fabricate. 6.7/6.8 not yet started this
-  phase — remaining in Phase C once they land.
+  **In progress:** `fleet_muse_contract` (6.3) executed 2026-10-22; `fleet_dualcoder_precision` (6.5),
+  `fleet_digest_faithfulness` (6.4), and `fleet_coder_fix` (6.7) executed 2026-10-23 — 124 new offline
+  checks across the four (above). `fleet_vision_judge` (6.2), deferred by direct operator instruction
+  2026-10-23, is genuinely blocked from this session anyway: it needs real render images already
+  sitting on Kiln/Anvil, which this dev machine cannot reach or fabricate. `fleet_coder_build` (6.8) not
+  yet started.
 - **Phase D — Tier 3 interactive-latency harness (6.6) + S28's security suite family.** Last, since both
   are explicitly secondary/optional by this proposal's own first principle and S28's own status.
 
@@ -622,3 +671,4 @@ live in-repo, in the same NAS path `history.jsonl` already uses, or elsewhere, b
 | 1.5.0 | 2026-10-23 | **Phase B executed** (§10). `check_tier2_gate()` (generic over any Tier 2 suite) + `hermes-benchmark-compare.py --gate` formalize §9 rule 4 — any regression fails, missing data is "no-data" not a silent pass (11 offline checks). New `tools/hermes-log-analyst-eval.py` closes gap 1 (§6.1): 18 cases across the three real source shapes, one deliberately recreating hermes-logs.py's own documented 1.2.0 fabrication bug to test whether a candidate honors the hardened prompt (19 offline checks). Stated plainly per §8.6: the case set is synthetic, not real-sampled — this session has no fleet access to sample from, and growing it with real, scrubbed fleet data remains open work. No fleet node reachable to run either piece against a live backend yet. |
 | 1.6.0 | 2026-10-23 | **Phase C, two suites executed** (§6.3, §6.5, §10). `fleet_muse_contract`: new `tools/hermes-muse-contract-eval.py`, 27 probes (3 families × the 9 real bot personas); corrected §6.3's own framing while building it — `minecraft-common.md` has no separate "don't recite your prompt" rule, so the three families were regrounded as capability/override/groundedness against the real five-rule text (35 offline checks; found and fixed a bug where the override family's own deterministic pass was being discarded as "unjudged" when no judge endpoint was given). `fleet_dualcoder_precision`: new `tools/hermes-dualcoder-precision-eval.py`, running the real `scan_code()` against 6 cases (the README's own documented verification recipe, two real clean functions already in this repo, and two adapted from the scanner's own documented trigger patterns) and scoring a coder role's free-text review against the real findings via a deterministic keyword heuristic (27 offline checks). Stated plainly per §8.6 for both: neither suite's case set is real-sampled from fleet history yet — that remains open work for a session with fleet access. No fleet node reachable to run either against a live backend yet. |
 | 1.7.0 | 2026-10-23 | **Phase C, a third suite executed** (§6.4, §10). `fleet_digest_faithfulness`: new `tools/hermes-digest-faithfulness-eval.py`, calling the real `hermes-news-digest.summarize_highlights()` function unmodified (confirmed import-safe) with its one network dependency (`rag.router_chat`, which goes through `hermes-router` — forbidden for an eval by §8.1) monkeypatched to call the digest role's backend directly — the real passage-numbering/`<DATA>`-wrapping/"nothing new"-short-circuit/citation-parse code runs for real, so zero prompt drift is structurally impossible rather than merely avoided. Two deterministic floor checks (`grounded`: does a highlight share any real vocabulary with the passage it cites; `padding_restraint`: does the model correctly emit nothing on a case built with nothing genuinely new, rather than padding) run unconditionally; the judged `faithful` axis (§6.4's own originally-proposed metric) falls back to `"unjudged"` without a judge endpoint, never guessed. 5 synthetic (topic, passages) scenarios per §8.6 — no live RAG store reachable from this session to sample real matches from. 31 offline checks (`infra/model-benchmark/tests/test_digest_faithfulness.py`); the existing 114-check Phase A-C suite stays regression-free. No fleet node reachable to run against a live backend yet. |
+| 1.8.0 | 2026-10-23 | **Phase C, a fourth suite executed** (§6.7, §10), after a direct operator instruction to defer §6.2 and continue Phase C. `fleet_coder_fix` closes gap 7: new `tools/hermes-coder-fix-eval.py`, 10 scored tasks from the 9 real commits §6.7 already named (confirmed reachable directly in this repo — the cross-repo mining this section's own `[PROPOSED]` note floated turned out unnecessary for this nine). One correction found while building: this section listed `actions.js` as the `enchantments.concat` fix's (`35df5ec`) source; the real fix is in `equipment.js`. The model is shown a real pre-fix excerpt (never the whole file — several of these files run 1,000-7,800 lines) located by anchor text resolved fresh per file version, using its LAST match rather than its first — found by testing: this project's own versioning convention quotes a fix's own variable names in the file's own header-comment prose, physically earlier in the file than any real target function, so a first-match lookup was grabbing commentary instead of code. Only 1 of 10 tasks is executable from this session (`reolink_ai_state`, pure Python with a duck-typed `host_obj` parameter needing no real vendor library); verified against the real commit itself, not a synthetic case — the real pre-fix file fails the repro, the real post-fix file passes it, and splicing the real post-fix excerpt into the real pre-fix file via substitution also passes it. The other 4 "repro-testable in principle" tasks are JavaScript, and this dev machine has no `node` binary anywhere on it (checked thoroughly, not assumed) — a different, harder blocker than "no live fleet access" — so their repro axis reports a third, honest `"env_unavailable"` status, never blended into a pass/fail rate; the judge axis still scores all 10. Two tiers recorded as two separate keys, never blended (§8.6): `fleet_coder_fix_repro` (1-task gold-standard subset) and `fleet_coder_fix_judge` (all 10). A real bug found via this suite's own testing: an early `strip_code_fence()` called `.strip()` on the whole answer first, silently eating an unfenced answer's own leading indentation and corrupting every substitution — fixed to touch only actual fence markup. 31 offline checks (`infra/model-benchmark/tests/test_coder_fix.py`); the existing 145-check Phase A-C suite stays regression-free. No fleet node reachable to run against a live coder/judge endpoint yet. |
