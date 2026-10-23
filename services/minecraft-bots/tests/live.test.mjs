@@ -673,8 +673,16 @@ scenario("Shelter rooms (general): shelterRoomsNear finds a real hole in a real 
   const myWalls = new Set(communalShelterPositions(base, width, depth).map((p) => `${p.x},${p.y},${p.z}`));
   const isMine = (r) => [...r.shell].some((k) => myWalls.has(k));
   const doorPos = communalDoorwayPosition(base, depth);
+  const myRoom = () => shelterRoomsNear(bot, doorPos, 12).find(isMine);
 
-  const intact = shelterRoomsNear(bot, doorPos, 12).find(isMine);
+  // Real door placement auto-creates both halves server-side in one action, but the upper
+  // half's own block-update packet can land a moment after the lower half's -- found live, not
+  // guessed: checking immediately after the build reported success read the real upper-door
+  // cell as still-air for up to ~2s, one false hole, gone on the very next check. Production's
+  // checkShelterIntegrity() never checks this soon after a build (a 60s timer), so this settle
+  // wait belongs here, not in the implementation.
+  await waitFor(() => myRoom()?.holes.size === 0, 5000, "the client's world model to settle after the build");
+  const intact = myRoom();
   assert(intact, "the real, just-built structure is found by the general detector");
   assert.equal(intact.holes.size, 0, "intact -- no holes yet");
 
