@@ -1,19 +1,21 @@
 # Firmament Fleet Benchmark Suite — Target Design
 
-**Version:** 1.9.0
+**Version:** 1.10.0
 
-**Status:** S39a cleared, Phases A-B executed (2026-10-22/23), Phase C complete except §6.2
+**Status:** S39a cleared, Phases A-B-D(6.6) executed (2026-10-22/23), Phase C complete except §6.2
 (2026-10-23) — operator reviewed the gap list (§4) and phasing (§10), approved proceeding; schema
 unification (§7), the two highest-stakes gaps (`fleet_log_analyst`, the formal `fleet_guard` Tier 2
-gate), and five of Phase C's six suites (`fleet_muse_contract`, `fleet_dualcoder_precision`,
-`fleet_digest_faithfulness`, `fleet_coder_fix`, `fleet_coder_build`) are built, 204 offline checks
-total, no live fleet node reachable to verify a real run yet. Every case set built so far is
-synthetic, pattern-adapted, or drawn from real git history with only a small executable subset
-(this dev machine has no `node` binary at all, and lacks a couple of Python vendor libraries),
-stated plainly (§8.6). §6.2 is deferred by direct operator instruction (2026-10-23) and genuinely
-blocked anyway (no real render images reachable from this session); only Phase D and §6.2 (whenever
-it's unblocked) remain. Direct operator request, 2026-10-18; scope extended 2026-10-20 (gaps 7-8);
-reviewed and approved 2026-10-22. This
+gate), five of Phase C's six suites (`fleet_muse_contract`, `fleet_dualcoder_precision`,
+`fleet_digest_faithfulness`, `fleet_coder_fix`, `fleet_coder_build`), and the Tier 3
+interactive-latency harness (§6.6) are built, 238 offline checks total, no live fleet node reachable
+to verify a real run or real backend numbers yet. Every case set built so far is synthetic,
+pattern-adapted, or drawn from real git history with only a small executable subset (this dev
+machine has no `node` binary at all, and lacks a couple of Python vendor libraries), stated plainly
+(§8.6). §6.2 is deferred by direct operator instruction (2026-10-23) and genuinely blocked anyway (no
+real render images reachable from this session); S28's security suite family stays deferred,
+genuinely gated on a different stage's own incomplete prerequisite (S10's network isolation).
+Direct operator request, 2026-10-18; scope extended 2026-10-20 (gaps 7-8); reviewed and approved
+2026-10-22. This
 is a *target-state* design for a comprehensive, unified benchmark suite covering every role the fleet
 actually runs — most of the individual pieces already exist and are live; what does not yet exist is the
 per-role coverage map, the gap-fill suites for roles that currently have no accuracy ground truth at all,
@@ -344,7 +346,7 @@ new key.
   (`infra/model-benchmark/tests/test_dualcoder_precision.py`); no fleet node reachable to run against a
   live coder endpoint yet.
 
-### 6.6 Tier 3 interactive-latency harness — the speed half of the six "Yes" roles
+### 6.6 Tier 3 interactive-latency harness — the speed half of the six "Yes" roles — **built 2026-10-23** (`tools/hermes-latency-eval.py`)
 
 Not a new accuracy suite — the secondary-goal half of `dispatch`, `guard`, presenter styling, RAG
 synthesis/`embed`/`rerank`, and `muse`. Three corrections carried over from real measurement history
@@ -358,6 +360,28 @@ synthesis/`embed`/`rerank`, and `muse`. Three corrections carried over from real
 3. **Never run this tier through `hermes-router`** — same bypass every other suite already uses (§8.1), and
    for the same reason: the router's own injection screen can false-positive on the harness's own synthetic
    prompts.
+- **Built, and the three corrections above verified for real, not just implemented:** this harness was
+  tested against a real local HTTP server standing in for a backend (an in-process thread, no subprocess,
+  no external network) rather than a stubbed Python call — the strongest verification available without a
+  live fleet node for a tool whose whole point is measuring real concurrent I/O timing. Against that
+  server's fixed, known per-call delay, going from concurrency 1 to 4 reproduced correction #1's own cited
+  finding directly: aggregate tok/s roughly quadrupled while per-request p50 latency stayed flat — the
+  exact "13.0→51.9 tok/s... with flat per-request latency" shape this section already cites from real
+  `muse` measurement history, now demonstrated against a controlled server rather than only asserted.
+  `rag_embed`/`rag_rerank` call the REAL `hermes_rag_common.embed()`/`rerank()` functions directly
+  (imported, never copied — §8.5), with their own `EMBED_URL`/`RERANK_URL` module globals monkeypatched to
+  the test endpoint — the same monkeypatch-the-shared-module-global pattern `hermes-digest-faithfulness-eval.py`
+  already uses for `rag.router_chat`, so those two hops' real request/response parsing runs unmodified.
+  `dispatch`/`guard`/`muse`/`rag_synthesis` use a representative — not the exact real — system+user message
+  per role, stated plainly as a simplification: latency depends on realistic shape/length far more than
+  exact wording, unlike the accuracy suites where prompt fidelity is load-bearing. `fleet_rag_latency`
+  (`ALL_SUITES`' own registered name) is written per-hop (`fleet_rag_latency_embed`/`_rerank`/`_synthesis`),
+  never as one fabricated bare number combining hops a single invocation didn't measure. The primary value
+  recorded per role is p50 latency (ms) at the highest tested concurrency level, with p95 and aggregate
+  tok/s as additional unregistered sub-keys, the same "bare + breakdown" shape every other suite in this
+  design uses. 34 offline checks (`infra/model-benchmark/tests/test_latency_eval.py`); no live fleet node
+  reachable to measure a real backend's actual numbers yet — only the harness's own correctness is
+  verified from this session.
 
 ### 6.7 `fleet_coder_fix` — closes gap 7 — **built 2026-10-23** (`tools/hermes-coder-fix-eval.py`)
 
@@ -678,6 +702,15 @@ earlier phases make the later ones cheaper.
   is otherwise done; only Phase D and §6.2 (whenever it's unblocked) remain.
 - **Phase D — Tier 3 interactive-latency harness (6.6) + S28's security suite family.** Last, since both
   are explicitly secondary/optional by this proposal's own first principle and S28's own status.
+  **6.6 executed 2026-10-23** (above) — `tools/hermes-latency-eval.py`, verified against a real local
+  test server, 34 offline checks. **S28's security suite family stays deferred, not attempted**: unlike
+  every other gap this session has worked around (missing `node`, missing Python vendor libraries,
+  missing render images), S28 is gated on a DIFFERENT stage's own incomplete prerequisite — `IMPLEMENTATION_PLAN.md`'s
+  S10 (network isolation) is still "an operator checklist," not executed — and it requires standing up
+  real, deliberately-vulnerable web applications (OWASP Juice Shop, WebGoat), which is not something a
+  dev-machine session should attempt to fake or mock around. Building untested fixture infrastructure for
+  that would be lower-quality work than simply stating the real blocker plainly, so it's left for a
+  session where S10 is actually done.
 
 `[UNKNOWN]`: exact case-set sizes for 6.1/6.2/6.3 are proposed targets, not final — they should be set by
 whoever builds each phase, sized to what's actually labelable in a reasonable sitting, not treated as a
@@ -704,3 +737,4 @@ live in-repo, in the same NAS path `history.jsonl` already uses, or elsewhere, b
 | 1.7.0 | 2026-10-23 | **Phase C, a third suite executed** (§6.4, §10). `fleet_digest_faithfulness`: new `tools/hermes-digest-faithfulness-eval.py`, calling the real `hermes-news-digest.summarize_highlights()` function unmodified (confirmed import-safe) with its one network dependency (`rag.router_chat`, which goes through `hermes-router` — forbidden for an eval by §8.1) monkeypatched to call the digest role's backend directly — the real passage-numbering/`<DATA>`-wrapping/"nothing new"-short-circuit/citation-parse code runs for real, so zero prompt drift is structurally impossible rather than merely avoided. Two deterministic floor checks (`grounded`: does a highlight share any real vocabulary with the passage it cites; `padding_restraint`: does the model correctly emit nothing on a case built with nothing genuinely new, rather than padding) run unconditionally; the judged `faithful` axis (§6.4's own originally-proposed metric) falls back to `"unjudged"` without a judge endpoint, never guessed. 5 synthetic (topic, passages) scenarios per §8.6 — no live RAG store reachable from this session to sample real matches from. 31 offline checks (`infra/model-benchmark/tests/test_digest_faithfulness.py`); the existing 114-check Phase A-C suite stays regression-free. No fleet node reachable to run against a live backend yet. |
 | 1.8.0 | 2026-10-23 | **Phase C, a fourth suite executed** (§6.7, §10), after a direct operator instruction to defer §6.2 and continue Phase C. `fleet_coder_fix` closes gap 7: new `tools/hermes-coder-fix-eval.py`, 10 scored tasks from the 9 real commits §6.7 already named (confirmed reachable directly in this repo — the cross-repo mining this section's own `[PROPOSED]` note floated turned out unnecessary for this nine). One correction found while building: this section listed `actions.js` as the `enchantments.concat` fix's (`35df5ec`) source; the real fix is in `equipment.js`. The model is shown a real pre-fix excerpt (never the whole file — several of these files run 1,000-7,800 lines) located by anchor text resolved fresh per file version, using its LAST match rather than its first — found by testing: this project's own versioning convention quotes a fix's own variable names in the file's own header-comment prose, physically earlier in the file than any real target function, so a first-match lookup was grabbing commentary instead of code. Only 1 of 10 tasks is executable from this session (`reolink_ai_state`, pure Python with a duck-typed `host_obj` parameter needing no real vendor library); verified against the real commit itself, not a synthetic case — the real pre-fix file fails the repro, the real post-fix file passes it, and splicing the real post-fix excerpt into the real pre-fix file via substitution also passes it. The other 4 "repro-testable in principle" tasks are JavaScript, and this dev machine has no `node` binary anywhere on it (checked thoroughly, not assumed) — a different, harder blocker than "no live fleet access" — so their repro axis reports a third, honest `"env_unavailable"` status, never blended into a pass/fail rate; the judge axis still scores all 10. Two tiers recorded as two separate keys, never blended (§8.6): `fleet_coder_fix_repro` (1-task gold-standard subset) and `fleet_coder_fix_judge` (all 10). A real bug found via this suite's own testing: an early `strip_code_fence()` called `.strip()` on the whole answer first, silently eating an unfenced answer's own leading indentation and corrupting every substitution — fixed to touch only actual fence markup. 31 offline checks (`infra/model-benchmark/tests/test_coder_fix.py`); the existing 145-check Phase A-C suite stays regression-free. No fleet node reachable to run against a live coder/judge endpoint yet. |
 | 1.9.0 | 2026-10-23 | **Phase C complete except §6.2** (§6.8, §10) — operator confirmed continuing straight into `fleet_coder_build` after `fleet_coder_fix`. New `tools/hermes-coder-build-eval.py` closes gap 8: 8 scored tasks from the 8 real "build from scratch" commits §6.8 already named; 7 reachable directly in this repo, 1 (`botnet_intel_build`) from the sibling `HermesAgentRedo` repo via ordinary cross-repo `git show`, same precedent §6.7's corpus already set — `HermesAgentV4` turned out not to be needed for either suite. Unlike a fix prompt, there's no pre-existing file to excerpt for a build task, so the model is shown only the requirement (from the real commit's own stated "why"); the 3 fixture-tier tasks additionally specify the exact real function signature to implement, a real interface contract rather than an implementation hint. Those 3 (`botnet_intel_build`, `feed_reader_build`, `minecraft_admin_build`) each target a pure, dependency-free function, with every fixture's expected output run against the REAL post-build implementation before being written down, never hand-computed; one real discriminating-power check caught during testing — a plausible RSS parser using `Element.text` instead of `Element.itertext()` (missing text after a nested tag) correctly fails the fixture while a minimal correct one passes. `doc_to_markdown_build` is explicitly NOT fixture-tested despite this section's own text calling it so: its real substance needs `pymupdf4llm`/`python-docx`, neither installed on this dev machine — scored judge-only, a real environment constraint, not a design reversal. Two tiers, never blended (§8.6): `fleet_coder_build_fixture` (3-task subset) and `fleet_coder_build_judge` (all 8). 28 offline checks (`infra/model-benchmark/tests/test_coder_build.py`); the existing 176-check Phase A-C suite stays regression-free. Phase C is now complete except §6.2, which stays deferred. No fleet node reachable to run against a live coder/judge endpoint yet. |
+| 1.10.0 | 2026-10-23 | **Phase D's §6.6 executed**, after a direct operator instruction ("D") to continue into Phase D. New `tools/hermes-latency-eval.py`: the Tier 3 interactive-latency harness for the six roles §3 marks "Yes" (`dispatch`, `guard`, `muse`, and RAG's `embed`/`rerank`/synthesis hops), implementing all three corrections this section already names. Verified against a real local HTTP server (an in-process background thread, no subprocess, no external network) rather than a stubbed Python call — against that server's fixed, known per-call delay, concurrency 1→4 reproduced correction #1's own cited finding directly: aggregate tok/s roughly quadrupled while per-request p50 latency stayed flat, the same "13.0→51.9 tok/s... flat per-request latency" shape already cited from real `muse` history, now demonstrated rather than only asserted. `rag_embed`/`rag_rerank` call the REAL `hermes_rag_common.embed()`/`rerank()` functions directly (their `EMBED_URL`/`RERANK_URL` globals monkeypatched to the test endpoint, same pattern `hermes-digest-faithfulness-eval.py` already uses), so those hops' real parsing runs unmodified. `fleet_rag_latency` is written per-hop, never as one fabricated bare number. 34 offline checks (`infra/model-benchmark/tests/test_latency_eval.py`); the existing 204-check suite stays regression-free. **S28's security suite family stays explicitly deferred, not attempted**: it's gated on a different stage's own incomplete prerequisite (`IMPLEMENTATION_PLAN.md` S10's network isolation, still an operator checklist) and needs real deployed vulnerable web apps (Juice Shop/WebGoat) a dev-machine session shouldn't fake infrastructure around — stated plainly rather than built untested. No live fleet node reachable to measure a real backend's actual latency numbers yet — only the harness's own correctness is verified. Minor bump — a stage's phase executed and its real record written in, nothing prior reversed. |
