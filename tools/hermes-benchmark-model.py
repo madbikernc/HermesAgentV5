@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-22) — S39 Phase A: --suites now validates against hermes_benchmark_common.py's new
+# TIER0_SUITES constant instead of ALL_SUITES, which that module just widened to the full shared
+# schema (fleet_*/juiceshop/webgoat/vulnhunter) for format_comparison()'s own benefit. Validating
+# against the wider list here would have let `--suites fleet_coder_fix` pass validation and then
+# silently do nothing -- this tool's own dispatch is a hardcoded per-suite branch sequence, not a
+# generic lookup, and none of those suites have a branch. No change to what this tool actually runs.
 #
 # 1.1.0 — real fixes from a live verification pass on spark, 2026-08-24 (venv actually installed,
 # every suite actually invoked against real backends, not just read). BFCL: replaced a wrong guess
@@ -72,8 +79,10 @@ def main() -> int:
                          help="OpenAI-compatible base URL, no trailing /chat/completions "
                               "(default: this node's hermes-router)")
     parser.add_argument("--suites", default=",".join(bc.DEFAULT_SUITES),
-                         help=f"comma-separated subset of {bc.ALL_SUITES} (default excludes "
-                              "swebench — confirmed blocked on this hardware, README §4)")
+                         help=f"comma-separated subset of {bc.TIER0_SUITES} (default excludes "
+                              "swebench — confirmed blocked on this hardware, README §4). The "
+                              "fleet_*/juiceshop/webgoat/vulnhunter suites in the shared history "
+                              "schema are written by their own dedicated tools, never by this one.")
     parser.add_argument("--limit", type=int, default=None,
                          help="sample limit per suite — use a small number for a smoke test "
                               "before committing to a full run")
@@ -91,9 +100,10 @@ def main() -> int:
     args = parser.parse_args()
 
     suites = [s.strip() for s in args.suites.split(",") if s.strip()]
-    unknown = set(suites) - set(bc.ALL_SUITES)
+    unknown = set(suites) - set(bc.TIER0_SUITES)
     if unknown:
-        parser.error(f"unknown suite(s): {sorted(unknown)} — expected a subset of {bc.ALL_SUITES}")
+        parser.error(f"unknown or unrunnable-by-this-tool suite(s): {sorted(unknown)} — expected a "
+                     f"subset of {bc.TIER0_SUITES}. The fleet_* suites each have their own tool.")
     if "bfcl" in suites and not args.bfcl_model_name:
         parser.error("--bfcl-model-name is required when 'bfcl' is in --suites — see `bfcl models` "
                      "for the registry, and this script's own docstring for why it can't be inferred")

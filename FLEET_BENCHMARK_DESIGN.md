@@ -1,10 +1,12 @@
 # Firmament Fleet Benchmark Suite — Target Design
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 
-**Status:** S39a cleared 2026-10-22 — operator reviewed the gap list (§4) and phasing (§10) and approved
-proceeding. Phase A (schema unification, §7) is the next build step; Phases B-D remain design-only. Direct
-operator request, 2026-10-18; scope extended 2026-10-20 (gaps 7-8); reviewed and approved 2026-10-22. This
+**Status:** S39a cleared and Phase A executed, both 2026-10-22 — operator reviewed the gap list (§4) and
+phasing (§10), approved proceeding, and schema unification (§7) is built (`ALL_SUITES` extended, three
+thin adapters wired in, 22 offline checks, no live fleet node reachable to verify a real run yet). Phases
+B-D remain design-only. Direct operator request, 2026-10-18; scope extended 2026-10-20 (gaps 7-8); reviewed
+and approved 2026-10-22. This
 is a *target-state* design for a comprehensive, unified benchmark suite covering every role the fleet
 actually runs — most of the individual pieces already exist and are live; what does not yet exist is the
 per-role coverage map, the gap-fill suites for roles that currently have no accuracy ground truth at all,
@@ -501,9 +503,24 @@ no promotion" was a reasonable call but an un-formalized one). Before any candid
 Not a commitment to build all of this at once; ordered so each phase is independently valuable and the
 earlier phases make the later ones cheaper.
 
-- **Phase A — schema unification (§7).** Lowest effort, highest immediate leverage: wires the suites that
-  already exist (guard, RAG, dispatch-routing, mcintent) into the one comparable ledger. No new ground
-  truth to build.
+- **Phase A — schema unification (§7). Executed 2026-10-22.** `hermes_benchmark_common.py`'s `ALL_SUITES`
+  now lists every suite name in this design (Tier 0 unchanged; the three existing custom suites' new keys;
+  the six §6 suites, still design-only; S28's Tier 2 suites; the Tier 3 latency suites) — safe because
+  `format_comparison()` only ever iterates it to print a row per suite, never to dispatch or validate.
+  Found a real gap doing this: `hermes-benchmark-model.py` validated `--suites` against this same constant
+  but dispatches through a hardcoded per-suite branch sequence, not a generic lookup, so widening it would
+  have let `--suites fleet_coder_fix` pass validation and then silently do nothing. Added a separate
+  `TIER0_SUITES` constant (the original five) for that tool to validate against instead, so an unrunnable
+  suite name is a clear CLI error, never a silent no-op. Wired thin adapters into the three suites that
+  already exist: `hermes-rag-eval.py` (`fleet_rag_recall`, unconditional — every real run already is a
+  real measurement) and `hermes-bakeoff-typesafe.py` (`fleet_dispatch_routing`/`fleet_mc_intent`,
+  unconditional per-task) write on every run; `hermes-guard-eval.py` (`fleet_guard`, the COMPOSITE (L1 tool
+  block OR L2) gate specifically) is opt-in via a new `--record-history` flag, since most of its real
+  invocations are diagnostic candidate-arm runs, not the deployed pipeline's own official measurement.
+  Every adapter writes in addition to, never instead of, each tool's own existing output. No fleet node
+  reachable from this session, so verified with 22 new offline checks
+  (`infra/model-benchmark/tests/test_schema_unification.py`) against synthetic result fixtures, not a live
+  run — a live run recording a real entry is still owed before this is fully proven in production.
 - **Phase B — the two highest-stakes gaps.** `fleet_log_analyst` (6.1) and `fleet_guard`'s formal Tier 2
   promotion gate (already measured, just needs the gate from §9 applied to it) — both security-relevant,
   neither currently has a real accuracy number backing a promotion decision.
@@ -534,3 +551,4 @@ live in-repo, in the same NAS path `history.jsonl` already uses, or elsewhere, b
 | 1.2.0 | 2026-10-20 | Added two `fleet_coder_fix` candidates from the S19 mesh work, per CLAUDE.md 1.2.0's benchmark-evaluation rule. **The call: no new suite is needed** — this is coder capability on a Python fleet tool, already covered by gap 7 / §6.7, and nothing about it is a role this proposal does not already score. It is worth adding to §6.7's corpus specifically because that table's own `[PROPOSED]` note says the pool skews toward mineflayer-shaped JS and needs Python tool fixes to balance it. Both candidates are repro-testable (tier a): the symptom is a measurable property of the output mesh — wall thickness relative to the bounding-box diagonal, and a self-intersecting-face count — so a minimal repro asserts the previously-wrong number is now right, with no live vendor API or Minecraft server needed. The first is also an unusually good test of *diagnosis* rather than patching, since the symptom ("valid STL, gaps when sliced") points nowhere near the cause (the reconstruction algorithm wraps a hollow shell), and three plausible-looking fixes were measured and rejected before the right one. Hashes are pending the commit. |
 | 1.2.1 | 2026-10-20 | Filled the two `fleet_coder_fix` candidate hashes, now that the fix is committed as `b4651ca`. |
 | 1.3.0 | 2026-10-22 | Operator reviewed the gap list and phasing and signed off (S39a cleared) — proceeding to Phase A. Generalized every `coder`/`coder2` reference (§3's role table, gaps 5/7/8, §§6.5/6.7/6.8) to "all coder roles"/"the coder role family," since `coder2` was retired 2026-10-20 (`1e86d0e`) with its replacement still under evaluation in a parallel session — none of the suites' own logic was ever actually `coder2`-specific, only the wording naming it was. |
+| 1.4.0 | 2026-10-22 | **Phase A executed** (§7, §10). `hermes_benchmark_common.py`'s `ALL_SUITES` now lists every suite name this design defines; found and fixed a real validation gap doing it (`hermes-benchmark-model.py` dispatches through hardcoded per-suite branches, not a generic lookup, so widening `ALL_SUITES` without also adding the new `TIER0_SUITES` constant it now validates against would have let `--suites fleet_coder_fix` pass validation and silently do nothing instead of erroring). Wired thin, additive adapters into the three suites that already exist: `hermes-rag-eval.py` (`fleet_rag_recall`) and `hermes-bakeoff-typesafe.py` (`fleet_dispatch_routing`/`fleet_mc_intent`) write unconditionally on every real run; `hermes-guard-eval.py` (`fleet_guard`) is opt-in via new `--record-history`, since most of its invocations are diagnostic, not the deployed pipeline's own measurement. 22 new offline checks (`infra/model-benchmark/tests/test_schema_unification.py`) against synthetic fixtures — no fleet node reachable, so a real live-run entry is still owed. |

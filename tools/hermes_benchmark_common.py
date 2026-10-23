@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-22) — S39 Phase A (schema unification, FLEET_BENCHMARK_DESIGN.md S7), after S39a's
+# sign-off. ALL_SUITES now also lists every suite name from the design's own §7 code block (the
+# three already-existing custom suites' new keys, the six §6 suites that are still design-only, S28's
+# Tier 2 suites, and the Tier 3 latency suites), so format_comparison() can print a row for any of
+# them the moment some tool starts writing one -- unpopulated keys just print "current=None
+# prior=None", never an error. Added TIER0_SUITES (the original five) as a separate constant: found
+# while extending ALL_SUITES that hermes-benchmark-model.py validates --suites against the full list
+# but dispatches through a hardcoded per-suite branch sequence, not a generic lookup -- validating
+# against the newly-widened ALL_SUITES would have let `--suites fleet_coder_fix` pass and then
+# silently do nothing (no branch, no error, no row). hermes-benchmark-model.py now validates against
+# this narrower constant instead.
 #
 # 1.1.0 — real fixes from a live verification pass on spark, 2026-08-24: run_bfcl() rewritten
 # around the actual verified mechanism (REMOTE_OPENAI_BASE_URL pointed directly at a role's own
@@ -81,10 +93,47 @@ METRIC_PREFERENCE = {
     IFEVAL_TASK: ["prompt_level_strict_acc,none", "inst_level_strict_acc,none"],
 }
 
-ALL_SUITES = ["mmlu_pro", "gpqa_diamond", "ifeval", "bfcl", "swebench"]
+# The subset hermes-benchmark-model.py itself can actually run — its dispatch is a hardcoded
+# `if "mmlu_pro" in suites: ...` sequence per suite, not a generic lookup over ALL_SUITES, so
+# validating --suites against the full list below (as this constant's own first version did)
+# would let `--suites fleet_coder_fix` pass validation and then silently do nothing: no branch
+# matches, no error, no row written, no suite run. Found while extending ALL_SUITES for the
+# shared schema (S39 Phase A), not assumed. hermes-benchmark-model.py validates against this
+# narrower constant instead; every fleet_*/juiceshop/webgoat/vulnhunter suite is written by its
+# own dedicated tool (hermes-bakeoff-typesafe.py, hermes-rag-eval.py, hermes-guard-eval.py, and
+# whichever future tool builds each §6 suite), never by this one.
+TIER0_SUITES = ["mmlu_pro", "gpqa_diamond", "ifeval", "bfcl", "swebench"]
+
+ALL_SUITES = [
+    # Tier 0 — unchanged
+    "mmlu_pro", "gpqa_diamond", "ifeval", "bfcl", "swebench",
+    # Tier 1 — existing custom suites, now also reported here instead of only their own output
+    # (FLEET_BENCHMARK_DESIGN.md S39 Phase A, S7): fleet_dispatch_routing/fleet_mc_intent come from
+    # hermes-bakeoff-typesafe.py's "dispatch"/"mcintent" tasks' incumbent arm; fleet_rag_recall
+    # comes from hermes-rag-eval.py's recall@k. The six §6 suites these sit alongside
+    # (fleet_log_analyst, fleet_vision_judge, fleet_muse_contract, fleet_digest_faithfulness,
+    # fleet_dualcoder_precision, fleet_coder_fix, fleet_coder_build) are design-only as of S39a
+    # (2026-10-22) -- no runner writes them yet. Listed anyway: format_comparison() below only
+    # ever iterates this list to print a row, per suite, per compared run -- an unpopulated key
+    # prints "current=None prior=None" and nothing else, never an error, so there is no live-code
+    # reason to hold them back until each one's own runner exists.
+    "fleet_dispatch_routing", "fleet_mc_intent", "fleet_rag_recall",
+    "fleet_log_analyst", "fleet_vision_judge", "fleet_muse_contract",
+    "fleet_digest_faithfulness", "fleet_dualcoder_precision",
+    "fleet_coder_fix", "fleet_coder_build",
+    # Tier 2 — existing (fleet_guard, from hermes-guard-eval.py's --record-history) + S28 (planned)
+    "fleet_guard", "juiceshop", "webgoat", "vulnhunter",
+    # Tier 3 — secondary-only, only ever populated for the roles FLEET_BENCHMARK_DESIGN.md S3 lists
+    # as speed-in-scope; none of these suites exist yet either.
+    "fleet_dispatch_latency", "fleet_guard_latency", "fleet_muse_latency",
+    "fleet_rag_latency",
+]
 # swebench excluded from the default set — confirmed blocked on current fleet hardware (no x86_64
 # Docker emulation, infra/model-benchmark/README.md §4). Still selectable explicitly via --suites;
-# run_swebench() fails fast with the real reason rather than silently doing nothing.
+# run_swebench() fails fast with the real reason rather than silently doing nothing. None of the
+# Tier 1-3 fleet_* suites are in DEFAULT_SUITES either -- each is written by its own tool
+# (hermes-bakeoff-typesafe.py, hermes-rag-eval.py, hermes-guard-eval.py), never by
+# hermes-benchmark-model.py's own --suites dispatch, which only ever runs Tier 0.
 DEFAULT_SUITES = ["mmlu_pro", "gpqa_diamond", "ifeval", "bfcl"]
 
 

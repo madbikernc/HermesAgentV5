@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-22) — S39 Phase A (FLEET_BENCHMARK_DESIGN.md S7), after S39a's sign-off. Every
+# real --run (never --generate) now also writes recall@k into the shared history.jsonl
+# hermes-benchmark-model.py/hermes-benchmark-compare.py already read, under the new
+# fleet_rag_recall key, in addition to -- never instead of -- this tool's own HISTORY_PATH above.
+# New --model-id (default "rag (live)", since retrieval quality depends on embed+rerank+search
+# together, not one named checkpoint). Always fires, no opt-in flag: unlike hermes-guard-eval.py's
+# many diagnostic flag combinations, every real run of this command already is a real measurement.
 #
 # hermes-rag-eval — retrieval-quality evaluation harness for the RAG stack
 # (HermesAgentV5/IMPLEMENTATION_PLAN.md S16a). Distinct from tools/hermes-benchmark-model.py's
@@ -43,6 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_rag_common as rc  # noqa: E402
+import hermes_benchmark_common as bc  # noqa: E402
 
 EVAL_SET_PATH = Path.home() / ".hermes" / "state" / "rag-eval-set.json"
 HISTORY_PATH = Path.home() / ".hermes" / "state" / "rag-eval-history.jsonl"
@@ -126,7 +135,28 @@ def cmd_generate(per_corpus):
     return 0
 
 
-def cmd_run(top_k, notes):
+def record_shared_history(model_id, top_k, recall):
+    """S39 Phase A (FLEET_BENCHMARK_DESIGN.md S7): also writes recall@k into the shared
+    history.jsonl hermes-benchmark-model.py/hermes-benchmark-compare.py already read, in addition
+    to (never instead of) this tool's own HISTORY_PATH above -- every real run of this command
+    already is a real measurement (unlike hermes-guard-eval.py's many diagnostic flag
+    combinations), so this always fires, no opt-in flag needed. Best-effort: a failure to write
+    the shared copy must never affect this tool's own primary result or its own history file,
+    same rule every notification/secondary-write in this fleet already follows."""
+    try:
+        bc.append_entry({
+            "date": datetime.now(timezone.utc).isoformat(),
+            "lm_eval_version": None, "bfcl_version": None, "swebench_version": None,
+            "model_id": model_id, "role_or_endpoint": "rag", "endpoint": None,
+            "bfcl_model_name": None, "notes": "",
+            "suites": {"fleet_rag_recall": {"metric": f"recall@{top_k}", "value": recall,
+                                             "limit": top_k}},
+        })
+    except Exception as exc:
+        log(f"shared history write failed (this run's own result above is unaffected): {exc}")
+
+
+def cmd_run(top_k, notes, model_id):
     if not EVAL_SET_PATH.exists():
         log(f"no eval set at {EVAL_SET_PATH} — run --generate first")
         return 1
@@ -180,12 +210,18 @@ def cmd_run(top_k, notes):
     with HISTORY_PATH.open("a") as f:
         f.write(json.dumps(entry) + "\n")
     log(f"\nrecorded to {HISTORY_PATH}")
+    record_shared_history(model_id, top_k, recall)
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description="RAG retrieval-quality evaluation harness (S16a)")
     parser.add_argument("--generate", action="store_true", help="generate a new fixed eval set")
+    parser.add_argument("--model-id", default="rag (live)",
+                         help="operator-supplied label for the shared benchmark history's "
+                              "fleet_rag_recall entry (S39 Phase A) -- not auto-detected, since "
+                              "retrieval quality depends on embed+rerank+search together, not one "
+                              "named checkpoint")
     parser.add_argument("--per-corpus", type=int, default=DEFAULT_PER_CORPUS,
                          help=f"questions to attempt per corpus when generating (default {DEFAULT_PER_CORPUS})")
     parser.add_argument("--top-k", type=int, default=5, help="recall@k to measure (default 5, matches hermes-retrieve.py's own TOP_K default)")
@@ -194,7 +230,7 @@ def main():
 
     if args.generate:
         return cmd_generate(args.per_corpus)
-    return cmd_run(args.top_k, args.notes)
+    return cmd_run(args.top_k, args.notes, args.model_id)
 
 
 if __name__ == "__main__":

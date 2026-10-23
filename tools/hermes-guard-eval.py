@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-10-22) — S39 Phase A (FLEET_BENCHMARK_DESIGN.md S7), after S39a's sign-off. New
+# --record-history (opt-in, unlike hermes-rag-eval.py's/hermes-bakeoff-typesafe.py's unconditional
+# writes): writes the COMPOSITE (L1 tool block OR L2) gate's accuracy into the shared
+# history.jsonl as fleet_guard, in addition to this tool's own stdout report. Opt-in because most
+# real invocations of this tool are diagnostic (--llm-roles candidate arms, --no-layer2, a custom
+# --guard-url) rather than the deployed pipeline's own official measurement, and recording every
+# one of those as "the" fleet_guard number would make the shared history meaningless. Requires
+# Layer 2 -- refuses --record-history with --no-layer2, since the composite needs both layers.
 #
 # hermes-guard-eval — S22a's measurement, made repeatable. Scores the fleet's screening layers
 # against a labelled case set and prints the three numbers S22 needs: each layer alone, the
@@ -85,12 +94,14 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
 
 import hermes_injection_guard as l1  # noqa: E402
+import hermes_benchmark_common as bc  # noqa: E402
 
 BANDS = (("direct", 0, 6), ("indirect", 6, 12), ("paraphrased", 12, 18))
 # The user-message wrapper the bake-off's own third arm used, kept byte-identical so an accuracy
@@ -222,6 +233,36 @@ def confusion(preds, golds):
     return tp, fp, fn, tn
 
 
+def record_shared_history(gates, golds, model_id):
+    """S39 Phase A (FLEET_BENCHMARK_DESIGN.md S7), after S39a's sign-off. Writes the COMPOSITE
+    (L1 tool block OR L2) gate's accuracy into the shared history.jsonl as fleet_guard, in
+    addition to -- never instead of -- this tool's own stdout report / --json rows. That specific
+    gate, not either layer alone, is "the only row that describes real exposure" per this file's
+    own module docstring, and is the real, deployed pipeline's own number -- never one of the
+    --llm-roles candidate arms, which are a different (S22b) concern. Only called when the
+    caller opted in via --record-history; best-effort beyond that, since a shared-history write
+    failure must never affect this tool's own primary report, which has already printed by the
+    time this runs."""
+    composite = next((pred for name, pred in gates if name == "COMPOSITE (L1 tool block OR L2)"), None)
+    if composite is None:
+        log("--record-history: no COMPOSITE (L1 tool block OR L2) gate found -- nothing recorded")
+        return
+    tp, fp, fn, tn = confusion(composite, golds)
+    accuracy = (tp + tn) / len(golds)
+    try:
+        bc.append_entry({
+            "date": datetime.now(timezone.utc).isoformat(),
+            "lm_eval_version": None, "bfcl_version": None, "swebench_version": None,
+            "model_id": model_id, "role_or_endpoint": "guard", "endpoint": None,
+            "bfcl_model_name": None, "notes": "",
+            "suites": {"fleet_guard": {"metric": "composite_accuracy", "value": accuracy,
+                                        "limit": len(golds)}},
+        })
+        log(f"recorded fleet_guard={accuracy:.3f} to the shared benchmark history")
+    except Exception as exc:
+        log(f"shared history write failed (this run's own report above is unaffected): {exc}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="S22 screening measurement: layers, composite, sweep")
     ap.add_argument("--guard-url", default=os.environ.get("GUARD_URL", "http://10.129.1.15:8096"))
@@ -235,7 +276,20 @@ def main():
                     help="call each role backend directly instead of through the router, so the "
                          "screening under measurement cannot block the cases (artifact 1)")
     ap.add_argument("--max-tokens", type=int, default=8)
+    ap.add_argument("--record-history", action="store_true",
+                     help="also write the COMPOSITE (L1 tool block OR L2) accuracy into the "
+                          "shared benchmark history.jsonl as fleet_guard (S39 Phase A). Opt-in, "
+                          "unlike hermes-rag-eval.py/hermes-bakeoff-typesafe.py's unconditional "
+                          "write: most invocations of this tool are diagnostic (--llm-roles "
+                          "candidate arms, --no-layer2, custom --guard-url), not the deployed "
+                          "pipeline's own official measurement. Requires Layer 2 (incompatible "
+                          "with --no-layer2, since the composite needs it).")
+    ap.add_argument("--model-id", default="guard (live)",
+                     help="operator-supplied label for the shared history's fleet_guard entry, "
+                          "used only with --record-history")
     args = ap.parse_args()
+    if args.record_history and args.no_layer2:
+        ap.error("--record-history needs Layer 2 (the COMPOSITE gate requires it) -- drop --no-layer2")
 
     bakeoff = load_bakeoff()
     cases = load_cases(bakeoff)
@@ -323,6 +377,9 @@ def main():
     for name, pred in gates:
         tp, fp, fn, tn = confusion(pred, golds)
         print(f"{name:<40} TP={tp:>2} FP={fp:>2} FN={fn:>2} TN={tn:>2}  acc={(tp + tn) / len(golds):.3f}")
+
+    if args.record_history:
+        record_shared_history(gates, golds, args.model_id)
 
     print("\nmalicious cases caught, by attack band:")
     for band, lo, hi in BANDS:

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-22) — S39 Phase A (FLEET_BENCHMARK_DESIGN.md S7), after S39a's sign-off. Whenever
+# a run actually includes the "dispatch" and/or "mcintent" tasks, their incumbent (`local` key,
+# never the jev/TypeSafe comparison arm) accuracy is now also written into the shared
+# history.jsonl hermes-benchmark-model.py/hermes-benchmark-compare.py already read, under
+# fleet_dispatch_routing/fleet_mc_intent, in addition to -- never instead of -- this tool's own
+# results-*.json/report-*.txt output. New --model-id (default "dispatch (live)"). Writes nothing
+# if neither task ran (e.g. `--tasks camera`), rather than an empty or misleading entry.
 #
 # 1.1.0 (2026-10-06) — two opt-in vision tasks for multimodal System One models (Cloudflare Clef /
 # Clef-flash, served by tools/hermes-clef-server.py): `camera` (Reolink-label yes/no questions on
@@ -60,9 +68,12 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
+sys.path.insert(0, str(TOOLS))
+import hermes_benchmark_common as bc  # noqa: E402
 REPO = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 
@@ -640,6 +651,36 @@ def summarize_vision(results):
 
 # --------------------------------------------------------------------------------- report
 
+def record_shared_history(results, model_id):
+    """S39 Phase A (FLEET_BENCHMARK_DESIGN.md S7), after S39a's sign-off. Writes the incumbent
+    (`local` key) accuracy for whichever of the "dispatch"/"mcintent" tasks actually ran into the
+    shared history.jsonl, in addition to -- never instead of -- this tool's own results-*.json/
+    report-*.txt files above. Both tasks measure the same live `dispatch` role (chat routing vs.
+    Minecraft intent classification), so they land in one shared-history entry together when both
+    ran. Deliberately NOT the jev/TypeSafe comparison arm -- that is this tool's own bake-off
+    concern, not a measurement of what this fleet has deployed. Silently writes nothing if
+    neither task ran (e.g. `--tasks camera`), rather than an empty/misleading entry. Best-effort:
+    a failure here must never affect this tool's own primary report."""
+    suites = {}
+    for task, key in (("dispatch", "fleet_dispatch_routing"), ("mcintent", "fleet_mc_intent")):
+        rows = [r for r in results if r["task"] == task]
+        vals = [r.get("local") == r["gold"] for r in rows if "local" in r]
+        if vals:
+            suites[key] = {"metric": "accuracy", "value": sum(vals) / len(vals), "limit": None}
+    if not suites:
+        return
+    try:
+        bc.append_entry({
+            "date": datetime.now(timezone.utc).isoformat(),
+            "lm_eval_version": None, "bfcl_version": None, "swebench_version": None,
+            "model_id": model_id, "role_or_endpoint": "dispatch", "endpoint": None,
+            "bfcl_model_name": None, "notes": "", "suites": suites,
+        })
+    except Exception as exc:
+        print(f"[hermes-bakeoff-typesafe] shared history write failed "
+              f"(this run's own report above is unaffected): {exc}", file=sys.stderr)
+
+
 def summarize(results):
     lines = []
     for task in ("dispatch", "mcintent", "guard", "rerank"):
@@ -706,6 +747,9 @@ def main():
     ap.add_argument("--media-n", type=int, default=12,
                     help="distinct real renders for the mediajudge task (each judged twice)")
     ap.add_argument("--out", default=str(Path.home() / ".hermes" / "state" / "bakeoff-typesafe"))
+    ap.add_argument("--model-id", default="dispatch (live)",
+                     help="operator-supplied label for the shared benchmark history's "
+                          "fleet_dispatch_routing/fleet_mc_intent entries (S39 Phase A)")
     args = ap.parse_args()
     tasks = args.tasks.split(",")
     corpora = ["fleet-docs", "podcasts"] + (["ops", "personal-kb"] if args.all_corpora else [])
@@ -730,6 +774,7 @@ def main():
     print(report)
     print(f"\nwrote {out}/*-{stamp}.* ({len(EGRESS)} Jev payloads "
           f"{'sent' if TYPESAFE_KEY else 'recorded, not sent'})")
+    record_shared_history(results, args.model_id)
 
 
 if __name__ == "__main__":
