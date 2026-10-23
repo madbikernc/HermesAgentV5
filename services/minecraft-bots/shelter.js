@@ -1,4 +1,12 @@
-// Version: 1.3.0
+// Version: 1.3.1
+//
+// 1.3.1 (2026-10-22): real bug found live against the real server, not caught by any mock --
+// coveredInterior() has never stopped at a doorway (deliberately, for its original living-space
+// caller -- see its own updated header). shelterRoomsNear() needs the opposite: a real door's
+// own boundingBox is not a plain solid block the way a wall is, so the unguarded fill walked
+// straight through a just-built, fully intact door into the world outside, and read a couple of
+// cells out there as a false hole. New optional stopAtDoors parameter, default false (every
+// existing caller unchanged), which shelterRoomsNear() now passes true.
 //
 // 1.3.0 (2026-10-22, direct request, generalizing S42's fix): shelterRoomsNear()/holesIn() --
 // recognize any number of individual shelters and a larger shelter of any shape ("contiguous
@@ -274,12 +282,23 @@ export function isCovered(bot, pos, scan = SHELL_ROOF_SCAN) {
 // cell cap bounds the whole refresh rather than each bed separately. `radius` defaults to
 // SHELL_RADIUS (the dig-protection feature's own deliberately tight bound) but is overridable --
 // shelterRoomsNear() below needs a wider one for a large communal-sized room.
-export function coveredInterior(bot, anchor, inside = new Set(), radius = SHELL_RADIUS) {
+//
+// `stopAtDoors`, default false, exists only for that same new caller. The dig-protection feature
+// this was built for deliberately does NOT stop at a doorway -- this file's own header explains
+// why: "the fill stops exactly where cover stops... so the doorway stays open whether or not a
+// door has been hung in it yet," because a freshly built shelter has no door at all yet and the
+// room still needs recognizing. shelterRoomsNear() hits the opposite problem with a REAL, closed
+// door already hung: found live against the real server, not guessed -- a real door's own
+// boundingBox is not a plain 'block' the way a wall is, so an unguarded fill walks straight
+// through it into the open world outside, and the first few cells out there can easily read as
+// "4+ solid neighbours" (the door frame, the ground) -- a false hole in a perfectly intact room.
+export function coveredInterior(bot, anchor, inside = new Set(), radius = SHELL_RADIUS, stopAtDoors = false) {
   const queue = [];
   const consider = (cell) => {
     const key = posKey(cell);
     if (inside.has(key) || inside.size >= SHELL_MAX_CELLS) return;
     if (!passable(bot, cell) || !isCovered(bot, cell)) return;
+    if (stopAtDoors && isDoorwayName(bot.blockAt(cell)?.name)) return;
     inside.add(key);
     queue.push(cell);
   };
@@ -579,7 +598,7 @@ export function shelterRoomsNear(bot, point, radius = BED_SEARCH_DISTANCE) {
       const seedKey = posKey(seed);
       if (claimed.has(seedKey) || tried.has(seedKey)) continue;
       tried.add(seedKey);
-      const inside = coveredInterior(bot, seed, new Set(), SHELTER_ROOM_SEARCH_RADIUS);
+      const inside = coveredInterior(bot, seed, new Set(), SHELTER_ROOM_SEARCH_RADIUS, true);
       // Too small to be a real room (the far side of a doorway standing in open terrain, the
       // common no-shelter-here case) -- skip, same as the strict function's own !inside.size check.
       if (inside.size < MIN_SHELTER_ROOM_CELLS) continue;
