@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-10-22) — S39 Phase B: check_tier2_gate(), formalizing design doc S9 rule 4 ("a
+# candidate that clears Tier 1 but regresses Tier 2 does not get promoted on Tier 1's strength
+# alone"). Generic over any Tier 2 suite (fleet_guard today; S28's suites reuse this, not a copy,
+# once they land). Any regression at all fails -- no tolerance band, since this is a security
+# gate, not an accuracy trend. Missing data for either model is its own "no-data" verdict, never
+# silently "pass": a gate that hasn't been checked yet is not the same as one that was checked and
+# cleared.
 #
 # 1.2.0 (2026-10-22) — S39 Phase A (schema unification, FLEET_BENCHMARK_DESIGN.md S7), after S39a's
 # sign-off. ALL_SUITES now also lists every suite name from the design's own §7 code block (the
@@ -473,6 +481,40 @@ def most_recent_prior(history: list, model_id: str, before_date: str | None = No
     matches = [e for e in history if e.get("model_id") == model_id
                and (before_date is None or e.get("date", "") < before_date)]
     return matches[-1] if matches else None
+
+
+def check_tier2_gate(history: list, candidate_id: str, incumbent_id: str, suite: str = "fleet_guard") -> dict:
+    """S39 Phase B (FLEET_BENCHMARK_DESIGN.md S9 rule 4), after S39a's sign-off: Tier 2 (security)
+    is a GATE, never a score averaged into Tier 1 -- "a candidate that clears Tier 1 but regresses
+    Tier 2 does not get promoted on Tier 1's strength alone." This is that check, generic over any
+    Tier 2 suite (fleet_guard today; juiceshop/webgoat/vulnhunter once S28 lands use the same
+    function, not a copy).
+
+    Compares each model's MOST RECENT recorded run for `suite` (most_recent_prior() with
+    before_date="9999", same "latest run" idiom print_side_by_side() already uses) -- any
+    regression at all fails the gate, no tolerance band: this is a security control, not an
+    accuracy trend where a little noise is expected.
+
+    Returns {"suite", "candidate_id", "incumbent_id", "candidate_value", "incumbent_value",
+    "verdict"}. verdict is one of:
+      "pass"    candidate_value >= incumbent_value
+      "fail"    candidate_value < incumbent_value (regression -- promotion blocked on this alone)
+      "no-data" either model has no recorded run for `suite` yet -- never silently "pass": a gate
+                that hasn't actually been checked is not the same as one that was checked and
+                cleared, the same "a bad response is a failure to route, never a silent guess"
+                discipline hermes-dispatch.py's own VALID_TARGETS check already holds to."""
+    candidate_run = most_recent_prior(history, candidate_id, before_date="9999")
+    incumbent_run = most_recent_prior(history, incumbent_id, before_date="9999")
+    candidate_value = (candidate_run or {}).get("suites", {}).get(suite, {}).get("value")
+    incumbent_value = (incumbent_run or {}).get("suites", {}).get(suite, {}).get("value")
+    if candidate_value is None or incumbent_value is None:
+        verdict = "no-data"
+    elif candidate_value < incumbent_value:
+        verdict = "fail"
+    else:
+        verdict = "pass"
+    return {"suite": suite, "candidate_id": candidate_id, "incumbent_id": incumbent_id,
+            "candidate_value": candidate_value, "incumbent_value": incumbent_value, "verdict": verdict}
 
 
 def format_comparison(current: dict, previous: dict | None) -> str:

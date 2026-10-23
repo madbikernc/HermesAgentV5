@@ -1,12 +1,14 @@
 # Firmament Fleet Benchmark Suite — Target Design
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 
-**Status:** S39a cleared and Phase A executed, both 2026-10-22 — operator reviewed the gap list (§4) and
-phasing (§10), approved proceeding, and schema unification (§7) is built (`ALL_SUITES` extended, three
-thin adapters wired in, 22 offline checks, no live fleet node reachable to verify a real run yet). Phases
-B-D remain design-only. Direct operator request, 2026-10-18; scope extended 2026-10-20 (gaps 7-8); reviewed
-and approved 2026-10-22. This
+**Status:** S39a cleared and Phases A-B executed (2026-10-22/23) — operator reviewed the gap list (§4)
+and phasing (§10), approved proceeding; schema unification (§7) and the two highest-stakes gaps
+(`fleet_log_analyst`, the formal `fleet_guard` Tier 2 gate) are built, 52 offline checks total, no live
+fleet node reachable to verify a real run yet. `fleet_log_analyst`'s case set is synthetic, stated
+plainly (§8.6) — real-sampled fleet log data needs a session with fleet access. Phases C-D remain
+design-only. Direct operator request, 2026-10-18; scope extended 2026-10-20 (gaps 7-8); reviewed and
+approved 2026-10-22. This
 is a *target-state* design for a comprehensive, unified benchmark suite covering every role the fleet
 actually runs — most of the individual pieces already exist and are live; what does not yet exist is the
 per-role coverage map, the gap-fill suites for roles that currently have no accuracy ground truth at all,
@@ -521,9 +523,19 @@ earlier phases make the later ones cheaper.
   reachable from this session, so verified with 22 new offline checks
   (`infra/model-benchmark/tests/test_schema_unification.py`) against synthetic result fixtures, not a live
   run — a live run recording a real entry is still owed before this is fully proven in production.
-- **Phase B — the two highest-stakes gaps.** `fleet_log_analyst` (6.1) and `fleet_guard`'s formal Tier 2
-  promotion gate (already measured, just needs the gate from §9 applied to it) — both security-relevant,
-  neither currently has a real accuracy number backing a promotion decision.
+- **Phase B — the two highest-stakes gaps. Executed 2026-10-23.** `fleet_guard`'s formal Tier 2 promotion
+  gate: `hermes_benchmark_common.check_tier2_gate()` (generic over any Tier 2 suite, so S28's suites reuse
+  it later rather than a copy) plus `hermes-benchmark-compare.py --gate`, formalizing §9 rule 4 — any
+  regression at all fails, no tolerance band, and missing data for either model is its own "no-data"
+  verdict, never a silent pass. `fleet_log_analyst` (6.1): new `tools/hermes-log-analyst-eval.py`, 18
+  cases across the three real source shapes (pfSense/canary/gameabuse), with a case deliberately
+  reconstructing hermes-logs.py's own 1.2.0 fabrication bug (an empty/no-data input) to test whether a
+  candidate actually honors the hardened prompt rather than inventing a finding. **Stated plainly, not
+  glossed over:** §6.1's own design calls for real-sampled, scrubbed log lines; this session has no fleet
+  access to sample from, so all 18 cases are SYNTHETIC (same disclosed-provenance precedent
+  `hermes-bakeoff-typesafe.py`'s own `DISPATCH_CASES`/`GUARD_CASES`/`MC_CASES` already set) — a floor/
+  sanity-check per §8.6, not a claim about real-world performance. 30 new offline checks across both
+  pieces; no fleet node reachable to run either against a live backend yet.
 - **Phase C — the remaining new suites (6.2-6.5, 6.7-6.8).** Vision judge, muse contract, digest
   faithfulness, dual-coder precision, coder-fix, coder-build — each independent of the others, buildable in
   any order. 6.7/6.8's corpus curation is heavier than the rest of this phase (cross-repo git mining,
@@ -552,3 +564,4 @@ live in-repo, in the same NAS path `history.jsonl` already uses, or elsewhere, b
 | 1.2.1 | 2026-10-20 | Filled the two `fleet_coder_fix` candidate hashes, now that the fix is committed as `b4651ca`. |
 | 1.3.0 | 2026-10-22 | Operator reviewed the gap list and phasing and signed off (S39a cleared) — proceeding to Phase A. Generalized every `coder`/`coder2` reference (§3's role table, gaps 5/7/8, §§6.5/6.7/6.8) to "all coder roles"/"the coder role family," since `coder2` was retired 2026-10-20 (`1e86d0e`) with its replacement still under evaluation in a parallel session — none of the suites' own logic was ever actually `coder2`-specific, only the wording naming it was. |
 | 1.4.0 | 2026-10-22 | **Phase A executed** (§7, §10). `hermes_benchmark_common.py`'s `ALL_SUITES` now lists every suite name this design defines; found and fixed a real validation gap doing it (`hermes-benchmark-model.py` dispatches through hardcoded per-suite branches, not a generic lookup, so widening `ALL_SUITES` without also adding the new `TIER0_SUITES` constant it now validates against would have let `--suites fleet_coder_fix` pass validation and silently do nothing instead of erroring). Wired thin, additive adapters into the three suites that already exist: `hermes-rag-eval.py` (`fleet_rag_recall`) and `hermes-bakeoff-typesafe.py` (`fleet_dispatch_routing`/`fleet_mc_intent`) write unconditionally on every real run; `hermes-guard-eval.py` (`fleet_guard`) is opt-in via new `--record-history`, since most of its invocations are diagnostic, not the deployed pipeline's own measurement. 22 new offline checks (`infra/model-benchmark/tests/test_schema_unification.py`) against synthetic fixtures — no fleet node reachable, so a real live-run entry is still owed. |
+| 1.5.0 | 2026-10-23 | **Phase B executed** (§10). `check_tier2_gate()` (generic over any Tier 2 suite) + `hermes-benchmark-compare.py --gate` formalize §9 rule 4 — any regression fails, missing data is "no-data" not a silent pass (11 offline checks). New `tools/hermes-log-analyst-eval.py` closes gap 1 (§6.1): 18 cases across the three real source shapes, one deliberately recreating hermes-logs.py's own documented 1.2.0 fabrication bug to test whether a candidate honors the hardened prompt (19 offline checks). Stated plainly per §8.6: the case set is synthetic, not real-sampled — this session has no fleet access to sample from, and growing it with real, scrubbed fleet data remains open work. No fleet node reachable to run either piece against a live backend yet. |

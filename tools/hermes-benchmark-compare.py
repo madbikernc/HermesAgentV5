@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-22) — S39 Phase B: new --gate SUITE (with --model-id as candidate, --against as
+# incumbent) formalizes FLEET_BENCHMARK_DESIGN.md S9 rule 4's Tier 2 promotion gate -- prints
+# PASS/FAIL/NO DATA and exits 0/1/2 so it's usable directly in a promotion script's own decision,
+# not just read by a human. Reuses hermes_benchmark_common.check_tier2_gate(), generic over any
+# Tier 2 suite.
 """
 hermes-benchmark-compare.py — Ad hoc queries against the benchmark history
 tools/hermes-benchmark-model.py writes to (tools/hermes_benchmark_common.py has the schema).
@@ -42,6 +48,27 @@ def print_trend(history: list, model_id: str, n: int):
                 print(f"  {suite:14s} ERROR")
 
 
+def print_gate(history: list, candidate_id: str, incumbent_id: str, suite: str) -> int:
+    """S39 Phase B: FLEET_BENCHMARK_DESIGN.md S9 rule 4's Tier 2 gate, formalized -- "a candidate
+    that clears Tier 1 but regresses Tier 2 does not get promoted on Tier 1's strength alone."
+    Returns a process exit code (0 pass, 1 fail, 2 no-data) so this is usable in a script's own
+    promotion decision, not just read by a human."""
+    result = bc.check_tier2_gate(history, candidate_id, incumbent_id, suite)
+    print(f"=== Tier 2 gate: {suite} ===")
+    print(f"  candidate ({candidate_id}): {result['candidate_value']!r}")
+    print(f"  incumbent ({incumbent_id}): {result['incumbent_value']!r}")
+    if result["verdict"] == "no-data":
+        print("  VERDICT: NO DATA -- at least one model has no recorded run for this suite yet. "
+              "This is not a pass: the gate has not actually been checked.")
+        return 2
+    if result["verdict"] == "fail":
+        print("  VERDICT: FAIL -- candidate regresses this Tier 2 suite. Per S9 rule 4, this "
+              "blocks promotion regardless of any Tier 1 result, and is never averaged away.")
+        return 1
+    print("  VERDICT: PASS -- candidate does not regress this Tier 2 suite.")
+    return 0
+
+
 def print_side_by_side(history: list, model_a: str, model_b: str):
     # "9999" sorts after any real ISO-8601 date, so this is just "the latest recorded run" —
     # most_recent_prior() already does the model_id filter + take-last-by-date we need here.
@@ -72,9 +99,19 @@ def main() -> int:
                                                           "first one's latest run against")
     parser.add_argument("--n", type=int, default=10, help="how many recent runs to show "
                                                             "(trend mode only, default 10)")
+    parser.add_argument("--gate", default=None, metavar="SUITE",
+                         help="S39 Phase B: check whether --model-id (the candidate) regresses "
+                              "--against (the incumbent) on this Tier 2 suite (e.g. fleet_guard). "
+                              "Prints PASS/FAIL/NO DATA and exits 0/1/2 accordingly, per "
+                              "FLEET_BENCHMARK_DESIGN.md S9 rule 4 -- a Tier 2 regression blocks "
+                              "promotion regardless of any Tier 1 result.")
     args = parser.parse_args()
 
     history = bc.load_history()
+    if args.gate:
+        if not args.against:
+            parser.error("--gate needs --against <incumbent model_id>")
+        return print_gate(history, args.model_id, args.against, args.gate)
     if args.against:
         print_side_by_side(history, args.model_id, args.against)
     else:
