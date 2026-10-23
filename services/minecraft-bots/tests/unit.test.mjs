@@ -2393,7 +2393,11 @@ await check('checkShelterIntegrity (unified, general) repairs the first damaged 
   await mkContext([complete, damaged]).checkShelterIntegrity();
   assert.equal(calls.length, 1, 'the damaged room, found anywhere in the list, triggers a repair');
   assert.equal(calls[0].type, 'patch_shelter');
-  const gotKeys = calls[0].holes.map((p) => `${p.x},${p.y},${p.z}`).sort();
+  // holes was built inside the vm context, so it (and anything .map() derives from it without
+  // first re-literalizing) carries that context's own Array.prototype -- deepEqual against a
+  // plain literal then fails on realm identity alone, "same structure but not reference-equal,"
+  // even with identical content. Spreading into a fresh array first constructs it in THIS realm.
+  const gotKeys = [...calls[0].holes].map((p) => `${p.x},${p.y},${p.z}`).sort();
   assert.deepEqual(gotKeys, ['9,65,0', '9,66,0'], 'the real hole positions, not a recomputed geometry, are passed through');
 
   calls.length = 0;
