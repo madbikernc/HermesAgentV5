@@ -1,4 +1,10 @@
-// Version: 1.20.0
+// Version: 1.21.0
+//
+// 1.21.0 (2026-10-22, direct follow-up, generalizing 1.20.0's own scenario): new scenario for
+// the unified detection path real bots now actually take -- shelterRoomsNear()/holesIn()
+// (shelter.js 1.3.0) finding a real hole from real block state, no predetermined geometry on
+// the detection side at all, and the new "patch_shelter" action (actions.js 1.93.0) filling
+// exactly what was found, against the real server.
 //
 // 1.20.0 (2026-10-22, direct report: a large communal shelter with holes/missing parts was not
 // being repaired as a large structure): new scenario mirroring "Shelter integrity" just above,
@@ -98,7 +104,7 @@ const arbiter = await import("../arbiter.js");
 const { equipBestArmor, installEnchantsFix } = await import("../equipment.js");
 const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
 const { isProtectedBlockName } = await import("../actions.js");
-const { refreshLivingSpace } = await import("../shelter.js");
+const { refreshLivingSpace, shelterRoomsNear } = await import("../shelter.js");
 const { installTorchTrail, needsTorches, torchCount, TORCH_CARRY_MIN, TORCH_SPACING } = await import("../tunneling.js");
 
 const { pathfinder, Movements, goals } = pathfinderPkg;
@@ -644,6 +650,53 @@ scenario("Communal shelter integrity: a hole in the large structure gets repaire
   const repaired = await performAction(bot, { type: "build_communal_shelter", at: { x: base.x, y: base.y, z: base.z }, width, depth }, TESTER);
   assert.equal(repaired.ok, true, repaired.text);
   assert.equal(bot.blockAt(hole)?.boundingBox, "block", "the hole in the large structure is filled back in, same as a small shelter");
+});
+
+scenario("Shelter rooms (general): shelterRoomsNear finds a real hole in a real large structure, and patch_shelter fills it", async () => {
+  // Direct follow-up, 2026-10-22 ("it should recognize: any number of individual shelters;
+  // larger shelters as defined by contiguous walls roof and floor, broken only by doors"): the
+  // scenario above proves build_communal_shelter's own repair path still works; this one proves
+  // the NEW general path real bots actually take now -- shelterRoomsNear()/holesIn() finding the
+  // real hole from the real block state (no predetermined geometry involved on this side at
+  // all), and "patch_shelter" filling exactly what was found, against the real server.
+  const width = 5, depth = 5;
+  const base = new Vec3(x + 4, y + 1, z + 4); // a different spot from the scenario above, same arena
+  const needed = communalShelterPositions(base, width, depth).length;
+  await rcon(`give ${TESTER} minecraft:cobblestone ${needed + 10}`, `give ${TESTER} minecraft:oak_planks 10`);
+  await waitFor(() => held("cobblestone") >= needed && held("oak_planks") >= 10, 10000, "building materials");
+  const built = await performAction(bot, { type: "build_communal_shelter", at: { x: base.x, y: base.y, z: base.z }, width, depth }, TESTER);
+  assert.equal(built.ok, true, built.text);
+
+  // Identify "my" room among whatever shelterRoomsNear finds near this door (the scenario above
+  // left its own, now-intact structure permanently standing nearby in the same arena) by real
+  // wall overlap -- never by guessing an interior cell's coordinates.
+  const myWalls = new Set(communalShelterPositions(base, width, depth).map((p) => `${p.x},${p.y},${p.z}`));
+  const isMine = (r) => [...r.shell].some((k) => myWalls.has(k));
+  const doorPos = communalDoorwayPosition(base, depth);
+
+  const intact = shelterRoomsNear(bot, doorPos, 12).find(isMine);
+  assert(intact, "the real, just-built structure is found by the general detector");
+  assert.equal(intact.holes.size, 0, "intact -- no holes yet");
+
+  const wallPositions = communalShelterPositions(base, width, depth);
+  const hole = wallPositions.find((p) => p.y === base.y + 1 && (p.x !== doorPos.x || p.z !== doorPos.z));
+  await rcon(`setblock ${hole.x} ${hole.y} ${hole.z} minecraft:air`);
+  await waitFor(() => bot.blockAt(hole)?.boundingBox !== "block", 5000, "the hole to appear");
+
+  const damaged = shelterRoomsNear(bot, doorPos, 12).find(isMine);
+  assert(damaged, "still recognized once damaged");
+  assert(damaged.holes.has(`${hole.x},${hole.y},${hole.z}`),
+    `the real hole, from real block state, is found by holesIn(): ${JSON.stringify([...damaged.holes])}`);
+
+  await rcon(`give ${TESTER} minecraft:cobblestone 4`);
+  await waitFor(() => held("cobblestone") >= 4, 5000, "a little more cobblestone to patch with");
+  const holesList = [...damaged.holes].map((k) => {
+    const [hx, hy, hz] = k.split(",").map(Number);
+    return { x: hx, y: hy, z: hz };
+  });
+  const patched = await performAction(bot, { type: "patch_shelter", holes: holesList }, TESTER);
+  assert.equal(patched.ok, true, patched.text);
+  assert.equal(bot.blockAt(hole)?.boundingBox, "block", "the real hole, found by the general detector, is filled by patch_shelter");
 });
 
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);
