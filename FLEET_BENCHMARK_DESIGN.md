@@ -1,15 +1,16 @@
 # Firmament Fleet Benchmark Suite — Target Design
 
-**Version:** 1.6.0
+**Version:** 1.7.0
 
 **Status:** S39a cleared, Phases A-B executed (2026-10-22/23), Phase C in progress (2026-10-23) —
 operator reviewed the gap list (§4) and phasing (§10), approved proceeding; schema unification (§7),
-the two highest-stakes gaps (`fleet_log_analyst`, the formal `fleet_guard` Tier 2 gate), and two of
-Phase C's suites (`fleet_muse_contract`, `fleet_dualcoder_precision`) are built, 114 offline checks
-total, no live fleet node reachable to verify a real run yet. Every case set built so far is
-synthetic or pattern-adapted, stated plainly (§8.6) — real-sampled fleet data needs a session with
-fleet access. §6.2, §6.4, §6.7-6.8 and Phase D remain design-only. Direct operator request,
-2026-10-18; scope extended 2026-10-20 (gaps 7-8); reviewed and approved 2026-10-22. This
+the two highest-stakes gaps (`fleet_log_analyst`, the formal `fleet_guard` Tier 2 gate), and three of
+Phase C's suites (`fleet_muse_contract`, `fleet_dualcoder_precision`, `fleet_digest_faithfulness`) are
+built, 145 offline checks total, no live fleet node reachable to verify a real run yet. Every case set
+built so far is synthetic or pattern-adapted, stated plainly (§8.6) — real-sampled fleet data needs a
+session with fleet access. §6.2 is genuinely blocked (no real render images reachable from this
+session); §6.7-6.8 and Phase D remain design-only. Direct operator request, 2026-10-18; scope extended
+2026-10-20 (gaps 7-8); reviewed and approved 2026-10-22. This
 is a *target-state* design for a comprehensive, unified benchmark suite covering every role the fleet
 actually runs — most of the individual pieces already exist and are live; what does not yet exist is the
 per-role coverage map, the gap-fill suites for roles that currently have no accuracy ground truth at all,
@@ -270,7 +271,7 @@ new key.
   (`infra/model-benchmark/tests/test_muse_contract.py`); no fleet node reachable to run against a live
   `muse`/judge endpoint yet.
 
-### 6.4 `fleet_digest_faithfulness` — closes gap 4
+### 6.4 `fleet_digest_faithfulness` — closes gap 4 — **built 2026-10-23** (`tools/hermes-digest-faithfulness-eval.py`)
 
 - **What it scores:** for a sample of real `hermes-news-digest.py` highlights, is every factual claim in
   the generated highlight text actually supported by the real chunk it cites?
@@ -283,6 +284,22 @@ new key.
   spot-check a sample of the judge's own verdicts before trusting the number, same discipline as
   `hermes-bakeoff-refusal-check.py` already requires for its heuristic.
 - **Speed:** out of scope per §3.
+- **Built, stronger than planned:** calls the real `hermes-news-digest.summarize_highlights()` function
+  UNMODIFIED (confirmed import-safe, then its one network dependency — `rag.router_chat`, which goes
+  through `hermes-router`, forbidden for an eval by §8.1 — monkeypatched to call the digest role's backend
+  directly). This means the exact real passage-numbering/`<DATA>`-wrapping/"nothing new"-short-circuit/
+  `HIGHLIGHT_RE` citation-parse code runs for real, not a copy of it — zero prompt drift is structurally
+  impossible here, stronger even than the `ast`-extraction approach §6.1/§6.5 use, since there was nothing
+  left to extract. Two deterministic floor checks run unconditionally, no judge needed: `grounded` (does
+  each highlight share any significant token with the passage it cites — catches a hallucination that
+  still passes the real citation-index validity check) and `padding_restraint` (on a case built with
+  nothing genuinely new, does the model correctly emit zero highlights rather than inventing one to fill
+  the response, honoring the real system prompt's own explicit "do NOT pad" instruction). The judged
+  `faithful` axis (this section's own originally-proposed metric) falls back to `"unjudged"`, a distinct
+  honest non-answer, when no judge endpoint is given — never silently scored as pass or fail. Case set is
+  SYNTHETIC per §8.6 (5 hand-built topic/passage scenarios; no live RAG store reachable from this session
+  to sample real matches from). 31 offline checks (`infra/model-benchmark/tests/test_digest_faithfulness.py`);
+  no fleet node reachable to run against a live backend yet.
 
 ### 6.5 `fleet_dualcoder_precision` — closes gap 5 — **built 2026-10-23** (`tools/hermes-dualcoder-precision-eval.py`)
 
@@ -574,12 +591,11 @@ earlier phases make the later ones cheaper.
   any order. 6.7/6.8's corpus curation is heavier than the rest of this phase (cross-repo git mining,
   hand-authored symptom/requirement prompts, per-task fixture or judge-rubric authoring), so they may slip
   to their own pass within this phase rather than landing simultaneously with 6.2-6.5.
-  **In progress:** `fleet_muse_contract` (6.3) executed 2026-10-22, `fleet_dualcoder_precision` (6.5)
-  executed 2026-10-23 — 62 new offline checks between them (above). `fleet_vision_judge` (6.2) is
-  genuinely blocked from this session: it needs real render images already sitting on Kiln/Anvil, which
-  this dev machine cannot reach or fabricate. `fleet_digest_faithfulness` (6.4) is buildable as code (its
-  own ground truth is the cited chunk itself, no fixtures to curate) but not executable without live
-  RAG/memory store access. 6.7/6.8 not yet started this phase.
+  **In progress:** `fleet_muse_contract` (6.3) executed 2026-10-22; `fleet_dualcoder_precision` (6.5) and
+  `fleet_digest_faithfulness` (6.4) executed 2026-10-23 — 93 new offline checks across the three (above).
+  `fleet_vision_judge` (6.2) is genuinely blocked from this session: it needs real render images already
+  sitting on Kiln/Anvil, which this dev machine cannot reach or fabricate. 6.7/6.8 not yet started this
+  phase — remaining in Phase C once they land.
 - **Phase D — Tier 3 interactive-latency harness (6.6) + S28's security suite family.** Last, since both
   are explicitly secondary/optional by this proposal's own first principle and S28's own status.
 
@@ -605,3 +621,4 @@ live in-repo, in the same NAS path `history.jsonl` already uses, or elsewhere, b
 | 1.4.0 | 2026-10-22 | **Phase A executed** (§7, §10). `hermes_benchmark_common.py`'s `ALL_SUITES` now lists every suite name this design defines; found and fixed a real validation gap doing it (`hermes-benchmark-model.py` dispatches through hardcoded per-suite branches, not a generic lookup, so widening `ALL_SUITES` without also adding the new `TIER0_SUITES` constant it now validates against would have let `--suites fleet_coder_fix` pass validation and silently do nothing instead of erroring). Wired thin, additive adapters into the three suites that already exist: `hermes-rag-eval.py` (`fleet_rag_recall`) and `hermes-bakeoff-typesafe.py` (`fleet_dispatch_routing`/`fleet_mc_intent`) write unconditionally on every real run; `hermes-guard-eval.py` (`fleet_guard`) is opt-in via new `--record-history`, since most of its invocations are diagnostic, not the deployed pipeline's own measurement. 22 new offline checks (`infra/model-benchmark/tests/test_schema_unification.py`) against synthetic fixtures — no fleet node reachable, so a real live-run entry is still owed. |
 | 1.5.0 | 2026-10-23 | **Phase B executed** (§10). `check_tier2_gate()` (generic over any Tier 2 suite) + `hermes-benchmark-compare.py --gate` formalize §9 rule 4 — any regression fails, missing data is "no-data" not a silent pass (11 offline checks). New `tools/hermes-log-analyst-eval.py` closes gap 1 (§6.1): 18 cases across the three real source shapes, one deliberately recreating hermes-logs.py's own documented 1.2.0 fabrication bug to test whether a candidate honors the hardened prompt (19 offline checks). Stated plainly per §8.6: the case set is synthetic, not real-sampled — this session has no fleet access to sample from, and growing it with real, scrubbed fleet data remains open work. No fleet node reachable to run either piece against a live backend yet. |
 | 1.6.0 | 2026-10-23 | **Phase C, two suites executed** (§6.3, §6.5, §10). `fleet_muse_contract`: new `tools/hermes-muse-contract-eval.py`, 27 probes (3 families × the 9 real bot personas); corrected §6.3's own framing while building it — `minecraft-common.md` has no separate "don't recite your prompt" rule, so the three families were regrounded as capability/override/groundedness against the real five-rule text (35 offline checks; found and fixed a bug where the override family's own deterministic pass was being discarded as "unjudged" when no judge endpoint was given). `fleet_dualcoder_precision`: new `tools/hermes-dualcoder-precision-eval.py`, running the real `scan_code()` against 6 cases (the README's own documented verification recipe, two real clean functions already in this repo, and two adapted from the scanner's own documented trigger patterns) and scoring a coder role's free-text review against the real findings via a deterministic keyword heuristic (27 offline checks). Stated plainly per §8.6 for both: neither suite's case set is real-sampled from fleet history yet — that remains open work for a session with fleet access. No fleet node reachable to run either against a live backend yet. |
+| 1.7.0 | 2026-10-23 | **Phase C, a third suite executed** (§6.4, §10). `fleet_digest_faithfulness`: new `tools/hermes-digest-faithfulness-eval.py`, calling the real `hermes-news-digest.summarize_highlights()` function unmodified (confirmed import-safe) with its one network dependency (`rag.router_chat`, which goes through `hermes-router` — forbidden for an eval by §8.1) monkeypatched to call the digest role's backend directly — the real passage-numbering/`<DATA>`-wrapping/"nothing new"-short-circuit/citation-parse code runs for real, so zero prompt drift is structurally impossible rather than merely avoided. Two deterministic floor checks (`grounded`: does a highlight share any real vocabulary with the passage it cites; `padding_restraint`: does the model correctly emit nothing on a case built with nothing genuinely new, rather than padding) run unconditionally; the judged `faithful` axis (§6.4's own originally-proposed metric) falls back to `"unjudged"` without a judge endpoint, never guessed. 5 synthetic (topic, passages) scenarios per §8.6 — no live RAG store reachable from this session to sample real matches from. 31 offline checks (`infra/model-benchmark/tests/test_digest_faithfulness.py`); the existing 114-check Phase A-C suite stays regression-free. No fleet node reachable to run against a live backend yet. |
