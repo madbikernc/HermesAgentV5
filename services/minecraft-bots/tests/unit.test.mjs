@@ -3031,19 +3031,28 @@ function room(w, { baseX = 0, baseZ = 0, wallName = 'cobblestone', doorFacing = 
   return new V3(baseX, 64, baseZ + 1);
 }
 
-await check('Shelter rooms (general): a sealed room has zero holes; a real gap is found and reported', async () => {
+await check('Shelter rooms (general): a sealed room is recognized with zero holes, even when it is too narrow for hole-finding itself', async () => {
+  // smallRoom() is 1x1 interior -- exactly the shape holesIn()'s own header explains cannot be
+  // told apart from a hole by neighbour count alone (every real floor-level cell there has 4 of
+  // 6 neighbours solid, the same count a genuine breach would). Found live, offline, while
+  // writing this test: the first version of holesIn() false-positived THIS room's own floor
+  // cell as a hole. MIN_SHELTER_ROOM_SPAN now deliberately leaves a room this narrow to
+  // findShelterNearHome() (index.js), which has a real reference geometry and needs no
+  // heuristic -- so recognition still succeeds here, holes is just never attempted on it.
   const c = shelter();
   const w = smallRoom();
   const intact = c.shelterRoomsNear(w.bot, new V3(0, 64, 1), 8);
   assert.equal(intact.length, 1, 'exactly one room found');
-  assert.equal(intact[0].holes.size, 0, 'fully sealed -- no holes');
+  assert.equal(intact[0].holes.size, 0, 'too narrow for hole-finding to even attempt -- not a false claim of damage');
   assert(intact[0].inside.has('0,64,0'), 'the room interior is in it');
 
-  // The same gap the strict enclosedInterior test above shows breaks "sealed" entirely.
+  // Confirmed deliberately bare: even with the same real gap the strict enclosedInterior test
+  // above shows breaks "sealed" entirely, a room this narrow still reports zero holes -- the
+  // point of the test above is exactly that this must never become a false positive.
   w.open([-1, 65, 0]);
   const damaged = c.shelterRoomsNear(w.bot, new V3(0, 64, 1), 8);
   assert.equal(damaged.length, 1, 'still recognized as one room -- real damage does not erase it');
-  assert.deepEqual([...damaged[0].holes], ['-1,65,0'], 'the real hole, and only the real hole, is found');
+  assert.equal(damaged[0].holes.size, 0, 'too narrow for this mechanism -- the individual-shelter repair path owns this one, not a false negative');
 });
 
 await check('Shelter rooms (general): any number of separate individual shelters, each kept apart', async () => {

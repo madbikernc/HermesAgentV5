@@ -506,9 +506,18 @@ export function shelterInteriorsNear(bot, point, radius = BED_SEARCH_DISTANCE) {
 // the room's "true" outline: a passable, non-door cell surrounded by mostly-solid neighbours is
 // sitting where a wall/floor/roof block used to be, whether the room is a 2x3 bedroom or a 7x7
 // communal hall. A genuine deep-room air cell is instead surrounded mostly by MORE room air, not
-// solid blocks, so this does not fire on the room's own interior.
+// solid blocks -- EXCEPT in a room only one cell wide, where every real interior cell has the
+// exact same solid-neighbour profile as a hole would. Found live (offline test, not guessed):
+// the Builder's own 1x1-interior shelter false-positived its own floor-level cell as a "hole" --
+// 4 of its 6 neighbours (both walls, the floor, the door) are genuinely solid, same count a real
+// breach has. This heuristic is only geometrically valid once the room is wide enough that a
+// hole's neighbourhood and a genuine interior cell's can actually differ; MIN_SHELTER_ROOM_SPAN
+// below draws that line, and a narrower room is left to the individual-shelter mechanism
+// (findShelterNearHome(), index.js), which already has a reference geometry and does not need
+// this heuristic at all.
 export const SHELTER_ROOM_SEARCH_RADIUS = 16; // wider than SHELL_RADIUS -- must reach across a large communal-sized room, not just a 2x3
 export const MIN_SHELTER_ROOM_CELLS = 2; // filters out a coincidental one-cell covered nook
+export const MIN_SHELTER_ROOM_SPAN = 3; // narrower than this (either axis) and holesIn() cannot tell a hole from the room's own interior
 export const HOLE_MIN_SOLID_NEIGHBOURS = 4; // of 6 face-neighbours -- a thin gap in an otherwise-solid wall/floor/roof
 
 function solidFaceNeighbourCount(bot, cell) {
@@ -517,11 +526,30 @@ function solidFaceNeighbourCount(bot, cell) {
   return n;
 }
 
+// The horizontal footprint `inside` actually occupies -- both axes, since a hallway one cell
+// wide in Z but ten long in X is exactly as narrow a case as a 1x1 room for holesIn()'s purposes.
+function horizontalSpan(inside) {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const key of inside) {
+    const [x, , z] = key.split(",").map(Number);
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  return { width: maxX - minX + 1, depth: maxZ - minZ + 1 };
+}
+
 // Every cell of `inside` that reads as room air today but is actually a breach: surrounded by
 // enough solid neighbours that it was almost certainly part of the shell, not the room's real
-// open space. Returns a Set of posKeys, each a position that should be solid again.
+// open space. Returns a Set of posKeys, each a position that should be solid again. Deliberately
+// returns empty, never a guess, for a room narrower than MIN_SHELTER_ROOM_SPAN on either axis --
+// see this section's own header for why a 1-wide room cannot be told apart from a hole this way.
 export function holesIn(bot, inside) {
   const holes = new Set();
+  if (!inside.size) return holes;
+  const { width, depth } = horizontalSpan(inside);
+  if (width < MIN_SHELTER_ROOM_SPAN || depth < MIN_SHELTER_ROOM_SPAN) return holes;
   for (const key of inside) {
     const cell = fromKey(key);
     if (solidFaceNeighbourCount(bot, cell) >= HOLE_MIN_SOLID_NEIGHBOURS) holes.add(key);
