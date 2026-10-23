@@ -1,14 +1,16 @@
 # Firmament Fleet Benchmark Suite — Target Design
 
-**Version:** 1.2.1
+**Version:** 1.3.0
 
-**Status:** Planned, not executed. Direct operator request, 2026-10-18. This is a *target-state* design
-for a comprehensive, unified benchmark suite covering every role the fleet actually runs — most of the
-individual pieces already exist and are live; what does not yet exist is the per-role coverage map, the
-gap-fill suites for roles that currently have no accuracy ground truth at all, and the single shared
-schema that would let any of them be compared side by side. `IMPLEMENTATION_PLAN.md`'s **S39** is the
-stage that tracks building this and points back here for the full spec — the same split **S23** uses for
-`MINECRAFT_BOTS_DESIGN.md` and **S38** uses for `MARKET_WATCH_DESIGN.md`.
+**Status:** S39a cleared 2026-10-22 — operator reviewed the gap list (§4) and phasing (§10) and approved
+proceeding. Phase A (schema unification, §7) is the next build step; Phases B-D remain design-only. Direct
+operator request, 2026-10-18; scope extended 2026-10-20 (gaps 7-8); reviewed and approved 2026-10-22. This
+is a *target-state* design for a comprehensive, unified benchmark suite covering every role the fleet
+actually runs — most of the individual pieces already exist and are live; what does not yet exist is the
+per-role coverage map, the gap-fill suites for roles that currently have no accuracy ground truth at all,
+and the single shared schema that would let any of them be compared side by side. `IMPLEMENTATION_PLAN.md`'s
+**S39** is the stage that tracks building this and points back here for the full spec — the same split
+**S23** uses for `MINECRAFT_BOTS_DESIGN.md` and **S38** uses for `MARKET_WATCH_DESIGN.md`.
 
 **Purpose:** give every current and future local-model candidate, for every role The Firmament actually
 has a model doing work in, a benchmark with real (not assumed) ground truth, so that a promotion/rejection
@@ -85,11 +87,11 @@ in-game player is synchronously blocked on that specific call before they see a 
 | `embed` / `rerank` | RAG embedding + cross-encoder reranking, called inside the same interactive retrieval path | Qwen3-Embedding-8B / Qwen3-Reranker-0.6B | **Yes** | Same synchronous retrieval wait as above |
 | Minecraft `muse` replies | In-character chat, Mayor/Mark directives | Qwen3.6-35B-A3B-A3B abliterated | **Yes** | A player in the world is waiting on the bot's chat reply |
 | `super` | Log/canary/pfSense/game-abuse analysis, news-digest summarization | Huihui-GLM-4.7-Flash-abliterated | **No** | Always invoked async off a timer or Buzz topic; nobody is watching a spinner for it |
-| `coder` / `coder2` | Dual-coder code review | Qwen3.8-27B-abliterated / Muse-Glimmer-30B | **No** | Async review, triggered on goal completion, not on a human's clock — and `coder2` is already known to need 34-55s/call, which is fine for this role |
+| All coder roles (`coder`; `coder2` retired 2026-10-20, replacement candidates under evaluation) | Dual-coder code review | Qwen3.8-27B-abliterated (`coder`) | **No** | Async review, triggered on goal completion, not on a human's clock — speed is never in scope for this role family regardless of which models currently fill it; `coder2`, before retirement, needed 34-55s/call and was never penalized for it, the precedent this rule generalizes from |
 | `omni` (vision judge / log-mode) | Camera description, media generate→evaluate→regenerate judge | gemma-4-26B-A4B-it stock | **No** | The generate-evaluate-regenerate loop is a background job polled via Matrix push, not a live wait |
 | `hermes-model-scout` | Daily discovery → role-fit → benchmark backlog | n/a (batch pipeline, not a chat role) | **No** | Daily timer |
 | VulnHunter / security bake-off candidates | Static vulnerability analysis | 6 contenders (S28) | **No** | Offline analyst run, pre-registered and batch-scored |
-| Minecraft triage | Crash/incident diagnosis | `coder`/`coder2` | **No** | Async, worker-thread-fed, not blocking gameplay |
+| Minecraft triage | Crash/incident diagnosis | A coder role (`coder`) | **No** | Async, worker-thread-fed, not blocking gameplay |
 
 `[DECIDED]` per the operator's own framing in this request. If a role's call pattern changes later (e.g.
 `super` ever ends up behind a synchronous chat reply), it moves rows — the table, not a hardcoded rule in
@@ -101,8 +103,8 @@ any one script, is the source of truth for which suites get a speed column at al
 
 Eight real gaps: the original six, found by cross-checking the role list above against §2's existing
 coverage, plus two more (7-8) found in a 2026-10-20 follow-up pass that asked a narrower question — not
-"which roles have no accuracy ground truth" but "does any existing or proposed suite test `coder`/`coder2`
-on tasks actually shaped like this fleet's own real work." These are the actual new benchmark designs this
+"which roles have no accuracy ground truth" but "does any existing or proposed suite test the coder role
+family on tasks actually shaped like this fleet's own real work." These are the actual new benchmark designs this
 proposal adds (§6); everything else in §2 stays as is.
 
 1. **`super` as log analyst has no correctness ground truth at all.** S11 explicitly scoped "the log
@@ -129,11 +131,12 @@ proposal adds (§6); everything else in §2 stays as is.
    text* itself is model-generated prose over real indexed chunks, and nothing currently verifies that
    every factual claim in that prose is actually supported by its cited chunk.
 
-5. **Dual-coder review (`coder`/`coder2`) has no precision/recall against real findings.** The role is
-   measured dormant (zero real runs in 30 days per the router's own comment) and scored today purely on
+5. **Dual-coder review (all coder roles) has no precision/recall against real findings.** The role family
+   is measured dormant (zero real runs in 30 days per the router's own comment) and scored today purely on
    general BFCL/coding capability. There is no benchmark for the thing the role actually exists to do:
-   does its LLM pass agree with `hermes-code-security-scan.py`'s static-analysis findings (true positives
-   it should confirm) without inventing new ones (false positives) on code where the static scan is clean.
+   does a coder role's LLM pass agree with `hermes-code-security-scan.py`'s static-analysis findings (true
+   positives it should confirm) without inventing new ones (false positives) on code where the static scan
+   is clean.
 
 6. **Every existing custom suite lives in its own output format.** `hermes-guard-eval.py` writes its own
    `--json` file; `hermes-rag-eval.py` appends to its own `rag-eval-history.jsonl`; the bake-off scripts
@@ -143,14 +146,14 @@ proposal adds (§6); everything else in §2 stays as is.
    This is the single structural gap that makes "comprehensive" the right word for what's missing: the
    *individual* measurements already exist, but there is no one place to compare them.
 
-7. **Neither `coder` nor `coder2` has a benchmark for general fix capability on this fleet's own code.**
+7. **No coder role has a benchmark for general fix capability on this fleet's own code.**
    Gap 5's `fleet_dualcoder_precision` measures review-*agreement* with a static scanner — a judgment task.
    Nothing measures the more basic thing the role spends most of its real time on: given a real bug in a
    real custom tool this fleet has built, can the model actually produce a correct fix. Today's only signal
    for this is Tier 0's general BFCL/SWE-bench numbers, and neither is drawn from this fleet's own code —
    a candidate could score well on both while being no good at the actual shape of work it's assigned.
 
-8. **Neither role has a benchmark for building a new capability from a stated requirement, either.** This
+8. **No coder role has a benchmark for building a new capability from a stated requirement, either.** This
    fleet's own history is full of exactly this shape of work — a direct operator request, a vendor
    integration or parsing pipeline built from nothing to satisfy it (§6.8 names eight real examples) — and
    nothing currently measures whether a candidate model can do that well, only whether it can review
@@ -269,7 +272,7 @@ new key.
 
 ### 6.5 `fleet_dualcoder_precision` — closes gap 5
 
-- **What it scores:** does `coder`/`coder2`'s review pass agree with `hermes-code-security-scan.py`'s
+- **What it scores:** does a coder role's review pass agree with `hermes-code-security-scan.py`'s
   static-analysis findings (bandit/ruff/detect-secrets) on a fixed set of real commits/files — confirming
   real findings (recall) without inventing new ones on clean code (precision)?
 - **Ground truth:** the static scanner's own findings are the deterministic ground truth, same
@@ -277,10 +280,12 @@ new key.
   pattern one tier down, at the single-role level instead of across a 6-contender matrix. Target set:
   `[PROPOSED]` a mix of real past commits with a known scanner finding and real clean files with none,
   pulled from this repo's own history rather than invented.
-- **Metric:** precision/recall against the scanner's findings, per model (`coder` vs `coder2`).
-- **Speed:** out of scope per §3 — and this is worth stating plainly given `coder2`'s known 34-55s/call
-  cost (§3's Minecraft bake-off finding carries over): this suite must never penalize `coder2` for being
-  slow, only for being wrong, which is the whole point of separating Tier 1 from Tier 3.
+- **Metric:** precision/recall against the scanner's findings, per candidate model in the coder role
+  family — whichever models currently fill it, not a hardcoded pair.
+- **Speed:** out of scope per §3 — worth stating plainly given this role family's own precedent: `coder2`,
+  before its 2026-10-20 retirement, needed 34-55s/call and was never penalized for it. This suite must
+  never penalize a slower candidate for being slow, only for being wrong, which is the whole point of
+  separating Tier 1 from Tier 3.
 
 ### 6.6 Tier 3 interactive-latency harness — the speed half of the six "Yes" roles
 
@@ -371,9 +376,10 @@ synthesis/`embed`/`rerank`, and `muse`. Three corrections carried over from real
   mistake §8.6's provenance discipline already guards against elsewhere. Partial credit is expected and
   should be visible in the reported rubric breakdown, not collapsed to one number.
 - **Speed:** out of scope per §3. Worth stating plainly: build tasks are bigger (201-892 lines vs. a narrow
-  patch) and cost more tokens/wall-clock to attempt than anything else in this proposal, which bites harder
-  for `coder2` given its already-flagged S36 slowness — this suite must never penalize that, only
-  correctness, same rule 6.5 already states for the same role.
+  patch) and cost more tokens/wall-clock to attempt than anything else in this proposal, which will bite
+  harder on any slower coder candidate (`coder2`, before its retirement, was this role family's own
+  precedent) — this suite must never penalize that, only correctness, same rule 6.5 already states for
+  the role family.
 - Same public-repo contamination `[RISK]` as 6.7 applies here too.
 
 ---
@@ -527,3 +533,4 @@ live in-repo, in the same NAS path `history.jsonl` already uses, or elsewhere, b
 | 1.1.0 | 2026-10-20 | Direct operator request: added gaps 7-8 and suites 6.7 (`fleet_coder_fix`) / 6.8 (`fleet_coder_build`) — `coder`/`coder2` had no benchmark for general fix or from-scratch-build capability on tasks actually shaped like this fleet's own coding work, only review-agreement (gap 5) and generic Tier 0 numbers. Grounded both suites in real commits rather than invented fixtures: nine verified fix commits and eight verified from-scratch build commits, traced across this repo and, where a tool's own real history predates the V4→V5 consolidation, the sibling `HermesAgentV4`/`HermesAgentRedo` repos on the same disk — confirmed reachable by ordinary cross-repo `git log`, correcting a first-pass assumption that this history was inaccessible. Established a two-tier scoring split for both suites (deterministic repro-test where a bug/capability is reproducible standalone; independent LLM-judge otherwise, graded against the stated requirement/symptom, never against line-similarity to the real diff) and named two risks plainly: an unverified public-repo training-data-contamination question, and build tasks' larger token/wall-clock cost landing hardest on `coder2`'s already-flagged S36 slowness. |
 | 1.2.0 | 2026-10-20 | Added two `fleet_coder_fix` candidates from the S19 mesh work, per CLAUDE.md 1.2.0's benchmark-evaluation rule. **The call: no new suite is needed** — this is coder capability on a Python fleet tool, already covered by gap 7 / §6.7, and nothing about it is a role this proposal does not already score. It is worth adding to §6.7's corpus specifically because that table's own `[PROPOSED]` note says the pool skews toward mineflayer-shaped JS and needs Python tool fixes to balance it. Both candidates are repro-testable (tier a): the symptom is a measurable property of the output mesh — wall thickness relative to the bounding-box diagonal, and a self-intersecting-face count — so a minimal repro asserts the previously-wrong number is now right, with no live vendor API or Minecraft server needed. The first is also an unusually good test of *diagnosis* rather than patching, since the symptom ("valid STL, gaps when sliced") points nowhere near the cause (the reconstruction algorithm wraps a hollow shell), and three plausible-looking fixes were measured and rejected before the right one. Hashes are pending the commit. |
 | 1.2.1 | 2026-10-20 | Filled the two `fleet_coder_fix` candidate hashes, now that the fix is committed as `b4651ca`. |
+| 1.3.0 | 2026-10-22 | Operator reviewed the gap list and phasing and signed off (S39a cleared) — proceeding to Phase A. Generalized every `coder`/`coder2` reference (§3's role table, gaps 5/7/8, §§6.5/6.7/6.8) to "all coder roles"/"the coder role family," since `coder2` was retired 2026-10-20 (`1e86d0e`) with its replacement still under evaluation in a parallel session — none of the suites' own logic was ever actually `coder2`-specific, only the wording naming it was. |
