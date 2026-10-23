@@ -3064,7 +3064,9 @@ await check('Shelter rooms (general): any number of separate individual shelters
   const rooms = c.shelterRoomsNear(w.bot, doorA, 48);
   assert.equal(rooms.length, 3, `three separate shelters, not merged into one or lost: found ${rooms.length}`);
   for (const d of [doorA, doorB, doorC]) {
-    assert(rooms.some((r) => r.inside.has(`${d.x},${d.y - 1},${d.z - 1}`)), `room at door ${JSON.stringify(d)} is one of them`);
+    // door faces north (step [0,-1]); the room's own interior column sits one block further
+    // north again (same x/y, z-1) -- not y-1, which is the solid floor underneath it.
+    assert(rooms.some((r) => r.inside.has(`${d.x},${d.y},${d.z - 1}`)), `room at door ${JSON.stringify(d)} is one of them`);
   }
   assert.equal(new Set(rooms.flatMap((r) => [...r.inside])).size,
     [...rooms[0].inside, ...rooms[1].inside, ...rooms[2].inside].length, 'no cell is claimed by two rooms at once');
