@@ -1,4 +1,16 @@
-// Version: 1.91.0
+// Version: 1.92.0
+//
+// 1.92.0 (2026-10-22, investigation: attack_win_rate regressed 0.846 baseline -> 0.099):
+// root-caused to Luke/Mark (Soldiers, SELF_DEFENSE_RANGE=20, never flee) repeatedly committing
+// to a 90s ACTION_TIMEOUT_MS attack against a target their pathfinder could never route to --
+// 5,901 and 1,718 noPath results in 24h respectively, vs. 298-832 for the other three bots,
+// almost certainly the 2026-10-08 fresh-world terrain change. "attack" now tracks path_update
+// during the fight and bails with a new, honest "couldn't reach it -- no path through." outcome
+// after NOPATH_BURST_THRESHOLD (4) noPath results within NOPATH_BURST_WINDOW_MS (3000ms) --
+// same shape index.js's own dig_error burst detector already uses. Deliberately excluded from
+// tests/baseline.mjs's attack_win_rate loss count, same reasoning as the existing "broke off the
+// fight" exclusion: never a real fight to begin with. New
+// unreachable_target_bailouts_per_bot_day metric tracks it instead.
 //
 // 1.91.0 (2026-10-18, direct request): bed claiming removed entirely -- "any bed not already
 // occupied," trying the next one until she finds one free (no more priority-banded "her own
@@ -3755,23 +3767,52 @@ async function performActionAs(bot, action, speaker, token) {
       // set up), and re-issued if the library drops the target while it still exists. A kill is
       // now only claimed on the server's own entityDead status for THIS target; the entity merely
       // unloading (out of range, despawned) is reported as losing track, not a kill.
+      // Direct report, 2026-10-22 (attack_win_rate collapsed 0.846 baseline -> 0.099 measured):
+      // root-caused from real spark journals, not guessed -- Luke and Mark (the two Soldiers,
+      // SELF_DEFENSE_RANGE=20 and decideFightType()'s "a Soldier always fights" rule, never
+      // flees) logged 5,901 and 1,718 path_update status=noPath results in 24h, 7-20x Amy/Babs/
+      // Mayor's 298-832, almost certainly the fresh 2026-10-08 world reset putting their guard
+      // posts near terrain their wide detection range can sense across but the pathfinder can't
+      // route through (water/elevation/gaps). A Soldier who can't flee and can't reach the
+      // target just polled this loop for the full 90s ACTION_TIMEOUT_MS every single time --
+      // 206-266 such losses per bot per day, each one holding SELF_DEFENSE-tier arbiter control
+      // the entire span. FLEE_ONLY_MOBS already exists for the identical shape of problem with
+      // flying mobs ("a melee attack can never land, don't commit to it"); nothing gave melee an
+      // equivalent escape when the target is sensed but genuinely unpathable. Same burst-
+      // detection shape this file's own dig_error handler already uses (index.js,
+      // DIG_ERROR_BURST_THRESHOLD=4 within DIG_ERROR_BURST_WINDOW_MS=3000) -- a handful of real,
+      // persistent noPath results in a few seconds is strong evidence of structural
+      // unreachability, not a single transient blip (a door about to open, a teammate's hitbox
+      // briefly in the way) that a lower threshold would wrongly abandon.
       const FIGHT_POLL_MS = 250;
+      const NOPATH_BURST_THRESHOLD = 4;
+      const NOPATH_BURST_WINDOW_MS = 3000;
       const deadline = Date.now() + (action.maxDurationMs ?? ACTION_TIMEOUT_MS);
       let killed = false;
+      let unreachable = false;
+      let noPathTimestamps = [];
       const onDead = (entity) => { if (entity?.id === target.id) killed = true; };
+      const onPathUpdate = (r) => {
+        if (r.status !== "noPath") { noPathTimestamps = []; return; }
+        const now = Date.now();
+        noPathTimestamps = [...noPathTimestamps.filter((t) => now - t < NOPATH_BURST_WINDOW_MS), now];
+        if (noPathTimestamps.length >= NOPATH_BURST_THRESHOLD) unreachable = true;
+      };
       const startAttack = () => {
         Promise.resolve(bot.pvp.attack(target))
           .catch((err) => console.error("attack: pvp.attack failed:", err.message));
       };
       bot.on("entityDead", onDead);
+      bot.on("path_update", onPathUpdate);
       try {
         if (!token.cancelled) startAttack();
-        while (!killed && bot.entities[target.id] && !token.cancelled && Date.now() < deadline) {
+        while (!killed && !unreachable && bot.entities[target.id] && !token.cancelled && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, FIGHT_POLL_MS));
           if (!killed && !token.cancelled && bot.entities[target.id] && bot.pvp.target !== target) startAttack();
         }
       } finally {
         bot.removeListener("entityDead", onDead);
+        bot.removeListener("path_update", onPathUpdate);
         // A preemptor's own cancelPhysical() already stopped PvP; only the owner cleans up.
         if (!token.cancelled) {
           if (bot.pvp.target) bot.pvp.stop();
@@ -3780,6 +3821,12 @@ async function performActionAs(bot, action, speaker, token) {
       }
       if (token.cancelled) return ok("broke off the fight.");
       if (killed) return ok("took care of it.");
+      // Deliberately its own outcome, excluded from attack_win_rate's loss count the same way
+      // "broke off the fight" already is (tests/baseline.mjs) -- this was never a fight with any
+      // chance of landing a hit, the same reasoning that already excludes FLEE_ONLY_MOBS from
+      // ever entering one. Tracked separately by unreachable_target_bailouts_per_bot_day so the
+      // underlying terrain/range problem stays visible rather than just vanishing from the ratio.
+      if (unreachable) return fail("couldn't reach it -- no path through.");
       if (!bot.entities[target.id]) return fail("lost track of it.");
       return fail("gave up on the fight -- took too long.");
     }

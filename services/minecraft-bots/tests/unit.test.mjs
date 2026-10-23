@@ -1,4 +1,9 @@
-// Version: 1.31.1
+// Version: 1.32.0
+// 1.32.0 (2026-10-22): two new MB-01 checks for actions.js 1.92.0's noPath burst bailout (the
+// attack_win_rate regression fix) -- four real noPath path_update results bail out well short
+// of the test's 400ms ACTION_TIMEOUT_MS with a new "couldn't reach it" outcome, and a lone/
+// transient noPath that's followed by a real path doesn't abandon a fight that then lands a
+// kill.
 // 1.31.1 (2026-10-21): the S34 "S27f analysis mode..." test's chat-site scan window was 25
 // lines, too short to reach generateReply()'s callRole() options (36 lines from its <speaker>
 // content line) -- found live on spark, crashed the whole suite on an uncaught assertion.
@@ -195,6 +200,38 @@ await check('MB-01 a target that merely unloads is not reported as a kill', asyn
   await sleep(50); delete bot.entities[2];
   const result = await pending;
   assert.equal(result.ok, false); assert.match(result.text, /lost track/);
+});
+
+await check('MB-01 attack bails early on a noPath burst -- target sensed but unreachable', async () => {
+  // Regression for the real 2026-10-22 finding: a Soldier with a wide self-defense range who
+  // never flees, facing a target her pathfinder can never route to, used to poll the full
+  // ACTION_TIMEOUT_MS every single time (206-266 such losses/bot/day on Luke/Mark). Four real
+  // noPath results within NOPATH_BURST_WINDOW_MS now bail out well before the deadline --
+  // confirmed here by never emitting entityDead at all and asserting the result lands fast.
+  const bot = makeBot(); const target = { id: 3 }; bot.entities[3] = target;
+  const c = context(bot); vm.runInContext(timeoutFn + actionFn, c);
+  const started = Date.now();
+  const pending = c.performAction(bot, { type: 'attack', target }, 'test');
+  await sleep(10);
+  for (let i = 0; i < 4; i++) bot.emit('path_update', { status: 'noPath' });
+  const result = await pending;
+  assert(Date.now() - started < 400, 'bailed well before the 400ms test ACTION_TIMEOUT_MS');
+  assert.equal(result.ok, false);
+  assert.match(result.text, /couldn't reach it/);
+  assert(bot.entities[3], 'the target is still present -- this must not be mistaken for "lost track"');
+});
+
+await check('MB-01 a lone/transient noPath does not abandon a fight that then lands a real kill', async () => {
+  const bot = makeBot(); const target = { id: 4 }; bot.entities[4] = target;
+  const c = context(bot); vm.runInContext(timeoutFn + actionFn, c);
+  const pending = c.performAction(bot, { type: 'attack', target }, 'test');
+  await sleep(10);
+  bot.emit('path_update', { status: 'noPath' });
+  bot.emit('path_update', { status: 'noPath' });
+  bot.emit('path_update', { status: 'success' }); // a real path found resets the burst counter
+  bot.emit('entityDead', target); delete bot.entities[4];
+  const result = await pending;
+  assert.equal(result.ok, true); assert.match(result.text, /took care of it/);
 });
 
 await check('MB-03 teleport-style cancelAndClear leaves no owner behind', async () => {

@@ -1,4 +1,4 @@
-// Version: 1.3.1
+// Version: 1.4.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -15,7 +15,9 @@
 // When a behavior fix lands, add the metric that proves it here (see tests/README.md), and after
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
-// Revision History: 1.0.0 | 2026-09-24 | Initial metrics from the 2026-09-23 fleet measurement.
+// Revision History: 1.4.0 | 2026-10-22 | unreachable_target_bailouts_per_bot_day (actions.js
+//   1.92.0's noPath burst bailout for the attack action).
+// 1.0.0 | 2026-09-24 | Initial metrics from the 2026-09-23 fleet measurement.
 // 1.1.0 | 2026-09-24 | action_failure_rate (OUTCOME lines) and routine_skips_per_bot_day (ROUTINE_SKIPS).
 // 1.2.0 | 2026-09-25 | failed_eats_per_bot_day and farm_ranch_successes_per_bot_day (farming/ranching fixes).
 // 1.3.0 | 2026-10-07 | access_obstructions_per_bot_day, dig_error_bursts_per_bot_day,
@@ -66,6 +68,18 @@ const METRICS = {
     better: "higher", tolerance: 0.15, floor: 0.05,
     value: (c) => ratio(c(/(attack|squad response result|self-defense result): took care of it/),
       c(/gave up on the fight|lost track of it/)),
+  },
+  // 2026-10-22: a target sensed within SELF_DEFENSE_RANGE but genuinely unpathable (actions.js
+  // 1.92.0's noPath burst bailout) is deliberately NOT counted as an attack_win_rate loss -- it
+  // was never a fight with any chance of a hit, the same reasoning that already excludes "broke
+  // off the fight" (preemption). This metric is where that case stays visible instead of just
+  // vanishing from the ratio -- investigated live after a real regression (0.846 baseline ->
+  // 0.099 measured) traced mostly to Luke/Mark holding 90s doomed fights against unreachable
+  // targets near the 2026-10-08 fresh-world terrain.
+  unreachable_target_bailouts_per_bot_day: {
+    about: "attack bailed early because the target was sensed but genuinely unpathable, not fought at all",
+    better: "lower", tolerance: 0.5, floor: 1,
+    value: (c, ctx) => perBotDay(c(/couldn't reach it -- no path through\./), ctx),
   },
   planner_action_ratio: {
     about: "goal steps actually executed per planner call (efficiency pass)",
