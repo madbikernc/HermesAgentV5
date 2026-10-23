@@ -1,4 +1,10 @@
-// Version: 1.19.0
+// Version: 1.20.0
+//
+// 1.20.0 (2026-10-22, direct report: a large communal shelter with holes/missing parts was not
+// being repaired as a large structure): new scenario mirroring "Shelter integrity" just above,
+// for checkCommunalShelterIntegrity()'s self-repair (index.js 2.120.0) -- a hole knocked in the
+// communal structure's wall via RCON is filled back in by the real "build_communal_shelter"
+// action, same as a small shelter already was.
 //
 // 1.19.0 (2026-10-18, direct request): bed claiming removed -- the "destroyed claimed bed moves
 // to the nearest unclaimed one" scenario (checkClaimedBed, a bedsDir fixture, placeBed()) is gone
@@ -86,7 +92,8 @@ import path from "node:path";
 const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
 process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
 process.env.MC_RAG_DISABLED = "true";
-const { loadActionPlugins, performAction, loadPenLocation, countInPen, findBedSites, shelterPositions } = await import("../actions.js");
+const { loadActionPlugins, performAction, loadPenLocation, countInPen, findBedSites, shelterPositions,
+  communalShelterPositions, communalDoorwayPosition } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor, installEnchantsFix } = await import("../equipment.js");
 const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
@@ -599,6 +606,44 @@ scenario("Shelter integrity: a hole knocked in a built shelter gets repaired on 
   const repaired = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
   assert.equal(repaired.ok, true, repaired.text);
   assert.equal(bot.blockAt(hole)?.boundingBox, "block", "the hole is filled back in");
+});
+
+scenario("Communal shelter integrity: a hole in the large structure gets repaired, same as a small one", async () => {
+  // Direct report, 2026-10-22 ("there is a large shelter with many beds, but it has holes or
+  // missing parts. They are not repairing it as a large structure"): checkShelterIntegrity()'s
+  // self-healing never covered the communal shelter at all -- findCommunalShelterNearHome() was
+  // only ever called while a bot was actively pursuing the one-time "build it" goal, which
+  // nextBuilderPriority() stops proposing forever the instant it's first satisfied. New
+  // checkCommunalShelterIntegrity() (index.js 2.120.0) is the periodic version, same shape as
+  // checkShelterIntegrity() just above; this calls its own "build_communal_shelter" action
+  // directly (same reason the individual-shelter scenario above does: the real timer is 60s,
+  // too slow for a live test to wait out).
+  const width = 5, depth = 5;
+  const base = new Vec3(x - 2, y + 1, z - 2);
+  const needed = communalShelterPositions(base, width, depth).length;
+  await rcon(`give ${TESTER} minecraft:cobblestone ${needed + 10}`, `give ${TESTER} minecraft:oak_planks 10`);
+  await waitFor(() => held("cobblestone") >= needed && held("oak_planks") >= 10, 10000, "communal shelter building materials");
+  const built = await performAction(bot, { type: "build_communal_shelter", at: { x: base.x, y: base.y, z: base.z }, width, depth }, TESTER);
+  assert.equal(built.ok, true, built.text);
+  assert.equal(built.built, true, built.text);
+
+  const worldSpawn = bot.spawnPoint;
+  bot.spawnPoint = base;
+  scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
+
+  // Knock a real hole in the wall via RCON (damage, not a deliberate dig) at a position taken
+  // from the real geometry function -- not guessed -- and confirm it reads as damaged.
+  const wallPositions = communalShelterPositions(base, width, depth);
+  const doorPos = communalDoorwayPosition(base, depth);
+  const hole = wallPositions.find((p) => p.y === base.y + 1 && (p.x !== doorPos.x || p.z !== doorPos.z));
+  await rcon(`setblock ${hole.x} ${hole.y} ${hole.z} minecraft:air`);
+  await waitFor(() => bot.blockAt(hole)?.boundingBox !== "block", 5000, "the hole to appear");
+  await rcon(`give ${TESTER} minecraft:cobblestone 4`);
+  await waitFor(() => held("cobblestone") >= 4, 5000, "a little more cobblestone to repair with");
+
+  const repaired = await performAction(bot, { type: "build_communal_shelter", at: { x: base.x, y: base.y, z: base.z }, width, depth }, TESTER);
+  assert.equal(repaired.ok, true, repaired.text);
+  assert.equal(bot.blockAt(hole)?.boundingBox, "block", "the hole in the large structure is filled back in, same as a small shelter");
 });
 
 const logCount = () => bot.inventory.items().filter((i) => i.name.endsWith("_log")).reduce((n, i) => n + i.count, 0);

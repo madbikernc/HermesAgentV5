@@ -1,4 +1,8 @@
-// Version: 1.32.0
+// Version: 1.33.0
+// 1.33.0 (2026-10-22): two new checks for index.js 2.120.0's checkCommunalShelterIntegrity() --
+// findCommunalShelterNearHome() correctly reports a damaged (not just complete-or-nothing)
+// communal shelter, and the new periodic wrapper calls build_communal_shelter with the right
+// base/width/depth only when damaged, never on a complete structure or a bare absence.
 // 1.32.0 (2026-10-22): two new MB-01 checks for actions.js 1.92.0's noPath burst bailout (the
 // attack_win_rate regression fix) -- four real noPath path_update results bail out well short
 // of the test's 400ms ACTION_TIMEOUT_MS with a new "couldn't reach it" outcome, and a lone/
@@ -2300,6 +2304,74 @@ await check('Communal shelter: structure completeness and bed-count verification
   assert.equal(twoBeds.communalShelterSatisfied(), true, '2 beds meets the target');
   const noDoor = check2(communalMockBot(null, bedCells2));
   assert.equal(noDoor.hasCommunalShelterStructure(), false, 'no real door -- not complete, regardless of beds');
+});
+
+await check('findCommunalShelterNearHome finds a damaged communal shelter as a repair target, not just complete-or-nothing', async () => {
+  // Direct report, 2026-10-22 ("there is a large shelter with many beds, but it has holes or
+  // missing parts. They are not repairing it as a large structure"): this detector already
+  // existed and was already correct, but nothing had ever exercised its DAMAGED case -- only
+  // "fully complete" and "missing its door entirely" were tested above. checkCommunalShelterIntegrity()
+  // (index.js 2.120.0) depends on exactly this case to find its repair target.
+  const s = shelterFns();
+  const base = new V3(0, 64, 0);
+  const width = 5, depth = 5;
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  const full = s.communalShelterPositions(base, width, depth);
+  const doorPos = s.communalDoorwayPosition(base, depth);
+  const findCheck = (positions, doorAt) => {
+    const solid = new Set(positions.map(key));
+    const doors = new Set(doorAt ? [key(doorAt)] : []);
+    const mockBot = { spawnPoint: base, isABed: () => false,
+      blockAt: (p) => (doors.has(key(p)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower' }) }
+        : { name: 'x', boundingBox: solid.has(key(p)) ? 'block' : 'empty' }) };
+    const h = vm.createContext({ bot: mockBot, Math, BOT_USERNAMES: new Set(['amy']), BUILDER_PRIORITY_RADIUS: 6,
+      communalShelterPositions: s.communalShelterPositions, communalDoorwayPosition: s.communalDoorwayPosition });
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+      between(index, 'const TOOL_NAME', 'function nextSurvivalPriority('), h);
+    return h.findCommunalShelterNearHome();
+  };
+  assert.equal(findCheck(full, doorPos).complete, true, 'sanity: the full structure reads as complete');
+
+  // A few blocks knocked out (the real "a creeper blew a hole in it" shape) -- still well over
+  // half solid, still shelter-shaped, just not sealed.
+  const damaged = findCheck(full.slice(5), doorPos);
+  assert.equal(damaged.complete, false, 'missing wall blocks -- not complete');
+  assert.deepEqual([damaged.base.x, damaged.base.y, damaged.base.z], [base.x, base.y, base.z],
+    "the damaged shelter's own base is returned -- checkCommunalShelterIntegrity()'s repair target, not a bare false");
+  assert.equal(damaged.width, width); assert.equal(damaged.depth, depth);
+
+  // Well under half solid -- not a real repair target, just coincidental open space.
+  const tooDamaged = findCheck(full.slice(Math.ceil(full.length / 2) + 5), doorPos);
+  assert.equal(tooDamaged, null, 'under half solid -- too far gone to count as a genuine repair target');
+});
+
+await check('checkCommunalShelterIntegrity repairs a damaged communal shelter, never touches a complete one or a bare absence', async () => {
+  const calls = [];
+  const base = new V3(5, 64, 9);
+  const mkContext = (found) => {
+    const c = vm.createContext({
+      AUTONOMY_ENABLED: true, routineBlocked: () => false,
+      findCommunalShelterNearHome: () => found,
+      arbiter: { requestControl: async () => ({ release() {} }), OWNERS: { ROUTINE: 'routine' } },
+      performAction: async (_bot, action) => { calls.push(action); return { ok: true, text: 'built the communal shelter.' }; },
+      bot: {}, USERNAME: 'Test', console: { log() {}, error() {} },
+    });
+    vm.runInContext(between(index, 'async function checkCommunalShelterIntegrity() {', 'setInterval(() => {'), c);
+    return c;
+  };
+  await mkContext({ base, width: 7, depth: 7, complete: false }).checkCommunalShelterIntegrity();
+  assert.equal(calls.length, 1, 'a damaged communal shelter must trigger a repair');
+  assert.equal(calls[0].type, 'build_communal_shelter');
+  assert.deepEqual([calls[0].at.x, calls[0].at.y, calls[0].at.z], [5, 64, 9]);
+  assert.equal(calls[0].width, 7); assert.equal(calls[0].depth, 7);
+
+  calls.length = 0;
+  await mkContext({ base, width: 7, depth: 7, complete: true }).checkCommunalShelterIntegrity();
+  assert.equal(calls.length, 0, 'a complete communal shelter must never be re-repaired');
+
+  calls.length = 0;
+  await mkContext(null).checkCommunalShelterIntegrity();
+  assert.equal(calls.length, 0, 'no communal shelter at all near home -- nothing to repair');
 });
 
 function shelterWorld({ groundY = (x, z) => 63, blocked = [] } = {}) {

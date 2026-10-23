@@ -1,4 +1,18 @@
-// Version: 2.119.0
+// Version: 2.120.0
+//
+// 2.120.0 (2026-10-22, direct report: "there is a large shelter with many beds, but it has
+// holes or missing parts. They are not repairing it as a large structure"): new
+// checkCommunalShelterIntegrity(), a standalone ROUTINE-tier timer mirroring
+// checkShelterIntegrity() exactly but for the communal structure. Root cause: the communal
+// shelter's own damage detector, findCommunalShelterNearHome(), already existed and was already
+// correct -- its only caller was communalShelterStep(), which only runs while a bot is actively
+// pursuing the "communal_shelter" self-propose goal, and nextBuilderPriority() stops proposing
+// that goal forever the instant communalShelterSatisfied() first returns true. Once built and
+// bedded, nothing ever looked at it again. New check runs independently of any active goal, the
+// same way checkShelterIntegrity() already does for individual shelters, and re-runs
+// "build_communal_shelter" with the real width/depth findCommunalShelterNearHome() already
+// reports -- that action's own "already standing" early return makes a call against a genuinely
+// intact structure a safe no-op.
 //
 // 2.119.0 (2026-10-21, direct request: "fix the mayor bot screening" -- IMPLEMENTATION_PLAN.md
 // S34): classifyIntent() and generateReply() now pass analysis: isAnotherBot(speaker) to
@@ -6884,6 +6898,50 @@ async function checkShelterIntegrity() {
 setInterval(() => {
   checkShelterIntegrity().catch((err) => console.error(`[${USERNAME}] checkShelterIntegrity error:`, err.message));
 }, SHELTER_INTEGRITY_CHECK_MS);
+
+// Direct report, 2026-10-22 ("there is a large shelter with many beds, but it has holes or
+// missing parts. They are not repairing it as a large structure"): checkShelterIntegrity() just
+// above only ever covers findShelterNearHome() -- the small, fixed-size individual-shelter
+// geometry. The communal shelter has its own, already-correct damage detector,
+// findCommunalShelterNearHome() (mirrors findShelterNearHome() exactly: complete/damaged/null,
+// at least half solid to count as a real repair target), but before this it was ONLY ever
+// called from communalShelterStep() -- which only runs while a bot is actively pursuing the
+// "communal_shelter" self-propose goal, and nextBuilderPriority() stops ever proposing that goal
+// again the moment communalShelterSatisfied() first returns true (index.js, candidate list).
+// Once the shelter was built and bedded, nothing looked at it again -- a creeper, a stray dig, or
+// an explosion could open a hole in a wall that housed the whole fleet's beds and it would simply
+// stay open forever. Same ROUTINE-tier self-healing shape as checkShelterIntegrity() beside it,
+// just targeting the communal structure's own geometry and re-running "build_communal_shelter"
+// (not the individual "build") with the real width/depth findCommunalShelterNearHome() already
+// knows -- that action's own early "already standing" return makes a call against a genuinely
+// complete structure a safe no-op, same guarantee checkShelterIntegrity() already relies on.
+const COMMUNAL_SHELTER_INTEGRITY_CHECK_MS =
+  parseInt(process.env.MC_COMMUNAL_SHELTER_INTEGRITY_CHECK_MS || "60000", 10);
+
+async function checkCommunalShelterIntegrity() {
+  if (!AUTONOMY_ENABLED || routineBlocked("checkCommunalShelterIntegrity")) return;
+  const found = findCommunalShelterNearHome();
+  if (!found || found.complete) return;
+
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
+  try {
+    const result = await performAction(
+      bot, { type: "build_communal_shelter", at: found.base, width: found.width, depth: found.depth },
+      USERNAME, handle,
+    );
+    console.log(`[${USERNAME}] communal shelter integrity repair: ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] communal shelter integrity check failed:`, err.message);
+  } finally {
+    handle.release();
+  }
+}
+
+setInterval(() => {
+  checkCommunalShelterIntegrity().catch((err) =>
+    console.error(`[${USERNAME}] checkCommunalShelterIntegrity error:`, err.message));
+}, COMMUNAL_SHELTER_INTEGRITY_CHECK_MS);
 
 // Direct request, 2026-09-07 ("what else can we add" -> stuck-detection): robustness, not new
 // capability -- a periodic check for "hasn't moved at all in a long time," regardless of
