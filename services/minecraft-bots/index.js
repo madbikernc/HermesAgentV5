@@ -1,4 +1,18 @@
-// Version: 2.120.0
+// Version: 2.121.0
+//
+// 2.121.0 (2026-10-22, direct request, generalizing 2.120.0's own fix): checkShelterIntegrity()
+// and checkCommunalShelterIntegrity() merged back into one -- the operator's own next request
+// after 2.120.0 shipped was "it should recognize: any number of individual shelters; larger
+// shelters as defined by contiguous walls roof and floor, broken only by doors," which named
+// exactly the two corners 2.120.0 still cut: one shelter at a time, and only the two hand-coded
+// geometries ("build"'s small room, "build_communal_shelter"'s parameterized rectangle). The
+// unified check now calls shelterRoomsNear() (shelter.js 1.3.0), which finds every qualifying
+// room near home in one pass regardless of count or shape, and repairs via the new generic
+// "patch_shelter" action (actions.js 1.93.0) using each room's own real hole positions --
+// nothing here computes or assumes a shape anymore. findShelterNearHome()/
+// findCommunalShelterNearHome() and the two build actions are unchanged and still own their own,
+// separate job: the fleet's shelter-count progression check, and giving a brand-new shelter a
+// concrete shape to build when none exists yet.
 //
 // 2.120.0 (2026-10-22, direct report: "there is a large shelter with many beds, but it has
 // holes or missing parts. They are not repairing it as a large structure"): new
@@ -1652,7 +1666,8 @@ import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { SwimMovements, installDoorSupport, isDoorway } from "./swim-movements.js";
-import { refreshLivingSpace, findAccessObstructions, wouldBlockAccess, ACCESS_SCAN_RADIUS } from "./shelter.js";
+import { refreshLivingSpace, findAccessObstructions, wouldBlockAccess, ACCESS_SCAN_RADIUS,
+  shelterRoomsNear } from "./shelter.js";
 import { installTorchTrail, needsTorches, torchCount, TORCH_CARRY_MIN } from "./tunneling.js";
 import { findSkill, runSkill, recordSkillOutcome, authorSkillFromGoal } from "./skills.js";
 import { ROLES, BOT_ROLES } from "./roles.js";
@@ -3318,9 +3333,17 @@ function hasHollowInterior(base) {
 // MOST complete hollow-interior-shaped candidate found, as long as it's already at least half
 // solid -- a genuine, damaged (or half-built) shelter, not just an open-air pocket that happens to
 // be the right shape (hasHollowInterior() alone never checks for walls at all, and a cleared,
-// flat home site can easily have more than one open 2x2 pocket near it). That's the repair target
-// checkShelterIntegrity() (below) re-runs "build" against. Returns null only when nothing
-// shelter-shaped and at-least-half-real exists here at all.
+// flat home site can easily have more than one open 2x2 pocket near it). Returns null only when
+// nothing shelter-shaped and at-least-half-real exists here at all.
+//
+// 2026-10-22: no longer checkShelterIntegrity()'s own repair target -- that check now uses
+// shelterRoomsNear()/holesIn() (shelter.js), shape- and count-agnostic, instead of this
+// function's fixed small-room geometry. This function and hasShelterNearHome()/
+// hasOwnShelterWithBed()/countQualifyingSheltersNearHome() below it still use that fixed
+// geometry on purpose, for a different job: deciding whether the fleet has built enough
+// qualifying shelters to progress, and where to site a brand-new one when none exists yet --
+// both need a concrete shape to build towards, which repairing a shelter that already exists,
+// whatever shape it turned out to be, does not.
 function findShelterNearHome() {
   if (!bot.spawnPoint) return null;
   const center = bot.spawnPoint.floored();
@@ -6867,26 +6890,38 @@ setInterval(() => {
 }, TERRAIN_REPAIR_CHECK_MS);
 
 // Direct report, 2026-10-11 ("if a shelter gets damaged, violating its integrity..., repairing it
-// becomes a temporary top priority"): nothing before this ever re-checked a shelter after it was
-// first built -- a wall, the door, or the floor could be dug out (by a bot, a mob, an explosion)
-// and nothing would notice. findShelterNearHome() already does the "is there a damaged one"
-// detection (index.js, above); this just runs it on a timer and, if the best match isn't complete,
-// re-runs "build" at that exact site -- the same action a fresh build uses, since filling in
-// whatever's missing at a given site is already exactly what it does. ROUTINE tier, same as every
-// other self-healing infrastructure check (checkTerrainDamage, checkAccessObstructions) -- real
-// urgency against a role goal/self-propose (Tier 1, not yet built) comes from ordering, not from
-// outranking combat or anything else in the arbiter.
+// becomes a temporary top priority"), generalized 2026-10-22 (direct request, after a separate
+// report -- "there is a large shelter with many beds, but it has holes or missing parts. They
+// are not repairing it as a large structure" -- found the first version of this fix only ever
+// covered ONE shelter at a time, via two separate hand-coded geometries): nothing before the
+// 2026-10-11 fix ever re-checked a shelter after it was first built, and this stage's own first
+// pass still missed two things the operator then named directly -- any number of individual
+// shelters, not just the nearest one, and a larger shelter of any shape, not just the two
+// fixed-rectangle geometries "build"/"build_communal_shelter" know how to construct from
+// scratch. shelterRoomsNear() (shelter.js) now finds every qualifying room near home in one pass,
+// any count, any shape -- "contiguous walls, roof and floor, broken only by doors" -- tolerant of
+// real damage, and reports each one's own specific hole positions directly rather than relying on
+// a predetermined position list. ROUTINE tier, same as every other self-healing infrastructure
+// check (checkTerrainDamage, checkAccessObstructions) -- real urgency against a role goal/
+// self-propose (Tier 1, not yet built) comes from ordering, not from outranking combat or
+// anything else in the arbiter. One damaged room is repaired per tick (the first found); a fleet
+// with several damaged at once catches up over a few ticks rather than holding control for all of
+// them at once.
 const SHELTER_INTEGRITY_CHECK_MS = parseInt(process.env.MC_SHELTER_INTEGRITY_CHECK_MS || "60000", 10);
 
 async function checkShelterIntegrity() {
-  if (!AUTONOMY_ENABLED || routineBlocked("checkShelterIntegrity")) return;
-  const found = findShelterNearHome();
-  if (!found || found.complete) return;
+  if (!AUTONOMY_ENABLED || routineBlocked("checkShelterIntegrity") || !bot.spawnPoint) return;
+  const damaged = shelterRoomsNear(bot, bot.spawnPoint).find((room) => room.holes.size > 0);
+  if (!damaged) return;
 
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
-    const result = await performAction(bot, { type: "build", at: found.base }, USERNAME, handle);
+    const holes = [...damaged.holes].map((key) => {
+      const [x, y, z] = key.split(",").map(Number);
+      return { x, y, z };
+    });
+    const result = await performAction(bot, { type: "patch_shelter", holes }, USERNAME, handle);
     console.log(`[${USERNAME}] shelter integrity repair: ${result.text} (ok=${result.ok})`);
   } catch (err) {
     console.error(`[${USERNAME}] shelter integrity check failed:`, err.message);
@@ -6898,50 +6933,6 @@ async function checkShelterIntegrity() {
 setInterval(() => {
   checkShelterIntegrity().catch((err) => console.error(`[${USERNAME}] checkShelterIntegrity error:`, err.message));
 }, SHELTER_INTEGRITY_CHECK_MS);
-
-// Direct report, 2026-10-22 ("there is a large shelter with many beds, but it has holes or
-// missing parts. They are not repairing it as a large structure"): checkShelterIntegrity() just
-// above only ever covers findShelterNearHome() -- the small, fixed-size individual-shelter
-// geometry. The communal shelter has its own, already-correct damage detector,
-// findCommunalShelterNearHome() (mirrors findShelterNearHome() exactly: complete/damaged/null,
-// at least half solid to count as a real repair target), but before this it was ONLY ever
-// called from communalShelterStep() -- which only runs while a bot is actively pursuing the
-// "communal_shelter" self-propose goal, and nextBuilderPriority() stops ever proposing that goal
-// again the moment communalShelterSatisfied() first returns true (index.js, candidate list).
-// Once the shelter was built and bedded, nothing looked at it again -- a creeper, a stray dig, or
-// an explosion could open a hole in a wall that housed the whole fleet's beds and it would simply
-// stay open forever. Same ROUTINE-tier self-healing shape as checkShelterIntegrity() beside it,
-// just targeting the communal structure's own geometry and re-running "build_communal_shelter"
-// (not the individual "build") with the real width/depth findCommunalShelterNearHome() already
-// knows -- that action's own early "already standing" return makes a call against a genuinely
-// complete structure a safe no-op, same guarantee checkShelterIntegrity() already relies on.
-const COMMUNAL_SHELTER_INTEGRITY_CHECK_MS =
-  parseInt(process.env.MC_COMMUNAL_SHELTER_INTEGRITY_CHECK_MS || "60000", 10);
-
-async function checkCommunalShelterIntegrity() {
-  if (!AUTONOMY_ENABLED || routineBlocked("checkCommunalShelterIntegrity")) return;
-  const found = findCommunalShelterNearHome();
-  if (!found || found.complete) return;
-
-  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
-  if (!handle) return;
-  try {
-    const result = await performAction(
-      bot, { type: "build_communal_shelter", at: found.base, width: found.width, depth: found.depth },
-      USERNAME, handle,
-    );
-    console.log(`[${USERNAME}] communal shelter integrity repair: ${result.text} (ok=${result.ok})`);
-  } catch (err) {
-    console.error(`[${USERNAME}] communal shelter integrity check failed:`, err.message);
-  } finally {
-    handle.release();
-  }
-}
-
-setInterval(() => {
-  checkCommunalShelterIntegrity().catch((err) =>
-    console.error(`[${USERNAME}] checkCommunalShelterIntegrity error:`, err.message));
-}, COMMUNAL_SHELTER_INTEGRITY_CHECK_MS);
 
 // Direct request, 2026-09-07 ("what else can we add" -> stuck-detection): robustness, not new
 // capability -- a periodic check for "hasn't moved at all in a long time," regardless of

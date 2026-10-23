@@ -1,4 +1,12 @@
-// Version: 1.33.0
+// Version: 1.34.0
+// 1.34.0 (2026-10-22): generalizes 1.33.0's checks for shelter.js 1.3.0's shelterRoomsNear()/
+// holesIn() and the unified index.js 2.121.0 checkShelterIntegrity() -- replaces the now-removed
+// checkCommunalShelterIntegrity() test. New coverage: a sealed room has zero holes and a real
+// gap is found exactly; any number of separate individual shelters are each kept apart, not
+// merged or lost; a larger shelter in a shape neither fixed geometry builds is recognized and
+// its hole found; the unified periodic check repairs whichever room in the list is damaged via
+// the new generic "patch_shelter" action, and "patch_shelter" itself never computes its own
+// geometry or touches a door.
 // 1.33.0 (2026-10-22): two new checks for index.js 2.120.0's checkCommunalShelterIntegrity() --
 // findCommunalShelterNearHome() correctly reports a damaged (not just complete-or-nothing)
 // communal shelter, and the new periodic wrapper calls build_communal_shelter with the right
@@ -2270,6 +2278,21 @@ await check('Communal shelter: stone-or-better material, parameterized geometry,
     'door item crafted before the wall loop, door itself placed after it');
 });
 
+await check('Shelter patch: takes an explicit hole list, never a door, never its own geometry', async () => {
+  // Direct request, 2026-10-22, generalizing S42: "patch_shelter" exists specifically so a
+  // shelter's REAL, already-found holes (shelterRoomsNear()/holesIn(), shelter.js) get filled
+  // exactly as found -- never recomputed from a predetermined shape the way "build"/
+  // "build_communal_shelter" above do, which is what lets it work on a shelter of any size or
+  // shape. holesIn() already excludes every doorway cell from its own output, so there is
+  // structurally never a door to craft or place here.
+  const patchBody = actions.slice(actions.indexOf('case "patch_shelter": {'), actions.indexOf('case "build_communal_shelter": {'));
+  assert(patchBody.length > 0, 'the case exists');
+  assert(!/doorItemFor|doorPlaced|doorAlready/.test(patchBody), 'never touches a door -- holesIn() already excludes doorway cells');
+  assert.match(patchBody, /action\.holes \|\| \[\]/, 'takes an explicit hole list from the caller');
+  assert(!/buildOrder|shelterPositions|communalShelterPositions/.test(patchBody), 'never computes its own geometry');
+  assert.match(patchBody, /isShelterMaterial/, 'uses the same permissive material check "build" does');
+});
+
 await check('Communal shelter: structure completeness and bed-count verification, mocked', async () => {
   const s = shelterFns();
   const base = new V3(0, 64, 0);
@@ -2345,33 +2368,41 @@ await check('findCommunalShelterNearHome finds a damaged communal shelter as a r
   assert.equal(tooDamaged, null, 'under half solid -- too far gone to count as a genuine repair target');
 });
 
-await check('checkCommunalShelterIntegrity repairs a damaged communal shelter, never touches a complete one or a bare absence', async () => {
+await check('checkShelterIntegrity (unified, general) repairs the first damaged room found, any count or shape, never a complete one or a bare absence', async () => {
+  // S42 shipped checkShelterIntegrity()/checkCommunalShelterIntegrity() as two separate
+  // functions, one per hand-coded geometry. The very next request generalized detection itself
+  // (shelterRoomsNear(), tested directly above) and asked for "any number" -- this is the
+  // matching check on the periodic wrapper: it must act on whichever room in the list is
+  // damaged, not just the first one found, and must hand the real hole positions straight to
+  // the new generic "patch_shelter" action rather than any geometry-specific build call.
   const calls = [];
-  const base = new V3(5, 64, 9);
-  const mkContext = (found) => {
+  const mkContext = (rooms) => {
     const c = vm.createContext({
       AUTONOMY_ENABLED: true, routineBlocked: () => false,
-      findCommunalShelterNearHome: () => found,
+      shelterRoomsNear: () => rooms,
       arbiter: { requestControl: async () => ({ release() {} }), OWNERS: { ROUTINE: 'routine' } },
-      performAction: async (_bot, action) => { calls.push(action); return { ok: true, text: 'built the communal shelter.' }; },
-      bot: {}, USERNAME: 'Test', console: { log() {}, error() {} },
+      performAction: async (_bot, action) => { calls.push(action); return { ok: true, text: 'patched the shelter.' }; },
+      bot: { spawnPoint: new V3(0, 64, 0) }, USERNAME: 'Test', console: { log() {}, error() {} },
     });
-    vm.runInContext(between(index, 'async function checkCommunalShelterIntegrity() {', 'setInterval(() => {'), c);
+    vm.runInContext(between(index, 'async function checkShelterIntegrity() {', 'setInterval(() => {'), c);
     return c;
   };
-  await mkContext({ base, width: 7, depth: 7, complete: false }).checkCommunalShelterIntegrity();
-  assert.equal(calls.length, 1, 'a damaged communal shelter must trigger a repair');
-  assert.equal(calls[0].type, 'build_communal_shelter');
-  assert.deepEqual([calls[0].at.x, calls[0].at.y, calls[0].at.z], [5, 64, 9]);
-  assert.equal(calls[0].width, 7); assert.equal(calls[0].depth, 7);
+  const complete = { inside: new Set(['0,64,0']), shell: new Set(), holes: new Set() };
+  const damaged = { inside: new Set(['10,64,0']), shell: new Set(), holes: new Set(['9,65,0', '9,66,0']) };
+
+  await mkContext([complete, damaged]).checkShelterIntegrity();
+  assert.equal(calls.length, 1, 'the damaged room, found anywhere in the list, triggers a repair');
+  assert.equal(calls[0].type, 'patch_shelter');
+  const gotKeys = calls[0].holes.map((p) => `${p.x},${p.y},${p.z}`).sort();
+  assert.deepEqual(gotKeys, ['9,65,0', '9,66,0'], 'the real hole positions, not a recomputed geometry, are passed through');
 
   calls.length = 0;
-  await mkContext({ base, width: 7, depth: 7, complete: true }).checkCommunalShelterIntegrity();
-  assert.equal(calls.length, 0, 'a complete communal shelter must never be re-repaired');
+  await mkContext([complete]).checkShelterIntegrity();
+  assert.equal(calls.length, 0, 'every room complete -- nothing to repair');
 
   calls.length = 0;
-  await mkContext(null).checkCommunalShelterIntegrity();
-  assert.equal(calls.length, 0, 'no communal shelter at all near home -- nothing to repair');
+  await mkContext([]).checkShelterIntegrity();
+  assert.equal(calls.length, 0, 'no shelter rooms at all near home -- nothing to repair');
 });
 
 function shelterWorld({ groundY = (x, z) => 63, blocked = [] } = {}) {
@@ -2971,6 +3002,90 @@ await check('Shelter detection: shelterInteriorsNear finds a room from its door,
 
   const field = blockWorld();
   assert.equal(c.shelterInteriorsNear(field.bot, new V3(0, 64, 0), 8).size, 0, 'no doors at all -- nothing qualifies');
+});
+
+// Direct request, 2026-10-22, generalizing S42's fix: "recognize any number of individual
+// shelters; larger shelters as defined by contiguous walls roof and floor, broken only by
+// doors." shelterRoomsNear()/holesIn() must work on damage shelterInteriorsNear()'s own strict
+// test structurally cannot (a hole makes that fill leak without bound -- see the "Shelter
+// detection" test two above, `holed.sealed === false`), on any number of separate rooms, and on
+// a shape neither of this file's two hand-coded geometries (shelterPositions'/
+// communalShelterPositions' fixed rectangles) ever builds.
+function room(w, { baseX = 0, baseZ = 0, wallName = 'cobblestone', doorFacing = 'north' } = {}) {
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      w.place([baseX + dx, 63, baseZ + dz], wallName); // floor
+      w.place([baseX + dx, 67, baseZ + dz], wallName); // roof
+      if (dx === 0 && dz === 0) continue; // interior column stays open
+      for (let dy = 64; dy <= 66; dy++) {
+        if (dx === 0 && dz === 1 && dy <= 65) continue; // doorway, filled below
+        w.place([baseX + dx, dy, baseZ + dz], wallName);
+      }
+    }
+  }
+  w.door([baseX, 64, baseZ + 1], 'oak_door', doorFacing);
+  return new V3(baseX, 64, baseZ + 1);
+}
+
+await check('Shelter rooms (general): a sealed room has zero holes; a real gap is found and reported', async () => {
+  const c = shelter();
+  const w = smallRoom();
+  const intact = c.shelterRoomsNear(w.bot, new V3(0, 64, 1), 8);
+  assert.equal(intact.length, 1, 'exactly one room found');
+  assert.equal(intact[0].holes.size, 0, 'fully sealed -- no holes');
+  assert(intact[0].inside.has('0,64,0'), 'the room interior is in it');
+
+  // The same gap the strict enclosedInterior test above shows breaks "sealed" entirely.
+  w.open([-1, 65, 0]);
+  const damaged = c.shelterRoomsNear(w.bot, new V3(0, 64, 1), 8);
+  assert.equal(damaged.length, 1, 'still recognized as one room -- real damage does not erase it');
+  assert.deepEqual([...damaged[0].holes], ['-1,65,0'], 'the real hole, and only the real hole, is found');
+});
+
+await check('Shelter rooms (general): any number of separate individual shelters, each kept apart', async () => {
+  const c = shelter();
+  const w = blockWorld();
+  const doorA = room(w, { baseX: 0, baseZ: 0 });
+  const doorB = room(w, { baseX: 20, baseZ: 0 }); // far enough apart not to overlap
+  const doorC = room(w, { baseX: 40, baseZ: 0 });
+  const rooms = c.shelterRoomsNear(w.bot, doorA, 48);
+  assert.equal(rooms.length, 3, `three separate shelters, not merged into one or lost: found ${rooms.length}`);
+  for (const d of [doorA, doorB, doorC]) {
+    assert(rooms.some((r) => r.inside.has(`${d.x},${d.y - 1},${d.z - 1}`)), `room at door ${JSON.stringify(d)} is one of them`);
+  }
+  assert.equal(new Set(rooms.flatMap((r) => [...r.inside])).size,
+    [...rooms[0].inside, ...rooms[1].inside, ...rooms[2].inside].length, 'no cell is claimed by two rooms at once');
+});
+
+await check('Shelter rooms (general): a larger shelter, a shape neither fixed geometry builds, is recognized and its hole found', async () => {
+  const c = shelter();
+  const w = blockWorld();
+  // A 5x5 interior (bigger than the Builder's own 1x1 smallRoom() and a different shape than
+  // communalShelterPositions()' own formula-sized rectangle), walls/roof/floor built directly
+  // from blockWorld() primitives -- proving this is shape detection, not a geometry match.
+  const size = 5; // interior cells 0..4 on each axis
+  for (let dx = -1; dx <= size; dx++) {
+    for (let dz = -1; dz <= size; dz++) {
+      const edge = dx === -1 || dx === size || dz === -1 || dz === size;
+      w.place([dx, 63, dz], 'stone_bricks'); // floor under every cell, including the walls' own footing
+      w.place([dx, 68, dz], 'stone_bricks'); // roof, one layer above the 4-tall interior (64..67)
+      if (!edge) continue; // interior stays open
+      for (let dy = 64; dy <= 67; dy++) {
+        if (dx === -1 && dz === 0 && dy <= 65) continue; // doorway on the west wall, two cells tall
+        w.place([dx, dy, dz], 'stone_bricks');
+      }
+    }
+  }
+  w.door([-1, 64, 0], 'oak_door', 'west');
+  const found = c.shelterRoomsNear(w.bot, new V3(-1, 64, 0), 12);
+  assert.equal(found.length, 1, 'one large room found');
+  assert.equal(found[0].holes.size, 0, 'intact -- no holes yet');
+  assert(found[0].inside.has('2,65,2'), 'the far interior corner is really reached, not just the cell by the door');
+
+  w.open([2, 65, size]); // a real gap in the far (east) wall
+  const damaged = c.shelterRoomsNear(w.bot, new V3(-1, 64, 0), 12);
+  assert.equal(damaged.length, 1, 'still one room, now damaged');
+  assert(damaged[0].holes.has(`2,65,${size}`), `the hole in the far wall of a 5x5 room is found: ${[...damaged[0].holes]}`);
 });
 
 await check('Access: "place" takes another side rather than blocking a door, and says so when every side would', async () => {

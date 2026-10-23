@@ -1,4 +1,16 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-10-22, direct request, generalizing S42's fix): shelterRoomsNear()/holesIn() --
+// recognize any number of individual shelters and a larger shelter of any shape ("contiguous
+// walls, roof and floor, broken only by doors"), tolerant of real damage. shelterInteriorsNear()'s
+// strict enclosedInterior() can only ever answer "is this fully sealed right now" -- a single hole
+// makes the fill leak without bound and the whole structure stops reading as a shelter at all,
+// the moment recognizing it as damaged matters most. The new pair reuses coveredInterior()'s
+// already-proven, radius-bounded, hole-tolerant fill instead, and flags a hole by a purely local
+// test (a passable, non-door cell surrounded by mostly-solid neighbours) rather than by
+// re-deriving the room's exact original outline, which a damaged, previously-unknown-shape
+// structure does not reliably offer. coveredInterior() gained an optional radius parameter
+// (default unchanged, SHELL_RADIUS) so this can search a communal-sized room, not just a 2x3.
 //
 // 1.2.0 (2026-10-18) -- new enclosedInterior()/isSandWallName()/shelterInteriorsNear(): "shelters
 // are not a set size or shape... any structure with no openings other than doors," walls any
@@ -259,8 +271,10 @@ export function isCovered(bot, pos, scan = SHELL_ROOF_SCAN) {
 
 // The air inside a living space: everywhere reachable from `anchor` without leaving cover.
 // `inside` is shared across anchors so one room shared by several beds is filled once, and so the
-// cell cap bounds the whole refresh rather than each bed separately.
-export function coveredInterior(bot, anchor, inside = new Set()) {
+// cell cap bounds the whole refresh rather than each bed separately. `radius` defaults to
+// SHELL_RADIUS (the dig-protection feature's own deliberately tight bound) but is overridable --
+// shelterRoomsNear() below needs a wider one for a large communal-sized room.
+export function coveredInterior(bot, anchor, inside = new Set(), radius = SHELL_RADIUS) {
   const queue = [];
   const consider = (cell) => {
     const key = posKey(cell);
@@ -279,7 +293,7 @@ export function coveredInterior(bot, anchor, inside = new Set()) {
     for (const [dx, dy, dz] of STEPS_6) {
       const next = cell.offset(dx, dy, dz);
       if (Math.max(Math.abs(next.x - anchor.x), Math.abs(next.y - anchor.y),
-                   Math.abs(next.z - anchor.z)) > SHELL_RADIUS) continue;
+                   Math.abs(next.z - anchor.z)) > radius) continue;
       consider(next);
     }
   }
@@ -473,6 +487,83 @@ export function shelterInteriorsNear(bot, point, radius = BED_SEARCH_DISTANCE) {
     }
   }
   return merged;
+}
+
+// ---- shelter rooms, any number, any shape, tolerant of damage --------------------------------
+//
+// Direct request, 2026-10-22, generalizing S42's fix ("there is a large shelter with many beds,
+// but it has holes... They are not repairing it as a large structure"): recognize ANY NUMBER of
+// individual shelters, and a LARGER shelter of any shape -- "contiguous walls, roof and floor,
+// broken only by doors" -- the same definition shelterInteriorsNear() already uses for bed
+// placement, now generalized to also work on a DAMAGED structure, which that strict function
+// can't: enclosedInterior()'s "sealed" test requires the fill to terminate entirely on its own,
+// so a single hole makes it leak without bound and the whole structure stops being recognized as
+// a shelter at all, the instant it needs recognizing most.
+//
+// The trick: use coveredInterior()'s already-proven, radius-bounded, hole-TOLERANT fill (the
+// dig-protection feature already relies on it degrading gracefully near a breach) to find the
+// room's air, then flag a hole by a purely local, shape-agnostic test rather than by re-deriving
+// the room's "true" outline: a passable, non-door cell surrounded by mostly-solid neighbours is
+// sitting where a wall/floor/roof block used to be, whether the room is a 2x3 bedroom or a 7x7
+// communal hall. A genuine deep-room air cell is instead surrounded mostly by MORE room air, not
+// solid blocks, so this does not fire on the room's own interior.
+export const SHELTER_ROOM_SEARCH_RADIUS = 16; // wider than SHELL_RADIUS -- must reach across a large communal-sized room, not just a 2x3
+export const MIN_SHELTER_ROOM_CELLS = 2; // filters out a coincidental one-cell covered nook
+export const HOLE_MIN_SOLID_NEIGHBOURS = 4; // of 6 face-neighbours -- a thin gap in an otherwise-solid wall/floor/roof
+
+function solidFaceNeighbourCount(bot, cell) {
+  let n = 0;
+  for (const [dx, dy, dz] of STEPS_6) if (solid(bot, cell.offset(dx, dy, dz))) n++;
+  return n;
+}
+
+// Every cell of `inside` that reads as room air today but is actually a breach: surrounded by
+// enough solid neighbours that it was almost certainly part of the shell, not the room's real
+// open space. Returns a Set of posKeys, each a position that should be solid again.
+export function holesIn(bot, inside) {
+  const holes = new Set();
+  for (const key of inside) {
+    const cell = fromKey(key);
+    if (solidFaceNeighbourCount(bot, cell) >= HOLE_MIN_SOLID_NEIGHBOURS) holes.add(key);
+  }
+  return holes;
+}
+
+// Every shelter room findable near `point`, any number, any shape or size, each kept separate
+// (unlike shelterInteriorsNear()'s merged Set, which answers a different question -- "is this
+// spot inside SOME shelter" -- and does not need to tell two rooms apart). Seeded from every
+// doorway near `point`, same as shelterInteriorsNear(), but flood-filled with the loose,
+// hole-tolerant coveredInterior() instead of the strict, damage-intolerant enclosedInterior() --
+// this is deliberately a DIFFERENT trade-off than that function's: willing to call a three-sided
+// lean-to "covered" in exchange for not losing a genuinely enclosed room the moment it is
+// breached, since finding exactly that breach is the entire point here.
+export function shelterRoomsNear(bot, point, radius = BED_SEARCH_DISTANCE) {
+  const rooms = [];
+  const claimed = new Set();
+  const tried = new Set();
+  const doors = bot.findBlocks({ matching: (b) => isDoorwayName(b?.name), point, maxDistance: radius, count: 32 }) || [];
+  for (const pos of doors) {
+    const block = bot.blockAt(pos);
+    const sides = doorPassageSides(bot, block);
+    if (!sides) continue;
+    for (const side of sides) {
+      const seed = side[0];
+      const seedKey = posKey(seed);
+      if (claimed.has(seedKey) || tried.has(seedKey)) continue;
+      tried.add(seedKey);
+      const inside = coveredInterior(bot, seed, new Set(), SHELTER_ROOM_SEARCH_RADIUS);
+      // Too small to be a real room (the far side of a doorway standing in open terrain, the
+      // common no-shelter-here case) -- skip, same as the strict function's own !inside.size check.
+      if (inside.size < MIN_SHELTER_ROOM_CELLS) continue;
+      // The far side of the SAME door (open world) typically fails the size check above and
+      // never reaches here; a room with two doors reaches this seed a second time and must not
+      // be double-counted. Either way: already-claimed cells mean this is the same room again.
+      if ([...inside].some((k) => claimed.has(k))) continue;
+      for (const k of inside) claimed.add(k);
+      rooms.push({ anchor: seed, inside, shell: shellAround(bot, inside), holes: holesIn(bot, inside) });
+    }
+  }
+  return rooms;
 }
 
 // ---- clearing an obstruction ------------------------------------------------------------------
