@@ -686,8 +686,17 @@ scenario("Shelter rooms (general): shelterRoomsNear finds a real hole in a real 
   assert(intact, "the real, just-built structure is found by the general detector");
   assert.equal(intact.holes.size, 0, "intact -- no holes yet");
 
-  const wallPositions = communalShelterPositions(base, width, depth);
-  const hole = wallPositions.find((p) => p.y === base.y + 1 && (p.x !== doorPos.x || p.z !== doorPos.z));
+  // A flat mid-wall-face cell (west wall, dz in the middle of the room, not a corner where two
+  // wall faces meet). Found live, not guessed: holesIn() walks STEPS_6 (face neighbours only,
+  // never diagonal) outward from `inside`, and a corner cell's own path back to the interior is
+  // two face-steps, not one -- the flood fill can never reach it, so it never enters `inside`
+  // and holesIn() (which only ever examines cells already in `inside`) never sees it at all.
+  // communalShelterPositions()'s own wall loop confirms the shape directly: dx=-1 is the west
+  // wall for every dz in [0, depth), so (dx=-1, dz=floor(depth/2)) is guaranteed flat, not a
+  // corner. This is a real, named limitation (shelter.js's own holesIn() header), not something
+  // this test works around by accident.
+  const hole = base.offset(-1, 1, Math.floor(depth / 2));
+  assert.equal(bot.blockAt(hole)?.boundingBox, "block", "sanity: this really is a solid wall cell before the hole");
   await rcon(`setblock ${hole.x} ${hole.y} ${hole.z} minecraft:air`);
   await waitFor(() => bot.blockAt(hole)?.boundingBox !== "block", 5000, "the hole to appear");
 

@@ -1,4 +1,10 @@
-// Version: 1.3.1
+// Version: 1.3.2
+//
+// 1.3.2 (2026-10-22): documents a real, named limitation found live -- holesIn() cannot find a
+// hole exactly at a corner (see HOLE_MIN_SOLID_NEIGHBOURS' own updated comment). No code change;
+// the live test that found it now knocks a flat mid-wall hole instead, the representative real
+// case (a creeper, a stray dig), and the corner case is recorded rather than silently assumed
+// covered.
 //
 // 1.3.1 (2026-10-22): real bug found live against the real server, not caught by any mock --
 // coveredInterior() has never stopped at a doorway (deliberately, for its original living-space
@@ -538,6 +544,18 @@ export const SHELTER_ROOM_SEARCH_RADIUS = 16; // wider than SHELL_RADIUS -- must
 export const MIN_SHELTER_ROOM_CELLS = 2; // filters out a coincidental one-cell covered nook
 export const MIN_SHELTER_ROOM_SPAN = 3; // narrower than this (either axis) and holesIn() cannot tell a hole from the room's own interior
 export const HOLE_MIN_SOLID_NEIGHBOURS = 4; // of 6 face-neighbours -- a thin gap in an otherwise-solid wall/floor/roof
+
+// [FLAGGED] A hole exactly at a CORNER (where two wall faces meet) is not found. Found live, not
+// guessed: holesIn() only ever examines cells already in `inside`, and `inside` is built by
+// coveredInterior()'s STEPS_6 fill -- face neighbours only, never diagonal. A corner cell's own
+// path back to the room's real interior is two face-steps, not one, so the fill can never reach
+// it and it never enters `inside` at all; holesIn() has nothing to examine there. This is a real
+// gap, not a false claim of safety -- flat wall/floor/roof damage (a creeper, a stray dig, the
+// reported case) is found correctly; a hole landing exactly on a corner column is not. Fixing
+// it would mean a 26-neighbour fill instead of 6, which trades this gap for a new, broader risk
+// (pulling genuinely separate rooms or terrain together diagonally) that has not been measured --
+// left as a named limitation rather than a guessed fix for a narrower, less common case than the
+// one this generalization was actually asked to solve.
 
 function solidFaceNeighbourCount(bot, cell) {
   let n = 0;
