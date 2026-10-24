@@ -188,6 +188,7 @@ def main():
         class _FakeArgs:
             endpoint = f"http://127.0.0.1:{port3}"
             timeout = 30
+            embed_dims = None
         embed_fn = mod.build_call_fn(_FakeArgs(), "rag_embed")
         rerank_fn = mod.build_call_fn(_FakeArgs(), "rag_rerank")
         embed_result = embed_fn()
