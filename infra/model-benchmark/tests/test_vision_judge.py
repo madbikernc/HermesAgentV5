@@ -81,9 +81,36 @@ class _LenientHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+_SMART_DEFECT_MARKERS = (
+    "cybernetically enhanced sharks",  # hermes_gen_00003 -- sharks show no cybernetic element
+    "Passion's Bloom",                 # amy_gen_00070 -- neither named character appears at all
+    "deepseek-chat",                   # amy_gen_00077 -- no comparison table of any kind renders
+    "cute bunnygirl",                  # amy_gen_00110 -- no bunny ears/features at all
+    "Prompt: Generate a dozen random images suitable for use in a visual benchmark suite",
+    # hermes_gen_00005 -- a real wire-mesh rendering artifact across several panels. This exact
+    # text is also a prefix of hermes_gen_00006/00007's longer "...showing cute animals" prompt,
+    # but those are caught by the exact-match duplicate-prompt branch below FIRST (elif order),
+    # so this marker is only ever reached for 00005's own, shorter text.
+)
+# amy_gen_00028 and 00029 share the substring "ridden by a cowboy" -- only 00028 (no trailing
+# "test deploy..." suffix) is the real defect (missing rider); 00029 (with that suffix) is fine.
+_COWBOY_OK_SUFFIX = "test deploy of hermes-render-request.sh as amy"
+# hermes_gen_00006 and 00007 share byte-for-byte IDENTICAL prompt text (both end "...showing cute
+# animals") -- a real limitation this stub can't resolve from text alone, since the real
+# difference (~20 vs ~70 thumbnails) is only visible in the image itself, which a judge model
+# would actually look at but this text-only stub cannot. Resolved with a call counter: the first
+# occurrence of that exact prompt (006, PASS) scores correctly; the second (007, FAIL) does too --
+# demonstrating the harness's own mechanism is fully correct even though this particular stub
+# needs a little extra state to prove it across a text-ambiguous pair.
+_DUPLICATE_PROMPT = ("Generate a dozen random images suitable for use in a visual benchmark suite "
+                     "showing cute animals")
+
+
 class _SmartHandler(BaseHTTPRequestHandler):
-    """Correctly catches the one real defect (missing 'cybernetically enhanced' sharks) via the
-    real prompt text, PASS otherwise."""
+    """Correctly catches all 7 real defects in the fixture set via the real prompt text (plus one
+    call counter for the one pair of fixtures that share identical prompt text), PASS otherwise."""
+    _duplicate_prompt_calls = [0]
+
     def log_message(self, *a):
         pass
 
@@ -92,8 +119,16 @@ class _SmartHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         body = json.loads(raw)
         text_part = next(c["text"] for c in body["messages"][1]["content"] if c.get("type") == "text")
-        if "cybernetically enhanced sharks" in text_part:
-            verdict = "FAIL the sharks show no cybernetic enhancement at all."
+
+        if text_part == f"Prompt: {_DUPLICATE_PROMPT}":
+            type(self)._duplicate_prompt_calls[0] += 1
+            is_second_call = type(self)._duplicate_prompt_calls[0] == 2
+            verdict = ("FAIL far more than a dozen thumbnails are shown." if is_second_call
+                      else "PASS matches the prompt.")
+        elif "ridden by a cowboy" in text_part and _COWBOY_OK_SUFFIX not in text_part:
+            verdict = "FAIL no cowboy rider is visible anywhere in the image."
+        elif any(marker in text_part for marker in _SMART_DEFECT_MARKERS):
+            verdict = "FAIL the image is missing a key element the prompt asked for."
         else:
             verdict = "PASS matches the prompt."
         resp = {"choices": [{"message": {"content": verdict}}]}
@@ -116,12 +151,13 @@ def start_server(handler_cls):
 def main():
     mod = load()
 
-    print("\n[fixtures: all 4 real images and labels load]")
+    print("\n[fixtures: all real images and labels load]")
     fixtures = mod.load_fixtures()
-    check("4 fixtures total", len(fixtures) == 4, str(len(fixtures)))
-    check("3 labelled pass, 1 labelled fail (honest 3:1 split, not forced 50/50)",
-          sum(1 for v in fixtures.values() if v["label"] == "pass") == 3
-          and sum(1 for v in fixtures.values() if v["label"] == "fail") == 1)
+    check("34 fixtures total (4 from 2026-10-23, 30 more added 2026-10-24)",
+          len(fixtures) == 34, str(len(fixtures)))
+    check("27 labelled pass, 7 labelled fail (honest real distribution, not forced 50/50)",
+          sum(1 for v in fixtures.values() if v["label"] == "pass") == 27
+          and sum(1 for v in fixtures.values() if v["label"] == "fail") == 7)
     for filename, info in fixtures.items():
         path = FIXTURES / filename
         check(f"[{filename}] file exists and is a real PNG",
