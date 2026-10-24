@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-24) — found while actually benchmarking a staged embed candidate (bge-m3) on
+# spark2: the real `hermes_rag_common.embed()` raises RuntimeError on any dimension other than
+# the live module's own `EMBED_DIMS` (currently 4096, for Qwen3-Embedding-8B) -- a deliberate
+# correctness gate in the real code (1.7.0's own comment), not a bug, but it means a
+# different-dimension candidate's *latency* can't be measured through this harness at all without
+# an explicit override, since every call fails the dimension check before latency is ever
+# measured. New `--embed-dims` (rag_embed only) monkeypatches `rag.EMBED_DIMS` the same way
+# `--endpoint` already monkeypatches `rag.EMBED_URL` -- an explicit, visible test-only override,
+# never a silent bypass of the real check for anything other than this harness's own candidate
+# run.
 #
 # Initial version (2026-10-23) — S39 Phase D (FLEET_BENCHMARK_DESIGN.md S6.6), after S39a's
 # sign-off, continuing directly after Phase C. New tool. Measures the secondary-goal (speed) half
@@ -206,6 +217,8 @@ def build_call_fn(args, role):
     rag = import_rag_common()
     if role == "rag_embed":
         rag.EMBED_URL = f"{args.endpoint.rstrip('/')}/v1/embeddings"
+        if args.embed_dims is not None:
+            rag.EMBED_DIMS = args.embed_dims
         return lambda: call_embed(rag.embed, "a representative search query about VPN security "
                                               "advisories", args.timeout)
     if role == "rag_rerank":
@@ -245,6 +258,10 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=200)
     ap.add_argument("--timeout", type=int, default=120)
     ap.add_argument("--model-id", default=None, help="defaults to '<role> (live)'")
+    ap.add_argument("--embed-dims", type=int, default=None,
+                     help="rag_embed only: override the real embed()'s dimension check for a "
+                          "candidate whose output dim differs from the live module's EMBED_DIMS "
+                          "-- an explicit, visible test-only override, not a silent bypass")
     ap.add_argument("--json", help="write per-level stats here")
     args = ap.parse_args()
     args.model_id = args.model_id or f"{args.role} (live)"
