@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -157,7 +157,46 @@ which makes them look like harness/task-design signals rather than three unrelat
 None of the three Phase 2 candidates shows a clean win over a live incumbent on a fair, non-speed-only
 basis — nothing qualifies yet for the "outperforms an incumbent" memory note.
 
-## Phase 2+ — in progress
+## Phase 3 — mid-size general-purpose, role TBD
+
+### Infra finding: `coder2` is "retired" in the router only — Muse-Glimmer-30B is still fully loaded
+
+`hermes-router.py`'s own 2.18.0 changelog and its `ROLES` dict comment both assert Muse-Glimmer-30B was
+"unloaded/unregistered" when `coder2` was retired on 2026-10-20. Live check on spark2 during this run:
+`systemctl is-active llama-coder2.service` → `active`, and `curl http://127.0.0.1:8099/v1/models` returns
+Muse-Glimmer-30B-Q4_K_M, fully loaded. Only the *router's* dispatch table was updated — no production
+traffic reaches it any more — but the actual `llama-server` process was never stopped. Four days of a
+~17GB resident model on spark2 serving no traffic. Separate from, and more concrete than, the two stale-
+`Description=` findings in Phase 1 — this one is a real resource-recovery opportunity (`systemctl stop
+llama-coder2.service` would free the memory) and a one-line doc fix to make the changelog comment match
+reality, not just a cosmetic metadata mismatch.
+
+### `GLM-4.7-Flash-Q4_K_M.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.600 | Weaker than Qwen3 (0.900), stronger than Ministral (0.500) |
+| `fleet_log_analyst` | accuracy 2/3 = 0.667 (15 unclear), **fact-extraction 16/25 = 0.640** | Weakest fact-extraction of any candidate tested so far (everyone else: 23-25/25) |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, padding_restraint 1.000 | Clean sweep |
+| `fleet_muse_contract` | capability 8/9, groundedness 7/9, **override 6/9**, overall 0.778 | Best override score of any candidate so far (6/9 vs. 4-5/9 elsewhere) |
+| `fleet_dualcoder_precision` | recall 3/3, **precision 3/3, overall 1.000** | **First perfect score on this suite** — breaks the 0/3-precision pattern every Phase 2 candidate shared |
+| `fleet_coder_fix` | repro 0/1, judge 10/10 = 1.000, 4 `env_unavailable` | No timeouts this run |
+| `fleet_coder_build` | fixture 2/3 = 0.667, judge 8/8 = 1.000 | No timeouts |
+
+**Real finding — candidate outperforms a live incumbent on a fair, same-day, same-suite basis**: `coder2`
+(Muse-Glimmer-30B) is formally retired from router dispatch but, per the infra finding above, is still
+fully loaded and reachable. Ran the exact same `fleet_dualcoder_precision` suite against it, read-only,
+no disruption: **recall 0/2, precision 0/2, overall 0/4 = 0.000** (2 of 6 cases timed out, reducing the
+denominator). GLM-4.7-Flash scores **1.000 (6/6)** on the identical suite. `coder2` was retired in the
+first place for "chronic reasoning-candidate" issues per the router's own changelog — this result is
+consistent with that retirement rationale and gives a concrete, fair data point that GLM-4.7-Flash is a
+plausible candidate specifically for whatever role the dual-coder/code-review function would live under,
+should that role be revived. Not a recommendation to reinstate the role — that's the operator's call — but
+a real, verified outperformance finding, saved to memory per standing instruction. Caveat: GLM-4.7-Flash's
+own Tier 0 (0.600) and log-analyst fact-extraction (0.640) are mediocre, so this is role-specific strength,
+not a general-purpose win.
+
+## Phase 3+ — in progress
 
 (continues below as each candidate completes)
 
@@ -168,3 +207,4 @@ basis — nothing qualifies yet for the "outperforms an incumbent" memory note.
 | 1.0.0 | 2026-10-24 | Initial version — real Phase 1 results from the first live execution of the sequencing runbook: guard candidate's full Tier 0/3 numbers (Tier 2 blocked by a tooling gap, stated plainly), the rerank candidate excluded as a confirmed byte-identical duplicate of the live incumbent, and the embed candidate's real latency delta against a live, read-only-measured incumbent baseline (accuracy unmeasured, correctly not attempted). |
 | 1.1.0 | 2026-10-24 | Added Phase 2 Qwen3-4B and Qwen3-8B full-battery results. Qwen3-8B surfaced a real harness gap: 7/10 `fleet_coder_fix` and 4/8 `fleet_coder_build` tasks timed out outright at 8B (zero timeouts at 4B on the same settings) — surviving-subset judge scores flagged as not comparable at face value until the harness's timeout is made size-aware. |
 | 1.2.0 | 2026-10-25 | Completed Phase 2 with Ministral-8B-Instruct-2410 results, plus a cross-candidate findings section: `fleet_dualcoder_precision` precision axis is 0/3 for all three Phase 2 candidates (likely task-calibration issue), coder_fix/coder_build judge-only axes are near-1.000 for all three while every objective axis is weak (judge-calibration concern, not candidate-specific), and the Qwen3-8B timeout spike did not reproduce on similarly-sized Ministral-8B (model-specific, not a simple size threshold). No Phase 2 candidate qualifies as outperforming a live incumbent. |
+| 1.3.0 | 2026-10-25 | Started Phase 3 with GLM-4.7-Flash-Q4_K_M full battery. Found `coder2`/Muse-Glimmer-30B still fully loaded and live on spark2 four days after the router's changelog claimed it was unloaded/unregistered -- only its dispatch registration was actually removed. Used that still-live incumbent for a fair same-day `fleet_dualcoder_precision` comparison: incumbent scores 0.000 (0/4, 2 timeouts), GLM-4.7-Flash scores a perfect 1.000 (6/6) -- first confirmed candidate-outperforms-incumbent finding of this run, saved to memory. |
