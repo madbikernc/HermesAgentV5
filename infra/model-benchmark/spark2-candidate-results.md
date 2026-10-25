@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -213,6 +213,32 @@ mid-run; verified immediately after via `systemctl is-active` and a direct `/v1/
 `coder` and `muse` came back up correctly serving their real production models — no lasting effect, not a
 benchmark-validity issue.
 
+### `NousResearch_Hermes-4.3-36B-Q4_K_M.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.850 | Second only to Qwen3 (0.900) |
+| `fleet_log_analyst` | **accuracy 9/12 = 0.750** (6 unclear), fact-extraction 24/25 = 0.960 | **Best accuracy and fewest "unclear" of any candidate tested so far** — see outperformance finding below |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, padding_restraint 1.000 | Clean sweep (one raw case, `hallucination_trap`, missed its count but didn't move the aggregate) |
+| `fleet_muse_contract` | capability 7/9, groundedness 8/9, **override 3/9**, overall 0.667 | Tied weakest override resistance with phi-4 |
+| `fleet_dualcoder_precision` | recall 0/2, precision 0/2, overall 0.000 | 2 of 6 cases timed out, reducing the denominator |
+| `fleet_coder_fix` | repro 0/1, judge 4/4 = 1.000, 2 `env_unavailable`, **6 of 10 timed out** | Heaviest timeout rate of any Phase 3 candidate on this suite |
+| `fleet_coder_build` | fixture 2/3 = 0.667, judge 8/8 = 1.000 | **Zero timeouts** on the same loaded candidate, same session — the timeout pattern is suite/task-specific, not a general slowness of this model |
+
+**Real finding — candidate outperforms a live, actively-serving incumbent on a fair, same-day, same-suite
+basis**: traced `fleet_log_analyst`'s real production role via `tools/hermes-logs.py`'s own comment
+("Reasoning model is `super`, not `dispatch`") — the live log-analysis role is `super`
+(`Huihui-GLM-4.7-Flash-abliterated`, spark port 8095), which is also the judge model used throughout this
+entire benchmark run. Ran the identical `fleet_log_analyst` suite against it directly, read-only, no
+disruption: **accuracy 3/8 = 0.375 (10/18 unclear), fact-extraction 22/25 = 0.880**. Hermes-4.3-36B scores
+**0.750 accuracy (9/12, only 6/18 unclear), fact-extraction 0.960** on the same suite, same day. Unlike the
+`coder2` comparison, `super` is a live role actively serving real production log-analysis traffic today —
+this is a stronger-weight finding than the GLM-4.7-Flash one. Saved to memory per standing instruction.
+Caveat: Hermes-4.3-36B's own weak axis is `fleet_muse_contract` override resistance (3/9) and
+`fleet_dualcoder_precision` (0.000, timeout-reduced sample) — this is a log-analyst-role-specific
+recommendation, not a blanket "replace `super` everywhere" (`super` also serves as this run's own judge
+model and other `super`-role duties not benchmarked here).
+
 ## Phase 3+ — in progress
 
 (continues below as each candidate completes)
@@ -226,3 +252,4 @@ benchmark-validity issue.
 | 1.2.0 | 2026-10-25 | Completed Phase 2 with Ministral-8B-Instruct-2410 results, plus a cross-candidate findings section: `fleet_dualcoder_precision` precision axis is 0/3 for all three Phase 2 candidates (likely task-calibration issue), coder_fix/coder_build judge-only axes are near-1.000 for all three while every objective axis is weak (judge-calibration concern, not candidate-specific), and the Qwen3-8B timeout spike did not reproduce on similarly-sized Ministral-8B (model-specific, not a simple size threshold). No Phase 2 candidate qualifies as outperforming a live incumbent. |
 | 1.3.0 | 2026-10-25 | Started Phase 3 with GLM-4.7-Flash-Q4_K_M full battery. Found `coder2`/Muse-Glimmer-30B still fully loaded and live on spark2 four days after the router's changelog claimed it was unloaded/unregistered -- only its dispatch registration was actually removed. Used that still-live incumbent for a fair same-day `fleet_dualcoder_precision` comparison: incumbent scores 0.000 (0/4, 2 timeouts), GLM-4.7-Flash scores a perfect 1.000 (6/6) -- first confirmed candidate-outperforms-incumbent finding of this run, saved to memory. |
 | 1.4.0 | 2026-10-25 | Added phi-4-Q8_0 results: weakest Tier 0 score of the run (0.350) but strong log-analyst fact-extraction (0.960) and the weakest muse_contract override resistance seen so far (3/9). Noted and cleared a transient wrapper hiccup (`llama-coder.service` logged "canceled" mid-stop; verified both coder and muse came back up correctly). |
+| 1.5.0 | 2026-10-25 | Added NousResearch_Hermes-4.3-36B results and a second, stronger candidate-outperforms-incumbent finding: traced `fleet_log_analyst`'s real production role to `super` (live, actively serving traffic), measured it read-only at 0.375 accuracy, and found Hermes-4.3-36B scores 0.750 on the identical suite same-day. Saved to memory. |
