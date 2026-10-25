@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.9.0
+**Version:** 1.10.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -369,6 +369,35 @@ dramatically better recall and false-fail rate. Combined with this candidate's a
 `fleet_muse_contract` score (0.852), this is the strongest outperformance finding of the run so far —
 saved to memory per standing instruction.
 
+### `Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | **0.950** | **Best Tier 0 score of the entire run** |
+| `fleet_log_analyst` | accuracy 1/1 = 1.000 (**17/18 unclear**), fact-extraction 25/25 = 1.000 | The "1.000" is on a single scored case — near-total non-commitment elsewhere, not a real signal |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, padding_restraint 0/1 = 0.000 | Same restraint failure pattern as several other candidates |
+| `fleet_muse_contract` | capability 9/9, groundedness 9/9, override 5/9, overall **0.852** | **Ties Nemotron-3.5-Bolt for best muse_contract score of the run** |
+| `fleet_dualcoder_precision` | recall 0/3, precision 0/3, overall 0.000 | |
+| `fleet_coder_fix` | repro 0/1, judge 10/10 = 1.000, 4 `env_unavailable` | No timeouts |
+| `fleet_coder_build` | fixture 2/3 = 0.667, judge 8/8 = 1.000 | No timeouts |
+| `fleet_vision_judge` (n=34) | precision 0.833, recall 0.926, **false_pass_rate 0.714**, false_fail_rate 0.074 | See comparison note below |
+
+**Comparison with the other vision candidates and the live incumbent on the identical, same-day
+`fleet_vision_judge` suite**:
+
+| Model | precision | recall | false_pass_rate | false_fail_rate |
+|---|---|---|---|---|
+| `omni` incumbent (live, gemma-4-26B-A4B-it) | 0.846 | 0.407 | 0.286 | 0.593 |
+| Nemotron-3.5-Bolt-74B (candidate) | 0.897 | 0.963 | 0.429 | 0.037 |
+| Qwen3VL-30B (candidate) | 0.833 | 0.926 | **0.714** | 0.074 |
+
+Qwen3VL also clearly beats the incumbent on recall/false_fail_rate, but its **false_pass_rate (0.714) is
+the worst of all three** — it lets genuinely bad images through more often than even the incumbent does
+(0.286). Despite Qwen3VL's best-in-run Tier 0 and tied-best muse_contract, Nemotron-3.5-Bolt remains the
+stronger candidate specifically for the vision-judge role on this evidence (better recall, much better
+false_pass_rate, same muse_contract tie). Not re-opening the memory finding as a new one — folding this
+comparison into the existing Nemotron-3.5-Bolt finding.
+
 ## Phase 4+ — in progress
 
 (continues below as each candidate completes)
@@ -387,3 +416,4 @@ saved to memory per standing instruction.
 | 1.7.0 | 2026-10-25 | Added Huihui-Qwen3.6-35B-A3B-Claude-4.6-Opus-abliterated results (measured with the `--reasoning off` fix). Tracks the base model/`muse` incumbent closely across every suite -- no meaningful difference found. |
 | 1.8.0 | 2026-10-25 | Added Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated results, closing out Phase 3. Ties Hermes-4.3-36B's log-analyst accuracy but posts the worst muse_contract override/overall score of the entire run -- a real tradeoff, not a new recommendation. |
 | 1.9.0 | 2026-10-25 | Started Phase 4 (vision-capable candidates) with NVIDIA-Nemotron-3.5-Bolt-74B-A9B. Found and fixed a `hermes-vision-judge-eval.py` endpoint-format gotcha (no `/v1` suffix, unlike every other tool). Third outperformance finding, and the strongest yet: live `omni` incumbent (gemma-4-26B-A4B-it) has fleet_vision_judge recall 0.407 and false_fail_rate 0.593 (rejects most good images); Nemotron-3.5-Bolt scores recall 0.963, false_fail_rate 0.037, and also posts the best fleet_muse_contract score of the entire run (0.852). Saved to memory. |
+| 1.10.0 | 2026-10-25 | Added Qwen3VL-30B-A3B-Instruct results: best Tier 0 score of the run (0.950), ties Nemotron-3.5-Bolt for best muse_contract (0.852), and also clearly beats the omni incumbent on vision-judge recall -- but its false_pass_rate (0.714) is the worst of all three models compared, keeping Nemotron-3.5-Bolt as the stronger vision-role candidate. |
