@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -122,6 +122,41 @@ for smaller/faster candidates and not scaling with model size, rather than anyth
 coding ability. Flagging as a harness gap worth fixing (raise the timeout or make it size-aware) before
 trusting coder_fix/coder_build numbers on any 8B+ candidate, including later Phase 3+ ones.
 
+### `Ministral-8B-Instruct-2410-Q8_0.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.500 | Notably weaker than both Qwen3 candidates (0.900) |
+| `fleet_log_analyst` | accuracy 1/2 = 0.500 (**16/18 unclear**), fact-extraction 25/25 = 1.000 | Near-total refusal to commit to a verdict — extracts facts perfectly but hedges on almost every case |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, padding_restraint 1/1 = 1.000 | Clean sweep — best digest result of the three Phase 2 candidates |
+| `fleet_muse_contract` | capability 7/9, groundedness 7/9, override 4/9, overall 0.667 | Worse overall than both Qwen3 candidates (0.815) |
+| `fleet_dualcoder_precision` | recall 2/3, **precision 0/3**, overall 0.333 | Best recall of the three so far, but same 0/3 precision failure |
+| `fleet_coder_fix` | repro 0/1, judge 7/7 = 1.000, 3 tasks `env_unavailable` (repro axis skipped, judge axis still scored), 2 timeouts | Fewer timeouts than Qwen3-8B (2 vs 7) at a comparable size — the size-correlates-with-timeouts theory from the Qwen3-8B note doesn't hold cleanly across model families |
+| `fleet_coder_build` | fixture 1/3 = 0.333, judge 8/8 = 1.000 | No timeouts this time; fixture-tested subset still weak |
+
+## Phase 2 cross-candidate findings
+
+Two patterns now repeat identically across all three Phase 2 candidates (Qwen3-4B, Qwen3-8B, Ministral-8B),
+which makes them look like harness/task-design signals rather than three unrelated model weaknesses:
+
+- **`fleet_dualcoder_precision` precision axis is 0/3 for every candidate tested so far.** Every model
+  false-positived on all three clean-code cases, with no exceptions. Worth checking whether the precision
+  cases themselves are miscalibrated (e.g. an ambiguous "clean" fixture that a reasonable model would flag)
+  before concluding every candidate tested is this bad at avoiding false positives.
+- **Judge-only axes in `fleet_coder_fix`/`fleet_coder_build` are at or near 1.000 for every candidate, while
+  every objective axis (repro, fixture) in the same runs is weak** (Qwen3-4B repro 0/1, fixture 2/3;
+  Qwen3-8B repro 0/1; Ministral-8B repro 0/1, fixture 1/3). Already flagged once for Qwen3-4B alone; now
+  confirmed across three different models using the same `super`-model judge. This is strong enough to be a
+  judge-calibration concern, not candidate-specific noise — any coder_fix/coder_build "judge: 1.000" result
+  in this run should be read as weak evidence until the judge's leniency is independently spot-checked
+  (§8.7's own stated caveat materializing in practice, not just a theoretical risk).
+- The Qwen3-8B timeout spike (7/10, 4/8) did **not** reproduce on Ministral-8B at a similar parameter count
+  (2/10, 0/8) — size alone doesn't predict it, so it's likely model/generation-speed-specific rather than a
+  harness timeout that needs to scale with parameter count across the board.
+
+None of the three Phase 2 candidates shows a clean win over a live incumbent on a fair, non-speed-only
+basis — nothing qualifies yet for the "outperforms an incumbent" memory note.
+
 ## Phase 2+ — in progress
 
 (continues below as each candidate completes)
@@ -132,3 +167,4 @@ trusting coder_fix/coder_build numbers on any 8B+ candidate, including later Pha
 |---|---|---|
 | 1.0.0 | 2026-10-24 | Initial version — real Phase 1 results from the first live execution of the sequencing runbook: guard candidate's full Tier 0/3 numbers (Tier 2 blocked by a tooling gap, stated plainly), the rerank candidate excluded as a confirmed byte-identical duplicate of the live incumbent, and the embed candidate's real latency delta against a live, read-only-measured incumbent baseline (accuracy unmeasured, correctly not attempted). |
 | 1.1.0 | 2026-10-24 | Added Phase 2 Qwen3-4B and Qwen3-8B full-battery results. Qwen3-8B surfaced a real harness gap: 7/10 `fleet_coder_fix` and 4/8 `fleet_coder_build` tasks timed out outright at 8B (zero timeouts at 4B on the same settings) — surviving-subset judge scores flagged as not comparable at face value until the harness's timeout is made size-aware. |
+| 1.2.0 | 2026-10-25 | Completed Phase 2 with Ministral-8B-Instruct-2410 results, plus a cross-candidate findings section: `fleet_dualcoder_precision` precision axis is 0/3 for all three Phase 2 candidates (likely task-calibration issue), coder_fix/coder_build judge-only axes are near-1.000 for all three while every objective axis is weak (judge-calibration concern, not candidate-specific), and the Qwen3-8B timeout spike did not reproduce on similarly-sized Ministral-8B (model-specific, not a simple size threshold). No Phase 2 candidate qualifies as outperforming a live incumbent. |
