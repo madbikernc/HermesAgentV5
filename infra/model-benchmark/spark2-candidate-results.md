@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.7.0
+**Version:** 1.8.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -315,7 +315,27 @@ This Claude-4.6-Opus-abliterated finetune tracks the base `Huihui-Qwen3.6-35B-A3
 incumbent) closely across every suite — consistent with being a light finetune/merge on the same base
 rather than a meaningfully different model. No suite shows a gap large enough to call a real difference.
 
-## Phase 3+ — in progress
+### `Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated.Q4_K_M.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.850 | Same as the Claude-4.6 sibling |
+| `fleet_log_analyst` | **accuracy 6/8 = 0.750** (10 unclear), **fact-extraction 25/25 = 1.000** | Ties Hermes-4.3-36B for best accuracy in the run, with perfect fact-extraction |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, padding_restraint 0/1 = 0.000 | Same padding-restraint failure as its sibling and the base model |
+| `fleet_muse_contract` | capability 5/9, groundedness 9/9, **override 1/9**, overall **0.556** | **Worst override and worst overall muse_contract score of the entire run** — below even the real `muse` incumbent baseline (0.704) |
+| `fleet_dualcoder_precision` | recall 0/3, precision 0/3, overall 0.000 | Same as its sibling |
+| `fleet_coder_fix` | repro 0/1, judge 10/10 = 1.000, 4 `env_unavailable` | No timeouts |
+| `fleet_coder_build` | fixture 2/3 = 0.667, judge 8/8 = 1.000 | No timeouts |
+
+A real tradeoff against its Claude-4.6 sibling: notably better log-analyst accuracy (0.750 vs. 0.400) but
+markedly worse persona/override resistance (1/9 vs. 3/9). Since it ties rather than beats Hermes-4.3-36B's
+already-flagged log-analyst accuracy (same 0.750, see the Phase 3 outperformance finding above) while
+coming with the weakest muse_contract score in the run, this doesn't change that recommendation — noted as
+a secondary data point, not a new finding.
+
+This closes out Phase 3.
+
+## Phase 4+ — in progress
 
 (continues below as each candidate completes)
 
@@ -331,3 +351,4 @@ rather than a meaningfully different model. No suite shows a gap large enough to
 | 1.5.0 | 2026-10-25 | Added NousResearch_Hermes-4.3-36B results and a second, stronger candidate-outperforms-incumbent finding: traced `fleet_log_analyst`'s real production role to `super` (live, actively serving traffic), measured it read-only at 0.375 accuracy, and found Hermes-4.3-36B scores 0.750 on the identical suite same-day. Saved to memory. |
 | 1.6.0 | 2026-10-25 | Found and fixed a real methodology bug: the candidate wrapper never passed `--reasoning off`, a fleet-wide mandatory flag on every production launch script. Confirmed it corrupted the Huihui-Qwen3.6-35B-A3B-abliterated (= live `muse` incumbent, byte-identical) run outright (log_analyst 0/25 facts, digest axes missing); re-ran with the fix for the real, corrected `muse`-incumbent baseline (muse_contract 0.704). Flagged Qwen3-8B's and Hermes-4.3-36B's coder_fix/coder_build timeout-inflated numbers as likely affected by the same root cause, recommending a targeted re-run; the four Instruct-suffixed/non-reasoning candidates show no corruption symptoms. Wrapper now passes the flag by default for every remaining candidate. |
 | 1.7.0 | 2026-10-25 | Added Huihui-Qwen3.6-35B-A3B-Claude-4.6-Opus-abliterated results (measured with the `--reasoning off` fix). Tracks the base model/`muse` incumbent closely across every suite -- no meaningful difference found. |
+| 1.8.0 | 2026-10-25 | Added Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated results, closing out Phase 3. Ties Hermes-4.3-36B's log-analyst accuracy but posts the worst muse_contract override/overall score of the entire run -- a real tradeoff, not a new recommendation. |
