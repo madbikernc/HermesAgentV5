@@ -33,3 +33,30 @@ fintech                | keyword | fintech
 industrials            | sector  | Industrials
 energy_utilities       | sector  | Energy
 energy_utilities       | sector  | Utilities
+
+# frontier_llm / ai_hardware (S38g, direct operator request): a curated watchlist, not a broad
+# sector/keyword net like `ai` above. Each gets its own dedicated per-ticker report section
+# (hermes-market-report.py's "Frontier LLM Watch" / "AI Hardware Watch") in addition to showing
+# up as one more line in the generic Thematic tag trends section. Exact-ticker rules only, kept
+# deliberately explicit and short rather than matched by keyword — curation here IS the point.
+# Membership checked against the real S&P 500 constituents table before being written down
+# (2026-10-24): TSM and ARM are real AI-silicon names but are NOT S&P 500 members (confirmed
+# absent from `instruments`), so they are deliberately left off rather than added as dead rules.
+#
+# frontier_llm: the in-house frontier-model developers that are actual S&P 500 constituents.
+# OpenAI/Anthropic/xAI are not public and have no ticker to add.
+frontier_llm | ticker | GOOGL
+frontier_llm | ticker | GOOG
+frontier_llm | ticker | META
+frontier_llm | ticker | MSFT
+frontier_llm | ticker | AMZN
+#
+# ai_hardware: companies whose core business IS AI-specific silicon/memory/networking, not
+# general-purpose IT hardware or storage vendors that merely resell AI servers.
+ai_hardware | ticker | NVDA
+ai_hardware | ticker | AMD
+ai_hardware | ticker | AVGO
+ai_hardware | ticker | MU
+ai_hardware | ticker | INTC
+ai_hardware | ticker | MRVL
+ai_hardware | ticker | ANET

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-24) - S38g, direct operator request: a dedicated per-ticker report section for
+# the two curated AI watchlists tags.yaml now seeds ("frontier_llm", "ai_hardware") -- "special
+# attention" beyond the one aggregate line those tags already got in the existing tag_trend
+# section. compute_report() now also calls hermes_market_common.ai_watch_block() for each;
+# matrix_summary gains one line naming whichever watchlist ticker moved the most today.
 #
 # hermes-market-report — S38d. Computes sector/tag trend, movers, and 30-day trend from
 # hermes_market_common's `prices`/`instruments`/`tags` tables, writes the result to
@@ -94,6 +100,15 @@ def compute_report(conn, pct_by_ticker):
         [(name, avg) for name, avg, _n in tag_trends],
         lambda name, avg, rank: common.render_tag_line(name, avg, rank, n_tags))
 
+    # S38g: a dedicated, per-ticker section for each curated AI watchlist -- "special attention"
+    # beyond the one aggregate line these two tags already get above in tag_trend.
+    trend30_pct, _trend30_date = common.trend30_pct_changes(conn, "US")
+    ai_watch_items = {}
+    for item_type, tag in common.AI_WATCH_SECTIONS.items():
+        items = common.ai_watch_block(conn, tag, pct_by_ticker, trend30_pct)
+        blocks[("ALL", item_type)] = items
+        ai_watch_items[item_type] = items
+
     gainers = common.top_n(pct_by_ticker, TOP_N_MOVERS, "up")
     blocks[("ALL", "movers_up")] = _ranked(
         gainers, lambda t, p, rank: common.render_mover_line(t, p, rank, "up"))
@@ -102,7 +117,6 @@ def compute_report(conn, pct_by_ticker):
     blocks[("ALL", "movers_down")] = _ranked(
         decliners, lambda t, p, rank: common.render_mover_line(t, p, rank, "down"))
 
-    trend30_pct, _trend30_date = common.trend30_pct_changes(conn, "US")
     t30_up = common.top_n(trend30_pct, TOP_N_TREND30, "up")
     blocks[("ALL", "trend30_up")] = _ranked(
         t30_up, lambda t, p, rank: common.render_trend30_line(t, p, rank, "up"))
@@ -119,6 +133,12 @@ def compute_report(conn, pct_by_ticker):
         summary_bits.append("Top gainers: " + ", ".join(f"{t} +{p:.2f}%" for t, p in gainers[:3]))
     if decliners:
         summary_bits.append("Top decliners: " + ", ".join(f"{t} {p:.2f}%" for t, p in decliners[:3]))
+    all_ai_watch = ai_watch_items["ai_watch_llm"] + ai_watch_items["ai_watch_hw"]
+    if all_ai_watch:
+        biggest = max(all_ai_watch, key=lambda item: abs(item[1]))
+        ticker, pct, _text = biggest
+        sign = "rose" if pct >= 0 else "fell"
+        summary_bits.append(f"AI watch: {ticker} {sign} {abs(pct):.2f}% today.")
     matrix_summary = " ".join(summary_bits) if summary_bits else "No movers today."
 
     return blocks, matrix_summary

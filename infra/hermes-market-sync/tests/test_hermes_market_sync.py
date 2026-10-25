@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-24) - S38g: checks that the real committed tags.yaml carries the two new
+# frontier_llm/ai_hardware curated watchlists, ticker-matched only, including NVDA/GOOGL.
 #
 # Offline checks for S38b/c (hermes-market-sync.py) and S38e (hermes-market-gate.py). No real
 # network call and no real Vaultwarden/Matrix credential anywhere — fetch_html()/fetch_json() are
@@ -247,6 +250,21 @@ def test_tags(sync_mod):
     con.close()
     check("a removed rule's tag disappears on the next apply (wipe, not merge)",
           tagged2 == {("AAPL", "ai")}, str(tagged2))
+
+    print("\n[the real committed tags.yaml, including S38g's frontier_llm/ai_hardware watchlists]")
+    real_rules, real_bad = sync_mod.load_tags(sync_mod.REPO_DIR / "infra" / "hermes-market-sync" / "tags.yaml")
+    check("the committed tags.yaml parses with no complaints", not real_bad, str(real_bad))
+    real_tags = {tag for tag, _match_type, _pattern in real_rules}
+    check("all eight tags are present, including the two S38g watchlists",
+          {"frontier_llm", "ai_hardware", "ai", "information_technology", "agricultural",
+           "fintech", "industrials", "energy_utilities"} <= real_tags, str(real_tags))
+    hw_tickers = {pattern for tag, mt, pattern in real_rules if tag == "ai_hardware" and mt == "ticker"}
+    check("NVIDIA is in the ai_hardware watchlist (the operator's own named example)",
+          "NVDA" in hw_tickers, str(hw_tickers))
+    llm_tickers = {pattern for tag, mt, pattern in real_rules if tag == "frontier_llm" and mt == "ticker"}
+    check("frontier_llm is ticker-curated, not a broad sector/keyword net",
+          all(mt == "ticker" for tag, mt, _p in real_rules if tag == "frontier_llm"), str(real_rules))
+    check("GOOGL is in the frontier_llm watchlist", "GOOGL" in llm_tickers, str(llm_tickers))
 
 
 def test_sync_prices_honesty_split(sync_mod):

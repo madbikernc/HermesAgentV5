@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-24) - S38g: checks for the new dedicated Frontier LLM Watch/AI Hardware Watch
+# report sections (hermes_market_common.ai_watch_block()/render_ai_watch_line(), and
+# compute_report()'s own two new blocks + matrix_summary line).
 #
 # Offline checks for S38d (hermes-market-report.py) and the compute/render half of
 # hermes_market_common.py it shares with hermes-market-gate.py. hermes_market_common.py has no
@@ -157,6 +161,47 @@ def test_render_lines(common):
           "leads the 30-day gainers" in common.render_trend30_line("AAA", 12.0, 1, "up"))
 
 
+def test_ai_watch(common):
+    print("\n[ai_watch_block / render_ai_watch_line -- S38g]")
+    check("render_ai_watch_line with a 30-day figure mentions both windows",
+          "today" in common.render_ai_watch_line("NVDA", 3.0, 18.4)
+          and "30 days" in common.render_ai_watch_line("NVDA", 3.0, 18.4))
+    check("render_ai_watch_line with no 30-day figure yet mentions only today",
+          "30 days" not in common.render_ai_watch_line("NVDA", 3.0, None))
+    check("a decline renders with 'fell', not 'rose'",
+          "fell" in common.render_ai_watch_line("INTC", -2.0, None))
+
+    db_path, con = new_db()
+    con.executescript(common.SCHEMA)
+    seed_instruments(con, [("NVDA", "Tech"), ("AMD", "Tech"), ("GOOGL", "Comm"), ("NODATA", "Tech")])
+    con.executemany("INSERT INTO tags (ticker, exchange, tag) VALUES (?, 'US', ?)", [
+        ("NVDA", "ai_hardware"), ("AMD", "ai_hardware"), ("NODATA", "ai_hardware"),
+        ("GOOGL", "frontier_llm"),
+    ])
+    seed_prices(con, "NVDA", [("2026-10-22", 100), ("2026-10-23", 103)])
+    seed_prices(con, "AMD", [("2026-10-22", 50), ("2026-10-23", 48)])
+    seed_prices(con, "GOOGL", [("2026-10-22", 200), ("2026-10-23", 202)])
+    # NODATA carries the ai_hardware tag but has no price row at all -- must be omitted, not
+    # shown as a fabricated 0% mover.
+    con.commit()
+
+    pct, _dates = common.daily_pct_changes(con, "US")
+    trend30, _latest = common.trend30_pct_changes(con, "US")
+    hw = common.ai_watch_block(con, "ai_hardware", pct, trend30)
+    check("only the two real ai_hardware tickers with data appear", {t for t, _p, _tx in hw} == {"NVDA", "AMD"}, str(hw))
+    check("a tagged ticker with no price data is omitted, not fabricated as 0%",
+          not any(t == "NODATA" for t, _p, _tx in hw), str(hw))
+    check("best mover is listed first (NVDA +3% before AMD -4%)", hw[0][0] == "NVDA", str(hw))
+
+    llm = common.ai_watch_block(con, "frontier_llm", pct, trend30)
+    check("frontier_llm watch is a separate, independent list", {t for t, _p, _tx in llm} == {"GOOGL"}, str(llm))
+    check("ai_hardware members never leak into frontier_llm's list",
+          not any(t in ("NVDA", "AMD") for t, _p, _tx in llm), str(llm))
+
+    empty = common.ai_watch_block(con, "no_such_tag", pct, trend30)
+    check("an unseeded tag name returns an empty list, not an error", empty == [])
+
+
 def load_report_module():
     """Stubs hermes_alert_common before hermes-market-report.py's own `import hermes_alert_common`
     executes, so no real SMTP/Matrix call can happen. Returns (module, sent_log) where sent_log
@@ -212,6 +257,8 @@ def test_compute_report_and_rendering(report_mod, common):
     seed_prices(con, "BBB", [("2026-10-22", 50), ("2026-10-23", 45)])
     seed_prices(con, "CCC", [("2026-10-22", 10), ("2026-10-23", 9)])
     seed_prices(con, "DDD", [("2026-10-22", 30), ("2026-10-23", 33)])
+    con.executemany("INSERT INTO tags (ticker, exchange, tag) VALUES (?, 'US', ?)",
+                     [("AAA", "ai_hardware"), ("DDD", "frontier_llm")])
     con.commit()
 
     pct, _dates = common.daily_pct_changes(con, "US")
@@ -221,11 +268,21 @@ def test_compute_report_and_rendering(report_mod, common):
     check("movers_down contains only BBB/CCC (the real decliners)",
           {t for t, _v, _txt in blocks[("ALL", "movers_down")]} == {"BBB", "CCC"}, str(blocks[("ALL", "movers_down")]))
     check("a matrix summary is produced", bool(matrix_summary) and "gainers" in matrix_summary.lower(), matrix_summary)
+    check("the AI hardware watch block is populated from the tagged ticker",
+          {t for t, _v, _txt in blocks[("ALL", "ai_watch_hw")]} == {"AAA"}, str(blocks[("ALL", "ai_watch_hw")]))
+    check("the frontier LLM watch block is populated from the tagged ticker",
+          {t for t, _v, _txt in blocks[("ALL", "ai_watch_llm")]} == {"DDD"}, str(blocks[("ALL", "ai_watch_llm")]))
+    check("the matrix summary names the biggest AI-watch mover",
+          "AI watch:" in matrix_summary, matrix_summary)
 
     report_mod.write_report_items(con, "2026-10-23", blocks)
     text = common.render_full_report_text(con, "2026-10-23")
     check("the rendered report names the real top gainer", "AAA" in text, text)
     check("the rendered report names the real top decliner", "BBB" in text, text)
+    check("the rendered report has its own dedicated Frontier LLM Watch section",
+          "Frontier LLM Watch:" in text, text)
+    check("the rendered report has its own dedicated AI Hardware Watch section",
+          "AI Hardware Watch:" in text, text)
     check("render_full_report_text and the gate's own reader read the same stored rows",
           text == common.render_full_report_text(con, "2026-10-23"))
 
@@ -293,6 +350,7 @@ def main():
     test_group_trend(common)
     test_top_n(common)
     test_render_lines(common)
+    test_ai_watch(common)
 
     report_mod, sent_log = load_report_module()
     report_mod._test_sent_log = sent_log

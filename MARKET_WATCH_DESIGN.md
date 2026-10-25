@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.4.0
+**Version:** 1.6.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -114,6 +114,17 @@ no code change to add or remove a tag. The six named in the request (information
 agricultural, fintech, industrials, energy & utilities) seed the file; "including but not limited to" is
 exactly what an editable YAML list is for.
 
+**`[DECIDED]` S38g, direct operator request — two curated watchlists get "special attention," not just
+a `tags.yaml` line.** `frontier_llm` (the S&P 500's own in-house frontier-model developers: `GOOGL`/`GOOG`,
+`META`, `MSFT`, `AMZN` — OpenAI/Anthropic/xAI have no ticker, being private) and `ai_hardware` (companies
+whose core business IS AI-specific silicon/memory/networking, not general IT hardware that merely resells
+AI servers: `NVDA`, `AMD`, `AVGO`, `MU`, `INTC`, `MRVL`, `ANET`) are ticker-curated — exact membership, not
+sector/keyword matching, unlike every other tag — and §7 gives each its own dedicated per-ticker report
+section rather than folding them into the generic tag-trend line every other tag gets. Checked against
+the real S&P 500 constituents table before being written down, same discipline §2 already set for this
+whole design: `TSM` and `ARM` are real AI-silicon names but are **not** S&P 500 members, so they were left
+off rather than added as rules that would silently match nothing.
+
 ---
 
 ## 5. Storage `[PROPOSED]`
@@ -171,6 +182,9 @@ One push per day — a single report with several sections, unlike S27's six sep
 covering exactly what was asked:
 
 - Sectors/industries/thematic tags with an overall up or down trend
+- **A dedicated "Frontier LLM Watch" / "AI Hardware Watch" section (S38g)**, every member of
+  §4's two curated watchlists shown individually with its own daily and 30-day move — not folded
+  into the generic tag-trend line or left to only make the top-N movers cut by chance
 - Biggest-increasing companies, fastest-decreasing companies (by % change)
 - Strongest positive and negative 30-day % trend
 
@@ -325,10 +339,28 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
   (`Unknown sector/tag 'NotRealSector'`, `Unknown ticker 'ZZZZ'`) and the one unmatched message
   (`market bogus foo`) correctly drawing no reply at all. Both timers confirmed scheduled for
   their next real run via `systemctl list-timers`.
+- **S38g** — **Built and fully live-verified 2026-10-24, direct operator request after S38f
+  closed.** §4's two curated watchlists (`frontier_llm`, `ai_hardware`) added to `tags.yaml`;
+  `hermes_market_common.py` 1.1.0 gains `ai_watch_block()`/`render_ai_watch_line()` and the
+  `AI_WATCH_SECTIONS` mapping; `hermes-market-report.py` 1.1.0's `compute_report()` writes two
+  new dedicated `report_items` blocks (`ai_watch_llm`/`ai_watch_hw`) and adds a one-line "AI
+  watch: `<ticker>` `<moved>`% today" mention to the short Matrix summary naming whichever
+  watchlist ticker moved the most. 19 new offline checks (120 total across both suites) —
+  including one against the real, committed `tags.yaml` confirming NVDA/GOOGL are actually
+  present in their respective watchlists, not just in a synthetic test fixture.
+  Live, on `dgx-spark`: `tags.yaml` re-applied against the real `instruments` table (all 7
+  `ai_hardware` tickers and all 5 `frontier_llm` tickers, including both `GOOG`/`GOOGL` share
+  classes, matched); the real report rendered both dedicated sections with real per-ticker
+  daily+30-day numbers (e.g. "MU rose 2.46% today, down 18.12% over 30 days"); a real report run
+  through the actual systemd unit (`Result=success`) delivered the new "AI watch: MU rose 2.46%
+  today." Matrix line, confirmed by reading the room's own event stream; and `market sector
+  frontier_llm`/`market sector ai_hardware`/`market ticker NVDA` were each posted into the real
+  room and their replies read back from the room itself — the existing gate handlers needed no
+  code change to pick up the two new tags.
 
 ---
 
-## 13. Exit gate — **MET, 2026-10-24**
+## 13. Exit gate — **MET, 2026-10-24 — S38a-g in full**
 
 A real daily email **and** Matrix post landing on a real trading day, citing real sector movement and
 real movers an operator can check against an independent source; and a real `market <command>` round trip
@@ -376,3 +408,5 @@ own commit to that table in the same change, not a thing done here.
 | 1.2.0 | 2026-10-21 | **S38a decided, direct operator instruction ("use whatever free services we can for now, limit markets to ones free services can report on") verified live before being written down.** §2 rewritten: Stooq ruled out (a real client-side JS proof-of-work challenge blocks every `stooq.com/q/d/l/` request from this environment, confirmed by curl with and without a browser user-agent) — Yahoo Finance's unofficial chart endpoint decided instead for price data (live-tested against a US/LSE/Tokyo ticker and a full 1-year pull, returns `adjclose` for free) and Wikipedia's "List of S&P 500 companies" decided for the instrument list/GICS sector (live-tested, real `wikitable`). §3 narrowed to US/S&P-500-only for the MVP after confirming FTSE 100/Nikkei 225 have no equally clean free constituent-list table yet — international expansion named as a real, gated follow-up rather than guessed at. §5 gained `adj_close`, resolving risk 5 (corporate actions) for this source. §6 simplified from a per-exchange timer fleet to one daily US-close timer, with the per-exchange design kept as the documented scaling path. §11 risks 1 and 5 marked resolved; §12's S38a marked done. Minor bump — open questions resolved and one early recommendation corrected against real evidence, nothing restructured. |
 | 1.3.0 | 2026-10-24 | **S38b-f built: the full capability (direct operator request to build the whole remaining sequence), 101 offline checks passing, live verification explicitly NOT done.** §10 corrected: the "new Vaultwarden item" paragraph was stale after §2's keyless-source decision — removed, replaced with a note that this build reuses `hermes_alert_common.py`'s existing two secrets as-is. §12 updated with what each sub-stage actually built, including one schema correction found while building S38d (`report_items.category="ALL"` uniformly, not the group's own name — see that entry) and one real bug `test_hermes_market_sync.py`/`test_hermes_market_report.py` caught before any live run (`top_n()`'s sign-filtering gap). New files: `tools/hermes_market_common.py`, `tools/hermes-market-sync.py` (1.1.0), `tools/hermes-market-report.py`, `tools/hermes-market-gate.py`, `infra/hermes-market-sync/tags.yaml` + timer/service units, `infra/hermes-market-report/` timer/service units, both test files. Stated plainly per §13: this session had no fleet node, Vaultwarden, or Matrix access — every check above ran offline, against synthetic data, on a dev machine with no `bs4` installed (the Wikipedia table parser was written against stdlib `html.parser` instead, deliberately, rather than assume `bs4`'s real ambient availability on the deploy host would also hold here). `to_yahoo_symbol()`'s dotted-to-dashed ticker mapping is implemented but not live-verified. Minor bump — a planned stage built and tested, with its live-verification gap stated honestly rather than glossed over; nothing prior reversed. |
 | 1.4.0 | 2026-10-24 | **§13's exit gate MET, live, minutes after 1.3.0 was written — the operator corrected this session's own "no fleet access" assumption.** Files copied directly onto `dgx-spark`'s existing checkout (not committed/pushed — no git action was requested this session) and run for real: Wikipedia pull (503 instruments), `to_yahoo_symbol()` confirmed against real `BRK.B`/`BF.B`, a full 400-day/503-ticker backfill (200,063 rows, zero failures), `tags.yaml` applied (315 pairs), the real report delivered and its Matrix notice read back from the room's own event stream, all three systemd units installed and run for real (`Result=success`/`active (running)`, not just by hand), and a full gate round trip — every command shape and both refusal paths posted into the real FleetOps room and every reply read back from the room itself. §12's S38f entry and §13 both rewritten from "not done" to the real result. Minor bump — a stage's live verification executed and its real record written in, nothing prior reversed. |
+| 1.5.0 | 2026-10-24 | **S38g added: direct operator request for "special attention" and a dedicated report section for AI-specific-hardware and frontier-LLM-developer tickers.** New §4 paragraph: two ticker-curated (not sector/keyword) watchlists, `frontier_llm` (`GOOGL`/`GOOG`/`META`/`MSFT`/`AMZN` — the S&P 500's own in-house frontier-model developers; OpenAI/Anthropic/xAI have no ticker) and `ai_hardware` (`NVDA`/`AMD`/`AVGO`/`MU`/`INTC`/`MRVL`/`ANET` — AI-specific silicon/memory/networking, not general IT hardware resellers), checked against the real S&P 500 constituents table before being written down (`TSM`/`ARM` are real AI-silicon names but not S&P 500 members, deliberately left off). §7 gains a dedicated "Frontier LLM Watch"/"AI Hardware Watch" section naming every member individually with its own daily and 30-day move. §12's S38g entry records the build; §13 now notes this one piece is offline-tested only, not yet live-verified like S38a-f were. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
+| 1.6.0 | 2026-10-24 | **S38g live-verified on `dgx-spark`, minutes after 1.5.0 was written — direct operator request to deploy it the same way as S38a-f.** `tags.yaml` re-applied against the real `instruments` table: all 7 `ai_hardware` tickers and all 5 `frontier_llm` tickers (both `GOOG`/`GOOGL` share classes) matched. A real report run rendered both dedicated sections with real per-ticker numbers and delivered a real "AI watch: MU rose 2.46% today." Matrix line, confirmed via the room's own event stream, through the actual `hermes-market-report.service` unit (`Result=success`). `market sector frontier_llm`/`market sector ai_hardware`/`market ticker NVDA` posted into the real room and their replies read back from it — the existing gate handlers needed zero code changes to serve the two new tags, confirming the design's own "the gate re-reads whatever's in the DB" principle held for a feature added after the gate was built. §13 now reads "MET — S38a-g in full." Minor bump — a feature's live verification executed and its real record written in, nothing prior reversed. |

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-24) - S38g, direct operator request: "special attention" and a dedicated report
+# section for AI-specific hardware tickers (NVDA and similar) and frontier-LLM-developer tickers.
+# New AI_WATCH_SECTIONS mapping (report item_type -> tags.yaml tag name), ai_watch_block() and
+# render_ai_watch_line() — per-ticker daily + 30-day lines for a small curated watchlist, shown
+# individually rather than folded into the generic top-N movers lists. REPORT_SECTION_ORDER/
+# _TITLES gained "ai_watch_llm"/"ai_watch_hw", placed right after the sector/tag trend sections
+# for visibility.
 """
 hermes_market_common.py — Firmament Market Watch (S38b-e): shared schema, connect(), and the
 compute/render functions every consumer must agree on. Modeled on hermes_botnet_intel.py's shape
@@ -243,16 +251,23 @@ def render_mover_line(ticker, pct, rank, direction):
     return f"{ticker} was today's #{rank} {label}. It {sign} {abs(pct):.2f}%."
 
 
-REPORT_SECTION_ORDER = ["sector_trend", "tag_trend", "movers_up", "movers_down",
-                        "trend30_up", "trend30_down"]
+REPORT_SECTION_ORDER = ["sector_trend", "tag_trend", "ai_watch_llm", "ai_watch_hw",
+                        "movers_up", "movers_down", "trend30_up", "trend30_down"]
 REPORT_SECTION_TITLES = {
     "sector_trend": "Sector trends",
     "tag_trend": "Thematic tag trends",
+    "ai_watch_llm": "Frontier LLM Watch",
+    "ai_watch_hw": "AI Hardware Watch",
     "movers_up": "Today's biggest gainers",
     "movers_down": "Today's biggest decliners",
     "trend30_up": "30-day leaders",
     "trend30_down": "30-day laggards",
 }
+
+# S38g (direct operator request): the tags.yaml tag name each dedicated "AI watch" report
+# section reads its constituents from. Kept as a named mapping, not hardcoded inline at each call
+# site, so hermes-market-report.py's compute_report() and this module's own tests agree on it.
+AI_WATCH_SECTIONS = {"ai_watch_llm": "frontier_llm", "ai_watch_hw": "ai_hardware"}
 
 
 def latest_report_date(conn):
@@ -295,6 +310,27 @@ def render_full_report_text(conn, report_date):
         parts.extend(f"  {ln}" for ln in lines)
         parts.append("")
     return "\n".join(parts).rstrip()
+
+
+def ai_watch_block(conn, section_tag, pct_by_ticker, trend30_by_ticker):
+    """One curated watchlist's per-ticker lines, best-move-first — the "special attention" view
+    S38g asks for: every member ticker shown individually (not just whoever makes a top-N
+    movers cut), each with today's move and its 30-day move if one is available yet. A member
+    with no data for today (not yet synced, or genuinely absent from today's `prices`) is
+    omitted rather than shown as a fabricated 0%."""
+    members = sorted(tag_members(conn, "US").get(section_tag, []))
+    present = [(t, pct_by_ticker[t]) for t in members if t in pct_by_ticker]
+    present.sort(key=lambda kv: kv[1], reverse=True)
+    return [(t, p, render_ai_watch_line(t, p, trend30_by_ticker.get(t))) for t, p in present]
+
+
+def render_ai_watch_line(ticker, daily_pct, trend30_pct):
+    sign = "rose" if daily_pct >= 0 else "fell"
+    line = f"{ticker} {sign} {abs(daily_pct):.2f}% today"
+    if trend30_pct is not None:
+        sign30 = "up" if trend30_pct >= 0 else "down"
+        line += f", {sign30} {abs(trend30_pct):.2f}% over 30 days"
+    return line + "."
 
 
 def render_trend30_line(ticker, pct, rank, direction):
