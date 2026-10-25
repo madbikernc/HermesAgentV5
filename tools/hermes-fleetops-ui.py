@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 2.10.0
+# Version: 2.10.1
+#
+# 2.10.1 (2026-10-25) — bug fix, found live deferring the bulk of a mostly-not-recommended
+# backlog (891 proposed, only 7 recommended after bc 1.5.0's tightened bar): a bulk decide POST
+# selecting most of a 400-row page comfortably exceeds do_POST's old 8192-byte body cap, and the
+# old code redirected on that without ever reading the body. On this service's persistent
+# HTTP/1.1 connections, those unread bytes then sat in the socket, and the NEXT request read off
+# the same connection picked them up as its own request line — surfacing as a spurious 501
+# "Unsupported method" whose message was literally the rejected decide's own form-encoded body.
+# Fixed two ways: the cap is now MAX_DECIDE_BODY (256 KiB, real headroom over a full-page bulk
+# select, not guessed at), and the reject-without-reading path now sets
+# `self.close_connection = True` so an oversized/invalid body can never desync a reused
+# connection again, regardless of size.
 #
 # 2.10.0 (2026-10-25) — direct operator request: a "Graph" button on every ticker-level /market
 # row (movers, 30-day trend, the two AI-watch sections — the same TICKER_LEVEL_ITEM_TYPES
@@ -317,6 +329,11 @@ MAX_RECOMMENDATION_ROWS = 400
 MAX_EGRESS_BLOCK_ROWS = 400
 MAX_MARKET_ROWS = 400
 MAX_TAG_PROPOSAL_ROWS = 400
+# A decide POST's body: one `task_id=` field per selected row, plus the CSRF token and the
+# action. 400 rows (MAX_BACKLOG_ROWS) of `task_id=scout:<role>:<model>` is comfortably under
+# this -- see do_POST's own comment for why it must never be raised without also keeping the
+# "reject without reading, then close the connection" discipline that cap enforces.
+MAX_DECIDE_BODY = 1 << 18  # 256 KiB
 # A chart stays responsive even once `prices` holds many years of daily history -- even-stride
 # decimation above this many points, always keeping the first/last point so the window's real
 # endpoints never shift. Today's longest series (~1255 points for a 5-year window) never hits it.
@@ -2107,7 +2124,20 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = -1
-        if not 0 <= length <= 8192:
+        # 400 rows (MAX_BACKLOG_ROWS) of `task_id=scout:<role>:<model>` checkboxes, all selected
+        # at once, comfortably exceeds the old 8192-byte cap -- confirmed live 2026-10-25
+        # deferring the bulk of a mostly-not-recommended backlog. Raised with real headroom over
+        # that case (≈40KB), not guessed at, while still bounding how much a single POST can ask
+        # this service to buffer.
+        if not 0 <= length <= MAX_DECIDE_BODY:
+            # The old code redirected here WITHOUT reading the body — on a persistent HTTP/1.1
+            # connection, those unread bytes then sat in the socket, and the NEXT request read
+            # off the same connection picked them up as its own request line. That is exactly how
+            # this surfaced: a spurious 501 "Unsupported method" whose message was literally the
+            # rejected decide's own form-encoded body (csrf=...&action=defer&task_id=...). Closing
+            # the connection instead of reusing it sidesteps that without having to drain a body
+            # that could be arbitrarily (or maliciously) large.
+            self.close_connection = True
             self._redirect("/backlog?result=badaction")
             return
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))

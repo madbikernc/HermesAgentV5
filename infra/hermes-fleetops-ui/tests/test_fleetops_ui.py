@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.10.0
+# Version: 2.10.1
+#
+# 2.10.1 (2026-10-25) — check_write_surface() extended for hermes-fleetops-ui.py 2.10.1's decide
+# body-cap fix (the old bare 8192 that could desync a reused HTTP/1.1 connection into a spurious
+# 501): source-level checks that the cap is the named MAX_DECIDE_BODY constant, not the old bare
+# number, and that the reject-without-reading path closes the connection.
 #
 # 2.10.0 (2026-10-25) — check_market() extended for hermes-fleetops-ui.py 2.10.0's per-ticker
 # history graph: a real `prices` table (NVDA, ~663 daily rows, deterministic drift) backs
@@ -550,8 +555,12 @@ def check_write_surface(ui):
     print(NL + "[the write surface is exactly one guarded route]")
     src = (TOOLS / "hermes-fleetops-ui.py").read_text(encoding="utf-8")
     check("there is exactly one write handler", src.count("def do_POST") == 1)
-    check("and it serves only /backlog/decide",
-          '!= "/backlog/decide"' in src)
+    check("and it serves only two named routes -- /backlog/decide and /market/monitor/add",
+          'path not in ("/backlog/decide", "/market/monitor/add")' in src)
+    check("the decide body cap is a named constant, not a bare magic number",
+          "0 <= length <= MAX_DECIDE_BODY" in src and "0 <= length <= 8192" not in src)
+    check("an oversized/invalid body closes the connection rather than leaving it unread",
+          "self.close_connection = True" in src)
     check("a decide answers 303 to a GET, so a refresh cannot replay it",
           "self.send_response(303)" in src)
     check("nor do_PUT or do_DELETE", "def do_PUT" not in src and "def do_DELETE" not in src)
@@ -1242,6 +1251,10 @@ def check_market(ui, tmp):
     conn.commit()
     conn.close()
     ui.MARKET_DB = str(db)
+    # Isolation: without this override, load_monitored_tickers() would read this repo's own
+    # real, committed monitored-tickers.yaml (seeded with HPE) off disk, making this test depend
+    # on real repo state instead of a controlled fixture.
+    ui.market_common.MONITORED_TICKERS_PATH = tmp / "monitored-tickers.yaml"
 
     print(NL + "[with_company_name(): the splice itself, in isolation]")
     names = {"NVDA": "NVIDIA Corporation"}
@@ -1280,8 +1293,10 @@ def check_market(ui, tmp):
     check("the move is signed and formatted as a percentage",
           "+1.23%" in html and "-9.99%" in html, html[:2000])
     check("a ticker-level row gets a Graph button pointing at /market/history",
-          '/market/history?ticker=NVDA' in html and 'class="graph-btn"' in html)
-    check("a sector-trend row gets no Graph button -- no per-sector series is stored",
+          '/market/history?ticker=NVDA' in html and 'class="row-btn"' in html)
+    check("a ticker-level row also gets a Company button pointing at /market/company",
+          '/market/company?ticker=NVDA' in html)
+    check("a sector-trend row gets no Graph/Company button -- no per-sector series is stored",
           "ticker=Information" not in html)
     check("ticker-level sections gain a trailing (unlabeled) graph column header",
           "<th>#</th><th>ticker/group</th><th>move</th><th>detail</th><th></th>" in html)
@@ -1420,13 +1435,16 @@ def check_market(ui, tmp):
     no_ticker_page = ui.page_market_history({}).decode()
     check("no ticker given degrades without raising", "No ticker given" in no_ticker_page)
 
-    print(NL + "[the assembled page carries both sections, and the route is registered]")
+    print(NL + "[the assembled page carries all three sections, and the route is registered]")
     page = ui.page_market({}).decode()
-    check("both sections appear", "Market Watch — daily report" in page
+    check("all three sections appear", "Monitored stocks" in page
+          and "Market Watch — daily report" in page
           and "Pending tag candidate proposals" in page)
     check("the route is wired up", ui.ROUTES.get("/market") is ui.page_market)
-    check("no write form exists on this read-only page",
-          'method="post"' not in page)
+    check("the one legitimate write form posts to /market/monitor/add, with a real CSRF token",
+          'method="post" action="/market/monitor/add"' in page
+          and f'value="{ui.CSRF_TOKEN}"' in page)
+    check("no OTHER write form sneaks onto this page", page.count('method="post"') == 1)
 
 
 def check_decide_unavailable(ui):
