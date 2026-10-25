@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.11.0
+**Version:** 1.13.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -509,10 +509,76 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
   showing its named empty state — checked over both loopback and the real public tailnet URL
   (`https://spark.tail1a534.ts.net:8103/market`), with all 52 real ticker-level rows on the live
   report carrying a working Graph link.
+- **S38k** — **Built, live-verified, and committed 2026-10-25, direct operator request** (a "Company" button alongside Graph,
+  summarizing "what the company does, how long they've been in business, how long they have been
+  publicly traded, anything else... that may help understand that company"). There is no stored
+  fact base for this anywhere in `market.db` — unlike the Graph button, this has to come from an
+  LLM's own general knowledge, the same way S38h's tag-scout classification already does. New
+  `/market/company?ticker=...` route, opened in a new tab from every ticker-level row's second
+  button. `hermes-fleetops-ui.py`'s own `summarize_company()` calls `dispatch` with the exact
+  shape `hermes-market-sync.py`'s `call_router()`/`classify_batch()` already establish (plain
+  stdlib POST, `X-Hermes-Screening: analysis`, no `check_destination()` wrap); the Wikipedia-
+  scraped ticker/name/sector/industry are sanitized and `<DATA>`-wrapped the same way
+  `classify_batch()` already treats them as untrusted. **Deliberately no caching** — regenerated
+  fresh on every page load, the same stated policy `/models` already has for its own one other
+  live router call (`read_router_models()`'s "No cache and no copy of this data is kept here").
+  This was the deciding factor against a `company_profiles` cache table: `check_write_surface()`
+  enforces exactly one `sqlite3.connect(` call site and exactly one write route in this file, and
+  matching `/models`' existing no-cache policy satisfies the feature without touching either
+  invariant. `.graph-btn` renamed `.row-btn` (never semantically graph-only) so the new button
+  shares its style, including a monkeypatched `call_router()` confirming the real request shape
+  and a router-failure case confirmed to degrade via `section()`'s own wrapper rather than
+  raising out of the page (offline check count given with S38l below, both landed together).
+  Live, on `dgx-spark`: a real `/market/company?ticker=HPE` call through the real `dispatch`
+  role returned a sound, well-formed profile (business, 1939 founding/2015 spin-off, 1970s IPO
+  claim, Spring TX headquarters, ProLiant/Nimble products) in ~4 seconds — confirms `dispatch`
+  being always-resident (not on-demand) pays off for an interactive button, not just for a
+  background sync job.
+- **S38l** — **Built, live-verified, and committed 2026-10-25, direct operator request**: a "Monitored stocks" section on
+  `/market`, a personal watchlist above the daily report, with an "Add" form — seeded with HPE
+  (Hewlett Packard Enterprise, confirmed live on the real `instruments` table before being
+  written down). Storage is a new flat-text file via `hermes_market_common.py` 1.4.0's new
+  `load_monitored_tickers()`/`add_monitored_ticker()` — not a new SQLite table, so
+  `check_write_surface()`'s "exactly one `sqlite3.connect(`" invariant stays untouched. **A real
+  deploy-time finding, not reasoned about in advance**: the file was first placed inside the
+  repo (`tags.yaml`'s own shape) and the live Add form consistently failed with a named
+  "badaction" — `hermes-fleetops-ui.service` runs under `ProtectSystem=strict` +
+  `ProtectHome=read-only` (documented in its own unit file as deliberate: "it opens every store
+  read-only ... so it has no business writing anywhere on this host"), so the repo itself is
+  unwritable to this process regardless of what the code does. `ReadWritePaths=
+  /home/pmoney/.hermes/state` is the one grant that unit has — the same directory
+  `HERMES_USAGE_DB` already lives in — so `MONITORED_TICKERS_PATH`'s default moved there
+  instead. The relocation is also the more correct call on its own merits, sandboxing aside: a
+  live, per-host, user-mutated watchlist is local state, not git-tracked editorial config like
+  tags.yaml. The real architecture change is the OTHER invariant `check_write_surface()`
+  enforces: this file now has a genuine SECOND write route, `/market/monitor/add` alongside
+  `/backlog/decide`, both inside the one
+  `do_POST` (still exactly one handler function, sharing the body-length cap and CSRF check) — a
+  deliberate, documented relaxation of "serves only `/backlog/decide`," not a silent one;
+  `check_write_surface()`'s own assertion text was updated to match rather than deleted. A ticker
+  is checked against the real `instruments` table before ever being written (a named "Not a
+  tracked instrument" refusal, not a silent no-op or a crash) — the file-writing
+  `add_monitored_ticker()` itself deliberately stays DB-free (it doesn't even know what
+  `instruments` is), matching `append_tag_rule()`'s own narrow scope. Each monitored row reuses
+  `hermes_market_common.render_ai_watch_line()` (a single ticker's own daily + 30-day move, no
+  ranking involved — exactly what a watchlist entry needs, already built for S38g's AI-watch
+  sections) and a new `ticker_row_buttons()` helper shared with the daily report's own
+  ticker-level rows (factored out now that two call sites need the identical Graph+Company
+  button pair). S38k and S38l landed together, before either was separately verified: 24 new
+  offline checks on `hermes-fleetops-ui.py`'s own suite (334 total, up from 310) plus 8 on
+  `hermes_market_common.py`'s file-format behavior via `hermes-market-sync.py`'s own suite (119
+  total, up from 111).
+  Live, on `dgx-spark`: the sandboxing finding above (§ this entry) surfaced on the very first
+  real Add attempt, fixed, and then the full real round trip confirmed — HPE added for real
+  through the live Add form (the actual seeding mechanism, not a hand-written file), a
+  lowercase re-add correctly reported "already monitored," an unmatched ticker and a wrong CSRF
+  token each refused by name, and the real `/market` page showing `HPE (Hewlett Packard
+  Enterprise)` with working Graph/Company links — checked over both loopback and the real public
+  tailnet URL.
 
 ---
 
-## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full; S38i/S38j excluded, see below**
+## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full; S38i-l excluded, see below**
 
 A real daily email **and** Matrix post landing on a real trading day, citing real sector movement and
 real movers an operator can check against an independent source; and a real `market <command>` round trip
@@ -530,11 +596,16 @@ human** — the numbers (Energy +2.68%, CCI +9.06% top gainer, etc.) are real an
 consistent, but this exit gate's own "an operator can check against an independent source" clause
 is satisfied by the data being real and checkable, not by someone having actually checked it yet.
 
-**S38i and S38j are not part of this bar** — both are a read-only view over data S38a-h's own
-exit gate already established as real (S38j's new history graph included — it reads the exact
-same `prices` rows `market sector`/`market ticker` already read, drawn from a new angle), not a
-new push/pull path of its own. Each one's own "done" is stated in its own §12 entry instead.
-Both S38i and S38j are built, live-verified on `dgx-spark`, and committed.
+**S38i, S38j, and S38k are not part of this bar** — all three are a read-only view over data
+S38a-h's own exit gate already established as real (S38j's history graph and S38k's company
+summary both read the exact same `instruments`/`prices` rows `market sector`/`market ticker`
+already read, drawn from a new angle), not a new push/pull path of their own. **S38l is
+different in kind** — it genuinely adds a new write path (`/market/monitor/add`), so it isn't
+excluded from this bar by the same "read-only" reasoning; it simply isn't the kind of thing this
+bar measures at all (a Matrix daily-push/on-demand-pull round trip). Its own "done" is a real
+add-ticker round trip through the live UI, stated in its own §12 entry. Each sub-stage's own
+"done" is stated there instead of restated here. S38i, S38j, S38k, and S38l are all built,
+live-verified on `dgx-spark`, and (as of the next revision) committed.
 
 ---
 
@@ -569,6 +640,20 @@ server-side SVG; the backfill-range rename and the new-ticker auto-backfill in
 `hermes-router.py` call of any kind. No new benchmark scenario needed. Call recorded per
 `CLAUDE.md`'s rule rather than silently skipped.
 
+**Re-evaluated for S38k (2026-10-25): a real, new content-*generation* call through `dispatch`
+— the first one `hermes-fleetops-ui.py` itself makes (its one other router use, `/models`, lists
+metadata and never generates content via a role).** Same shape and role as the already-evaluated
+narrative-commentary/tag-scout paths: one-off advisory free-text generation through `dispatch`'s
+existing Tier 0 general-capability coverage (`FLEET_BENCHMARK_DESIGN.md` §2). No new benchmark
+scenario needed — call recorded, not skipped.
+
+**Re-evaluated for S38l (2026-10-25): no model call at all, same conclusion as S38i/S38j's own
+evaluations above.** The "Monitored stocks" section is file I/O (`monitored-tickers.yaml`) plus
+the same `daily_pct_changes()`/`trend30_pct_changes()`/`render_ai_watch_line()` compute/render
+functions S38g already built and S38a-h's own exit gate already proved real — no role, no
+`hermes-router.py` call anywhere in this feature. No new benchmark scenario needed. Call recorded
+per `CLAUDE.md`'s rule rather than silently skipped.
+
 What this design *is* relevant to, once actually built: `FLEET_BENCHMARK_DESIGN.md` gap 8 / §6.8
 (`fleet_coder_build`) draws its corpus from exactly this shape of work — a direct operator request, a
 vendor integration or parsing pipeline built from nothing to satisfy it. S38b/S38d/S38e's eventual build
@@ -594,3 +679,5 @@ own commit to that table in the same change, not a thing done here.
 | 1.9.0 | 2026-10-25 | **S38i added, direct operator request ("add a formatted report to the Fleetops-ui"), fulfilling §9's long-deferred "browsable report history" now that S38a-h's real data exists to browse.** §9 moved `[PROPOSED]` → `[DECIDED]`: new `/market` page on `hermes-fleetops-ui.py` (now 2.6.0) with a date-picked, filterable daily-report table (re-sorted into the fixed `REPORT_SECTION_ORDER` rather than the table's own alphabetical `item_type` order) read via `hermes_market_common.read_report_items()` — the same function the email/Matrix/gate paths already render from — plus a read-only "Pending tag candidate proposals" section over S38h's `tag_proposals` table, framed the same "deciding stays a Matrix reply" way `/recommendations` already frames its own findings. No new write route. §12 gained the S38i entry (19 new offline checks, 259 total on that page's suite); §13 notes S38i is offline-tested only and not part of S38a-h's own exit-gate bar, being a read-only view over data that bar already proved real; §14 re-evaluated — no model call at all, so no benchmark-gap question even arises, the simplest of the three S38 evaluations recorded there. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
 | 1.10.0 | 2026-10-25 | **S38j added, direct operator request** ("have a 'Graph' button [on /market] that breaks out a new window... evaluate if [the] appstack is retaining enough history, preferring up to one year... allow picking a time duration, which will autoscale the time-axis"), plus the S38i correction this same edit found while touching this file's own build-sequence entry. §11 risk 4 ("Unbounded storage growth") resolved: no pruning exists anywhere in this codebase, and a direct live check of Yahoo's chart endpoint showed 10 years of daily history available — decision is to retain every row forever (trivial size at this universe scale), and the operator raised the backfill goal from the risk's original ~1-year framing to 5 years once that ceiling was confirmed. §12's S38i entry corrected from its stale "not yet live-verified or committed" (it has been, since 1.9.0 was written) and gained a note about its same-day company-name/per-section follow-up enrichment; new S38j entry records the history-graph build — `ticker_price_history()` (`hermes_market_common.py` 1.3.0), the `backfill_days`→`backfill_range` rename and new-ticker auto-backfill (`hermes-market-sync.py` 1.3.0 — Yahoo's `Nd` range token turned out to count trading days, not calendar days), and the `/market/history` page itself (`hermes-fleetops-ui.py` 2.10.0), including a real bug its own test suite caught (the ticker query parameter breaking out of `section()`'s un-escaped heading argument — the first caller to put request-controlled data there). §13 corrected to reflect S38i's real completed state and extended to exclude S38j from the exit-gate bar on the same "read-only view, no new push/pull path" grounds as S38i. §14 re-evaluated for S38j: no model call at all, same conclusion as S38i's own evaluation, call recorded per `CLAUDE.md`'s rule. Minor bump — a new, additive feature plus a factual correction to this file's own prior content, nothing restructured or reversed. |
 | 1.11.0 | 2026-10-25 | **S38j live-verified on `dgx-spark`, minutes after 1.10.0 was written — direct operator request to deploy it the same way as every prior sub-stage.** A real `prices --backfill-range 5y` run against the full 503-ticker universe actually raised NVDA's own history from its original ~1.6-year backfill to a full 5 years. Every duration bucket on the real `/market/history` page returned the correct real date window; a real short-history ticker (`VYLR`) and a real unknown ticker both degraded exactly as designed; all 52 real ticker-level rows on the live `/market` report carried a working Graph link, confirmed over both loopback and the real public tailnet URL. §12's S38j entry and §13 both updated from "built" to the real live result; committed and pushed (`23bda8e`). Minor bump — a feature's live verification executed for real and its record written in, nothing prior reversed. |
+| 1.12.0 | 2026-10-25 | **S38k and S38l added, two direct operator follow-up requests landed back-to-back in the same session.** S38k: a "Company" button alongside Graph on every ticker-level `/market` row, an AI-generated company summary via a new `summarize_company()` (the exact `call_router()`/classify_batch() shape `hermes-market-sync.py` already establishes for an advisory `dispatch` call), deliberately uncached — matching `/models`' own existing "no cache kept here" policy rather than adding a new table/write path. S38l: a "Monitored stocks" watchlist section with an Add form, seeded with HPE — a new flat file and a genuine second write route (`/market/monitor/add`), both deliberate, documented relaxations of this file's own enforced invariants (`check_write_surface()`'s assertions updated to match, not silently loosened). A real deploy-time finding, not caught in review: the flat file was first placed inside the repo like `tags.yaml`, and the live Add form failed every time — `hermes-fleetops-ui.service`'s own `ProtectSystem=strict`/`ProtectHome=read-only` sandboxing makes the whole repo unwritable to that process; relocated to `~/.hermes/state` (the one directory its `ReadWritePaths` grants, already `HERMES_USAGE_DB`'s home), which is also the more correct call regardless of sandboxing since this is live per-host state, not git-tracked config. §11 unchanged; §12 gained both entries; §13's exclusion paragraph extended and corrected (S38l doesn't fit the "read-only, so excluded" framing S38i/j/k share — it has a real write path, it just isn't the kind of thing the exit-gate bar measures); §14 gained both evaluations (S38k: dispatch's existing Tier 0 coverage, no new gap; S38l: no model call at all). `hermes_market_common.py` now 1.4.0 (`load_monitored_tickers()`/`add_monitored_ticker()`); `hermes-fleetops-ui.py` now 2.12.0. 24 new checks on that page's own suite (334 total, up from 310) plus 8 on `hermes_market_common.py`'s file-format behavior via `hermes-market-sync.py`'s own suite (119 total, up from 111) — including a real bug this round's own suite caught (an unknown-ticker lookup inside `add_monitored_ticker_checked()` was case-sensitive against already-uppercase `instruments` rows; fixed to normalize at that function's own entry rather than trust every future caller to have already). Minor bump — two new, additive features on top of a stage already met, nothing prior reversed. |
+| 1.13.0 | 2026-10-25 | **S38k and S38l live-verified on `dgx-spark`, minutes after 1.12.0 was written — direct operator request to deploy them the same way as every prior sub-stage.** The real deploy attempt immediately surfaced the `ProtectSystem=strict`/`ProtectHome=read-only` sandboxing finding already folded into 1.12.0's own text above (not a separate bump, since it was caught and fixed before this live-verification pass ever completed) — `MONITORED_TICKERS_PATH` relocated to `~/.hermes/state`, redeployed, and the real Add round trip then worked cleanly: HPE seeded for real through the live form itself (not a hand-written file), a lowercase re-add correctly reported "already monitored," an unmatched ticker and a wrong CSRF token each refused by name. A real `/market/company?ticker=HPE` call through the real `dispatch` role returned a sound profile in ~4 seconds. Both confirmed over loopback and the real public tailnet URL, with the real `/market` page showing `HPE (Hewlett Packard Enterprise)` and working Graph/Company links. §12's S38k/S38l entries and §13 both updated from "built" to the real live result. Minor bump — two features' live verification executed for real, including a real bug caught and fixed along the way, nothing prior reversed. |

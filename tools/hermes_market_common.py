@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-10-25) - Market Watch "Monitored stocks": MONITORED_TICKERS_PATH/
+# load_monitored_tickers()/add_monitored_ticker() -- a new flat-text file, atomic
+# tempfile-then-rename append mirroring append_tag_rule()'s own pattern. Lives under
+# ~/.hermes/state, NOT the repo (unlike tags.yaml) -- found live, on the first real deploy
+# attempt: hermes-fleetops-ui.service runs under ProtectSystem=strict + ProtectHome=read-only,
+# so a repo-relative path is unwritable no matter what the code does, and ~/.hermes/state is the
+# one directory that unit's ReadWritePaths already grants. Also the more correct classification
+# regardless of sandboxing: a live, per-host, user-mutated watchlist is local state, not
+# operator-editable-but-rarely-changed config. Ticker-existence validation against `instruments`
+# deliberately stays out of this module -- the caller (hermes-fleetops-ui.py) already holds the
+# one connection this module's own SCHEMA/connect() reasoning keeps singular.
 #
 # 1.3.0 (2026-10-25) - Market Watch history graphs: ticker_price_history(), the one new query the
 # FleetOps-UI /market/history page needs -- plain ascending (date, adj_close) pairs, reusing the
@@ -344,6 +356,65 @@ def append_tag_rule(tag, ticker, path=None):
         tmp.write_text(current + new_lines, encoding="utf-8")
         tmp.replace(path)
         return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+# Deliberately NOT inside the repo, unlike tags.yaml -- found live: hermes-fleetops-ui.service
+# runs under ProtectSystem=strict + ProtectHome=read-only (it opens every store read-only and,
+# until this feature, served no write routes at all), so a repo-relative path here would be
+# unwritable no matter what the code does -- ReadWritePaths=/home/pmoney/.hermes/state is the
+# ONLY grant that unit has. This is also the correct classification regardless of sandboxing:
+# a live, per-host, user-mutated watchlist is CLAUDE.md's "local only" state, not operator-
+# editable-but-rarely-changed config like tags.yaml -- it shouldn't be a git-tracked file a human
+# diffs on every commit. Same convention HERMES_USAGE_DB already uses in hermes-fleetops-ui.py.
+MONITORED_TICKERS_PATH = Path(os.environ.get(
+    "MONITORED_TICKERS_PATH", str(Path.home() / ".hermes" / "state" / "monitored-tickers.yaml")))
+
+
+def load_monitored_tickers(path=None):
+    """One ticker per non-comment, non-blank line, uppercased -- the same flat-text line shape
+    tags.yaml/feeds.yaml/topics.yaml use (despite the .yaml extension, not real YAML, same
+    precedent), but this file is per-host LOCAL STATE (see MONITORED_TICKERS_PATH's own comment
+    for why it lives under ~/.hermes/state, not in the repo) -- hand-editable on that host, not
+    something a human is expected to diff in git. Returns tickers in file order (the display
+    order the FleetOps-UI "Monitored stocks" section uses), deduplicated case-insensitively
+    while keeping the first occurrence. A missing file is an empty list, not an error -- nothing
+    has been monitored yet."""
+    path = Path(path or MONITORED_TICKERS_PATH)
+    if not path.exists():
+        return []
+    seen, out = set(), []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        ticker = line.split("#", 1)[0].strip().upper()
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        out.append(ticker)
+    return out
+
+
+def add_monitored_ticker(ticker, path=None):
+    """Appends one ticker to monitored-tickers.yaml, atomically (write to a .tmp file, then
+    Path.replace() onto the real path) -- the same atomicity append_tag_rule() already uses for
+    tags.yaml. Never raises; returns (True, 'added'), (True, 'exists') if it was already being
+    monitored (not an error -- the caller tells the user either way), or (False, error_str) on a
+    real filesystem failure. Does NOT check whether `ticker` is a real tracked instrument --
+    that needs `instruments`, which this module's own connect() functions read, so the caller
+    (hermes-fleetops-ui.py, which already holds a connection) checks that first."""
+    path = Path(path or MONITORED_TICKERS_PATH)
+    ticker = ticker.strip().upper()
+    try:
+        if ticker in load_monitored_tickers(path):
+            return True, "exists"
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        if current and not current.endswith("\n"):
+            current += "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(current + f"{ticker}\n", encoding="utf-8")
+        tmp.replace(path)
+        return True, "added"
     except Exception as exc:
         return False, str(exc)
 

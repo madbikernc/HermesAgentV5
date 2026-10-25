@@ -1435,6 +1435,77 @@ def check_market(ui, tmp):
     no_ticker_page = ui.page_market_history({}).decode()
     check("no ticker given degrades without raising", "No ticker given" in no_ticker_page)
 
+    print(NL + "[summarize_company() / render_company_summary() / page_market_company()]")
+    calls = []
+
+    def fake_call_router(payload):
+        calls.append(payload)
+        return {"choices": [{"message": {"content": "  NVIDIA designs GPUs.  "}}]}
+    ui.call_router = fake_call_router
+
+    summary = ui.summarize_company("NVDA", "Nvidia", "Information Technology", "Semiconductors")
+    check("the result is the model's own content, trimmed",
+          summary == "NVIDIA designs GPUs.", summary)
+    check("the real role/model is used", calls[0]["model"] == "dispatch", calls[0])
+    check("the Wikipedia-scraped fields are wrapped as untrusted <DATA>, not instructions",
+          "<DATA>" in calls[0]["messages"][1]["content"]
+          and "NVDA" in calls[0]["messages"][1]["content"], calls[0])
+
+    html_known = ui.render_company_summary("NVDA")
+    check("a known ticker's page names the company and shows the (mocked) summary",
+          "NVDA (NVIDIA Corporation)" in html_known and "NVIDIA designs GPUs." in html_known,
+          html_known)
+    check("it's clearly labeled as AI-generated, not a verified source",
+          "not a verified source" in html_known, html_known)
+
+    calls.clear()
+    html_unknown = ui.render_company_summary("NOSUCHTICKER")
+    check("an unknown ticker degrades with a named empty state, never calling the router",
+          "No instrument on file for NOSUCHTICKER" in html_unknown and not calls, html_unknown)
+
+    def fake_call_router_boom(payload):
+        raise OSError("router unreachable")
+    ui.call_router = fake_call_router_boom
+    page_company_fail = ui.page_market_company({"ticker": ["NVDA"]}).decode()
+    check("a router failure degrades via section()'s own wrapper, never raises out of the page",
+          "This section is unavailable" in page_company_fail, page_company_fail[:800])
+    ui.call_router = fake_call_router
+
+    page_company = ui.page_market_company({"ticker": ["NVDA"]}).decode()
+    check("the full company page renders", "NVIDIA designs GPUs." in page_company)
+    check("the route is wired up", ui.ROUTES.get("/market/company") is ui.page_market_company)
+    no_ticker_company = ui.page_market_company({}).decode()
+    check("no ticker given degrades without raising", "No ticker given" in no_ticker_company)
+
+    print(NL + "[Monitored stocks: load/add/render against a real temp config file]")
+    check("a missing monitored-tickers.yaml is an empty list, not an error",
+          ui.market_common.load_monitored_tickers() == [])
+    check("an unknown ticker is refused, named, without touching the file",
+          ui.add_monitored_ticker_checked("ZZZZNOTREAL") == "unknown"
+          and ui.market_common.load_monitored_tickers() == [])
+    check("an empty ticker is refused, named",
+          ui.add_monitored_ticker_checked("") == "empty")
+    check("a real tracked ticker (NVDA) is accepted",
+          ui.add_monitored_ticker_checked("NVDA") == "added")
+    check("it actually persisted", ui.market_common.load_monitored_tickers() == ["NVDA"])
+    check("adding the same ticker again (any case) is a named no-op, not a duplicate line",
+          ui.add_monitored_ticker_checked("nvda") == "exists"
+          and ui.market_common.load_monitored_tickers() == ["NVDA"])
+
+    monitored_html = ui.render_monitored_tickers()
+    check("the monitored row names the company and shows a real daily move",
+          "NVDA (NVIDIA Corporation)" in monitored_html, monitored_html)
+    check("the monitored row carries both the Graph and Company buttons",
+          "/market/history?ticker=NVDA" in monitored_html
+          and "/market/company?ticker=NVDA" in monitored_html, monitored_html)
+    check("the Add form is present", 'action="/market/monitor/add"' in monitored_html)
+
+    ui.add_monitored_ticker_checked("EVIL")  # has an instruments row (from the escaping checks
+    # above), but no `prices` row at all -- exactly the "synced before a price ever landed" case.
+    monitored_html_2 = ui.render_monitored_tickers()
+    check("a monitored ticker with no price data on file degrades, not crashes",
+          "has no price data on file yet" in monitored_html_2, monitored_html_2)
+
     print(NL + "[the assembled page carries all three sections, and the route is registered]")
     page = ui.page_market({}).decode()
     check("all three sections appear", "Monitored stocks" in page

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-10-25) - Market Watch "Monitored stocks": load_monitored_tickers()/
+# add_monitored_ticker() against a real temp file -- missing-file, atomic append, case-
+# insensitive dedup-to-first-occurrence, and comments/blanks ignored (same convention
+# tags.yaml/feeds.yaml/topics.yaml already establish).
 #
 # 1.3.0 (2026-10-25) - Market Watch history graphs: refresh_instruments() now returns a 3-tuple
 # (adds the new-tickers list); sync_prices()'s backfill_days -> backfill_range rename and its new
@@ -310,6 +315,39 @@ def test_append_tag_rule(sync_mod):
           ("ai_hardware", "ticker", "NVDA") in rules and ("frontier_llm", "ticker", "GOOGL") in rules,
           str(rules))
     check("no bad lines from the provenance comments", not bad, str(bad))
+
+
+def test_monitored_tickers(sync_mod):
+    print("\n[load_monitored_tickers() / add_monitored_ticker() -- monitored-tickers.yaml]")
+    tmpdir = Path(tempfile.mkdtemp())
+    path = tmpdir / "monitored-tickers.yaml"
+
+    check("a missing file is an empty list, not an error",
+          sync_mod.common.load_monitored_tickers(path) == [])
+
+    ok, result = sync_mod.common.add_monitored_ticker("HPE", path=path)
+    check("first add to a missing file succeeds", ok and result == "added", str((ok, result)))
+    check("it's actually on file", sync_mod.common.load_monitored_tickers(path) == ["HPE"])
+
+    ok2, result2 = sync_mod.common.add_monitored_ticker("nvda", path=path)
+    check("a second, differently-cased ticker is added, stored uppercased",
+          ok2 and result2 == "added", str((ok2, result2)))
+    check("file order is preserved (display order)",
+          sync_mod.common.load_monitored_tickers(path) == ["HPE", "NVDA"],
+          str(sync_mod.common.load_monitored_tickers(path)))
+
+    ok3, result3 = sync_mod.common.add_monitored_ticker("HPE", path=path)
+    check("re-adding an already-monitored ticker is a named no-op, not an error or a duplicate",
+          ok3 and result3 == "exists", str((ok3, result3)))
+    check("no duplicate line was written",
+          path.read_text(encoding="utf-8").count("HPE") == 1, path.read_text(encoding="utf-8"))
+
+    # Comments/blanks ignored, same convention as tags.yaml/feeds.yaml/topics.yaml.
+    path.write_text("# a comment\n\nAAPL\n  msft  \n# another\nAAPL\n", encoding="utf-8")
+    check("comments and blank lines are ignored, tickers are uppercased, and a case-insensitive "
+          "duplicate keeps only the first occurrence",
+          sync_mod.common.load_monitored_tickers(path) == ["AAPL", "MSFT"],
+          str(sync_mod.common.load_monitored_tickers(path)))
 
 
 def test_tag_scout(sync_mod):
@@ -702,6 +740,7 @@ def main():
     test_refresh_instruments(sync_mod)
     test_tags(sync_mod)
     test_append_tag_rule(sync_mod)
+    test_monitored_tickers(sync_mod)
     test_tag_scout(sync_mod)
     test_sync_prices_honesty_split(sync_mod)
     test_backfill_range_and_watermark(sync_mod)
