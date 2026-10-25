@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-# Version: 2.5.0
+# Version: 2.6.0
+#
+# 2.6.0 (2026-10-25) — direct operator request: a new /market page (S38i, fulfilling
+# MARKET_WATCH_DESIGN.md §9's long-deferred "browsable report history" once S38's own data
+# existed to browse). Reads report_items/tag_proposals through hermes_market_common.py — the
+# exact same shared module hermes-market-report.py and hermes-market-gate.py already compute and
+# render from, so this page can never show different numbers for the same day than the daily
+# email/Matrix notice or a `market report` gate reply. A plain top-level import, not the
+# load_gate()-style lazy/fallback machinery: that machinery exists because the scout gate carries
+# write credentials and a transition table whose corruption is a meaningfully different risk;
+# hermes_market_common.py is a stdlib-only schema/compute module, the same character of dependency
+# hermes-market-report.py/hermes-market-sync.py already import unconditionally. Read-only, no new
+# write route — a second, generic "Pending tag candidate proposals" section names what's awaiting
+# a human reply but still points at the FleetOps Matrix `market tag approve/reject` commands to
+# act on it, the same "decide stays a Matrix reply, not a button here" line /recommendations
+# already draws for its own REC-<node> findings.
 #
 # 2.5.0 (2026-10-25) — direct operator request: /recommendations now leads with a "Recommended
 # model swaps" section, ahead of the existing REC-<node> security findings, surfacing the S39
@@ -74,6 +89,8 @@
 #   HERMES_RAG_DB        default /mnt/hermes-data/rag/vectors.db
 #   HERMES_USAGE_DB      default ~/.hermes/state/usage.db
 #   RAG_PORTAL_URL       default http://100.96.59.79:8093/
+#   MARKET_DB            default /mnt/hermes-data/market/market.db (same env var/default as
+#                        hermes-market-sync.py/-report.py/-gate.py — one store, read-only here)
 import base64
 import datetime
 import hmac
@@ -105,10 +122,19 @@ MEMORY_DB = os.environ.get("MEMORY_DB", "/mnt/hermes-data/memory/memory.db")
 RAG_DB = os.environ.get("HERMES_RAG_DB", "/mnt/hermes-data/rag/vectors.db")
 USAGE_DB = os.environ.get("HERMES_USAGE_DB", str(Path.home() / ".hermes" / "state" / "usage.db"))
 RAG_PORTAL_URL = os.environ.get("RAG_PORTAL_URL", "http://100.96.59.79:8093/")
+MARKET_DB = os.environ.get("MARKET_DB", "/mnt/hermes-data/market/market.db")
 
 TOOLS = Path(__file__).resolve().parent
 REPO = TOOLS.parent
 TOPICS_FILE = REPO / "infra" / "hermes-news-digest" / "topics.yaml"
+
+# hermes_market_common.py is an underscore-named module beside this file (not a hyphenated tool
+# like the scout gate), so a plain import works -- same shape hermes-market-report.py/
+# hermes-market-sync.py already use. sys.path needs the explicit insert because this file is also
+# loaded via importlib.util.spec_from_file_location by its own test suite, which does not add its
+# directory to sys.path the way running it directly would.
+sys.path.insert(0, str(TOOLS))
+import hermes_market_common as market_common  # noqa: E402
 
 NAS_HISTORY = Path("/mnt/nas2-hermes-backup/Private/Hermes/Benchmarks/history.jsonl")
 LOCAL_HISTORY = Path.home() / ".hermes" / "state" / "benchmark-history.jsonl"
@@ -232,6 +258,8 @@ MAX_HISTORY_ROWS = 400
 MAX_HIGHLIGHT_ROWS = 100
 MAX_RECOMMENDATION_ROWS = 400
 MAX_EGRESS_BLOCK_ROWS = 400
+MAX_MARKET_ROWS = 400
+MAX_TAG_PROPOSAL_ROWS = 400
 
 STYLE = """
 :root { --bg:#12141a; --fg:#e7e9ee; --dim:#9aa3b2; --line:#2a2f3a; --accent:#7fb2ff;
@@ -281,7 +309,8 @@ footer { color:var(--dim); padding:18px 20px; border-top:1px solid var(--line); 
 
 NAV = [("/", "Home"), ("/backlog", "Benchmark backlog"), ("/models", "Models &amp; usage"),
        ("/benchmarks", "Benchmark results"), ("/highlights", "Topic highlights"),
-       ("/recommendations", "Recommendations"), ("/egress-blocks", "Egress-guard denials")]
+       ("/recommendations", "Recommendations"), ("/egress-blocks", "Egress-guard denials"),
+       ("/market", "Market Watch")]
 
 
 def log(msg):
@@ -450,6 +479,10 @@ def page_home():
          "Every outbound destination the Layer 3 egress guard (S40) has denied — each one "
          "already triggered its own Matrix notice and hi-pri email; this is the durable record. "
          "Read-only."),
+        ("Market Watch", "/market",
+         "The daily sector/tag-trend, movers, and 30-day-trend report (S38), plus the frontier-LLM "
+         "and AI-hardware watchlists and any tag candidate the LLM-judged scout (S38h) has "
+         "proposed and is awaiting a human reply on. Read-only."),
     ]
     body = ['<p class="note">Read-only views over data this fleet already produces. '
             'Nothing here starts, stops or approves anything.</p><div class="cards">']
@@ -1448,6 +1481,102 @@ def page_egress_blocks(query):
     return shell("Egress-guard denials", body)
 
 
+# ── S38i: Market Watch ───────────────────────────────────────────────────────────────────────
+#
+# Fulfills MARKET_WATCH_DESIGN.md §9's deferred "browsable report history" now that S38 is live
+# and `report_items`/`tag_proposals` have real rows to browse. Every number here is read back
+# from `report_items` through hermes_market_common.read_report_items() — the same function the
+# daily email/Matrix notice and a `market report` gate reply already render from — so this page
+# can never disagree with either about what a given day said.
+
+def render_market_report(requested_date):
+    conn = ro_sqlite(MARKET_DB)
+    try:
+        dates = [r[0] for r in conn.execute(
+            "SELECT DISTINCT report_date FROM report_items ORDER BY report_date DESC LIMIT 60")]
+        if not dates:
+            return ('<p class="empty">No report has been generated yet — '
+                     '<span class="mono">hermes-market-report.py daily</span> writes '
+                     '<span class="mono">report_items</span> once the sync has run.</p>')
+        report_date = requested_date if requested_date in dates else dates[0]
+        rows = market_common.read_report_items(conn, report_date)
+    finally:
+        conn.close()
+
+    dopts = []
+    for d in dates:
+        sel = " selected" if d == report_date else ""
+        dopts.append(f'<option value="{esc(d)}"{sel}>{esc(d)}</option>')
+    form = (f'<form method="get"><select name="date">{"".join(dopts)}</select> '
+            f'<button type="submit">show</button></form>')
+    note = ("" if requested_date in ("", report_date) else
+            f'<p class="note">No report stored for {esc(requested_date)} — showing '
+            f'{esc(report_date)}, the most recent one on file.</p>')
+
+    # Grouped by item_type then re-emitted in REPORT_SECTION_ORDER (the same fixed order
+    # render_full_report_text() uses for the email body) rather than the table's own
+    # item_type-alphabetical ORDER BY — "Sector trends" belongs ahead of "30-day laggards"
+    # regardless of where the two sort lexically.
+    by_type = {}
+    for _category, item_type, rank, group, value, text in rows:
+        by_type.setdefault(item_type, []).append((rank, group, value, text))
+
+    body_rows = []
+    for item_type in market_common.REPORT_SECTION_ORDER:
+        for rank, group, value, text in sorted(by_type.get(item_type, []), key=lambda r: r[0]):
+            body_rows.append([
+                esc(market_common.REPORT_SECTION_TITLES[item_type]),
+                f'<span class="num">{rank}</span>',
+                esc(group),
+                f'<span class="num">{value:+.2f}%</span>',
+                esc(text),
+            ])
+    cap = ("" if len(body_rows) <= MAX_MARKET_ROWS else
+           f" Showing the first {MAX_MARKET_ROWS} of {len(body_rows)}.")
+    body_rows = body_rows[:MAX_MARKET_ROWS]
+
+    search = (f'<p><input type="search" placeholder="filter rows…" data-filter="#market">'
+              f'<span class="note">{len(body_rows)} row(s) for {esc(report_date)}.{cap}</span></p>')
+    return form + note + search + '<div id="market">' + table(
+        ["section", "#", "ticker/group", "move", "detail"], body_rows, numeric={1, 3}) + '</div>'
+
+
+def render_market_tag_proposals():
+    conn = ro_sqlite(MARKET_DB)
+    try:
+        rows = conn.execute("""
+            SELECT ticker, candidate_tag, rationale, proposed_at FROM tag_proposals
+            WHERE state='proposed' ORDER BY proposed_at DESC LIMIT ?
+        """, (MAX_TAG_PROPOSAL_ROWS,)).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return '<p class="empty">No pending tag proposals.</p>'
+    body_rows = [[esc(t), esc(tag), esc(r), esc(when(p))] for t, tag, r, p in rows]
+    note = (f'<p class="note">The LLM-judged tag scout\'s (S38h) frontier_llm/ai_hardware '
+            f'candidates, awaiting a human reply in FleetOps — never auto-applied. Reply '
+            f'<span class="mono">market tag approve &lt;TICKER&gt;</span> or '
+            f'<span class="mono">market tag reject &lt;TICKER&gt;</span>; deciding stays a '
+            f'Matrix reply, same as the recommendations page above, not a button here.</p>')
+    return note + table(["ticker", "candidate tag", "rationale", "proposed"], body_rows)
+
+
+def page_market(query):
+    requested_date = (query.get("date") or [""])[0]
+    body = section(
+        "Market Watch — daily report",
+        "Read straight from <span class=\"mono\">report_items</span> — the same stored rows the "
+        "daily email, Matrix notice, and a <span class=\"mono\">market report</span> gate reply "
+        "all render from (S38). Includes the dedicated Frontier LLM Watch / AI Hardware Watch "
+        "sections (S38g). Read-only.",
+        lambda: render_market_report(requested_date))
+    body += section(
+        "Pending tag candidate proposals",
+        "",
+        render_market_tag_proposals)
+    return shell("Market Watch", body)
+
+
 # ── server ────────────────────────────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -1458,6 +1587,7 @@ ROUTES = {
     "/highlights": page_highlights,
     "/recommendations": page_recommendations,
     "/egress-blocks": page_egress_blocks,
+    "/market": page_market,
 }
 
 

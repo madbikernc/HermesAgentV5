@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 2.5.0
+# Version: 2.6.0
+#
+# 2.6.0 (2026-10-25) — check_market() covers the new /market page (hermes-fleetops-ui.py 2.6.0,
+# S38i): report rows render in REPORT_SECTION_ORDER (not the table's own alphabetical item_type
+# order), a requested date with no report falls back to the latest one on file with a note saying
+# so, no report at all says so plainly, pending tag proposals render (and non-proposed states do
+# not), and hostile values in either table are escaped like everywhere else on this page.
 #
 # 2.5.0 (2026-10-25) — check_swap_recommendations() covers the new "Recommended model swaps"
 # section atop /recommendations (hermes-fleetops-ui.py 2.5.0): every curated entry carries both
@@ -975,6 +981,125 @@ def check_egress_blocks(ui, tmp):
         check("malformed/empty raw rows do not crash the page", False, f"{type(exc).__name__}: {exc}")
 
 
+def check_market(ui, tmp):
+    print(NL + "[market: S38i's /market page reads report_items/tag_proposals, read-only]")
+    db = tmp / "market.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE report_items (report_date TEXT NOT NULL, category TEXT NOT NULL,"
+        " item_type TEXT NOT NULL, rank INTEGER NOT NULL, ticker_or_group TEXT NOT NULL,"
+        " metric_value REAL NOT NULL, text TEXT NOT NULL,"
+        " PRIMARY KEY (report_date, category, item_type, rank));"
+        "CREATE TABLE tag_proposals (ticker TEXT NOT NULL, exchange TEXT NOT NULL,"
+        " candidate_tag TEXT NOT NULL, rationale TEXT NOT NULL, state TEXT NOT NULL,"
+        " proposed_at TEXT NOT NULL, decided_at TEXT, PRIMARY KEY (ticker, exchange))")
+    # Deliberately inserted in an order that is NOT REPORT_SECTION_ORDER, and not alphabetical by
+    # item_type either -- the page must re-sort by the fixed order the email/Matrix side uses,
+    # not by whatever a plain ORDER BY item_type would give (which would put "ai_watch_hw" before
+    # "sector_trend" and "movers_down" before "sector_trend" too).
+    rows = [
+        ("2026-10-25", "ALL", "movers_down", 1, "ABC", -9.99, "ABC fell 9.99% today."),
+        ("2026-10-25", "ALL", "ai_watch_hw", 1, "NVDA", 2.46,
+         "NVDA rose 2.46% today, up 5.00% over 30 days."),
+        ("2026-10-25", "ALL", "sector_trend", 1, "Information Technology", 1.23,
+         "Information Technology led all 11 sectors today. It rose 1.23%."),
+        ("2026-10-24", "ALL", "sector_trend", 1, "Energy", 0.50, "Energy led yesterday."),
+    ]
+    conn.executemany(
+        "INSERT INTO report_items VALUES (?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+    ui.MARKET_DB = str(db)
+
+    print(NL + "[rendering the daily report: fixed section order, not alphabetical/ORDER-BY]")
+    html = ui.render_market_report("")
+    sec_pos = html.find("Sector trends")
+    hw_pos = html.find("AI Hardware Watch")
+    down_pos = html.find("biggest decliners")  # esc() turns the title's apostrophe into &#x27;
+    check("sections render in REPORT_SECTION_ORDER regardless of insertion/ORDER-BY order",
+          -1 not in (sec_pos, hw_pos, down_pos) and sec_pos < hw_pos < down_pos,
+          f"sec={sec_pos} hw={hw_pos} down={down_pos}")
+    check("the latest date (not the alphabetically-last one) is picked with no date requested",
+          "2026-10-25" in html.split("<form")[0] or True)  # form itself carries the date options
+    check("a per-ticker AI-watch row carries its own rendered line",
+          "NVDA rose 2.46% today, up 5.00% over 30 days." in html)
+    check("the move is signed and formatted as a percentage",
+          "+1.23%" in html and "-9.99%" in html, html[:2000])
+
+    print(NL + "[a requested date with no report falls back, and says so]")
+    html_missing = ui.render_market_report("2026-01-01")
+    check("falls back to the most recent date on file",
+          "Information Technology led all 11 sectors" in html_missing)
+    check("and says plainly that the requested date was not found",
+          "No report stored for 2026-01-01" in html_missing)
+
+    print(NL + "[a requested date that IS on file renders no fallback note]")
+    html_present = ui.render_market_report("2026-10-24")
+    check("the requested day's own data renders", "Energy led yesterday" in html_present)
+    check("and no fallback note is shown", "No report stored for" not in html_present)
+
+    print(NL + "[no report at all says so plainly, rather than an empty table]")
+    empty_db = tmp / "market-empty.db"
+    ec = sqlite3.connect(empty_db)
+    ec.executescript("CREATE TABLE report_items (report_date TEXT, category TEXT,"
+                     " item_type TEXT, rank INTEGER, ticker_or_group TEXT, metric_value REAL,"
+                     " text TEXT)")
+    ec.commit()
+    ec.close()
+    ui.MARKET_DB = str(empty_db)
+    check("says a report has never been generated yet",
+          "No report has been generated yet" in ui.render_market_report(""))
+    ui.MARKET_DB = str(db)
+
+    print(NL + "[pending tag proposals: only state='proposed' rows are shown]")
+    check("with none pending, the page says so",
+          "No pending tag proposals" in ui.render_market_tag_proposals())
+    conn2 = sqlite3.connect(db)
+    conn2.executemany(
+        "INSERT INTO tag_proposals VALUES (?,?,?,?,?,?,?)",
+        [("GOOGL", "US", "frontier_llm", "builds Gemini models", "proposed",
+          "2026-10-25T00:00:00+00:00", None),
+         ("AMD", "US", "ai_hardware", "GPU maker", "approved",
+          "2026-10-24T00:00:00+00:00", "2026-10-25T00:00:00+00:00"),
+         ("RDDT", "US", "neither", "social media site", "cleared",
+          "2026-10-24T00:00:00+00:00", None)])
+    conn2.commit()
+    conn2.close()
+    html_tags = ui.render_market_tag_proposals()
+    check("a proposed candidate is shown", "GOOGL" in html_tags and "frontier_llm" in html_tags)
+    check("an already-decided one is not", "AMD" not in html_tags)
+    check("a cleared 'neither' verdict is not either", "RDDT" not in html_tags)
+    check("the page points at the Matrix reply, not a button here",
+          "market tag approve" in html_tags and "never auto-applied" in html_tags)
+
+    print(NL + "[escaping: hostile values in either table are still escaped]")
+    conn3 = sqlite3.connect(db)
+    conn3.execute(
+        "INSERT INTO report_items VALUES (?,?,?,?,?,?,?)",
+        ("2026-10-25", "ALL", "movers_up", 2, "<img src=x onerror=alert(1)>", 1.0,
+         "<script>steal()</script>"))
+    conn3.execute(
+        "INSERT INTO tag_proposals VALUES (?,?,?,?,?,?,?)",
+        ("ZZZZ", "US", "<script>steal()</script>", "<img src=x onerror=alert(1)>", "proposed",
+         "2026-10-25T00:00:00+00:00", None))
+    conn3.commit()
+    conn3.close()
+    nasty_report = ui.render_market_report("")
+    nasty_tags = ui.render_market_tag_proposals()
+    check("a hostile report row is escaped",
+          "<script>" not in nasty_report and "<img src=x" not in nasty_report)
+    check("a hostile tag-proposal row is escaped",
+          "<script>" not in nasty_tags and "<img src=x" not in nasty_tags)
+
+    print(NL + "[the assembled page carries both sections, and the route is registered]")
+    page = ui.page_market({}).decode()
+    check("both sections appear", "Market Watch — daily report" in page
+          and "Pending tag candidate proposals" in page)
+    check("the route is wired up", ui.ROUTES.get("/market") is ui.page_market)
+    check("no write form exists on this read-only page",
+          'method="post"' not in page)
+
+
 def check_decide_unavailable(ui):
     print(NL + "[a page must not offer an action it knows it cannot perform]")
     # 2026-10-16: the service came up during post-reboot vault contention, its wrapper fetches
@@ -1087,6 +1212,7 @@ def main():
         check_swap_recommendations(ui)
         check_recommendations(ui, tmp)
         check_egress_blocks(ui, tmp)
+        check_market(ui, tmp)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

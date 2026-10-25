@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.8.0
+**Version:** 1.9.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -268,13 +268,44 @@ advisory-only call) — the gate itself still calls no model and makes no judgme
 
 ---
 
-## 9. Browsable report history `[PROPOSED]`
+## 9. Browsable report history `[DECIDED]`
 
 `hermes-fleetops-ui.py` already has four read-only report pages (S21) plus S21e's per-highlight browser,
 added only once S27c's schema reshape existed for it to read. `report_items`' one-row-per-line shape (§5)
 is built the same way on purpose, so a fifth report page is a cheap follow-on once this stage has run long
 enough to have something worth browsing — not specified here, to avoid designing a page against data that
 doesn't exist yet.
+
+**S38i, direct operator request ("add a formatted report to the Fleetops-ui"), built 2026-10-25** —
+exactly this follow-on, now that S38a-h's real data exists to browse. A new `/market` page
+(`hermes-fleetops-ui.py` 2.6.0), added to `NAV` and the home page's card list like every other
+S21 report. Two sections:
+
+- **"Market Watch — daily report"** — a date picker (defaulting to, and falling back to on an
+  unknown/not-yet-synced date, the most recent `report_date` on file) over one flat, filterable
+  table: section (the same human labels `REPORT_SECTION_TITLES` gives the email), rank,
+  ticker/group, signed %, and the full rendered detail line. Rows are read with
+  `hermes_market_common.read_report_items()` and re-emitted in `REPORT_SECTION_ORDER` — the exact
+  fixed order the email body uses — rather than the table's own `item_type`-alphabetical `ORDER BY`,
+  so "Sector trends" renders ahead of "30-day laggards" here the same way it does in the email,
+  not wherever the two sort lexically. This is the same function `render_full_report_text()`
+  itself calls, so the page can never show different numbers for the same day than the daily
+  email, the Matrix notice, or a `market report` gate reply.
+- **"Pending tag candidate proposals"** — every `tag_proposals` row still in `state='proposed'`
+  (S38h's scout output awaiting a human reply), with the same "deciding stays a Matrix reply, not
+  a button here" framing §8's gate commands and `/recommendations`'s own REC-findings section
+  already use. No new write route; read-only end to end, same as the rest of this page.
+
+Reuses `hermes-fleetops-ui.py`'s existing `ro_sqlite()` helper against `MARKET_DB` (same env
+var/default `hermes-market-sync.py`/`-report.py`/`-gate.py` already use) rather than opening a
+second kind of connection — the file's own test asserts exactly one `sqlite3.connect()` call
+exists in its source, and this page does not add a second. `hermes_market_common.py` is imported
+directly at module top level (a plain `import`, the same way `hermes-market-report.py`/
+`hermes-market-sync.py` already import it) rather than through the lazy/fallback machinery
+`load_gate()` uses for the scout gate — that machinery exists because the gate carries write
+credentials and a transition table whose corruption is a materially different risk; this module
+is a stdlib-only schema/compute dependency, the same character of import those two tools already
+make unconditionally.
 
 ---
 
@@ -432,10 +463,17 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
   `hermes-router.service` dependency, `daemon-reload`d) was run for real end to end
   (`Result=success`) through all four steps including `scan-tags`, confirming "a wrapper that
   works by hand and a unit that works are not the same claim" held for this stage too.
+- **S38i** — **Built 2026-10-25, direct operator request** ("add a formatted report to the
+  Fleetops-ui"), fulfilling §9's long-deferred browsable-report-history follow-on. New `/market`
+  page on `hermes-fleetops-ui.py` (2.6.0) — detail in §9 above. 19 new checks on that page's own
+  suite (259 total, up from 240), covering fixed section ordering, date fallback, the empty-store
+  message, pending-proposal filtering, and escaping; both other S38 suites (101 + 57) re-run
+  unchanged. Not yet live-verified or committed — same two-stage workflow as every prior S38
+  sub-stage.
 
 ---
 
-## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full**
+## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full; S38i offline-tested only**
 
 A real daily email **and** Matrix post landing on a real trading day, citing real sector movement and
 real movers an operator can check against an independent source; and a real `market <command>` round trip
@@ -452,6 +490,11 @@ for the full detail. **Not yet independently cross-checked against an outside fi
 human** — the numbers (Energy +2.68%, CCI +9.06% top gainer, etc.) are real and internally
 consistent, but this exit gate's own "an operator can check against an independent source" clause
 is satisfied by the data being real and checkable, not by someone having actually checked it yet.
+
+**S38i is not part of this bar** — it is a read-only view over data S38a-h's own exit gate
+already established as real, not a new push/pull path of its own. Its own "done" is simpler and
+stated in its own §12 entry: offline-tested, not yet copied to `dgx-spark`/restarted/confirmed in
+a browser, and not yet committed.
 
 ---
 
@@ -471,6 +514,13 @@ path above — one more one-off advisory judgment through `dispatch`'s existing 
 coverage, never the source of a fact that ships un-reviewed (every verdict stays `proposed` until a
 human approves it). No new benchmark scenario needed here either; the conclusion above still holds, now
 against a real call instead of a deferred one.
+
+**Re-evaluated for S38i (2026-10-25): no model call at all, so no gap-structure question even
+arises.** `/market` is a read-only view that reads `report_items`/`tag_proposals` straight off
+`market.db` — the same character of change as every other `hermes-fleetops-ui.py` report page
+(S21), none of which have ever needed an entry here, since none of them touch a role or make a
+call through `hermes-router.py`. Call recorded per `CLAUDE.md`'s rule rather than silently
+skipped, even though the answer here is the simplest of the three S38 evaluations in this section.
 
 What this design *is* relevant to, once actually built: `FLEET_BENCHMARK_DESIGN.md` gap 8 / §6.8
 (`fleet_coder_build`) draws its corpus from exactly this shape of work — a direct operator request, a
@@ -494,3 +544,4 @@ own commit to that table in the same change, not a thing done here.
 | 1.6.0 | 2026-10-24 | **S38g live-verified on `dgx-spark`, minutes after 1.5.0 was written — direct operator request to deploy it the same way as S38a-f.** `tags.yaml` re-applied against the real `instruments` table: all 7 `ai_hardware` tickers and all 5 `frontier_llm` tickers (both `GOOG`/`GOOGL` share classes) matched. A real report run rendered both dedicated sections with real per-ticker numbers and delivered a real "AI watch: MU rose 2.46% today." Matrix line, confirmed via the room's own event stream, through the actual `hermes-market-report.service` unit (`Result=success`). `market sector frontier_llm`/`market sector ai_hardware`/`market ticker NVDA` posted into the real room and their replies read back from it — the existing gate handlers needed zero code changes to serve the two new tags, confirming the design's own "the gate re-reads whatever's in the DB" principle held for a feature added after the gate was built. §13 now reads "MET — S38a-g in full." Minor bump — a feature's live verification executed and its real record written in, nothing prior reversed. |
 | 1.7.0 | 2026-10-25 | **S38h added: direct operator follow-up request for Market Watch to periodically check whether a ticker needs adding to frontier_llm/ai_hardware.** A sector/industry heuristic was measured first, not assumed, and ruled out: `Systems Software`/`Interactive Media & Services` matched 6/7 and 1/4 wrong real S&P 500 names. New §4 paragraph (and an explicit correction to that section's own earlier "no code change to add a tag" line): classification routes through `hermes-router.py`'s `dispatch` role instead, advisory-only, proposal-gated. New `tag_proposals` table (§5); four new `market tag approve/reject/override/pending` gate commands (§8); §12's S38h entry records the build, including a real bug this stage's own test suite caught before touching a real file (`append_tag_rule()`'s first version put the provenance comment inline, silently corrupting the parsed ticker pattern — fixed to its own comment line). §13 now notes S38h is offline-tested only (158 checks), not yet live-verified like S38a-g were. §14 re-evaluated now that `dispatch` carries a real (not hypothetical) call — still no new benchmark gap. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
 | 1.8.0 | 2026-10-25 | **S38h live-verified on `dgx-spark`, minutes after 1.7.0 was written — direct operator request to deploy it the same way as every prior sub-stage.** The real classification run is the headline result: every exact ticker §4's heuristic measurement found as a false positive (`FTNT`/`GEN`/`NOW`/`PANW`/`TWLO`/`RDDT`) was correctly cleared by `dispatch`, each with a sound, specific rationale — directly validating the decision to use an LLM instead of a sector heuristic. Zero genuine candidates were left pending (the curated lists already cover the real universe), so the approve/reject/override gate round trip was verified with two synthetic test proposals, fully cleaned up from `tags.yaml`/`tag_proposals`/`tags` afterward. One confirming finding: approving a nonsense ticker (`TESTCO`) correctly added zero rows to the real `tags` table, since `apply_tags()` found no matching real instrument — the mechanism degrades safely. The installed `hermes-market-sync.service` unit was reinstalled to `/etc/systemd/system/` with its new `hermes-router.service` dependency and run for real end to end (`Result=success`) through all four steps including `scan-tags`. §13 now reads "MET — S38a-h in full." Minor bump — a feature's live verification executed for real and its record written in, nothing prior reversed. |
+| 1.9.0 | 2026-10-25 | **S38i added, direct operator request ("add a formatted report to the Fleetops-ui"), fulfilling §9's long-deferred "browsable report history" now that S38a-h's real data exists to browse.** §9 moved `[PROPOSED]` → `[DECIDED]`: new `/market` page on `hermes-fleetops-ui.py` (now 2.6.0) with a date-picked, filterable daily-report table (re-sorted into the fixed `REPORT_SECTION_ORDER` rather than the table's own alphabetical `item_type` order) read via `hermes_market_common.read_report_items()` — the same function the email/Matrix/gate paths already render from — plus a read-only "Pending tag candidate proposals" section over S38h's `tag_proposals` table, framed the same "deciding stays a Matrix reply" way `/recommendations` already frames its own findings. No new write route. §12 gained the S38i entry (19 new offline checks, 259 total on that page's suite); §13 notes S38i is offline-tested only and not part of S38a-h's own exit-gate bar, being a read-only view over data that bar already proved real; §14 re-evaluated — no model call at all, so no benchmark-gap question even arises, the simplest of the three S38 evaluations recorded there. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
