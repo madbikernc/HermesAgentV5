@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.10.0
+**Version:** 1.11.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -398,7 +398,42 @@ stronger candidate specifically for the vision-judge role on this evidence (bett
 false_pass_rate, same muse_contract tie). Not re-opening the memory finding as a new one — folding this
 comparison into the existing Nemotron-3.5-Bolt finding.
 
-## Phase 4+ — in progress
+### `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.850 | |
+| `fleet_log_analyst` | accuracy 2/6 = 0.333 (12 unclear), fact-extraction 22/25 = 0.880 | |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, padding_restraint 1.000 | Clean sweep |
+| `fleet_muse_contract` | capability 9/9, groundedness 9/9, **override 8/9**, overall **0.963** | **By far the best muse_contract score of the entire run** — see outperformance finding below |
+| `fleet_dualcoder_precision` | recall 0/3, precision 0/3, overall 0.000 | |
+| `fleet_coder_fix` | repro 0/1, judge 10/10 = 1.000, 4 `env_unavailable` | No timeouts, despite the "-Reasoning" name — the `--reasoning off` fix held |
+| `fleet_coder_build` | fixture 2/3 = 0.667, judge 8/8 = 1.000 | No timeouts |
+| `fleet_vision_judge` (n=34) | precision 0.821, recall 0.852, false_pass_rate 0.714, false_fail_rate 0.148 | Weakest vision-judge result of the three Phase 4 candidates despite being the `omni` role's namesake model |
+
+**Real finding — candidate strongly outperforms the live `muse` incumbent on a fair, same-day, same-suite
+basis**: against the corrected `muse`-incumbent baseline established earlier this phase (0.704, measured
+with the `--reasoning off` fix), this candidate scores **0.963** on the identical `fleet_muse_contract`
+suite — the single largest gap of any finding in this run. Its override-resistance axis alone (8/9) beats
+every other candidate's override score outright (best previous: 6/9). Saved to memory per standing
+instruction. Caveat: this candidate's own vision-judge numbers are the weakest of the three Phase 4
+candidates (false_pass_rate 0.714, tied-worst with Qwen3VL; recall 0.852, worse than both other
+candidates) — despite being named for the `omni` role, the evidence favors proposing it for `muse`
+specifically, not `omni`.
+
+**Phase 4 vision-candidate summary** (all measured on the identical, same-day, n=34 `fleet_vision_judge` suite):
+
+| Model | precision | recall | false_pass_rate | false_fail_rate |
+|---|---|---|---|---|
+| `omni` incumbent (live, gemma-4-26B-A4B-it) | 0.846 | 0.407 | 0.286 | 0.593 |
+| Nemotron-3.5-Bolt-74B (candidate) | 0.897 | **0.963** | 0.429 | **0.037** |
+| Qwen3VL-30B (candidate) | 0.833 | 0.926 | 0.714 | 0.074 |
+| Nemotron-3-Nano-Omni-30B-Reasoning (candidate) | 0.821 | 0.852 | 0.714 | 0.148 |
+
+Nemotron-3.5-Bolt remains the strongest vision-judge candidate of the three on every axis. This closes
+out Phase 4.
+
+## Phase 5 — in progress
 
 (continues below as each candidate completes)
 
@@ -417,3 +452,4 @@ comparison into the existing Nemotron-3.5-Bolt finding.
 | 1.8.0 | 2026-10-25 | Added Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated results, closing out Phase 3. Ties Hermes-4.3-36B's log-analyst accuracy but posts the worst muse_contract override/overall score of the entire run -- a real tradeoff, not a new recommendation. |
 | 1.9.0 | 2026-10-25 | Started Phase 4 (vision-capable candidates) with NVIDIA-Nemotron-3.5-Bolt-74B-A9B. Found and fixed a `hermes-vision-judge-eval.py` endpoint-format gotcha (no `/v1` suffix, unlike every other tool). Third outperformance finding, and the strongest yet: live `omni` incumbent (gemma-4-26B-A4B-it) has fleet_vision_judge recall 0.407 and false_fail_rate 0.593 (rejects most good images); Nemotron-3.5-Bolt scores recall 0.963, false_fail_rate 0.037, and also posts the best fleet_muse_contract score of the entire run (0.852). Saved to memory. |
 | 1.10.0 | 2026-10-25 | Added Qwen3VL-30B-A3B-Instruct results: best Tier 0 score of the run (0.950), ties Nemotron-3.5-Bolt for best muse_contract (0.852), and also clearly beats the omni incumbent on vision-judge recall -- but its false_pass_rate (0.714) is the worst of all three models compared, keeping Nemotron-3.5-Bolt as the stronger vision-role candidate. |
+| 1.11.0 | 2026-10-25 | Added NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning results, closing Phase 4. Fourth outperformance finding: scores 0.963 on fleet_muse_contract against the real muse-incumbent baseline of 0.704 -- the largest gap in the run -- despite the weakest vision-judge numbers of the three Phase 4 candidates. Saved to memory as a muse-role (not omni-role) recommendation. Added a Phase 4 vision-candidate summary table. |
