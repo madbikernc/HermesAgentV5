@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.4.0
+# Version: 2.5.0
 #
-# 2.4.0 (2026-10-18) — S40 Phase C: check_egress_blocks() covers the new /egress-blocks page
-# (read_egress_blocks()/render_egress_blocks()) -- every row is its own event with no `tasks` row
-# at all (unlike a recommendation), newest-first ordering, an honest COUNT(*)-based total, escaping,
-# and that a malformed/empty `raw` value degrades instead of crashing the page.
+# 2.5.0 (2026-10-25) — check_swap_recommendations() covers the new "Recommended model swaps"
+# section atop /recommendations (hermes-fleetops-ui.py 2.5.0): every curated entry carries both
+# scores, known findings render, a hostile value in a curated entry is still escaped, and the
+# section renders ahead of the existing security findings on the assembled page.
 #
 # Offline checks for hermes-fleetops-ui.py. No network, no live stores, no server bound.
 #
@@ -740,6 +740,41 @@ def check_published(ui):
     check("the backlog has a published column", ">published<" in html)
 
 
+def check_swap_recommendations(ui):
+    print(NL + "[recommended model swaps: curated S39 outperformance findings, not queried]")
+    check("every curated entry carries both a candidate score and an incumbent score",
+          all(r.get("candidate_score") and r.get("incumbent_score")
+              for r in ui.MODEL_SWAP_RECOMMENDATIONS))
+    html = ui.render_swap_recommendations()
+    check("a known finding's candidate and incumbent role both appear",
+          "Hermes-4.3-36B" in html and "log-analyst" in html)
+    check("the page states plainly that this list is curated, not read from a live store",
+          "hand-curated" in html and "not read from a live store" in html)
+    check("it points back at the source doc for full methodology",
+          "spark2-candidate-results.md" in html)
+
+    print(NL + "[a hostile value in a curated entry is still escaped]")
+    original = ui.MODEL_SWAP_RECOMMENDATIONS
+    ui.MODEL_SWAP_RECOMMENDATIONS = original + [{
+        "role": "<script>steal()</script>", "suite": "x", "candidate": "x",
+        "candidate_score": "x", "incumbent": "x", "incumbent_score": "x",
+        "caveat": "x", "date": "x",
+    }]
+    try:
+        nasty_html = ui.render_swap_recommendations()
+        check("escaped, not rendered as markup", "<script>steal()</script>" not in nasty_html)
+    finally:
+        ui.MODEL_SWAP_RECOMMENDATIONS = original
+
+    print(NL + "[it renders at the top of /recommendations, ahead of the security findings]")
+    page = ui.page_recommendations({}).decode()
+    swap_pos = page.find("Recommended model swaps")
+    rec_pos = page.find("Security/integrity recommendations")
+    check("both sections are present, and the swap section comes first",
+          swap_pos != -1 and rec_pos != -1 and swap_pos < rec_pos,
+          f"swap_pos={swap_pos} rec_pos={rec_pos}")
+
+
 def check_recommendations(ui, tmp):
     print(NL + "[recommendations: REC-<node>-<date>-<seq>, keyed by id prefix not an agent list]")
     db = tmp / "memory-recs.db"
@@ -1049,6 +1084,7 @@ def main():
         check_multiselect(ui)
         check_csp(ui)
         check_published(ui)
+        check_swap_recommendations(ui)
         check_recommendations(ui, tmp)
         check_egress_blocks(ui, tmp)
 

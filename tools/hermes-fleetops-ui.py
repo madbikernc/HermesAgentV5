@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# Version: 2.4.0
+# Version: 2.5.0
 #
-# 2.4.0 (2026-10-18) — S40 Phase C: new /egress-blocks page (read_egress_blocks()/
-# render_egress_blocks()/page_egress_blocks()), modeled directly on /recommendations per the
-# design doc's own §8.4. Reads tools/hermes_egress_guard.py's denial records
-# (task_id="egress-block") straight out of hermes-memory's `turns` table via the same read-only
-# ro_sqlite() connection every other page here already uses -- which turns out to make Phase C's
-# original gate (land a `since` filter on hermes-memory's `/turns` GET, or paginate around its
-# 500-row cap, per S33) moot for this specific page: that cap lives only in the HTTP JSON API,
-# which this page, like /recommendations and /backlog before it, never calls. A direct SQL
-# COUNT(*) has no such limit, so "showing N of true-total" is exact from day one, with no
-# prerequisite stage to land first. New NAV entry and home-page card alongside it.
+# 2.5.0 (2026-10-25) — direct operator request: /recommendations now leads with a "Recommended
+# model swaps" section, ahead of the existing REC-<node> security findings, surfacing the S39
+# spark2 candidate-benchmark run's own outperformance findings (infra/model-benchmark/
+# spark2-candidate-results.md) -- a staged candidate beating the real LIVE incumbent on the
+# identical suite, same day, same methodology. MODEL_SWAP_RECOMMENDATIONS is a curated list, not a
+# queried one: unlike every other section on this page, there is no live store yet for "a
+# candidate beat an incumbent", so this is hand-maintained alongside spark2-candidate-results.md
+# and says so on the page. render_swap_recommendations() is new; render_recommendations() and
+# read_recommendations() are untouched.
 #
 # hermes-fleetops-ui — one browser page for the fleet's human-facing surfaces (S21).
 #
@@ -443,7 +442,8 @@ def page_home():
          "The news digest's stored highlights per topic and day — including the ones ranked past "
          "the email's cap, which are otherwise never seen."),
         ("Recommendations", "/recommendations",
-         "Security/integrity findings written to hermes-memory by the fleet's scanners — "
+         "Leads with curated benchmark-driven model-swap candidates from the S39 spark2 run, "
+         "then security/integrity findings written to hermes-memory by the fleet's scanners — "
          "aide/lynis/syft+grype on spark/spark-2/HomeD13, the LinodeMercury watch, and any future "
          "node that writes the same REC-&lt;node&gt;-&lt;date&gt;-&lt;seq&gt; shape. Read-only."),
         ("Egress-guard denials", "/egress-blocks",
@@ -1145,6 +1145,92 @@ REC_SEVERITY_COLOR = {"critical": "var(--bad)", "high": "var(--bad)",
                        "medium": "var(--warn)", "low": "var(--dim)"}
 
 
+# ── Benchmark-driven model-swap recommendations ───────────────────────────────────────────────
+#
+# A different kind of recommendation from the REC-<node> ones below: not a security/integrity
+# finding written to hermes-memory by a scanner, but a staged candidate that beat the real LIVE
+# incumbent on the identical suite, same day, same methodology, found during the S39 spark2
+# candidate-benchmark run (infra/model-benchmark/spark2-candidate-results.md — see that doc for
+# full methodology, caveats and how each incumbent was re-measured). There is no live store yet
+# for "a candidate beat an incumbent" the way there is for scanner findings, so this list is
+# curated by hand rather than queried, and the page says so plainly — update it in the same change
+# that records a new outperformance finding in spark2-candidate-results.md, and re-verify against
+# that doc (and the live role) before acting on any entry, since role assignments on this fleet
+# are confirmed to drift from their own service descriptions.
+MODEL_SWAP_RECOMMENDATIONS = [
+    {
+        "role": "coder2 / dualcoder-review (retired 2026-10-20, but still resident, zero traffic)",
+        "suite": "fleet_dualcoder_precision",
+        "candidate": "GLM-4.7-Flash-Q4_K_M",
+        "candidate_score": "1.000 (6/6) — recall 3/3, precision 3/3",
+        "incumbent": "Muse-Glimmer-30B (coder2)",
+        "incumbent_score": "0.000 (0/4, 2 of 6 cases timed out)",
+        "caveat": "Role-specific, not a general win — GLM-4.7-Flash's own Tier 0 ifeval (0.600) "
+                  "and fleet_log_analyst (0.640) are the weakest seen in this run.",
+        "date": "2026-10-24/25",
+    },
+    {
+        "role": "super's log-analyst duty (live production traffic)",
+        "suite": "fleet_log_analyst",
+        "candidate": "NousResearch Hermes-4.3-36B-Q4_K_M",
+        "candidate_score": "accuracy 0.750 (9/12), fact-extraction 0.960",
+        "incumbent": "Huihui-GLM-4.7-Flash-abliterated (super)",
+        "incumbent_score": "accuracy 0.375 (3/8), fact-extraction 0.880",
+        "caveat": "super also judges this whole benchmark run and serves other duties not tested "
+                  "here — a dedicated log-analyst candidate, not a case for swapping super itself.",
+        "date": "2026-10-25",
+    },
+    {
+        "role": "omni's vision-judge duty (live production traffic)",
+        "suite": "fleet_vision_judge",
+        "candidate": "NVIDIA-Nemotron-3.5-Bolt-74B-A9B",
+        "candidate_score": "precision 0.897, recall 0.963, false_fail_rate 0.037",
+        "incumbent": "gemma-4-26B-A4B-it (omni)",
+        "incumbent_score": "precision 0.846, recall 0.407, false_fail_rate 0.593",
+        "caveat": "Incumbent's 0.593 false-fail rate means most good renders get needlessly "
+                  "regenerated today. Also this run's best fleet_muse_contract score (0.852) — "
+                  "check it fits the deployment target's VRAM budget before proposing it.",
+        "date": "2026-10-25",
+    },
+    {
+        "role": "muse's persona/override-resistance duty (live production traffic)",
+        "suite": "fleet_muse_contract",
+        "candidate": "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning",
+        "candidate_score": "0.963 (26/27) — override 8/9",
+        "incumbent": "Huihui-Qwen3.6-35B-A3B-abliterated (muse)",
+        "incumbent_score": "0.704 — override 3/9 (corrected baseline)",
+        "caveat": "Largest gap of the run, but staged/named as an omni candidate — its own "
+                  "vision-judge numbers are the weakest of the three Phase 4 candidates, so this "
+                  "is a muse-role finding only. Vision-capable (needs mmproj); check whether a "
+                  "text-only load changes resource usage favorably for a text-only role.",
+        "date": "2026-10-25",
+    },
+]
+
+
+def render_swap_recommendations():
+    rows = []
+    for r in MODEL_SWAP_RECOMMENDATIONS:
+        rows.append([
+            esc(r["role"]),
+            f'<span class="mono">{esc(r["suite"])}</span>',
+            f'<b>{esc(r["candidate"])}</b><br><span class="note">{esc(r["candidate_score"])}</span>',
+            f'{esc(r["incumbent"])}<br><span class="note">{esc(r["incumbent_score"])}</span>',
+            esc(r["caveat"]),
+            esc(r["date"]),
+        ])
+    note = (f'{len(MODEL_SWAP_RECOMMENDATIONS)} curated finding(s) from the S39 spark2 '
+            f'candidate-benchmark run — see <span class="mono">infra/model-benchmark/'
+            f'spark2-candidate-results.md</span> for full methodology. <b>Unlike every other '
+            f'section on this page, this list is hand-curated, not read from a live store</b>, and '
+            f'is not kept in sync automatically — re-verify against that doc, and against the '
+            f'live role, before acting on any row here; this fleet\'s role assignments are '
+            f'confirmed to drift from their own service descriptions.')
+    return (f'<p class="note">{note}</p>' + table(
+        ["role", "suite", "candidate (score)", "live incumbent (score)", "caveat", "found"],
+        rows))
+
+
 def read_recommendations(state_filter):
     """Same read-only stdlib-sqlite approach as read_backlog(), for the same reason (hermes-memory
     has no task-list route; /usr/bin/python3 cannot load sqlite-vec). Unlike the backlog, a
@@ -1277,6 +1363,11 @@ def page_recommendations(query):
     node_filter = (query.get("node") or [""])[0]
     state_filter = (query.get("state") or [""])[0]
     body = section(
+        "Recommended model swaps",
+        "A staged candidate that beat the real live incumbent on the identical benchmark suite — "
+        "see the note below the table for how this differs from the security findings beneath it.",
+        render_swap_recommendations)
+    body += section(
         "Security/integrity recommendations",
         "Every finding this fleet's scanners have written to hermes-memory as a "
         "<span class=\"mono\">REC-&lt;node&gt;-&lt;date&gt;-&lt;seq&gt;</span> recommendation — "

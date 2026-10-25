@@ -1,11 +1,12 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.4.0
+**Version:** 2.5.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog, which checkpoint backs each role, benchmark results, the news digest's stored highlights,
-and security/integrity recommendations written by the fleet's scanners. Runs on **Watch (spark)**
-only, over **HTTPS**, Basic Auth required.
+curated benchmark-driven model-swap recommendations, and security/integrity recommendations
+written by the fleet's scanners. Runs on **Watch (spark)** only, over **HTTPS**, Basic Auth
+required.
 
 **<https://spark.tail1a534.ts.net:8103/>**
 
@@ -198,6 +199,7 @@ missing-table crash on first run — is the concrete precedent.
 | `/benchmarks` | the NAS `history.jsonl` + local fallback | same two paths the benchmark tooling writes |
 | `/highlights` | `news_digest_daily` in `vectors.db` | every stored rank, not just the emailed top 20 |
 | `/recommendations` | `tasks`/`turns` in `memory.db`, `id LIKE 'REC-%'` | read-only; keyed by id prefix, not an agent list — see below |
+| `/recommendations` (top section) | `MODEL_SWAP_RECOMMENDATIONS`, a curated constant in the module itself | **not** read from a live store — see below |
 
 **The plan was wrong about the backlog source and the code follows the store, not the plan.** S21b
 said to read the scout's tasks with "the same `GET /tasks` shape `hermes-self-repair-status.py`
@@ -215,6 +217,16 @@ the score, which is what `hermes-benchmark-compare.py` reads off the same file. 
 measurement and renders as a number; a `null` is a suite that was attempted and produced nothing
 and says so. Both cases are pinned by the offline test, because the first draft assumed one suite
 and a `scores` blob per row and would have collapsed them.
+
+**The model-swap section at the top of `/recommendations` is curated, not queried.** Every other
+section on these pages reads a store the fleet already writes to; there is no live store yet for
+"a staged candidate beat the real incumbent on a benchmark suite", so `MODEL_SWAP_RECOMMENDATIONS`
+is a hand-maintained list in `hermes-fleetops-ui.py` itself, sourced from the S39 spark2
+candidate-benchmark run's own outperformance findings
+(`infra/model-benchmark/spark2-candidate-results.md`). The page says so plainly, in the same
+sentence that tells the reader to re-verify against that doc and the live role before acting —
+this fleet's role assignments are confirmed to drift from their own service descriptions. Update
+the list in the same change that records a new outperformance finding in that doc.
 
 **Everything rendered is escaped.** Not decoration: these pages show Hugging Face repo ids and
 advisory text derived from model cards — anyone can publish a repo saying anything — plus
@@ -240,7 +252,7 @@ route, since even with a stolen CSRF token a form on someone else's page cannot 
 
 ## 6. Tests
 
-`tests/test_fleetops_ui.py` — 201 offline checks, no network, no live store, no socket bound. The
+`tests/test_fleetops_ui.py` — 240 offline checks, no network, no live store, no socket bound. The
 fixtures are the real schemas read off the live stores on 2026-10-09, because the first draft got
 two of them wrong from the plan's own prose. Also asserts the things that are easy to break
 silently: that the NAS and local history paths still equal `hermes_benchmark_common`'s own
@@ -323,3 +335,4 @@ rather than silent. A restart re-fetches the credentials.
 | 2.2.0 | 2026-10-09 | Backlog shows **how old each candidate is** — publish date plus a relative age, flagged under a week, from the `created_at` the scout now carries (it used to fetch HF's `createdAt`, filter on it and drop it, so all 51 live candidates had no date). The `fit` cell also states how the size was established (`gguf-metadata` vs `safetensors`), since it reads as a measurement either way. |
 | 2.3.0 | 2026-10-09 | **New `/recommendations` page (S21h)**, direct request: surface every `REC-<node>-<date>-<seq>` security/integrity finding written to hermes-memory by `hermes-node-baseline-scan.py` (spark/spark-2/HomeD13, S17) and `hermes-linodemercury-watch.py` (LinodeMercury, S29) — keyed by the `REC-` id prefix rather than an agent allowlist, so a future producer needs no code change here. Read-only; no new write route. **Found a real, large pre-existing problem on first load**: 227,116 `REC-*` rows, 139,853 still pending since 2026-09-07, overwhelmingly `aide` noise against unexcluded rotating paths (`/var/log/sysstat/sa<DD>`) on spark/spark-2 — the same class of gap S29 independently found for LinodeMercury's own directories. A naive capped query buried every node but whichever was churning fastest *right now*; fixed by filtering `state != 'resolved'` in SQL by default (not after the cap), with a separate true-total `COUNT(*)` so "showing N of total" is never misleading, and an explicit `state=all` option to see resolved history anyway. 201 offline checks (19 new). |
 | 2.4.0 | 2026-10-16 | Decide availability is now checked at render time and the buttons are hidden with a reason when `MEMORY_TOKEN` or the gate module is missing — after the service ran five days with an empty token from a post-reboot vault failure, rendering buttons that could not work. A 401 on the task lookup no longer reports as `writefail`: `unauthorized`, `readfail` and `notoken` are distinct and each states that nothing was written. Every decide outcome now logs, and the route logs the action and candidates it was asked to apply — the old 401 branch returned bare, leaving only a `303` in the journal. 226 offline checks. |
+| 2.5.0 | 2026-10-25 | Direct operator request: `/recommendations` now leads with a "Recommended model swaps" section, ahead of the existing `REC-<node>` security findings, surfacing the S39 spark2 candidate-benchmark run's own outperformance findings (`infra/model-benchmark/spark2-candidate-results.md`) — GLM-4.7-Flash vs. the retired-but-still-resident `coder2`, Hermes-4.3-36B vs. `super` on log-analysis, Nemotron-3.5-Bolt-74B vs. `omni` on vision-judging, and Nemotron-3-Nano-Omni-30B vs. `muse` on persona/override-resistance. `MODEL_SWAP_RECOMMENDATIONS` is a curated constant, not a queried store — there is no live store yet for "a candidate beat an incumbent" the way there is for every other section here, and the page says so plainly, pointing back at the source doc and warning that role assignments on this fleet are confirmed to drift from their own service descriptions. 240 offline checks (14 new). |
