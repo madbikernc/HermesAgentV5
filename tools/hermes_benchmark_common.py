@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-10-25) — direct operator request, after reading is_promising() against the REAL
+# live backlog (891 proposed, 5 approved) on dgx-spark: the 1.4.0 heuristic's "comfortable fit OR
+# a publisher claim" bar flagged 174 candidates as promising, 169 of them `omni` repos qualifying
+# on fit-alone -- and nearly every `omni` candidate in this backlog comfortably fits and has a
+# GGUF build, so that branch was not selective at all. It was flagging real HF noise: joke-named
+# quant merges, a dozen+ near-identical "humanizer" clones from different orgs, "OBLITERATED"/
+# "Heretic" uncensoring finetunes. Tightened from OR to AND: a candidate is now promising only
+# when it has BOTH a comfortable fit AND a publisher-published formal eval -- on the same live
+# data this drops 169 down to the 2 that actually clear both bars. "Comfortable fit alone" and
+# "a claim alone" are now both named explicitly as reasons NOT to recommend, not folded into the
+# generic negative case, since a human skimming the backlog benefits from knowing which bar a
+# near-miss failed.
 #
 # 1.4.0 (2026-10-25) — direct operator request: is_promising(), a deterministic "is this
 # model-scout candidate worth a benchmark run" heuristic over the candidate's own stored facts
@@ -513,11 +526,15 @@ def is_promising(detail: dict) -> tuple:
     if comfortable and has_claim:
         return True, ("comfortable hardware fit, a GGUF build exists, and the publisher has "
                        "published formal eval numbers")
+    # Comfortable fit and GGUF availability alone are NOT selective -- live backlog data showed
+    # 169 of 174 "promising" verdicts came from this branch, almost all `omni` repo noise, because
+    # most candidates in this backlog comfortably fit and eventually get a GGUF build either way.
     if comfortable:
-        return True, "comfortable hardware fit and a GGUF build already exists"
+        return False, ("comfortable fit and a GGUF build exist, but the publisher has published "
+                       "no formal eval numbers to weigh it against")
     if has_claim:
-        return True, ("a GGUF build exists and the publisher has published formal eval numbers, "
-                       "despite a tighter hardware fit")
+        return False, ("the publisher has published formal eval numbers, but the hardware fit "
+                       "is tight or uncertain")
     return False, ("a GGUF build exists but the fit is tight/uncertain and the publisher has "
                    "published no formal eval numbers")
 

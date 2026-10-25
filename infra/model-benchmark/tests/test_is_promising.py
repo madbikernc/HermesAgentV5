@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
 #
 # Offline checks for hermes_benchmark_common.is_promising() (new in bc 1.4.0, 2026-10-25): the
 # deterministic "is this model-scout candidate worth a benchmark run" heuristic shared by
@@ -7,6 +7,11 @@
 # hermes-fleetops-ui.py (falls back to computing it live, by this exact function, for a
 # candidate proposed before that field existed). No network, no state -- every check calls the
 # function directly against a synthetic candidate dict.
+#
+# 1.1.0 (2026-10-25) — bc 1.5.0 tightened "comfortable fit OR a publisher claim" to AND, after
+# the live backlog (891 proposed) showed the OR form flagging 169 omni candidates as promising on
+# fit-alone, almost all HF noise. Updated the two cases that flip from promising to not (fit alone,
+# claim alone) and added the comfortable+claim case as the only remaining positive path.
 #
 # Run: python3 infra/model-benchmark/tests/test_is_promising.py
 import sys
@@ -62,26 +67,30 @@ def main():
           promising is False, reason)
     check("and says why", "GGUF" in reason, reason)
 
-    print("\n[is_promising(): the positive cases]")
+    print("\n[is_promising(): the only positive case -- fit AND claim together]")
     promising, reason = bc.is_promising(
         {"category": "coding", "fit": COMFORTABLE, "gguf_repo": "x",
          "publisher_claim": {"model_index_present": True}})
     check("comfortable fit + GGUF + a publisher claim is promising",
           promising is True, reason)
 
+    print("\n[is_promising(): fit alone or a claim alone is NOT enough (tightened in bc 1.5.0)]")
     promising, reason = bc.is_promising(
         {"category": "coding", "fit": COMFORTABLE, "gguf_repo": "x",
          "publisher_claim": {"model_index_present": False}})
-    check("comfortable fit + GGUF alone is still promising, with no claim needed",
-          promising is True, reason)
+    check("comfortable fit + GGUF alone is no longer promising without a publisher claim",
+          promising is False, reason)
+    check("and says it's the missing eval numbers that's the gap",
+          "eval numbers" in reason.lower(), reason)
 
     promising, reason = bc.is_promising(
         {"category": "coding", "fit": TIGHT, "gguf_repo": "x",
          "publisher_claim": {"model_index_present": True}})
-    check("a tight fit is still promising if the publisher published formal eval numbers",
-          promising is True, reason)
+    check("a publisher claim alone no longer rescues a tight/uncertain fit",
+          promising is False, reason)
+    check("and says it's the fit that's the gap", "fit" in reason.lower(), reason)
 
-    print("\n[is_promising(): the negative-but-not-disqualified case]")
+    print("\n[is_promising(): neither fit nor claim]")
     promising, reason = bc.is_promising(
         {"category": "coding", "fit": TIGHT, "gguf_repo": "x",
          "publisher_claim": {"model_index_present": False}})

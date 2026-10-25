@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 2.9.0
+# Version: 2.9.1
+#
+# 2.9.1 (2026-10-25) — check_recommended()'s heuristic-side checks updated for bc 1.5.0's
+# tightened bar: a comfortable fit and a GGUF build alone no longer recommend a proposed
+# candidate without a publisher claim too (live-backlog data showed the looser OR form flagging
+# 169 omni candidates on fit-alone, almost all HF noise). The DB-seeded "great-candidate" fixture
+# already carried both, so only the direct ui.recommendation() assertions needed updating.
 #
 # 2.9.0 (2026-10-25) — check_recommended(), new for hermes-fleetops-ui.py 2.9.0's "Recommended
 # for benchmarking" backlog section: recommendation()'s state-gating (approved always, proposed
@@ -328,10 +334,15 @@ def check_recommended(ui, tmp):
           ui.recommendation("proposed", {"category": "text",
                                          "fit": "size unknown (no safetensors metadata)"})[0]
           is False)
-    check("a proposed candidate with a comfortable fit and a GGUF build is recommended",
+    check("a proposed candidate needs BOTH a comfortable fit AND a publisher claim (bc 1.5.0)",
           ui.recommendation("proposed", {"category": "coding", "gguf_repo": "x",
+                                         "publisher_claim": {"model_index_present": True},
                                          "fit": "~9GB Q4 (dense) — fits alongside current "
                                                 "backends"})[0] is True)
+    check("a comfortable fit and a GGUF build alone are no longer enough, without a claim",
+          ui.recommendation("proposed", {"category": "coding", "gguf_repo": "x",
+                                         "fit": "~9GB Q4 (dense) — fits alongside current "
+                                                "backends"})[0] is False)
     check("an architecture finding is never recommended, even with a fit string",
           ui.recommendation("proposed", {"category": "architecture", "fit": "n/a"})[0] is False)
     check("a persisted recommended=True is trusted as-is, not re-derived from fit/gguf",
