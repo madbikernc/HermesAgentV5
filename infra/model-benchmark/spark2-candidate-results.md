@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -196,6 +196,23 @@ a real, verified outperformance finding, saved to memory per standing instructio
 own Tier 0 (0.600) and log-analyst fact-extraction (0.640) are mediocre, so this is role-specific strength,
 not a general-purpose win.
 
+### `phi-4-Q8_0.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | **0.350** | Weakest Tier 0 score of any candidate tested so far |
+| `fleet_log_analyst` | accuracy 6/9 = 0.667 (9 unclear), fact-extraction 24/25 = 0.960 | Strong fact-extraction despite weak Tier 0 |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, padding_restraint 1.000 | Clean sweep (one raw case, `duplicate_collapse`, missed its exact highlight count but didn't affect the aggregate axes as scored) |
+| `fleet_muse_contract` | capability 9/9, groundedness 9/9, **override 3/9**, overall 0.778 | Weakest override resistance of any candidate so far (3/9 vs. 4-6/9 elsewhere) |
+| `fleet_dualcoder_precision` | recall 2/3, precision 1/3, overall 0.500 | Second-best precision result after GLM-4.7-Flash's perfect 1.000 — not 0/3 like every Phase 2 candidate |
+| `fleet_coder_fix` | repro 0/1, judge 8/8 = 1.000, 3 `env_unavailable`, 2 timeouts | |
+| `fleet_coder_build` | fixture 1/3 = 0.333, judge 8/8 = 1.000 | |
+
+One wrapper hiccup noted for completeness: `llama-coder.service` logged "canceled" during its stop step
+mid-run; verified immediately after via `systemctl is-active` and a direct `/v1/models` curl that both
+`coder` and `muse` came back up correctly serving their real production models — no lasting effect, not a
+benchmark-validity issue.
+
 ## Phase 3+ — in progress
 
 (continues below as each candidate completes)
@@ -208,3 +225,4 @@ not a general-purpose win.
 | 1.1.0 | 2026-10-24 | Added Phase 2 Qwen3-4B and Qwen3-8B full-battery results. Qwen3-8B surfaced a real harness gap: 7/10 `fleet_coder_fix` and 4/8 `fleet_coder_build` tasks timed out outright at 8B (zero timeouts at 4B on the same settings) — surviving-subset judge scores flagged as not comparable at face value until the harness's timeout is made size-aware. |
 | 1.2.0 | 2026-10-25 | Completed Phase 2 with Ministral-8B-Instruct-2410 results, plus a cross-candidate findings section: `fleet_dualcoder_precision` precision axis is 0/3 for all three Phase 2 candidates (likely task-calibration issue), coder_fix/coder_build judge-only axes are near-1.000 for all three while every objective axis is weak (judge-calibration concern, not candidate-specific), and the Qwen3-8B timeout spike did not reproduce on similarly-sized Ministral-8B (model-specific, not a simple size threshold). No Phase 2 candidate qualifies as outperforming a live incumbent. |
 | 1.3.0 | 2026-10-25 | Started Phase 3 with GLM-4.7-Flash-Q4_K_M full battery. Found `coder2`/Muse-Glimmer-30B still fully loaded and live on spark2 four days after the router's changelog claimed it was unloaded/unregistered -- only its dispatch registration was actually removed. Used that still-live incumbent for a fair same-day `fleet_dualcoder_precision` comparison: incumbent scores 0.000 (0/4, 2 timeouts), GLM-4.7-Flash scores a perfect 1.000 (6/6) -- first confirmed candidate-outperforms-incumbent finding of this run, saved to memory. |
+| 1.4.0 | 2026-10-25 | Added phi-4-Q8_0 results: weakest Tier 0 score of the run (0.350) but strong log-analyst fact-extraction (0.960) and the weakest muse_contract override resistance seen so far (3/9). Noted and cleared a transient wrapper hiccup (`llama-coder.service` logged "canceled" mid-stop; verified both coder and muse came back up correctly). |
