@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 2.7.0
+# Version: 2.8.0
+#
+# 2.8.0 (2026-10-25) — direct operator request to enhance /market's "detail" column: every
+# ticker-level line (movers, 30-day trend, the two AI-watch sections) now names the registered
+# company in parens right after its ticker ("MSFT (Microsoft) rose..."), via a fresh
+# ticker->name lookup against `instruments` — a FleetOps-UI-only cosmetic splice
+# (with_company_name()) that never touches the stored report_items.text the email/Matrix/gate
+# paths also render from. Sector/tag-trend rows are excluded by item_type allowlist
+# (TICKER_LEVEL_ITEM_TYPES), not just by the splice's own startswith() guard, since some of
+# those lines also happen to start with a sector/tag NAME followed by a space. Also: the daily
+# report's single flat table (one row per item, a repeated "section" column) is now one table
+# per section, each under its own <h3 class="mkt-sec"> divider/title, with "#" (rank) leading
+# each section's own columns instead of "section" leading a shared one — direct operator
+# request. The row-count cap (MAX_MARKET_ROWS) now counts across all sections combined rather
+# than one flat list.
 #
 # 2.7.0 (2026-10-25) — direct operator request: /benchmarks' "Current" table gets a role filter,
 # a high-to-low score sort, and the value column now shows `value/highest` whenever a HIGHER
@@ -289,6 +303,9 @@ nav a:hover { text-decoration:underline; }
 main { padding:20px; max-width:1500px; }
 h2 { font-size:15px; margin:26px 0 10px; font-weight:600; }
 h2:first-child { margin-top:0; }
+h3.mkt-sec { font-size:13px; margin:22px 0 8px; padding-top:14px; border-top:1px solid var(--line);
+             font-weight:600; color:var(--dim); }
+h3.mkt-sec:first-child { margin-top:0; padding-top:0; border-top:none; }
 p.note { color:var(--dim); margin:4px 0 14px; max-width:92ch; }
 table { border-collapse:collapse; width:100%; font-size:13px; }
 th,td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line);
@@ -1559,6 +1576,31 @@ def page_egress_blocks(query):
 # daily email/Matrix notice and a `market report` gate reply already render from — so this page
 # can never disagree with either about what a given day said.
 
+# item_types whose `ticker_or_group` is a real ticker rather than a sector/tag name — the only
+# ones a company name lookup is meaningful for. sector_trend/tag_trend's `group` is a sector or
+# tag NAME, and is left alone even though some of those lines also happen to start with that
+# name followed by a space (the same shape with_company_name() looks for) — this allowlist is
+# the real guard, not the startswith() check inside it, which is only a second line of defense.
+TICKER_LEVEL_ITEM_TYPES = {"movers_up", "movers_down", "trend30_up", "trend30_down",
+                           "ai_watch_llm", "ai_watch_hw"}
+
+
+def with_company_name(text, ticker, name_by_ticker):
+    """Splices "(Registered Name)" in right after the ticker every render_*_line() in
+    hermes_market_common.py puts at the very start of its own line (verified against that
+    module's source — every ticker-level line names its ticker exactly once, as the first
+    token). Operates on the raw, not-yet-escaped `text`/`name` — the caller esc()s the composite
+    result exactly once, same as everything else on this page. This is a FleetOps-UI-only
+    cosmetic enhancement: it never touches the stored `report_items.text` itself, which the
+    daily email/Matrix notice/`market report` gate reply also render from and must keep agreeing
+    on. A ticker with no `instruments` row (delisted, or the line's shape doesn't match) is left
+    unchanged rather than guessed at."""
+    name = name_by_ticker.get(ticker)
+    if not name or not text.startswith(ticker + " "):
+        return text
+    return f"{ticker} ({name}){text[len(ticker):]}"
+
+
 def render_market_report(requested_date):
     conn = ro_sqlite(MARKET_DB)
     try:
@@ -1570,6 +1612,7 @@ def render_market_report(requested_date):
                      '<span class="mono">report_items</span> once the sync has run.</p>')
         report_date = requested_date if requested_date in dates else dates[0]
         rows = market_common.read_report_items(conn, report_date)
+        name_by_ticker = {r[0]: r[1] for r in conn.execute("SELECT ticker, name FROM instruments")}
     finally:
         conn.close()
 
@@ -1591,24 +1634,41 @@ def render_market_report(requested_date):
     for _category, item_type, rank, group, value, text in rows:
         by_type.setdefault(item_type, []).append((rank, group, value, text))
 
-    body_rows = []
+    # One table per section, each with its own divider/title (<h3>) instead of a repeated
+    # "section" column — "#" (the item's rank) leads each section's own table.
+    sections_html = []
+    remaining, total_rows, truncated = MAX_MARKET_ROWS, 0, False
     for item_type in market_common.REPORT_SECTION_ORDER:
-        for rank, group, value, text in sorted(by_type.get(item_type, []), key=lambda r: r[0]):
+        items = sorted(by_type.get(item_type, []), key=lambda r: r[0])
+        if not items:
+            continue
+        if remaining <= 0:
+            truncated = True
+            break
+        if len(items) > remaining:
+            items = items[:remaining]
+            truncated = True
+        remaining -= len(items)
+        total_rows += len(items)
+
+        body_rows = []
+        for rank, group, value, text in items:
+            if item_type in TICKER_LEVEL_ITEM_TYPES:
+                text = with_company_name(text, group, name_by_ticker)
             body_rows.append([
-                esc(market_common.REPORT_SECTION_TITLES[item_type]),
                 f'<span class="num">{rank}</span>',
                 esc(group),
                 f'<span class="num">{value:+.2f}%</span>',
                 esc(text),
             ])
-    cap = ("" if len(body_rows) <= MAX_MARKET_ROWS else
-           f" Showing the first {MAX_MARKET_ROWS} of {len(body_rows)}.")
-    body_rows = body_rows[:MAX_MARKET_ROWS]
+        title = esc(market_common.REPORT_SECTION_TITLES[item_type])
+        sections_html.append(f'<h3 class="mkt-sec">{title}</h3>' + table(
+            ["#", "ticker/group", "move", "detail"], body_rows, numeric={0, 2}))
 
+    cap = "" if not truncated else f" Truncated at {MAX_MARKET_ROWS} total row(s)."
     search = (f'<p><input type="search" placeholder="filter rows…" data-filter="#market">'
-              f'<span class="note">{len(body_rows)} row(s) for {esc(report_date)}.{cap}</span></p>')
-    return form + note + search + '<div id="market">' + table(
-        ["section", "#", "ticker/group", "move", "detail"], body_rows, numeric={1, 3}) + '</div>'
+              f'<span class="note">{total_rows} row(s) for {esc(report_date)}.{cap}</span></p>')
+    return form + note + search + '<div id="market">' + "".join(sections_html) + '</div>'
 
 
 def render_market_tag_proposals():

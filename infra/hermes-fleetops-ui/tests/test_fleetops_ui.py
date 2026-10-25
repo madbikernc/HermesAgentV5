@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.7.0
+# Version: 2.8.0
+#
+# 2.8.0 (2026-10-25) — check_market() extended for hermes-fleetops-ui.py 2.8.0: a new
+# with_company_name() unit check (splice fires on a known ticker, leaves an unmatched/unknown
+# ticker alone), the per-section <h3 class="mkt-sec"> divider/title replacing the old repeated
+# "section" table column (with "#" now leading each section's own columns), a ticker-level row's
+# detail naming its registered company in parens, a ticker with no instruments row rendering
+# unenriched, a sector-trend row never running through the splice at all, and a hostile
+# (Wikipedia-scraped) registered name escaped the same as everything else once spliced in.
 #
 # 2.7.0 (2026-10-25) — check_benchmark_ranking() covers /benchmarks' "Current" table getting a
 # role filter, a high-to-low score sort, and value/highest rendering (hermes-fleetops-ui.py
@@ -1077,6 +1085,9 @@ def check_market(ui, tmp):
     db = tmp / "market.db"
     conn = sqlite3.connect(db)
     conn.executescript(
+        "CREATE TABLE instruments (ticker TEXT NOT NULL, exchange TEXT NOT NULL,"
+        " name TEXT NOT NULL, currency TEXT, sector TEXT, industry TEXT, first_seen TEXT,"
+        " last_seen TEXT, PRIMARY KEY (ticker, exchange));"
         "CREATE TABLE report_items (report_date TEXT NOT NULL, category TEXT NOT NULL,"
         " item_type TEXT NOT NULL, rank INTEGER NOT NULL, ticker_or_group TEXT NOT NULL,"
         " metric_value REAL NOT NULL, text TEXT NOT NULL,"
@@ -1084,6 +1095,11 @@ def check_market(ui, tmp):
         "CREATE TABLE tag_proposals (ticker TEXT NOT NULL, exchange TEXT NOT NULL,"
         " candidate_tag TEXT NOT NULL, rationale TEXT NOT NULL, state TEXT NOT NULL,"
         " proposed_at TEXT NOT NULL, decided_at TEXT, PRIMARY KEY (ticker, exchange))")
+    # NVDA has a registered name on file; ABC deliberately does not -- the one real-world case
+    # (a ticker synced before its instruments row existed, or since delisted) this feature must
+    # degrade gracefully against rather than crash or guess at.
+    conn.execute("INSERT INTO instruments VALUES ('NVDA','US','NVIDIA Corporation','USD',"
+                "'Information Technology','Semiconductors','2026-01-01','2026-10-25')")
     # Deliberately inserted in an order that is NOT REPORT_SECTION_ORDER, and not alphabetical by
     # item_type either -- the page must re-sort by the fixed order the email/Matrix side uses,
     # not by whatever a plain ORDER BY item_type would give (which would put "ai_watch_hw" before
@@ -1102,6 +1118,18 @@ def check_market(ui, tmp):
     conn.close()
     ui.MARKET_DB = str(db)
 
+    print(NL + "[with_company_name(): the splice itself, in isolation]")
+    names = {"NVDA": "NVIDIA Corporation"}
+    check("a known ticker at the start of the line gets its name spliced in",
+          ui.with_company_name("NVDA rose 2.46% today.", "NVDA", names)
+          == "NVDA (NVIDIA Corporation) rose 2.46% today.")
+    check("a ticker with no instruments row is left unchanged",
+          ui.with_company_name("ABC fell 9.99% today.", "ABC", names)
+          == "ABC fell 9.99% today.")
+    check("a line that doesn't actually start with the ticker is left unchanged, not guessed at",
+          ui.with_company_name("something else entirely", "NVDA", names)
+          == "something else entirely")
+
     print(NL + "[rendering the daily report: fixed section order, not alphabetical/ORDER-BY]")
     html = ui.render_market_report("")
     sec_pos = html.find("Sector trends")
@@ -1110,10 +1138,20 @@ def check_market(ui, tmp):
     check("sections render in REPORT_SECTION_ORDER regardless of insertion/ORDER-BY order",
           -1 not in (sec_pos, hw_pos, down_pos) and sec_pos < hw_pos < down_pos,
           f"sec={sec_pos} hw={hw_pos} down={down_pos}")
+    check("each section title renders as its own divider/heading, not a repeated table column",
+          '<h3 class="mkt-sec">AI Hardware Watch</h3>' in html, html[:4000])
+    check("the per-row table no longer carries a 'section' column",
+          "<th>section</th>" not in html)
+    check("'#' (rank) leads each section's own columns instead",
+          "<th>#</th><th>ticker/group</th><th>move</th><th>detail</th>" in html)
     check("the latest date (not the alphabetically-last one) is picked with no date requested",
           "2026-10-25" in html.split("<form")[0] or True)  # form itself carries the date options
-    check("a per-ticker AI-watch row carries its own rendered line",
-          "NVDA rose 2.46% today, up 5.00% over 30 days." in html)
+    check("a ticker-level row's detail now names the registered company in parens after it",
+          "NVDA (NVIDIA Corporation) rose 2.46% today, up 5.00% over 30 days." in html)
+    check("a ticker with no instruments row renders its original line, unenriched",
+          "ABC fell 9.99% today." in html and "ABC (" not in html)
+    check("a sector-trend row is never run through the company-name splice",
+          "Information Technology (" not in html)
     check("the move is signed and formatted as a percentage",
           "+1.23%" in html and "-9.99%" in html, html[:2000])
 
@@ -1132,7 +1170,8 @@ def check_market(ui, tmp):
     print(NL + "[no report at all says so plainly, rather than an empty table]")
     empty_db = tmp / "market-empty.db"
     ec = sqlite3.connect(empty_db)
-    ec.executescript("CREATE TABLE report_items (report_date TEXT, category TEXT,"
+    ec.executescript("CREATE TABLE instruments (ticker TEXT, exchange TEXT, name TEXT);"
+                     "CREATE TABLE report_items (report_date TEXT, category TEXT,"
                      " item_type TEXT, rank INTEGER, ticker_or_group TEXT, metric_value REAL,"
                      " text TEXT)")
     ec.commit()
@@ -1169,6 +1208,14 @@ def check_market(ui, tmp):
         "INSERT INTO report_items VALUES (?,?,?,?,?,?,?)",
         ("2026-10-25", "ALL", "movers_up", 2, "<img src=x onerror=alert(1)>", 1.0,
          "<script>steal()</script>"))
+    # A hostile REGISTERED NAME (Wikipedia-scraped, third-party content) must be escaped too --
+    # not just the report row itself. "EVIL" both carries the malicious name AND starts its own
+    # detail line, so the splice actually fires rather than being skipped as a non-match.
+    conn3.execute("INSERT INTO instruments VALUES ('EVIL','US','<script>hack()</script>','USD',"
+                 "NULL,NULL,'2026-01-01','2026-10-25')")
+    conn3.execute(
+        "INSERT INTO report_items VALUES (?,?,?,?,?,?,?)",
+        ("2026-10-25", "ALL", "movers_up", 3, "EVIL", 1.0, "EVIL rose 1.00% today."))
     conn3.execute(
         "INSERT INTO tag_proposals VALUES (?,?,?,?,?,?,?)",
         ("ZZZZ", "US", "<script>steal()</script>", "<img src=x onerror=alert(1)>", "proposed",
@@ -1179,6 +1226,8 @@ def check_market(ui, tmp):
     nasty_tags = ui.render_market_tag_proposals()
     check("a hostile report row is escaped",
           "<script>" not in nasty_report and "<img src=x" not in nasty_report)
+    check("a hostile registered company name is escaped too, after being spliced in",
+          "<script>hack()</script>" not in nasty_report and "EVIL (" in nasty_report)
     check("a hostile tag-proposal row is escaped",
           "<script>" not in nasty_tags and "<img src=x" not in nasty_tags)
 
