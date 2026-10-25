@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 2.9.1
+# Version: 2.10.0
+#
+# 2.10.0 (2026-10-25) — check_market() extended for hermes-fleetops-ui.py 2.10.0's per-ticker
+# history graph: a real `prices` table (NVDA, ~663 daily rows, deterministic drift) backs
+# decimate()/render_history_chart() unit checks in isolation, render_market_history()'s duration
+# buckets/company-name line/unknown-ticker degradation, and page_market_history()'s full-page
+# assembly/routing. Also extends the existing report-rendering checks for the new Graph button
+# (present on ticker-level rows, absent on sector/tag-trend rows). Caught a real bug: the ticker
+# query param, reflected into section()'s heading argument (which — unlike shell()'s own title —
+# is NOT auto-escaped), was the first user-controlled value ever passed there; a hostile ticker
+# escaped everywhere else on the page still broke out via the heading. Fixed in
+# page_market_history() (esc() around the heading's ticker), not in section() itself, since
+# section()'s heading is a trusted static string everywhere else it's called.
 #
 # 2.9.1 (2026-10-25) — check_recommended()'s heuristic-side checks updated for bc 1.5.0's
 # tightened bar: a comfortable fit and a GGUF build alone no longer recommend a proposed
@@ -1194,7 +1206,10 @@ def check_market(ui, tmp):
         " PRIMARY KEY (report_date, category, item_type, rank));"
         "CREATE TABLE tag_proposals (ticker TEXT NOT NULL, exchange TEXT NOT NULL,"
         " candidate_tag TEXT NOT NULL, rationale TEXT NOT NULL, state TEXT NOT NULL,"
-        " proposed_at TEXT NOT NULL, decided_at TEXT, PRIMARY KEY (ticker, exchange))")
+        " proposed_at TEXT NOT NULL, decided_at TEXT, PRIMARY KEY (ticker, exchange));"
+        "CREATE TABLE prices (ticker TEXT NOT NULL, exchange TEXT NOT NULL, date TEXT NOT NULL,"
+        " open REAL, high REAL, low REAL, close REAL, adj_close REAL, volume INTEGER,"
+        " PRIMARY KEY (ticker, exchange, date))")
     # NVDA has a registered name on file; ABC deliberately does not -- the one real-world case
     # (a ticker synced before its instruments row existed, or since delisted) this feature must
     # degrade gracefully against rather than crash or guess at.
@@ -1214,6 +1229,16 @@ def check_market(ui, tmp):
     ]
     conn.executemany(
         "INSERT INTO report_items VALUES (?,?,?,?,?,?,?)", rows)
+    # NVDA's real per-ticker series for the /market/history checks below -- every calendar day
+    # from 2025-01-01 to 2026-10-25 (~663 rows), a deterministic upward drift (not random, so
+    # this test is reproducible), enough span to tell a 30-day window apart from "All".
+    import datetime as _dt
+    nvda_prices, d, price = [], _dt.date(2025, 1, 1), 100.0
+    while d <= _dt.date(2026, 10, 25):
+        price += 0.05
+        nvda_prices.append(("NVDA", "US", d.isoformat(), price, price, price, price, price, 1000))
+        d += _dt.timedelta(days=1)
+    conn.executemany("INSERT INTO prices VALUES (?,?,?,?,?,?,?,?,?)", nvda_prices)
     conn.commit()
     conn.close()
     ui.MARKET_DB = str(db)
@@ -1254,6 +1279,12 @@ def check_market(ui, tmp):
           "Information Technology (" not in html)
     check("the move is signed and formatted as a percentage",
           "+1.23%" in html and "-9.99%" in html, html[:2000])
+    check("a ticker-level row gets a Graph button pointing at /market/history",
+          '/market/history?ticker=NVDA' in html and 'class="graph-btn"' in html)
+    check("a sector-trend row gets no Graph button -- no per-sector series is stored",
+          "ticker=Information" not in html)
+    check("ticker-level sections gain a trailing (unlabeled) graph column header",
+          "<th>#</th><th>ticker/group</th><th>move</th><th>detail</th><th></th>" in html)
 
     print(NL + "[a requested date with no report falls back, and says so]")
     html_missing = ui.render_market_report("2026-01-01")
@@ -1330,6 +1361,64 @@ def check_market(ui, tmp):
           "<script>hack()</script>" not in nasty_report and "EVIL (" in nasty_report)
     check("a hostile tag-proposal row is escaped",
           "<script>" not in nasty_tags and "<img src=x" not in nasty_tags)
+
+    print(NL + "[decimate(): pure even-stride thinning, keeps both endpoints]")
+    pts9 = [(f"2026-01-{i:02d}", float(i)) for i in range(1, 10)]
+    thin = ui.decimate(pts9, 3)
+    check("thinning keeps the first/last point and roughly respects the cap",
+          thin[0] == pts9[0] and thin[-1] == pts9[-1] and len(thin) <= 5, str(thin))
+    check("a series already under the cap is returned untouched",
+          ui.decimate(pts9, 100) == pts9)
+
+    print(NL + "[render_history_chart(): pure SVG builder, in isolation]")
+    chart_html = ui.render_history_chart(
+        [("2026-10-01", 10.0), ("2026-10-02", 12.0), ("2026-10-03", 11.0)])
+    check("renders an SVG with the price path and the embedded hover-point data",
+          "<svg" in chart_html and "<path d=" in chart_html and "data-chart-points" in chart_html)
+    check("a single-point series never divides by zero -- degenerate, but doesn't crash",
+          "<svg" in ui.render_history_chart([("2026-10-01", 10.0)]))
+
+    print(NL + "[render_market_history() / page_market_history(): the per-ticker chart page]")
+    import re
+
+    def point_count(html_fragment):
+        m = re.search(r"data-chart-points>(.*?)</script>", html_fragment)
+        return len(json.loads(m.group(1))["points"])
+
+    h90 = ui.render_market_history("NVDA", 90)
+    check("a known ticker's history page names the registered company",
+          "NVIDIA Corporation" in h90)
+    check("a 90-day window renders a chart", "<svg" in h90)
+    check("the duration select carries every bucket",
+          all(f'value="{d}"' in h90 for d, _label in ui.HISTORY_DAYS_OPTIONS), h90[:500])
+    check("the requested bucket is pre-selected", 'value="90" selected' in h90)
+
+    h_30, h_all = ui.render_market_history("NVDA", 30), ui.render_market_history("NVDA", 0)
+    check("a 30-day window plots far fewer points than 'All' over ~663 days",
+          point_count(h_30) < point_count(h_all), (point_count(h_30), point_count(h_all)))
+
+    h_unknown = ui.render_market_history("NOSUCH", 90)
+    check("an unknown ticker degrades with a named empty state, never raises",
+          "No price history on file for NOSUCH" in h_unknown)
+
+    # A hostile ticker arrives via the QUERY STRING, not scraped Wikipedia content -- a distinct
+    # injection point from the company-name splice tested above. Gets its own `prices` row so the
+    # full render path (duration form, stats line) actually runs, not just the empty-state return.
+    conn4 = sqlite3.connect(db)
+    conn4.execute("INSERT INTO prices VALUES (?,?,?,?,?,?,?,?,?)",
+                  ("<SVG ONLOAD=ALERT(1)>", "US", "2026-10-24", 1, 1, 1, 1, 1, 100))
+    conn4.commit()
+    conn4.close()
+    hostile_page = ui.page_market_history({"ticker": ["<svg onload=alert(1)>"]}).decode()
+    check("a hostile ticker with real price data is still escaped everywhere it's echoed",
+          "<svg onload=alert(1)>" not in hostile_page.lower())
+
+    print(NL + "[page_market_history(): full page assembly, routing, and degradation]")
+    page_hist = ui.page_market_history({"ticker": ["NVDA"], "days": ["90"]}).decode()
+    check("the full page renders the chart and the ticker", "<svg" in page_hist and "NVDA" in page_hist)
+    check("the route is wired up", ui.ROUTES.get("/market/history") is ui.page_market_history)
+    no_ticker_page = ui.page_market_history({}).decode()
+    check("no ticker given degrades without raising", "No ticker given" in no_ticker_page)
 
     print(NL + "[the assembled page carries both sections, and the route is registered]")
     page = ui.page_market({}).decode()

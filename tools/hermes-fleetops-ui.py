@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-# Version: 2.9.0
+# Version: 2.10.0
+#
+# 2.10.0 (2026-10-25) — direct operator request: a "Graph" button on every ticker-level /market
+# row (movers, 30-day trend, the two AI-watch sections — the same TICKER_LEVEL_ITEM_TYPES
+# allowlist the company-name splice uses; sector/tag-trend rows get none, since there is no
+# stored per-sector time series, only a daily cross-sectional average) opens
+# /market/history?ticker=...&days=N in a new tab. Evaluated whether `prices` retains enough
+# history first: no pruning exists anywhere (confirmed by grep), and live-checking Yahoo's chart
+# endpoint directly showed 10 years of daily history is available — raised the backfill goal from
+# the original ~1.6-year catch-up to 5 years on direct operator instruction (hermes-market-sync.py
+# 1.3.0 handles the actual backfill). render_history_chart() is a server-rendered inline SVG
+# (dataviz skill: single series needs no legend, axis range always rescales to the selected
+# window's own min/max — the "autoscale" the duration picker promises) with a hover crosshair +
+# tooltip driven by a new PAGE_SCRIPT mousemove handler; HISTORY_DAYS_OPTIONS (1M/3M/6M/1Y/5Y/All)
+# drives the duration <select>. decimate()/MAX_CHART_POINTS keep the chart responsive no matter
+# how much further history grows from here, though nothing on file today is close to the cap.
 #
 # 2.9.0 (2026-10-25) — direct operator request: the backlog page now leads with a "Recommended
 # for benchmarking" section -- every `approved` candidate plus any still-`proposed` one whose own
@@ -302,6 +317,12 @@ MAX_RECOMMENDATION_ROWS = 400
 MAX_EGRESS_BLOCK_ROWS = 400
 MAX_MARKET_ROWS = 400
 MAX_TAG_PROPOSAL_ROWS = 400
+# A chart stays responsive even once `prices` holds many years of daily history -- even-stride
+# decimation above this many points, always keeping the first/last point so the window's real
+# endpoints never shift. Today's longest series (~1255 points for a 5-year window) never hits it.
+MAX_CHART_POINTS = 2000
+# (days back from the latest date on file, label) -- 0 means "every row on file", not "today".
+HISTORY_DAYS_OPTIONS = [(30, "1M"), (90, "3M"), (180, "6M"), (365, "1Y"), (1825, "5Y"), (0, "All")]
 
 STYLE = """
 :root { --bg:#12141a; --fg:#e7e9ee; --dim:#9aa3b2; --line:#2a2f3a; --accent:#7fb2ff;
@@ -350,6 +371,16 @@ button:hover { border-color:var(--accent); }
 .card a { color:var(--accent); text-decoration:none; }
 .card p { color:var(--dim); margin:6px 0 0; }
 footer { color:var(--dim); padding:18px 20px; border-top:1px solid var(--line); font-size:12px; }
+.graph-btn { display:inline-block; padding:1px 8px; border:1px solid var(--line); border-radius:3px;
+             color:var(--accent); text-decoration:none; font-size:12px; white-space:nowrap; }
+.graph-btn:hover { border-color:var(--accent); }
+.chart-wrap { position:relative; max-width:780px; }
+.chart-wrap svg { width:100%; height:auto; display:block; }
+.chart-tip { position:absolute; display:none; top:6px; transform:translateX(-50%);
+             background:#1b1f27; border:1px solid var(--line); border-radius:3px;
+             padding:4px 8px; font-size:12px; white-space:nowrap; pointer-events:none; }
+.chart-stats { display:flex; gap:22px; margin:4px 0 14px; font-size:13px; flex-wrap:wrap; }
+.chart-stats b { font-variant-numeric:tabular-nums; }
 """
 
 NAV = [("/", "Home"), ("/backlog", "Benchmark backlog"), ("/models", "Models &amp; usage"),
@@ -416,6 +447,46 @@ document.addEventListener('input', function (e) {
   document.querySelectorAll(box.dataset.filter + ' tbody tr').forEach(function (r) {
     r.style.display = r.textContent.toLowerCase().indexOf(v) < 0 ? 'none' : '';
   });
+});
+// Market-history chart crosshair + tooltip (dataviz skill step 5: an SVG line chart ships hover
+// by default). Point coordinates are pre-computed server-side in SVG viewBox units, so this only
+// maps the mouse position into that same unit space and finds the nearest point -- no price/date
+// scaling logic is duplicated here.
+function hideChartTip(wrap) {
+  var cross = wrap.querySelector('[data-crosshair]'); if (cross) { cross.style.display = 'none'; }
+  var dot = wrap.querySelector('[data-dot]'); if (dot) { dot.style.display = 'none'; }
+  var tip = wrap.querySelector('[data-tip]'); if (tip) { tip.style.display = 'none'; }
+}
+document.addEventListener('mousemove', function (e) {
+  var wrap = e.target.closest('[data-chart]');
+  document.querySelectorAll('[data-chart]').forEach(function (w) {
+    if (w !== wrap) { hideChartTip(w); }
+  });
+  if (!wrap) { return; }
+  var svg = wrap.querySelector('svg');
+  var data = JSON.parse(wrap.querySelector('[data-chart-points]').textContent);
+  var pts = data.points;
+  if (!pts.length) { return; }
+  var rect = svg.getBoundingClientRect();
+  var vb = svg.viewBox.baseVal;
+  var px = (e.clientX - rect.left) * (vb.width / rect.width);
+  var lo = 0, hi = pts.length - 1;
+  while (lo < hi) {
+    var mid = (lo + hi) >> 1;
+    if (pts[mid][0] < px) { lo = mid + 1; } else { hi = mid; }
+  }
+  if (lo > 0 && Math.abs(pts[lo - 1][0] - px) < Math.abs(pts[lo][0] - px)) { lo -= 1; }
+  var p = pts[lo];
+  var cross = wrap.querySelector('[data-crosshair]');
+  cross.setAttribute('x1', p[0]); cross.setAttribute('x2', p[0]);
+  cross.style.display = 'block';
+  var dot = wrap.querySelector('[data-dot]');
+  dot.setAttribute('cx', p[0]); dot.setAttribute('cy', p[1]);
+  dot.style.display = 'block';
+  var tip = wrap.querySelector('[data-tip]');
+  tip.textContent = p[2] + ': ' + p[3];
+  tip.style.display = 'block';
+  tip.style.left = ((p[0] / vb.width) * rect.width) + 'px';
 });
 refresh();
 """
@@ -1729,19 +1800,31 @@ def render_market_report(requested_date):
         remaining -= len(items)
         total_rows += len(items)
 
+        is_ticker_level = item_type in TICKER_LEVEL_ITEM_TYPES
         body_rows = []
         for rank, group, value, text in items:
-            if item_type in TICKER_LEVEL_ITEM_TYPES:
+            if is_ticker_level:
                 text = with_company_name(text, group, name_by_ticker)
-            body_rows.append([
+            row = [
                 f'<span class="num">{rank}</span>',
                 esc(group),
                 f'<span class="num">{value:+.2f}%</span>',
                 esc(text),
-            ])
+            ]
+            if is_ticker_level:
+                # Only ticker-level rows get a graph: a sector/tag row's "group" names a
+                # cross-sectional average recomputed from current membership, not a single
+                # ticker with its own stored `prices` series -- there is no real history to plot.
+                # quote(), not esc(): this is a URL query value, and quote()'s percent-encoding
+                # already leaves no raw &"<> behind, so the result is attribute-safe too.
+                href = f"/market/history?ticker={urllib.parse.quote(group, safe='')}"
+                row.append(f'<a class="graph-btn" href="{href}" target="_blank" '
+                           f'rel="noopener">Graph</a>')
+            body_rows.append(row)
         title = esc(market_common.REPORT_SECTION_TITLES[item_type])
+        headers = ["#", "ticker/group", "move", "detail"] + ([""] if is_ticker_level else [])
         sections_html.append(f'<h3 class="mkt-sec">{title}</h3>' + table(
-            ["#", "ticker/group", "move", "detail"], body_rows, numeric={0, 2}))
+            headers, body_rows, numeric={0, 2}))
 
     cap = "" if not truncated else f" Truncated at {MAX_MARKET_ROWS} total row(s)."
     search = (f'<p><input type="search" placeholder="filter rows…" data-filter="#market">'
@@ -1767,6 +1850,151 @@ def render_market_tag_proposals():
             f'<span class="mono">market tag reject &lt;TICKER&gt;</span>; deciding stays a '
             f'Matrix reply, same as the recommendations page above, not a button here.</p>')
     return note + table(["ticker", "candidate tag", "rationale", "proposed"], body_rows)
+
+
+def decimate(points, max_points):
+    """Even-stride decimation, always keeping the first and last point -- so a window's real
+    endpoints never shift just because the middle got thinned out. Today's longest series
+    (~1255 points for a 5-year window) never actually hits max_points; this is a safety valve for
+    however much further `prices` grows from here, not a response to a problem seen live."""
+    n = len(points)
+    if n <= max_points:
+        return points
+    stride = -(-n // max_points)  # ceil(n / max_points), stdlib-only
+    out = list(points[::stride])
+    if out[-1] != points[-1]:
+        out.append(points[-1])
+    return out
+
+
+def render_history_chart(points):
+    """points: [(date_iso, adj_close), ...] ascending, already sliced to the selected window —
+    every row the window actually has, NOT decimated (decimation happens only below, for what
+    gets drawn, so a thinned-out middle can never hide the window's real high or low). Inline
+    SVG, informed by the dataviz skill: a single series needs no legend box (the page title
+    names it); 2px var(--accent) stroke with round caps; recessive var(--line) gridlines /
+    var(--dim) axis text; the axis range is this window's own min/max, which is the autoscaling
+    the duration picker promises — a short window zooms in, a long one zooms out. The hover
+    crosshair + tooltip (dataviz skill step 5: ship by default on a line chart) is driven by
+    PAGE_SCRIPT's delegated mousemove handler reading the JSON point blob embedded alongside the
+    SVG; no scaling logic is duplicated in JS — point coordinates are already in SVG viewBox
+    units."""
+    width, height = 760, 280
+    x0, x1 = 56, width - 10
+    y0, y1 = 10, height - 26
+
+    values = [v for _d, v in points]
+    vmin, vmax = min(values), max(values)
+    pad = (vmax - vmin) * 0.08 or max(abs(vmax), 1.0) * 0.01
+    vmin_p, vmax_p = vmin - pad, vmax + pad
+
+    plotted = decimate(points, MAX_CHART_POINTS)
+    n = len(plotted)
+
+    def xf(i):
+        return x0 if n <= 1 else x0 + (x1 - x0) * i / (n - 1)
+
+    def yf(v):
+        return y1 if vmax_p <= vmin_p else y1 - (v - vmin_p) / (vmax_p - vmin_p) * (y1 - y0)
+
+    path_d = "M " + " L ".join(f"{xf(i):.1f},{yf(v):.1f}" for i, (_d, v) in enumerate(plotted))
+
+    grid_html = []
+    for k in range(5):
+        gy = y0 + (y1 - y0) * k / 4
+        gv = vmax_p - (vmax_p - vmin_p) * k / 4
+        grid_html.append(f'<line x1="{x0}" x2="{x1}" y1="{gy:.1f}" y2="{gy:.1f}" '
+                          f'stroke="var(--line)" stroke-width="1"/>')
+        grid_html.append(f'<text x="{x0 - 8}" y="{gy:.1f}" text-anchor="end" '
+                          f'dominant-baseline="middle" fill="var(--dim)" font-size="10">'
+                          f'{gv:,.2f}</text>')
+
+    # Up to 6 evenly-spaced date ticks. A short window names the day; past 120 days a day label
+    # repeats the same handful of months anyway, so the month+year is what's actually legible.
+    span_days = (datetime.date.fromisoformat(plotted[-1][0])
+                 - datetime.date.fromisoformat(plotted[0][0])).days
+    fmt = "%b %d" if span_days <= 120 else "%b %Y"
+    tick_count = min(6, n)
+    axis_html = []
+    for t in range(tick_count):
+        i = 0 if tick_count <= 1 else round(t * (n - 1) / (tick_count - 1))
+        label = datetime.date.fromisoformat(plotted[i][0]).strftime(fmt)
+        axis_html.append(f'<text x="{xf(i):.1f}" y="{height - 6}" text-anchor="middle" '
+                          f'fill="var(--dim)" font-size="10">{esc(label)}</text>')
+
+    points_json = json.dumps({"points": [
+        [round(xf(i), 1), round(yf(v), 1), d, f"${v:,.2f}"]
+        for i, (d, v) in enumerate(plotted)
+    ]}).replace("</", "<\\/")  # defensive: never let a literal "</script>" close this tag early
+
+    svg = (f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
+           + "".join(grid_html)
+           + f'<path d="{path_d}" fill="none" stroke="var(--accent)" stroke-width="2" '
+             f'stroke-linecap="round" stroke-linejoin="round"/>'
+           + "".join(axis_html)
+           + f'<line data-crosshair x1="0" x2="0" y1="{y0}" y2="{y1}" stroke="var(--dim)" '
+             f'stroke-width="1" stroke-dasharray="2,2" style="display:none"/>'
+           + '<circle data-dot r="3" fill="var(--accent)" style="display:none"/>'
+           + '</svg>')
+    return (f'<div class="chart-wrap" data-chart>{svg}<div class="chart-tip" data-tip></div></div>'
+            f'<script type="application/json" data-chart-points>{points_json}</script>')
+
+
+def render_market_history(ticker, days):
+    conn = ro_sqlite(MARKET_DB)
+    try:
+        name_row = conn.execute(
+            "SELECT name FROM instruments WHERE ticker=? AND exchange='US'", (ticker,)).fetchone()
+        all_points = market_common.ticker_price_history(conn, ticker)
+    finally:
+        conn.close()
+    if not all_points:
+        return f'<p class="empty">No price history on file for {esc(ticker)}.</p>'
+
+    if days:
+        cutoff = (datetime.date.fromisoformat(all_points[-1][0])
+                  - datetime.timedelta(days=days)).isoformat()
+        points = [(d, v) for d, v in all_points if d >= cutoff] or all_points[-1:]
+    else:
+        points = all_points
+
+    dopts = []
+    for d, label in HISTORY_DAYS_OPTIONS:
+        sel = " selected" if d == days else ""
+        dopts.append(f'<option value="{d}"{sel}>{esc(label)}</option>')
+    form = (f'<form method="get"><input type="hidden" name="ticker" value="{esc(ticker)}">'
+            f'<select name="days">{"".join(dopts)}</select> <button type="submit">show</button>'
+            f'</form>')
+    name_line = (f'<p class="note">{esc(ticker)} ({esc(name_row[0])})</p>' if name_row else "")
+
+    first_v, last_v = points[0][1], points[-1][1]
+    pct = market_common.pct_change(last_v, first_v)
+    high, low = max(v for _d, v in points), min(v for _d, v in points)
+    pct_html = f'<span class="num">{pct:+.2f}%</span>' if pct is not None else "n/a"
+    stats = (f'<div class="chart-stats"><span>Period change: <b>{pct_html}</b></span>'
+             f'<span>High: <b>${high:,.2f}</b></span><span>Low: <b>${low:,.2f}</b></span>'
+             f'<span>{len(points)} trading day(s), {esc(points[0][0])} – {esc(points[-1][0])}'
+             f'</span></div>')
+    return form + name_line + stats + render_history_chart(points)
+
+
+def page_market_history(query):
+    ticker = (query.get("ticker") or [""])[0].strip().upper()
+    valid_days = {d for d, _label in HISTORY_DAYS_OPTIONS}
+    try:
+        days = int((query.get("days") or ["90"])[0])
+    except ValueError:
+        days = 90
+    if days not in valid_days:
+        days = 90
+    if not ticker:
+        body = section("Price history", "", lambda: '<p class="empty">No ticker given.</p>')
+        return shell("Market Watch — history", body)
+    body = section(f"{esc(ticker)} — price history",
+                    "A real per-ticker <span class=\"mono\">prices</span> series — the window's "
+                    "axis range always rescales to what's actually plotted.",
+                    lambda: render_market_history(ticker, days))
+    return shell(f"{ticker} — price history", body)
 
 
 def page_market(query):
@@ -1796,6 +2024,7 @@ ROUTES = {
     "/recommendations": page_recommendations,
     "/egress-blocks": page_egress_blocks,
     "/market": page_market,
+    "/market/history": page_market_history,
 }
 
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-10-25) - Market Watch history graphs: ticker_price_history(), the one new query the
+# FleetOps-UI /market/history page needs -- plain ascending (date, adj_close) pairs, reusing the
+# existing idx_prices_ticker_date index. No schema change.
 #
 # 1.2.0 (2026-10-25) - S38h, direct operator request ("the market watch service should
 # periodically check to see if it needs to add stock tickers to any section, especially
@@ -149,6 +153,16 @@ def latest_dates(conn, exchange, n=2):
     return [r[0] for r in conn.execute(
         "SELECT DISTINCT date FROM prices WHERE exchange=? ORDER BY date DESC LIMIT ?",
         (exchange, n)).fetchall()]
+
+
+def ticker_price_history(conn, ticker, exchange="US"):
+    """[(date, adj_close), ...] ascending, for the Market Watch history graph -- the real
+    per-ticker series `prices` actually holds, using the existing idx_prices_ticker_date index.
+    adj_close, not close, matching every other read in this module (split/dividend-adjusted,
+    §5)."""
+    return conn.execute(
+        "SELECT date, adj_close FROM prices WHERE ticker=? AND exchange=? ORDER BY date",
+        (ticker, exchange)).fetchall()
 
 
 def daily_pct_changes(conn, exchange="US"):

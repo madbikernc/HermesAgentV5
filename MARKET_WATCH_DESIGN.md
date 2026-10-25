@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.9.0
+**Version:** 1.10.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -344,9 +344,12 @@ added later.
    a time. S38a already confirmed this split live rather than assuming a single bulk endpoint existed —
    the same "read the real API before specifying behavior" discipline `hermes-model-scout.py`/S20a
    applied to Hugging Face's.
-4. **Unbounded storage growth.** ~500 tickers × daily OHLCV rows, indefinitely — smaller than the global-
-   universe version of this risk, but the same class of "no retention policy stated yet" gap S27 flagged
-   for its own highlight table. Worth a pruning or archive decision once real volume is observed.
+4. **RESOLVED 2026-10-25, S38j — keep indefinitely, no pruning.** Confirmed live: no deletion
+   path exists anywhere in this codebase for `prices`, and a direct check of Yahoo's chart
+   endpoint (the real `User-Agent` this stack sends) showed 10 years of daily history available
+   per ticker — the ceiling is far past what's needed. Decision: retain every row forever; even
+   5 years × ~503 tickers is only ~630k rows (~60MB), trivial at this universe size. Revisit only
+   if ticker count or per-row columns grow by orders of magnitude.
 5. **RESOLVED for this source, per §5 — `adj_close`.** Yahoo's chart endpoint returns split/dividend-
    adjusted close directly; movers/30-day trend read `adj_close`, never raw `close`. Revisit only if a
    future non-Yahoo source for an additional market doesn't provide the same field.
@@ -463,17 +466,41 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
   `hermes-router.service` dependency, `daemon-reload`d) was run for real end to end
   (`Result=success`) through all four steps including `scan-tags`, confirming "a wrapper that
   works by hand and a unit that works are not the same claim" held for this stage too.
-- **S38i** — **Built 2026-10-25, direct operator request** ("add a formatted report to the
-  Fleetops-ui"), fulfilling §9's long-deferred browsable-report-history follow-on. New `/market`
-  page on `hermes-fleetops-ui.py` (2.6.0) — detail in §9 above. 19 new checks on that page's own
-  suite (259 total, up from 240), covering fixed section ordering, date fallback, the empty-store
-  message, pending-proposal filtering, and escaping; both other S38 suites (101 + 57) re-run
-  unchanged. Not yet live-verified or committed — same two-stage workflow as every prior S38
-  sub-stage.
+- **S38i** — **Built, live-verified, and committed 2026-10-25, direct operator request** ("add a
+  formatted report to the Fleetops-ui"), fulfilling §9's long-deferred browsable-report-history
+  follow-on. New `/market` page on `hermes-fleetops-ui.py` (2.6.0) — detail in §9 above. A later
+  same-day direct operator request enriched the page further (2.8.0): every ticker-level detail
+  line now names the registered company in parens, and the daily report renders one table per
+  section (an `<h3>` divider/title) instead of a repeated "section" column.
+- **S38j** — **Built 2026-10-25, direct operator request** ("have a 'Graph' button [on /market]
+  that breaks out a new window containing a time-series graph with the history that is remembered
+  in The Firmament fleet... evaluate if [the] appstack is retaining enough history, preferring up
+  to one year... allow picking a time duration, which will autoscale the time-axis"). Retention
+  was evaluated first, live, per §11 risk 4's resolution above — the operator then raised the
+  backfill goal from that evaluation's ~1 year to 5 years once 10 years was confirmed available.
+  New `ticker_price_history()` in `hermes_market_common.py` (1.3.0); `hermes-market-sync.py`
+  (1.3.0) renames `sync_prices()`'s `backfill_days` to `backfill_range` (Yahoo's `Nd` token turned
+  out to count *trading* days, not calendar days — a calendar-year goal needs Yahoo's own `Ny`
+  token instead) and backfills a ticker to `BACKFILL_RANGE` ("5y") the same day it's newly added
+  to `instruments`, closing the real gap found live: a post-backfill ticker (`VYLR`/`HONA`/
+  `FDXF`) was getting only the normal 5-day catch-up window, so "keep N years" was never actually
+  true for it. `hermes-fleetops-ui.py` (2.10.0) adds a "Graph" button to every ticker-level
+  `/market` row (the same `TICKER_LEVEL_ITEM_TYPES` allowlist the company-name splice uses —
+  sector/tag-trend rows get none, since no per-sector time series is stored, only a recomputed
+  daily average) opening `/market/history?ticker=...&days=N` in a new tab: a server-rendered
+  inline SVG line chart (dataviz-skill-informed — single series needs no legend, axis range
+  always rescales to the selected window's own min/max, which is the promised autoscaling) with a
+  hover crosshair/tooltip, and a duration `<select>` (1M/3M/6M/1Y/5Y/All). 17 new checks (310
+  total, up from 293) on `hermes-fleetops-ui.py`'s own suite; `hermes-market-sync.py`'s suite
+  gains 10 (111 total, up from 101). One real bug caught by the new suite before it ever shipped:
+  the ticker query parameter, reflected into `section()`'s heading argument (unlike `shell()`'s
+  own title, never auto-escaped, since every other caller passes a static string), was the first
+  user-controlled value ever placed there — a hostile ticker, escaped everywhere else on the
+  page, still broke out via the heading until `page_market_history()` was fixed to `esc()` it.
 
 ---
 
-## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full; S38i offline-tested only**
+## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full; S38i/S38j excluded, see below**
 
 A real daily email **and** Matrix post landing on a real trading day, citing real sector movement and
 real movers an operator can check against an independent source; and a real `market <command>` round trip
@@ -491,10 +518,12 @@ human** — the numbers (Energy +2.68%, CCI +9.06% top gainer, etc.) are real an
 consistent, but this exit gate's own "an operator can check against an independent source" clause
 is satisfied by the data being real and checkable, not by someone having actually checked it yet.
 
-**S38i is not part of this bar** — it is a read-only view over data S38a-h's own exit gate
-already established as real, not a new push/pull path of its own. Its own "done" is simpler and
-stated in its own §12 entry: offline-tested, not yet copied to `dgx-spark`/restarted/confirmed in
-a browser, and not yet committed.
+**S38i and S38j are not part of this bar** — both are a read-only view over data S38a-h's own
+exit gate already established as real (S38j's new history graph included — it reads the exact
+same `prices` rows `market sector`/`market ticker` already read, drawn from a new angle), not a
+new push/pull path of its own. Each one's own "done" is stated in its own §12 entry instead.
+S38i is built, live-verified on `dgx-spark`, and committed; S38j is offline-tested as of this
+revision, live verification and commit to follow the same two-stage workflow.
 
 ---
 
@@ -522,6 +551,13 @@ arises.** `/market` is a read-only view that reads `report_items`/`tag_proposals
 call through `hermes-router.py`. Call recorded per `CLAUDE.md`'s rule rather than silently
 skipped, even though the answer here is the simplest of the three S38 evaluations in this section.
 
+**Re-evaluated for S38j (2026-10-25): no model call at all, same conclusion as S38i's own
+evaluation above.** The history-graph page reads `prices` straight off `market.db` and renders a
+server-side SVG; the backfill-range rename and the new-ticker auto-backfill in
+`hermes-market-sync.py` are plain scheduling/fetch-range changes, not a role or a
+`hermes-router.py` call of any kind. No new benchmark scenario needed. Call recorded per
+`CLAUDE.md`'s rule rather than silently skipped.
+
 What this design *is* relevant to, once actually built: `FLEET_BENCHMARK_DESIGN.md` gap 8 / §6.8
 (`fleet_coder_build`) draws its corpus from exactly this shape of work — a direct operator request, a
 vendor integration or parsing pipeline built from nothing to satisfy it. S38b/S38d/S38e's eventual build
@@ -545,3 +581,4 @@ own commit to that table in the same change, not a thing done here.
 | 1.7.0 | 2026-10-25 | **S38h added: direct operator follow-up request for Market Watch to periodically check whether a ticker needs adding to frontier_llm/ai_hardware.** A sector/industry heuristic was measured first, not assumed, and ruled out: `Systems Software`/`Interactive Media & Services` matched 6/7 and 1/4 wrong real S&P 500 names. New §4 paragraph (and an explicit correction to that section's own earlier "no code change to add a tag" line): classification routes through `hermes-router.py`'s `dispatch` role instead, advisory-only, proposal-gated. New `tag_proposals` table (§5); four new `market tag approve/reject/override/pending` gate commands (§8); §12's S38h entry records the build, including a real bug this stage's own test suite caught before touching a real file (`append_tag_rule()`'s first version put the provenance comment inline, silently corrupting the parsed ticker pattern — fixed to its own comment line). §13 now notes S38h is offline-tested only (158 checks), not yet live-verified like S38a-g were. §14 re-evaluated now that `dispatch` carries a real (not hypothetical) call — still no new benchmark gap. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
 | 1.8.0 | 2026-10-25 | **S38h live-verified on `dgx-spark`, minutes after 1.7.0 was written — direct operator request to deploy it the same way as every prior sub-stage.** The real classification run is the headline result: every exact ticker §4's heuristic measurement found as a false positive (`FTNT`/`GEN`/`NOW`/`PANW`/`TWLO`/`RDDT`) was correctly cleared by `dispatch`, each with a sound, specific rationale — directly validating the decision to use an LLM instead of a sector heuristic. Zero genuine candidates were left pending (the curated lists already cover the real universe), so the approve/reject/override gate round trip was verified with two synthetic test proposals, fully cleaned up from `tags.yaml`/`tag_proposals`/`tags` afterward. One confirming finding: approving a nonsense ticker (`TESTCO`) correctly added zero rows to the real `tags` table, since `apply_tags()` found no matching real instrument — the mechanism degrades safely. The installed `hermes-market-sync.service` unit was reinstalled to `/etc/systemd/system/` with its new `hermes-router.service` dependency and run for real end to end (`Result=success`) through all four steps including `scan-tags`. §13 now reads "MET — S38a-h in full." Minor bump — a feature's live verification executed for real and its record written in, nothing prior reversed. |
 | 1.9.0 | 2026-10-25 | **S38i added, direct operator request ("add a formatted report to the Fleetops-ui"), fulfilling §9's long-deferred "browsable report history" now that S38a-h's real data exists to browse.** §9 moved `[PROPOSED]` → `[DECIDED]`: new `/market` page on `hermes-fleetops-ui.py` (now 2.6.0) with a date-picked, filterable daily-report table (re-sorted into the fixed `REPORT_SECTION_ORDER` rather than the table's own alphabetical `item_type` order) read via `hermes_market_common.read_report_items()` — the same function the email/Matrix/gate paths already render from — plus a read-only "Pending tag candidate proposals" section over S38h's `tag_proposals` table, framed the same "deciding stays a Matrix reply" way `/recommendations` already frames its own findings. No new write route. §12 gained the S38i entry (19 new offline checks, 259 total on that page's suite); §13 notes S38i is offline-tested only and not part of S38a-h's own exit-gate bar, being a read-only view over data that bar already proved real; §14 re-evaluated — no model call at all, so no benchmark-gap question even arises, the simplest of the three S38 evaluations recorded there. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
+| 1.10.0 | 2026-10-25 | **S38j added, direct operator request** ("have a 'Graph' button [on /market] that breaks out a new window... evaluate if [the] appstack is retaining enough history, preferring up to one year... allow picking a time duration, which will autoscale the time-axis"), plus the S38i correction this same edit found while touching this file's own build-sequence entry. §11 risk 4 ("Unbounded storage growth") resolved: no pruning exists anywhere in this codebase, and a direct live check of Yahoo's chart endpoint showed 10 years of daily history available — decision is to retain every row forever (trivial size at this universe scale), and the operator raised the backfill goal from the risk's original ~1-year framing to 5 years once that ceiling was confirmed. §12's S38i entry corrected from its stale "not yet live-verified or committed" (it has been, since 1.9.0 was written) and gained a note about its same-day company-name/per-section follow-up enrichment; new S38j entry records the history-graph build — `ticker_price_history()` (`hermes_market_common.py` 1.3.0), the `backfill_days`→`backfill_range` rename and new-ticker auto-backfill (`hermes-market-sync.py` 1.3.0 — Yahoo's `Nd` range token turned out to count trading days, not calendar days), and the `/market/history` page itself (`hermes-fleetops-ui.py` 2.10.0), including a real bug its own test suite caught (the ticker query parameter breaking out of `section()`'s un-escaped heading argument — the first caller to put request-controlled data there). §13 corrected to reflect S38i's real completed state and extended to exclude S38j from the exit-gate bar on the same "read-only view, no new push/pull path" grounds as S38i. §14 re-evaluated for S38j: no model call at all, same conclusion as S38i's own evaluation, call recorded per `CLAUDE.md`'s rule. Minor bump — a new, additive feature plus a factual correction to this file's own prior content, nothing restructured or reversed. |

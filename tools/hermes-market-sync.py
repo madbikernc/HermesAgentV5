@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-10-25) - Market Watch history graphs: the real backfill ceiling was checked live
+# against Yahoo's chart endpoint (NVDA, interval=1d) -- range=5y returned 1255 points spanning a
+# clean 5 calendar years, range=10y came back too (2514 points), and range=max returned a
+# suspiciously coarse 334 points so it's avoided. This also exposed that the original backfill's
+# "Nd" token counts *trading* days, not calendar days (400d gave exactly 400 points spanning
+# ~1.6 calendar years, not 400 days) -- so a calendar-year backfill goal is now expressed as
+# Yahoo's own "Ny" range token rather than a guessed day-count. sync_prices()'s `backfill_days`
+# param (and the `prices` subcommand's `--backfill-days` flag) is renamed `backfill_range`/
+# `--backfill-range` to match -- any literal Yahoo range token, not necessarily a day-count.
+# New BACKFILL_RANGE ("5y" by default). refresh_instruments() now also returns the tickers truly
+# new to `instruments` (no prior row at all); cmd_daily() backfills those immediately to
+# BACKFILL_RANGE in the same run (update_watermark=False on that call, so a supplemental backfill
+# can never stomp the main daily sync's own sync_state watermark for the same exchange) -- closes
+# the real gap found live: a ticker added to the S&P 500 after the original backfill was getting
+# no history beyond the normal 5-day catch-up window, so "keep ~N years" was never actually true
+# for it.
 #
 # 1.2.0 (2026-10-25) - S38h, direct operator request ("the market watch service should
 # periodically check to see if it needs to add stock tickers to any section, especially
@@ -64,11 +81,13 @@
 #   TAGS_PATH          as hermes_market_common.py defines it (default infra/hermes-market-sync/tags.yaml)
 #   ROUTER_URL         default http://127.0.0.1:8080 (S38h tag-scout classification)
 #   TAG_SCOUT_MODEL    default "dispatch" (S38h)
+#   BACKFILL_RANGE     default "5y" -- Yahoo range token used to backfill a ticker newly added
+#                      to `instruments` (cmd_daily() only; see 1.3.0 note above)
 #
 # Usage:
 #   hermes-market-sync.py instruments [--dry-run]
 #   hermes-market-sync.py tags [--dry-run]
-#   hermes-market-sync.py prices [--dry-run] [--only SYM1,SYM2] [--backfill-days N]
+#   hermes-market-sync.py prices [--dry-run] [--only SYM1,SYM2] [--backfill-range TOKEN]
 #   hermes-market-sync.py scan-tags [--dry-run]              # S38h -- classify, propose, notify
 #   hermes-market-sync.py daily [--dry-run]                  # what the .service runs
 import argparse
@@ -99,6 +118,7 @@ YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 EXCHANGE = "US"
 
 CATCHUP_WINDOW_DAYS = 5  # normal daily sync range per ticker
+BACKFILL_RANGE = os.environ.get("BACKFILL_RANGE", "5y")  # new-ticker first-seen backfill goal
 
 USER_AGENT = ("Mozilla/5.0 (compatible; HermesMarketWatch/1.0; "
               "+https://github.com/madbikernc/HermesAgentV5)")
@@ -247,9 +267,16 @@ def to_yahoo_symbol(ticker):
 def refresh_instruments(conn, dry_run=False):
     """Upsert by (ticker, exchange), preserving first_seen and bumping last_seen. A ticker
     dropped from the live Wikipedia table is never deleted -- its last_seen simply stops
-    advancing, so its price history stays queryable."""
+    advancing, so its price history stays queryable.
+
+    Also returns the list of tickers truly new to `instruments` (no prior row at all, checked
+    BEFORE the upsert) -- cmd_daily() uses this to backfill a new ticker's price history
+    immediately instead of leaving it to accumulate for real over the following years."""
     rows, bad = parse_sp500_wikitable(fetch_html(WIKI_URL))
     now = datetime.now(timezone.utc).date().isoformat()
+    existing = {r[0] for r in conn.execute(
+        "SELECT ticker FROM instruments WHERE exchange=?", (EXCHANGE,))}
+    new_tickers = [r["ticker"] for r in rows if r["ticker"] not in existing]
     if not dry_run:
         for r in rows:
             conn.execute("""
@@ -260,7 +287,7 @@ def refresh_instruments(conn, dry_run=False):
                     last_seen=excluded.last_seen
             """, (r["ticker"], EXCHANGE, r["name"], r["sector"], r["industry"], now, now))
         conn.commit()
-    return len(rows), bad
+    return len(rows), bad, new_tickers
 
 
 # ── tag candidate scout (S38h) ──────────────────────────────────────────────────────────────────
@@ -404,13 +431,23 @@ def _tickers_to_sync(conn, only=None):
         "SELECT ticker FROM instruments WHERE exchange=? ORDER BY ticker", (EXCHANGE,)).fetchall()]
 
 
-def sync_prices(conn, only=None, backfill_days=None, dry_run=False):
+def sync_prices(conn, only=None, backfill_range=None, dry_run=False, update_watermark=True):
     """Per-ticker try/except isolates one failure from the rest of the run. sync_state.last_error
     is set (and last_synced_date does NOT advance) whenever any ticker failed, so a bad run can
     never look identical to a clean one on the next day's retry -- the same honesty split
-    hermes-news-digest.py's own "nothing new" vs. "could not check" distinction models."""
+    hermes-news-digest.py's own "nothing new" vs. "could not check" distinction models.
+
+    `backfill_range` is a literal Yahoo chart-endpoint range token (e.g. "5y", "400d"), not
+    necessarily a day-count -- live-checked against the real endpoint: a plain "Nd" token counts
+    *trading* days, not calendar days (400d returned exactly 400 points spanning ~1.6 calendar
+    years), so a calendar-year goal is expressed with Yahoo's own "Ny" token instead of guessing
+    a trading-day multiplier.
+
+    `update_watermark=False` skips the sync_state write entirely -- for a supplemental call (e.g.
+    cmd_daily()'s new-ticker backfill) that must not stomp the main daily call's own watermark for
+    the same exchange."""
     tickers = _tickers_to_sync(conn, only)
-    rng = f"{backfill_days}d" if backfill_days else f"{CATCHUP_WINDOW_DAYS}d"
+    rng = backfill_range or f"{CATCHUP_WINDOW_DAYS}d"
     ok, failed, rows_written = 0, [], 0
 
     for ticker in tickers:
@@ -435,17 +472,18 @@ def sync_prices(conn, only=None, backfill_days=None, dry_run=False):
 
     today = datetime.now(timezone.utc).date().isoformat()
     if not dry_run:
-        if failed:
-            conn.execute("""
-                INSERT INTO sync_state (exchange, last_synced_date, last_error) VALUES (?, NULL, ?)
-                ON CONFLICT(exchange) DO UPDATE SET last_error=excluded.last_error
-            """, (EXCHANGE, f"{len(failed)}/{len(tickers)} ticker(s) failed"))
-        else:
-            conn.execute("""
-                INSERT INTO sync_state (exchange, last_synced_date, last_error) VALUES (?, ?, NULL)
-                ON CONFLICT(exchange) DO UPDATE SET
-                    last_synced_date=excluded.last_synced_date, last_error=NULL
-            """, (EXCHANGE, today))
+        if update_watermark:
+            if failed:
+                conn.execute("""
+                    INSERT INTO sync_state (exchange, last_synced_date, last_error) VALUES (?, NULL, ?)
+                    ON CONFLICT(exchange) DO UPDATE SET last_error=excluded.last_error
+                """, (EXCHANGE, f"{len(failed)}/{len(tickers)} ticker(s) failed"))
+            else:
+                conn.execute("""
+                    INSERT INTO sync_state (exchange, last_synced_date, last_error) VALUES (?, ?, NULL)
+                    ON CONFLICT(exchange) DO UPDATE SET
+                        last_synced_date=excluded.last_synced_date, last_error=NULL
+                """, (EXCHANGE, today))
         conn.commit()
     return {"ok": ok, "failed": failed, "rows_written": rows_written, "total": len(tickers)}
 
@@ -454,11 +492,11 @@ def sync_prices(conn, only=None, backfill_days=None, dry_run=False):
 
 def cmd_instruments(args):
     conn = common.connect()
-    count, bad = refresh_instruments(conn, dry_run=args.dry_run)
+    count, bad, new_tickers = refresh_instruments(conn, dry_run=args.dry_run)
     for problem in bad:
         log(f"wikitable: {problem}")
     log(f"{'[dry-run] ' if args.dry_run else ''}{count} instrument(s) refreshed from Wikipedia "
-        f"({len(bad)} row(s) skipped)")
+        f"({len(bad)} row(s) skipped, {len(new_tickers)} new: {', '.join(new_tickers) or '-'})")
     return 0
 
 
@@ -500,7 +538,7 @@ def cmd_scan_tags(args):
 def cmd_prices(args):
     conn = common.connect()
     only = [t.strip() for t in args.only.split(",")] if args.only else None
-    result = sync_prices(conn, only=only, backfill_days=args.backfill_days, dry_run=args.dry_run)
+    result = sync_prices(conn, only=only, backfill_range=args.backfill_range, dry_run=args.dry_run)
     return _report_prices_result(result, args.dry_run)
 
 
@@ -531,10 +569,10 @@ def cmd_daily(args):
     others down" discipline as every other step here."""
     conn = common.connect()
 
-    count, bad = refresh_instruments(conn, dry_run=args.dry_run)
+    count, bad, new_tickers = refresh_instruments(conn, dry_run=args.dry_run)
     for problem in bad:
         log(f"wikitable: {problem}")
-    log(f"instruments: {count} refreshed ({len(bad)} row(s) skipped)")
+    log(f"instruments: {count} refreshed ({len(bad)} row(s) skipped, {len(new_tickers)} new)")
 
     tag_count, tag_bad = common.apply_tags(conn, dry_run=args.dry_run)
     for problem in tag_bad:
@@ -543,6 +581,19 @@ def cmd_daily(args):
 
     result = sync_prices(conn, dry_run=args.dry_run)
     rc = _report_prices_result(result, args.dry_run)
+
+    if new_tickers:
+        try:
+            backfill_result = sync_prices(conn, only=new_tickers, backfill_range=BACKFILL_RANGE,
+                                           dry_run=args.dry_run, update_watermark=False)
+            log(f"new-ticker backfill ({BACKFILL_RANGE}): {', '.join(new_tickers)} -- "
+                f"{backfill_result['ok']}/{backfill_result['total']} ok, "
+                f"{backfill_result['rows_written']} row(s) written")
+            for ticker, reason in backfill_result["failed"]:
+                log(f"new-ticker backfill COULD NOT CHECK {ticker}: {reason}")
+        except Exception as exc:
+            log(f"new-ticker backfill failed, continuing (instruments/tags/prices above already "
+                f"ran): {exc}")
 
     try:
         _run_scan_tags(conn, args.dry_run)
@@ -565,7 +616,9 @@ def main():
     p = sub.add_parser("prices", help="sync daily prices from Yahoo's chart endpoint")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--only", help="comma-separated tickers, instead of the full universe")
-    p.add_argument("--backfill-days", type=int, help="pull this many days instead of the normal catch-up window")
+    p.add_argument("--backfill-range",
+                    help="a literal Yahoo chart-endpoint range token (e.g. 5y, 400d) instead of "
+                         "the normal catch-up window")
 
     p = sub.add_parser("scan-tags", help="classify the frontier_llm/ai_hardware candidate pool via the router (S38h)")
     p.add_argument("--dry-run", action="store_true")

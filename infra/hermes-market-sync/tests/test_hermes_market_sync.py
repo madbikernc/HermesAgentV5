@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-10-25) - Market Watch history graphs: refresh_instruments() now returns a 3-tuple
+# (adds the new-tickers list); sync_prices()'s backfill_days -> backfill_range rename and its new
+# update_watermark=False path; cmd_daily()'s new-ticker-backfill wiring tested directly by
+# monkeypatching refresh_instruments/sync_prices/apply_tags/_run_scan_tags, never a real network
+# call (same stated guarantee as every other check in this file).
 #
 # 1.2.0 (2026-10-25) - S38h: checks for the relocated apply_tags()/load_tags() (now
 # sync_mod.common.*, no behavior change), append_tag_rule()'s atomicity and its
@@ -169,8 +175,10 @@ def test_refresh_instruments(sync_mod):
     sync_mod.common.DB_PATH = db_path
 
     sync_mod.fetch_html = lambda url: WIKI_HTML
-    count, bad = sync_mod.refresh_instruments(sync_mod.common.connect(), dry_run=False)
+    count, bad, new_tickers = sync_mod.refresh_instruments(sync_mod.common.connect(), dry_run=False)
     check("two instruments written", count == 2, str(count))
+    check("both are reported new on a first run", sorted(new_tickers) == ["AAPL", "BRK.B"],
+          str(new_tickers))
 
     con = sqlite3.connect(db_path)
     row = con.execute("SELECT first_seen, last_seen FROM instruments WHERE ticker='AAPL'").fetchone()
@@ -186,9 +194,11 @@ def test_refresh_instruments(sync_mod):
             return real_datetime(2099, 1, 1, tzinfo=tz)
     sync_mod.datetime = _LaterDate
     try:
-        sync_mod.refresh_instruments(sync_mod.common.connect(), dry_run=False)
+        _count2, _bad2, new_tickers_2 = sync_mod.refresh_instruments(
+            sync_mod.common.connect(), dry_run=False)
     finally:
         sync_mod.datetime = real_datetime
+    check("a re-run of the same tickers reports none as new", new_tickers_2 == [], str(new_tickers_2))
 
     con = sqlite3.connect(db_path)
     row2 = con.execute("SELECT first_seen, last_seen FROM instruments WHERE ticker='AAPL'").fetchone()
@@ -439,6 +449,88 @@ def test_sync_prices_honesty_split(sync_mod):
           result4["ok"] == 2 and not result4["failed"] and result4["rows_written"] == 0, str(result4))
 
 
+def test_backfill_range_and_watermark(sync_mod):
+    print("\n[sync_prices backfill_range + update_watermark]")
+    db_path, con = new_db()
+    con.executescript(sync_mod.common.SCHEMA)
+    now = "2026-10-20"
+    con.execute(
+        "INSERT INTO instruments (ticker, exchange, name, currency, sector, industry, first_seen, last_seen) "
+        "VALUES ('NEW','US','New Co','USD','Tech','Soft',?,?)", (now, now))
+    con.commit()
+    con.close()
+    sync_mod.common.DB_PATH = db_path
+
+    seen_urls = []
+
+    def spy(url):
+        seen_urls.append(url)
+        return _yahoo_payload([1697000000, 1697086400], closes=[10.0, 11.0])
+    sync_mod.fetch_json = spy
+
+    result = sync_mod.sync_prices(sync_mod.common.connect(), only=["NEW"],
+                                   backfill_range="5y", update_watermark=False, dry_run=False)
+    check("backfill writes both fetched rows", result["rows_written"] == 2, str(result))
+    check("the literal range token reaches the real URL, not a day-count",
+          any("range=5y" in u for u in seen_urls), str(seen_urls))
+
+    con = sqlite3.connect(db_path)
+    row = con.execute("SELECT last_synced_date, last_error FROM sync_state WHERE exchange='US'").fetchone()
+    con.close()
+    check("update_watermark=False never writes sync_state", row is None, str(row))
+
+
+def test_cmd_daily_backfills_new_tickers(sync_mod):
+    print("\n[cmd_daily new-ticker backfill wiring]")
+    db_path, con = new_db()
+    con.executescript(sync_mod.common.SCHEMA)
+    con.close()
+    sync_mod.common.DB_PATH = db_path
+    calls = []
+
+    def fake_refresh_instruments(conn, dry_run=False):
+        return 2, [], ["NEWCO"]
+
+    def fake_apply_tags(conn, dry_run=False):
+        return 0, []
+
+    def fake_sync_prices(conn, only=None, backfill_range=None, dry_run=False, update_watermark=True):
+        calls.append({"only": only, "backfill_range": backfill_range, "update_watermark": update_watermark})
+        return {"ok": len(only) if only else 0, "failed": [], "rows_written": 0, "total": len(only) if only else 0}
+
+    def fake_run_scan_tags(conn, dry_run):
+        return []
+
+    real_refresh = sync_mod.refresh_instruments
+    real_apply_tags = sync_mod.common.apply_tags
+    real_sync_prices = sync_mod.sync_prices
+    real_scan_tags = sync_mod._run_scan_tags
+    sync_mod.refresh_instruments = fake_refresh_instruments
+    sync_mod.common.apply_tags = fake_apply_tags
+    sync_mod.sync_prices = fake_sync_prices
+    sync_mod._run_scan_tags = fake_run_scan_tags
+    try:
+        class _Args:
+            dry_run = False
+        sync_mod.cmd_daily(_Args())
+    finally:
+        sync_mod.refresh_instruments = real_refresh
+        sync_mod.common.apply_tags = real_apply_tags
+        sync_mod.sync_prices = real_sync_prices
+        sync_mod._run_scan_tags = real_scan_tags
+
+    check("sync_prices is called exactly twice (main catch-up, then the new-ticker backfill)",
+          len(calls) == 2, str(calls))
+    check("the main call uses the normal catch-up window (no backfill_range)",
+          calls[0]["backfill_range"] is None, str(calls))
+    check("the backfill call targets only the new ticker",
+          calls[1]["only"] == ["NEWCO"], str(calls))
+    check("the backfill call uses BACKFILL_RANGE",
+          calls[1]["backfill_range"] == sync_mod.BACKFILL_RANGE, str(calls))
+    check("the backfill call never touches the main watermark",
+          calls[1]["update_watermark"] is False, str(calls))
+
+
 def test_gate_regexes(gate_mod):
     print("\n[hermes-market-gate.py command grammar]")
     check("'market report' matches REPORT_RE", bool(gate_mod.REPORT_RE.match("market report")))
@@ -612,6 +704,8 @@ def main():
     test_append_tag_rule(sync_mod)
     test_tag_scout(sync_mod)
     test_sync_prices_honesty_split(sync_mod)
+    test_backfill_range_and_watermark(sync_mod)
+    test_cmd_daily_backfills_new_tickers(sync_mod)
     test_gate_regexes(gate_mod)
     test_gate_handlers(gate_mod)
     test_gate_tag_commands(gate_mod)
