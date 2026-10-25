@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-25) - S38h, direct operator request ("the market watch service should
+# periodically check to see if it needs to add stock tickers to any section, especially
+# frontier_llm and ai_hardware"). `TAGS_PATH`/`VALID_MATCH_TYPES`/`load_tags()`/`apply_tags()`
+# relocated here from hermes-market-sync.py 1.1.0 (unchanged behavior) -- hermes-market-gate.py
+# needs to call apply_tags() immediately after a human approves a tag proposal, and hyphenated
+# tool files can't import each other directly in this codebase, so shared logic belongs in this
+# module regardless of which tool wrote it first. New: the `tag_proposals` table, a 2-line
+# sanitize_llm_input() copied from hermes_rag_common.py's own implementation (not imported --
+# that module needs the RAG venv's sqlite_vec extension, unavailable under /usr/bin/python3),
+# append_tag_rule() (atomic tempfile-then-rename line append to tags.yaml), and tag_scout_pool()
+# (the candidate universe hermes-market-sync.py's new LLM classification step reads).
 #
 # 1.1.0 (2026-10-24) - S38g, direct operator request: "special attention" and a dedicated report
 # section for AI-specific hardware tickers (NVDA and similar) and frontier-LLM-developer tickers.
@@ -30,10 +42,16 @@ run, and two rules can legitimately map the same ticker to the same tag.
 import os
 import sqlite3
 import urllib.parse
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("MARKET_DB", "/mnt/hermes-data/market/market.db"))
+
+TOOLS_DIR = Path(__file__).resolve().parent
+REPO_DIR = TOOLS_DIR.parent
+TAGS_PATH = Path(os.environ.get(
+    "TAGS_PATH", str(REPO_DIR / "infra" / "hermes-market-sync" / "tags.yaml")))
+VALID_MATCH_TYPES = {"sector", "ticker", "keyword"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS instruments (
@@ -83,6 +101,16 @@ CREATE TABLE IF NOT EXISTS report_items (
     PRIMARY KEY (report_date, category, item_type, rank)
 );
 CREATE INDEX IF NOT EXISTS idx_report_items_date ON report_items(report_date);
+CREATE TABLE IF NOT EXISTS tag_proposals (
+    ticker         TEXT NOT NULL,
+    exchange       TEXT NOT NULL,
+    candidate_tag  TEXT NOT NULL,
+    rationale      TEXT NOT NULL,
+    state          TEXT NOT NULL,
+    proposed_at    TEXT NOT NULL,
+    decided_at     TEXT,
+    PRIMARY KEY (ticker, exchange)
+);
 """
 
 # A "sector"/"tag" average over fewer real data points than this is noise, not a trend.
@@ -211,6 +239,127 @@ def tag_members(conn, exchange="US"):
     ).fetchall():
         out.setdefault(tag, []).append(ticker)
     return out
+
+
+def load_tags(path=None):
+    """`tag | match_type | pattern` per line, # comments and blanks ignored. No YAML is parsed --
+    same precedent as feeds.yaml/topics.yaml. A malformed line or unknown match_type is reported
+    and skipped, never fatal. Relocated here from hermes-market-sync.py 1.1.0 (S38h) so
+    hermes-market-gate.py can call apply_tags() immediately after a tag-proposal approval."""
+    path = Path(path or TAGS_PATH)
+    rules, bad = [], []
+    if not path.is_file():
+        return rules, [f"{path} does not exist"]
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 3 or not all(parts):
+            bad.append(f"line {lineno}: expected 'tag | match_type | pattern', got {raw!r}")
+            continue
+        tag, match_type, pattern = parts
+        if match_type not in VALID_MATCH_TYPES:
+            bad.append(f"line {lineno}: match_type must be one of "
+                       f"{sorted(VALID_MATCH_TYPES)}, got {match_type!r}")
+            continue
+        rules.append((tag, match_type, pattern))
+    return rules, bad
+
+
+def apply_tags(conn, dry_run=False):
+    """Wipes and rebuilds the whole `tags` table from tags.yaml every run -- it is re-derived
+    config, never hand-edited per row (MARKET_WATCH_DESIGN.md §5)."""
+    rules, bad = load_tags()
+    pairs = set()
+    for tag, match_type, pattern in rules:
+        if match_type == "ticker":
+            found = conn.execute(
+                "SELECT ticker, exchange FROM instruments WHERE ticker=?", (pattern,)).fetchall()
+        elif match_type == "sector":
+            found = conn.execute("""
+                SELECT ticker, exchange FROM instruments
+                WHERE sector = ? COLLATE NOCASE OR industry = ? COLLATE NOCASE
+            """, (pattern, pattern)).fetchall()
+        else:  # keyword
+            found = conn.execute("""
+                SELECT ticker, exchange FROM instruments
+                WHERE lower(name || ' ' || coalesce(sector,'') || ' ' || coalesce(industry,'')) LIKE ?
+            """, (f"%{pattern.lower()}%",)).fetchall()
+        for ticker, exchange in found:
+            pairs.add((ticker, exchange, tag))
+    if not dry_run:
+        conn.execute("DELETE FROM tags")
+        conn.executemany("INSERT OR IGNORE INTO tags (ticker, exchange, tag) VALUES (?,?,?)", pairs)
+        conn.commit()
+    return len(pairs), bad
+
+
+def sanitize_llm_input(s, max_len=4000):
+    """Copied verbatim from hermes_rag_common.py's own implementation rather than imported --
+    that module requires the RAG venv's sqlite_vec extension at import time, unavailable under
+    /usr/bin/python3 (what hermes-market-sync.py runs under). Strips non-printables, truncates.
+    Every real LLM-call site in this fleet runs even trivial-looking input through this first;
+    a ticker/company-name scrape is no exception."""
+    s = "".join(ch if ch.isprintable() or ch == "\n" else " " for ch in s)
+    return s[:max_len]
+
+
+def append_tag_rule(tag, ticker, path=None):
+    """Appends one `tag | ticker | SYMBOL` line to tags.yaml, atomically (write to a .tmp file,
+    then Path.replace() onto the real path -- the same atomicity
+    hermes-rag-discovery-portal.py's own topics.yaml editor uses for a full-content replace,
+    adapted here to an append since the gate only ever adds one line at a time). Never raises;
+    returns (True, None) on success or (False, error_str) on failure, so a filesystem problem
+    becomes a clear gate reply instead of crashing the poll loop.
+
+    The provenance note goes on its OWN comment line above the rule, never appended inline after
+    the rule on the same line -- load_tags()'s parser only recognizes a comment as a whole line
+    starting with '#' (same as feeds.yaml/topics.yaml's parsers); an earlier version of this
+    function put the note inline and it silently broke the ticker match, since the trailing
+    "# added via..." text became part of the parsed pattern string instead of being stripped.
+    Caught by this module's own test before it ever reached a real tags.yaml."""
+    path = Path(path or TAGS_PATH)
+    try:
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+        if current and not current.endswith("\n"):
+            current += "\n"
+        today = datetime.now(timezone.utc).date().isoformat()
+        new_lines = f"# added via FleetOps gate approval, {today}\n{tag} | ticker | {ticker}\n"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(current + new_lines, encoding="utf-8")
+        tmp.replace(path)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+# S38h: the three sectors every current frontier_llm/ai_hardware member actually lives in.
+# Narrower than "Information Technology" alone (which would also sweep in e.g. payment
+# processors and industrial conglomerates) but wide enough to catch a real new candidate in
+# either tag without needing a precise heuristic -- the LLM call does the real narrowing.
+TAG_SCOUT_SECTORS = ("Information Technology", "Communication Services", "Consumer Discretionary")
+TAG_SCOUT_TAGS = ("frontier_llm", "ai_hardware")
+
+
+def tag_scout_pool(conn, exchange="US"):
+    """[(ticker, name, sector, industry), ...] -- every instrument in a plausible sector that is
+    not already in frontier_llm/ai_hardware and has never been classified before (any state in
+    tag_proposals, including 'cleared' for an earlier 'neither' verdict). This is what makes the
+    dedup correct: without excluding 'cleared' tickers too, the same ~150-200-ticker pool would
+    be re-classified, and re-burn router calls, every single day forever."""
+    already_classified = {r[0] for r in conn.execute(
+        "SELECT ticker FROM tag_proposals WHERE exchange=?", (exchange,))}
+    curated = {r[0] for r in conn.execute(
+        "SELECT ticker FROM tags WHERE exchange=? AND tag IN (?,?)",
+        (exchange, *TAG_SCOUT_TAGS))}
+    placeholders = ",".join("?" * len(TAG_SCOUT_SECTORS))
+    rows = conn.execute(f"""
+        SELECT ticker, name, sector, industry FROM instruments
+        WHERE exchange=? AND sector IN ({placeholders})
+        ORDER BY ticker
+    """, (exchange, *TAG_SCOUT_SECTORS)).fetchall()
+    return [(t, n, s, i) for t, n, s, i in rows if t not in already_classified and t not in curated]
 
 
 def top_n(pct_by_ticker, n, direction):

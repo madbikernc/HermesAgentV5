@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-10-25) - S38h: four new commands -- `market tag approve/reject/override <TICKER>`
+# and `market tag pending` -- the human approval gate for hermes-market-sync.py's new tag-scout
+# (direct operator request: Market Watch should periodically check whether a stock ticker needs
+# adding to frontier_llm/ai_hardware; a sector heuristic measured too imprecise, so classification
+# runs through an LLM instead, advisory only). `approve` is the first command in this gate that
+# opens a WRITE connection to market.db and the first that touches the filesystem outside it --
+# both deliberate and narrow: it calls hermes_market_common.append_tag_rule() (atomic
+# tempfile-then-rename append to tags.yaml) and then hermes_market_common.apply_tags() so the
+# approval takes effect immediately, without waiting for tomorrow's sync. `reject`/`override`
+# mirror hermes-model-scout-gate.py's own reject-is-permanent-until-override semantics exactly.
 #
 # hermes-market-gate — S38e. On-demand FleetOps Matrix commands for Firmament Market Watch
 # (MARKET_WATCH_DESIGN.md §8). Shape copied directly from hermes-model-scout-gate.py: an infinite
@@ -42,6 +53,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
@@ -66,6 +78,10 @@ SECTOR_RE = re.compile(r"^\s*market\s+sector\s+(.+?)\s*$", re.IGNORECASE)
 MOVERS_RE = re.compile(r"^\s*market\s+movers\s+(up|down)\s*$", re.IGNORECASE)
 TREND30_RE = re.compile(r"^\s*market\s+trend30\s+(up|down)\s*$", re.IGNORECASE)
 TICKER_RE = re.compile(r"^\s*market\s+ticker\s+(\S+)\s*$", re.IGNORECASE)
+TAG_PENDING_RE = re.compile(r"^\s*market\s+tag\s+pending\s*$", re.IGNORECASE)
+TAG_APPROVE_RE = re.compile(r"^\s*market\s+tag\s+approve\s+(\S+)\s*$", re.IGNORECASE)
+TAG_REJECT_RE = re.compile(r"^\s*market\s+tag\s+reject\s+(\S+)\s*$", re.IGNORECASE)
+TAG_OVERRIDE_RE = re.compile(r"^\s*market\s+tag\s+override\s+(\S+)\s*$", re.IGNORECASE)
 
 
 def log(msg):
@@ -188,6 +204,75 @@ def handle_ticker(sym):
     return "[market] " + " ".join(bits)
 
 
+# ── tag-scout approval gate (S38h) ──────────────────────────────────────────────────────────────
+
+def handle_tag_pending():
+    conn = common.connect(readonly=True)
+    rows = conn.execute("SELECT ticker, candidate_tag, rationale FROM tag_proposals "
+                         "WHERE exchange='US' AND state='proposed' ORDER BY ticker").fetchall()
+    if not rows:
+        return "[market] No pending tag proposals."
+    lines = [f"{t} -> {tag}: \"{r}\"" for t, tag, r in rows]
+    return "[market] Pending tag proposals:\n" + "\n".join(lines)
+
+
+def handle_tag_approve(ticker):
+    ticker = ticker.upper()
+    # First handler in this gate that opens a WRITE connection, and the first that touches the
+    # filesystem outside market.db -- see header note.
+    conn = common.connect(readonly=False)
+    row = conn.execute("SELECT candidate_tag, state FROM tag_proposals WHERE ticker=? AND exchange='US'",
+                        (ticker,)).fetchone()
+    if not row:
+        return f"[market] No tag proposal on file for {ticker!r}."
+    tag, state = row
+    if state != "proposed":
+        return f"[market] {ticker}'s proposal ({tag}) is already {state!r} -- ignoring."
+    ok, err = common.append_tag_rule(tag, ticker)
+    if not ok:
+        return f"[market] Could not write tags.yaml for {ticker}: {err}. Still pending -- try again."
+    conn.execute("UPDATE tag_proposals SET state='approved', decided_at=? WHERE ticker=? AND exchange='US'",
+                 (datetime.now(timezone.utc).isoformat(), ticker))
+    conn.commit()
+    count, _bad = common.apply_tags(conn)  # re-apply immediately, no waiting for tomorrow's sync
+    return (f"[market] Approved: {ticker} added to {tag} in tags.yaml and applied immediately "
+            f"({count} pair(s) total).")
+
+
+def handle_tag_reject(ticker):
+    ticker = ticker.upper()
+    conn = common.connect(readonly=False)
+    row = conn.execute("SELECT candidate_tag, state FROM tag_proposals WHERE ticker=? AND exchange='US'",
+                        (ticker,)).fetchone()
+    if not row:
+        return f"[market] No tag proposal on file for {ticker!r}."
+    tag, state = row
+    if state != "proposed":
+        return f"[market] {ticker}'s proposal ({tag}) is already {state!r} -- ignoring."
+    conn.execute("UPDATE tag_proposals SET state='rejected', decided_at=? WHERE ticker=? AND exchange='US'",
+                 (datetime.now(timezone.utc).isoformat(), ticker))
+    conn.commit()
+    return (f"[market] {ticker} rejected as {tag}, permanently -- it will never be re-proposed. "
+            f"The only way back is \"market tag override {ticker}\".")
+
+
+def handle_tag_override(ticker):
+    ticker = ticker.upper()
+    conn = common.connect(readonly=False)
+    row = conn.execute("SELECT candidate_tag, state FROM tag_proposals WHERE ticker=? AND exchange='US'",
+                        (ticker,)).fetchone()
+    if not row:
+        return f"[market] No tag proposal on file for {ticker!r}."
+    tag, state = row
+    if state != "rejected":
+        return f"[market] {ticker}'s proposal ({tag}) is {state!r}, not rejected -- nothing to override."
+    conn.execute("UPDATE tag_proposals SET state='proposed', decided_at=NULL WHERE ticker=? AND exchange='US'",
+                 (ticker,))
+    conn.commit()
+    return (f"[market] {ticker} un-rejected and back to proposed ({tag}), on an explicit reply. "
+            f"Reply \"market tag approve {ticker}\" to apply it.")
+
+
 DISPATCH_ORDER = [
     (REPORT_RE, lambda m: handle_report()),
     (SECTOR_LIST_RE, lambda m: handle_sector_list()),
@@ -195,6 +280,10 @@ DISPATCH_ORDER = [
     (MOVERS_RE, lambda m: handle_movers(m.group(1).lower())),
     (TREND30_RE, lambda m: handle_trend30(m.group(1).lower())),
     (TICKER_RE, lambda m: handle_ticker(m.group(1))),
+    (TAG_PENDING_RE, lambda m: handle_tag_pending()),
+    (TAG_APPROVE_RE, lambda m: handle_tag_approve(m.group(1))),
+    (TAG_REJECT_RE, lambda m: handle_tag_reject(m.group(1))),
+    (TAG_OVERRIDE_RE, lambda m: handle_tag_override(m.group(1))),
 ]
 
 
@@ -289,7 +378,8 @@ def main():
         sys.exit("no FleetOps Matrix credentials available (set FLEETOPS_MATRIX_TOKEN/"
                  "FLEETOPS_ROOM, or ensure vault item matrix-fleetops is reachable)")
     log("watching FleetOps for \"market report|sector <name>|sector list|movers up/down|"
-        f"trend30 up/down|ticker <SYMBOL>\", polling every {POLL_SECONDS}s")
+        "trend30 up/down|ticker <SYMBOL>|tag pending|tag approve/reject/override <TICKER>\", "
+        f"polling every {POLL_SECONDS}s")
     state = load_state()
     while True:
         try:

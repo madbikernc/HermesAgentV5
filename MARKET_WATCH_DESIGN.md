@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.6.0
+**Version:** 1.8.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -125,6 +125,30 @@ the real S&P 500 constituents table before being written down, same discipline �
 whole design: `TSM` and `ARM` are real AI-silicon names but are **not** S&P 500 members, so they were left
 off rather than added as rules that would silently match nothing.
 
+**`[DECIDED]` S38h, direct operator follow-up request — Market Watch should periodically check whether
+a ticker needs adding to `frontier_llm`/`ai_hardware`.** Six of the eight tags already self-maintain:
+`apply_tags()` re-evaluates every sector/keyword rule against the full universe on every sync, so a new
+S&P 500 entrant matching, say, `sector | Energy` is picked up automatically. The two curated watchlists
+above have no such mechanism by design. A sector/industry heuristic was measured, not assumed, before
+building anything: the only two GICS industries plausible for a frontier-LLM developer —
+`Systems Software` and `Interactive Media & Services` — matched 6/7 and 1/4 **wrong** real S&P 500 names
+(`CRWD`/`FTNT`/`GEN`/`NOW`/`PANW`/`TWLO`; `RDDT`) against the real live universe. Too imprecise to drive
+an automatic addition, so classification instead routes through `hermes-router.py`'s `dispatch` role: a
+bounded candidate pool (every US instrument in Information Technology/Communication Services/Consumer
+Discretionary not already curated or previously classified) is batch-classified (15 tickers/call, plain
+stdlib `urllib`, the same shape `hermes-model-scout.py`'s own advisory `narrative()` call uses — not
+`hermes_rag_common.router_chat()`, which needs the RAG venv) as `frontier_llm`/`ai_hardware`/`neither`.
+**Every verdict is advisory and only ever proposed, never auto-applied** — written to a new
+`tag_proposals` table (§5) and, for a real `frontier_llm`/`ai_hardware` verdict, posted to FleetOps.
+A human approves or rejects via the Matrix gate (§8); only an explicit `market tag approve <TICKER>`
+reply causes `hermes-market-gate.py` to append the real line to `tags.yaml` (atomically) and re-apply
+immediately. A `neither` verdict is recorded too (so the pool shrinks to near-zero after the one-time
+catch-up instead of re-classifying the same ~150-200 tickers forever) but needs no human action.
+
+**Correction to this section's own earlier text:** "no code change to add or remove a tag" (above) is no
+longer true for exactly these two tags, and only on an explicit human approval of an LLM-proposed
+candidate — never silently, never unattended. `tags.yaml`'s own header carries the same correction.
+
 ---
 
 ## 5. Storage `[PROPOSED]`
@@ -142,6 +166,10 @@ prices(ticker, exchange, date, open, high, low, close, adj_close, volume,
 sync_state(exchange, last_synced_date)                        -- per-exchange watermark; a non-trading day is "nothing new," not an error
 report_items(report_date, category, item_type, rank, ticker_or_group, metric_value, text,
              UNIQUE(report_date, category, item_type, rank))  -- one row per report line, the same reshape S27c proved for highlight tables; a future browsable report page (§9) and the Matrix gate (§8) both read this
+tag_proposals(ticker, exchange, candidate_tag, rationale, state, proposed_at, decided_at,
+              UNIQUE(ticker, exchange))  -- S38h: one row per ticker ever classified by the tag-scout. state is
+                                         -- 'proposed' (awaiting a human reply), 'approved', 'rejected', or
+                                         -- 'cleared' (verdict was 'neither' -- no human action, never re-classified)
 ```
 
 **`[RISK]` Percentage change, not raw price delta, is the metric for every cross-company/cross-exchange
@@ -225,11 +253,18 @@ never trust the chat message alone" rule as both precedents:
 | `market trend30 up` / `market trend30 down` | 30-day leaders / laggards. |
 | `market ticker <SYMBOL>` | One instrument's recent price and trend. |
 | `market sector list` | post the available sector names. |
+| `market tag pending` | S38h: list every tag-scout proposal awaiting a human reply. |
+| `market tag approve <TICKER>` | S38h: apply a proposed tag — appends to `tags.yaml`, re-applies immediately. |
+| `market tag reject <TICKER>` | S38h: reject a proposed tag, permanently (until `override`). |
+| `market tag override <TICKER>` | S38h: the only way back from `rejected`, same semantics as `hermes-model-scout-gate.py`'s own `override`. |
 
 Every reply is read back from `report_items`/`prices` directly — nothing here calls a model, so there is
 no screening-ordering question for this half of the stage (contrast S20a/S25/S26, which ingest open-
 internet free text and do carry one). An unknown command, unknown ticker, or unknown sector is a named
 error, not silence — the same discipline the two existing gates already apply to an unrecognized `<id>`.
+The four `market tag ...` commands are the one exception to "nothing here calls a model": they act on a
+verdict `hermes-market-sync.py`'s tag-scout already computed and logged (§4/§7's own screened,
+advisory-only call) — the gate itself still calls no model and makes no judgment of its own.
 
 ---
 
@@ -357,10 +392,50 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
   frontier_llm`/`market sector ai_hardware`/`market ticker NVDA` were each posted into the real
   room and their replies read back from the room itself — the existing gate handlers needed no
   code change to pick up the two new tags.
+- **S38h** — **Built 2026-10-25, direct operator follow-up request** ("the market watch service
+  should periodically check to see if it needs to add stock tickers to any section, especially
+  frontier_llm and ai_hardware"). A sector heuristic was measured first (§4) and ruled out as too
+  imprecise (75-86% false positives on the only two plausible GICS industries). New
+  `tag_proposals` table (§5); `hermes_market_common.py` 1.2.0 gains `append_tag_rule()` (atomic
+  tempfile-then-rename line append), `sanitize_llm_input()` (copied, not imported, from
+  `hermes_rag_common.py` — that module needs the RAG venv), `tag_scout_pool()`, and the relocated
+  `TAGS_PATH`/`load_tags()`/`apply_tags()` (moved from `hermes-market-sync.py` so
+  `hermes-market-gate.py` can call `apply_tags()` immediately after an approval — hyphenated tool
+  files can't import each other directly here). `hermes-market-sync.py` 1.2.0 gains the new
+  `scan-tags` subcommand (folded into `daily`): batches the candidate pool through
+  `hermes-router.py`'s `dispatch` role (plain stdlib, the same shape `hermes-model-scout.py`'s own
+  advisory call uses), records every verdict including `neither` (so the pool self-shrinks), and
+  posts proposals to FleetOps. `hermes-market-gate.py` 1.1.0 gains `market tag
+  approve/reject/override/pending` (§8) — `approve` is the first command in this gate that opens
+  a write connection or touches the filesystem outside `market.db`, both deliberate and narrow.
+  One real bug caught by this stage's own test suite before it ever touched a real file: the
+  first version of `append_tag_rule()` put the provenance note inline on the same line as the
+  rule, which silently corrupted the parsed ticker pattern (`load_tags()`'s parser only
+  recognizes a whole-line comment) — fixed to put the note on its own comment line above the
+  rule. 29 new offline checks (158 total across both suites).
+  Live, on `dgx-spark`, 2026-10-25: the real candidate pool (131 tickers across Information
+  Technology/Communication Services/Consumer Discretionary) was classified for real through
+  `dispatch`. **The real result directly validates the whole premise of this stage**: every one
+  of the exact tickers §4's heuristic measurement found as false positives (`FTNT`/`GEN`/`NOW`/
+  `PANW`/`TWLO`/`RDDT`) was correctly cleared by the LLM, each with a specific, sound rationale
+  (e.g. "CrowdStrike is a cybersecurity software company, not involved in frontier AI model
+  development or primary AI hardware manufacturing") — the sector heuristic would have gotten
+  every one of them wrong. Zero genuine candidates remained pending after this run (the curated
+  lists already cover the real universe), so the approve/reject/override gate commands were
+  verified with two clearly-marked synthetic test proposals instead of a real one — posted,
+  actioned, and read back from the real FleetOps room, then fully removed from `tags.yaml`/
+  `tag_proposals`/`tags` afterward so no test data was left in production. One real finding along
+  the way: `TESTCO`'s approval correctly added zero rows to the real `tags` table, since
+  `apply_tags()`'s ticker match found no real instrument named `TESTCO` — confirming the
+  mechanism is safe against a nonsense ticker, not just a real one. The installed
+  `hermes-market-sync.service` unit (reinstalled to `/etc/systemd/system/` with its new
+  `hermes-router.service` dependency, `daemon-reload`d) was run for real end to end
+  (`Result=success`) through all four steps including `scan-tags`, confirming "a wrapper that
+  works by hand and a unit that works are not the same claim" held for this stage too.
 
 ---
 
-## 13. Exit gate — **MET, 2026-10-24 — S38a-g in full**
+## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full**
 
 A real daily email **and** Matrix post landing on a real trading day, citing real sector movement and
 real movers an operator can check against an independent source; and a real `market <command>` round trip
@@ -390,6 +465,13 @@ deferred narrative "why" line (§7), routed through `dispatch` like S20b's advis
 already has coverage (`FLEET_BENCHMARK_DESIGN.md` §2's role-fitness bake-off, Tier 0 general capability),
 so even building that later opens no new gap.
 
+**Re-evaluated for S38h (2026-10-25), now that a `dispatch` call is real rather than hypothetical.**
+The tag-scout's classification call (§4) is the same shape and the same role as the narrative-commentary
+path above — one more one-off advisory judgment through `dispatch`'s existing Tier 0 general-capability
+coverage, never the source of a fact that ships un-reviewed (every verdict stays `proposed` until a
+human approves it). No new benchmark scenario needed here either; the conclusion above still holds, now
+against a real call instead of a deferred one.
+
 What this design *is* relevant to, once actually built: `FLEET_BENCHMARK_DESIGN.md` gap 8 / §6.8
 (`fleet_coder_build`) draws its corpus from exactly this shape of work — a direct operator request, a
 vendor integration or parsing pipeline built from nothing to satisfy it. S38b/S38d/S38e's eventual build
@@ -410,3 +492,5 @@ own commit to that table in the same change, not a thing done here.
 | 1.4.0 | 2026-10-24 | **§13's exit gate MET, live, minutes after 1.3.0 was written — the operator corrected this session's own "no fleet access" assumption.** Files copied directly onto `dgx-spark`'s existing checkout (not committed/pushed — no git action was requested this session) and run for real: Wikipedia pull (503 instruments), `to_yahoo_symbol()` confirmed against real `BRK.B`/`BF.B`, a full 400-day/503-ticker backfill (200,063 rows, zero failures), `tags.yaml` applied (315 pairs), the real report delivered and its Matrix notice read back from the room's own event stream, all three systemd units installed and run for real (`Result=success`/`active (running)`, not just by hand), and a full gate round trip — every command shape and both refusal paths posted into the real FleetOps room and every reply read back from the room itself. §12's S38f entry and §13 both rewritten from "not done" to the real result. Minor bump — a stage's live verification executed and its real record written in, nothing prior reversed. |
 | 1.5.0 | 2026-10-24 | **S38g added: direct operator request for "special attention" and a dedicated report section for AI-specific-hardware and frontier-LLM-developer tickers.** New §4 paragraph: two ticker-curated (not sector/keyword) watchlists, `frontier_llm` (`GOOGL`/`GOOG`/`META`/`MSFT`/`AMZN` — the S&P 500's own in-house frontier-model developers; OpenAI/Anthropic/xAI have no ticker) and `ai_hardware` (`NVDA`/`AMD`/`AVGO`/`MU`/`INTC`/`MRVL`/`ANET` — AI-specific silicon/memory/networking, not general IT hardware resellers), checked against the real S&P 500 constituents table before being written down (`TSM`/`ARM` are real AI-silicon names but not S&P 500 members, deliberately left off). §7 gains a dedicated "Frontier LLM Watch"/"AI Hardware Watch" section naming every member individually with its own daily and 30-day move. §12's S38g entry records the build; §13 now notes this one piece is offline-tested only, not yet live-verified like S38a-f were. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
 | 1.6.0 | 2026-10-24 | **S38g live-verified on `dgx-spark`, minutes after 1.5.0 was written — direct operator request to deploy it the same way as S38a-f.** `tags.yaml` re-applied against the real `instruments` table: all 7 `ai_hardware` tickers and all 5 `frontier_llm` tickers (both `GOOG`/`GOOGL` share classes) matched. A real report run rendered both dedicated sections with real per-ticker numbers and delivered a real "AI watch: MU rose 2.46% today." Matrix line, confirmed via the room's own event stream, through the actual `hermes-market-report.service` unit (`Result=success`). `market sector frontier_llm`/`market sector ai_hardware`/`market ticker NVDA` posted into the real room and their replies read back from it — the existing gate handlers needed zero code changes to serve the two new tags, confirming the design's own "the gate re-reads whatever's in the DB" principle held for a feature added after the gate was built. §13 now reads "MET — S38a-g in full." Minor bump — a feature's live verification executed and its real record written in, nothing prior reversed. |
+| 1.7.0 | 2026-10-25 | **S38h added: direct operator follow-up request for Market Watch to periodically check whether a ticker needs adding to frontier_llm/ai_hardware.** A sector/industry heuristic was measured first, not assumed, and ruled out: `Systems Software`/`Interactive Media & Services` matched 6/7 and 1/4 wrong real S&P 500 names. New §4 paragraph (and an explicit correction to that section's own earlier "no code change to add a tag" line): classification routes through `hermes-router.py`'s `dispatch` role instead, advisory-only, proposal-gated. New `tag_proposals` table (§5); four new `market tag approve/reject/override/pending` gate commands (§8); §12's S38h entry records the build, including a real bug this stage's own test suite caught before touching a real file (`append_tag_rule()`'s first version put the provenance comment inline, silently corrupting the parsed ticker pattern — fixed to its own comment line). §13 now notes S38h is offline-tested only (158 checks), not yet live-verified like S38a-g were. §14 re-evaluated now that `dispatch` carries a real (not hypothetical) call — still no new benchmark gap. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
+| 1.8.0 | 2026-10-25 | **S38h live-verified on `dgx-spark`, minutes after 1.7.0 was written — direct operator request to deploy it the same way as every prior sub-stage.** The real classification run is the headline result: every exact ticker §4's heuristic measurement found as a false positive (`FTNT`/`GEN`/`NOW`/`PANW`/`TWLO`/`RDDT`) was correctly cleared by `dispatch`, each with a sound, specific rationale — directly validating the decision to use an LLM instead of a sector heuristic. Zero genuine candidates were left pending (the curated lists already cover the real universe), so the approve/reject/override gate round trip was verified with two synthetic test proposals, fully cleaned up from `tags.yaml`/`tag_proposals`/`tags` afterward. One confirming finding: approving a nonsense ticker (`TESTCO`) correctly added zero rows to the real `tags` table, since `apply_tags()` found no matching real instrument — the mechanism degrades safely. The installed `hermes-market-sync.service` unit was reinstalled to `/etc/systemd/system/` with its new `hermes-router.service` dependency and run for real end to end (`Result=success`) through all four steps including `scan-tags`. §13 now reads "MET — S38a-h in full." Minor bump — a feature's live verification executed for real and its record written in, nothing prior reversed. |

@@ -1,8 +1,18 @@
 # S38c Market Watch thematic tags — one rule per line: `tag | match_type | pattern`.
 #
-# Boss-edited directly, like feeds.yaml/topics.yaml. hermes-market-sync.py's `tags` pass reads
-# this file verbatim on every run and rebuilds the `tags` table from it in full — no NLP, no LLM
-# judgment. Blank lines and lines starting with # are ignored.
+# Boss-edited directly, like feeds.yaml/topics.yaml, for every tag except the two named below.
+# hermes-market-sync.py's `tags` pass reads this file verbatim on every run and rebuilds the
+# `tags` table from it in full. Blank lines and lines starting with # are ignored.
+#
+# Correction, S38h: `frontier_llm`/`ai_hardware` lines may ALSO be appended by
+# hermes-market-gate.py, on an explicit human reply ("market tag approve <TICKER>") to an
+# LLM-classified candidate hermes-market-sync.py's tag-scout proposed — never silently, and never
+# without that reply. Every machine-appended line is preceded by its own
+# `# added via FleetOps gate approval, <date>` comment line (never an inline trailing comment —
+# load_tags()'s parser only recognizes a comment as a whole line, so an inline one would have
+# silently broken the rule's own ticker match), so a human reading this file can tell
+# machine-appended lines from hand-authored ones at a glance. Every other tag stays exactly
+# "no NLP, no LLM judgment," as this paragraph originally said in full.
 #
 # Despite the .yaml extension, this is NOT real YAML — flat delimited text, same precedent as
 # feeds.yaml/topics.yaml, so no PyYAML dependency anywhere in this repo. This file also carries
