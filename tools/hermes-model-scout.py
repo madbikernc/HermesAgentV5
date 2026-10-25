@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-10-25) — direct operator request: every proposed candidate is now stamped with
+# `recommended`/`recommended_reason` from hermes_benchmark_common.is_promising() (new in bc
+# 1.4.0), the same deterministic "worth a benchmark run" verdict hermes-fleetops-ui.py's backlog
+# page now surfaces under "Recommended for benchmarking" -- this is what makes that list grow on
+# its own with every daily run, rather than needing a human to notice. offer_text() names it in
+# the Matrix offer too, so a promising candidate stands out there as well, not only in the UI.
 #
 # 1.3.0 (2026-10-18) — S40 Layer 3: publisher_claim() now calls
 # hermes_egress_guard.check_destination() before reaching huggingface.co, same as every other
@@ -619,6 +626,10 @@ def narrative(records):
 
 def offer_text(task_id, rec):
     inc = rec.get("incumbent") or {}
+    recommended = (
+        f"  ⭐ recommended for benchmarking: {rec['recommended_reason']}\n"
+        if rec.get("recommended") else ""
+    )
     return (
         f"[model-scout] Candidate for {', '.join(rec.get('roles') or []) or rec['category']}: "
         f"{rec['model_id']}\n"
@@ -629,6 +640,7 @@ def offer_text(task_id, rec):
         f"  GGUF build: {rec.get('gguf_repo') or 'none found — llama.cpp likely cannot serve it'}\n"
         f"  publisher's own claim: "
         f"{'present (unverified)' if (rec.get('publisher_claim') or {}).get('model_index_present') else 'none published'}\n"
+        f"{recommended}"
         f"Reply with exactly one of:\n"
         f"  benchmark {task_id}\n"
         f"  defer {task_id}\n"
@@ -651,6 +663,11 @@ def propose(records, dry_run=False):
             if dry_run:
                 proposed.append((tid, "dry-run"))
                 continue
+            # Stamped once, here, at proposal time -- rec carries it through to offer_text()'s
+            # Matrix message below, and the turn write makes it part of the authoritative record
+            # the backlog page reads. See hermes_benchmark_common.is_promising() for what it does
+            # and does not consider.
+            rec["recommended"], rec["recommended_reason"] = bc.is_promising(rec)
             upsert_task(tid, STATE_PROPOSED, topic=rec["category"])
             write_turn(tid, "candidate", {
                 "model_id": rec["model_id"],
@@ -669,6 +686,8 @@ def propose(records, dry_run=False):
                 "incumbent_scores": rec.get("incumbent_scores"),
                 "publisher_claim": rec.get("publisher_claim"),
                 "advisory_narrative": rec.get("narrative"),
+                "recommended": rec["recommended"],
+                "recommended_reason": rec["recommended_reason"],
                 "prescribed_benchmark_label": benchmark_label_for(rec["model_id"]),
                 "summary": f"{rec['model_id']} proposed for {role}",
             })
@@ -752,6 +771,8 @@ def print_backlog():
                 print(f"    fit: {payload.get('fit')}")
                 inc = payload.get("incumbent") or {}
                 print(f"    incumbent: {inc.get('checkpoint') or 'unknown'}")
+                if payload.get("recommended"):
+                    print(f"    ⭐ recommended for benchmarking: {payload.get('recommended_reason')}")
                 if payload.get("prescribed_benchmark_label"):
                     print(f"    benchmark label: {payload['prescribed_benchmark_label']}")
 

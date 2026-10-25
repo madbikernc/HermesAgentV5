@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 2.8.0
+# Version: 2.9.0
+#
+# 2.9.0 (2026-10-25) — direct operator request: the backlog page now leads with a "Recommended
+# for benchmarking" section -- every `approved` candidate plus any still-`proposed` one whose own
+# stored facts clear hermes_benchmark_common.is_promising()'s deterministic bar (new in bc 1.4.0).
+# hermes-model-scout.py 1.4.0 now stamps that verdict onto every new candidate's turn at proposal
+# time, so this list grows on its own with each daily run; recommendation() falls back to calling
+# is_promising() live for any candidate proposed before that field existed, so an old row and a
+# new one are judged by the exact same rule rather than risking disagreement. The main table also
+# gets a small "★ recommended" badge next to any `proposed` row that qualifies, so the two views
+# agree at a glance. hermes_benchmark_common is a stdlib-only module with no import-time side
+# effects (confirmed by reading it, not assumed), so this is a plain top-level import, the same
+# character of dependency hermes_market_common already is here -- unlike the scout gate, nothing
+# here is a privileged write path, so there is no fail-closed/load_gate() machinery to match.
 #
 # 2.8.0 (2026-10-25) — direct operator request to enhance /market's "detail" column: every
 # ticker-level line (movers, 30-day trend, the two AI-watch sections) now names the registered
@@ -163,6 +176,7 @@ TOPICS_FILE = REPO / "infra" / "hermes-news-digest" / "topics.yaml"
 # directory to sys.path the way running it directly would.
 sys.path.insert(0, str(TOOLS))
 import hermes_market_common as market_common  # noqa: E402
+import hermes_benchmark_common as bc  # noqa: E402
 
 NAS_HISTORY = Path("/mnt/nas2-hermes-backup/Private/Hermes/Benchmarks/history.jsonl")
 LOCAL_HISTORY = Path.home() / ".hermes" / "state" / "benchmark-history.jsonl"
@@ -765,6 +779,53 @@ def size_note(detail):
     return f' <span class="mono" style="color:var(--dim)">[{esc(src)}]</span>'
 
 
+def recommendation(state, detail):
+    """'Recommended for benchmarking' = every manually-`approved` candidate, plus any still-
+    `proposed` one whose own stored facts clear hermes_benchmark_common.is_promising()'s bar.
+
+    An `approved` candidate is never re-judged by the heuristic -- a human already made that call,
+    and second-guessing an explicit decision with a deterministic guess would be backwards. A
+    `proposed` candidate carries a `recommended`/`recommended_reason` pair stamped on by the scout
+    at proposal time (1.4.0+); one proposed before that existed has neither key, so it is judged
+    live here, by the exact same function the scout calls, so the two can never disagree.
+
+    Returns (bool, reason)."""
+    if state == "approved":
+        return True, "approved for benchmarking"
+    if state != "proposed":
+        return False, ""
+    if "recommended" in detail:
+        return bool(detail.get("recommended")), str(detail.get("recommended_reason") or "")
+    return bc.is_promising(detail)
+
+
+def render_backlog_recommended():
+    tasks, detail = read_backlog()
+    rows = []
+    for t in tasks:
+        state = t["state"] or "?"
+        d = detail.get(t["id"], {})
+        promising, reason = recommendation(state, d)
+        if not promising:
+            continue
+        role, model_id = split_task_id(t["id"])
+        rows.append([
+            f'<span class="pill s-{esc(state)}">{esc(state)}</span>',
+            esc(role),
+            f'<span class="mono">{esc(model_id)}</span>',
+            esc(d.get("category") or t["topic"] or ""),
+            esc(d.get("fit") or "") + size_note(d),
+            esc(reason),
+            esc(when(t["updated_at"])),
+        ])
+    note = (f'{len(rows)} of {len(tasks)} loaded backlog entries currently qualify. '
+            f'<b>This list is read, never decided, here</b> — approving a proposed candidate '
+            f'still goes through the same decide button or FleetOps reply as always; appearing '
+            f'in this section only means the heuristic above thinks it is worth that decision.')
+    return f'<p class="note">{note}</p>' + table(
+        ["state", "role", "candidate", "category", "fit", "why recommended", "updated"], rows)
+
+
 def render_backlog():
     blocked = decide_unavailable()
     tasks, detail = read_backlog()
@@ -785,6 +846,13 @@ def render_backlog():
         else:
             advisory = esc(advisory)
         fit = esc(d.get("fit") or "") + size_note(d)
+
+        promising, rec_reason = recommendation(state, d)
+        state_cell = f'<span class="pill s-{esc(state)}">{esc(state)}</span>'
+        if promising and state == "proposed":
+            # `approved` rows don't need the badge -- the whole row already means "recommended".
+            state_cell += (f' <span class="pill" style="border-color:var(--accent);'
+                           f'color:var(--accent)" title="{esc(rec_reason)}">★ recommended</span>')
 
         legal = [] if blocked else legal_actions(state)
         # One checkbox per actionable row. A row with no legal transition (`approved`, or anything
@@ -817,7 +885,7 @@ def render_backlog():
         copy_cell = " ".join(actions)
         rows.append([
             pick,
-            f'<span class="pill s-{esc(state)}">{esc(state)}</span>',
+            state_cell,
             published(d.get("created_at")),
             esc(role),
             f'<span class="mono">{esc(model_id)}</span>',
@@ -876,6 +944,16 @@ def bulk_bar():
 
 def page_backlog(query=None):
     body = results_banner(query or {})
+    body += section(
+        "Recommended for benchmarking",
+        "Every candidate <b>approved</b> for benchmarking, plus any still-<b>proposed</b> "
+        "candidate whose own stored facts — hardware fit, an existing GGUF build, published "
+        "formal eval numbers — clear a deterministic bar. Never the advisory narrative below: "
+        "that paragraph is LLM-written and is documented as never a source of fact. The scout "
+        "stamps this verdict onto every new candidate when it proposes it, so this list grows on "
+        "its own with each daily run; a candidate proposed before that existed is judged live "
+        "here, by the exact same rule, so the two views can never disagree.",
+        render_backlog_recommended)
     body += section("Model benchmark backlog", "", render_backlog)
     return shell("Benchmark backlog", body)
 

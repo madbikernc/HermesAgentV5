@@ -1,6 +1,6 @@
 # hermes-model-scout — recreate checklist
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 S20's daily model-scouting pipeline: discover what's new, compare it against what each Firmament
 role is actually running, and write one tracked backlog entry per candidate that a human disposes
@@ -192,3 +192,4 @@ candidates had no date. It is now in the payload, and `hermes-fleetops-ui` shows
 |---|---|---|
 | 1.0.0 | 2026-10-08 | Initial version — S20 built, deployed and live-verified on `spark`: daily timer, the gate service, the offline test suite, and the eight findings above. S20d (retiring V4's duplicate routine) deliberately still open, gated on a week of real runs. |
 | 1.1.0 | 2026-10-09 | Candidate sizing resolves from the repo's own `gguf` metadata when the listing has no `safetensors` block, so `MIN_PARAMS_B` can finally filter the repos this file already identified as unfilterable: measured 21 of 51 candidates sizeless, 14 resolvable, **9 of them under the 7B floor**. Records the provenance of every size, flags architectures this fleet's llama.cpp has failed on (`qwen4exp`, from coder2's real incident — two live candidates carry it), and carries HF's `createdAt` into the candidate turn, which 1.1.0 fetched and then dropped. |
+| 1.2.0 | 2026-10-25 | `hermes-model-scout.py` 1.4.0: every proposed candidate's turn now also carries `recommended`/`recommended_reason`, stamped from `hermes_benchmark_common.is_promising()` (new in `bc` 1.4.0) — a deterministic "worth a benchmark run" verdict over the candidate's own fit/GGUF-availability/publisher-claim facts, never the advisory narrative. Named in the Matrix offer too. This is what `hermes-fleetops-ui`'s backlog page reads for its new "Recommended for benchmarking" section, so that list grows with every daily run rather than needing a human to notice. |

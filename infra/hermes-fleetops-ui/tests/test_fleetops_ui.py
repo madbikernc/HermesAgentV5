@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.8.0
+# Version: 2.9.0
+#
+# 2.9.0 (2026-10-25) — check_recommended(), new for hermes-fleetops-ui.py 2.9.0's "Recommended
+# for benchmarking" backlog section: recommendation()'s state-gating (approved always, proposed
+# only via the heuristic, everything else never) and its trust of a persisted `recommended` key
+# over re-deriving one, plus a seeded-DB pass over render_backlog_recommended() (a comfortable-
+# fit/GGUF proposed candidate appears, a no-GGUF one and a rejected one with an otherwise-
+# qualifying fit do not, an approved one appears regardless of its own fit) and render_backlog()'s
+# inline "★ recommended" badge appearing exactly once, on the proposed row only.
 #
 # 2.8.0 (2026-10-25) — check_market() extended for hermes-fleetops-ui.py 2.8.0: a new
 # with_company_name() unit check (splice fires on a known ticker, leaves an unmatched/unknown
@@ -306,6 +314,87 @@ def check_backlog(ui, tmp):
         check("a missing store raises instead of being created empty", False, "no error")
     except sqlite3.OperationalError:
         check("a missing store raises instead of being created empty", not missing.exists())
+
+
+def check_recommended(ui, tmp):
+    print(NL + "[recommended-for-benchmarking: the heuristic itself]")
+    check("approved is always recommended, regardless of the heuristic",
+          ui.recommendation("approved", {})[0] is True)
+    check("a rejected/deferred/unknown state is never recommended, even with a perfect fit",
+          ui.recommendation("rejected", {"gguf_repo": "x",
+                                         "fit": "~9GB Q4 — fits alongside current backends"})[0]
+          is False)
+    check("a proposed candidate with no GGUF build is not recommended",
+          ui.recommendation("proposed", {"category": "text",
+                                         "fit": "size unknown (no safetensors metadata)"})[0]
+          is False)
+    check("a proposed candidate with a comfortable fit and a GGUF build is recommended",
+          ui.recommendation("proposed", {"category": "coding", "gguf_repo": "x",
+                                         "fit": "~9GB Q4 (dense) — fits alongside current "
+                                                "backends"})[0] is True)
+    check("an architecture finding is never recommended, even with a fit string",
+          ui.recommendation("proposed", {"category": "architecture", "fit": "n/a"})[0] is False)
+    check("a persisted recommended=True is trusted as-is, not re-derived from fit/gguf",
+          ui.recommendation("proposed", {"recommended": True,
+                                         "recommended_reason": "stamped at proposal time"}) ==
+          (True, "stamped at proposal time"))
+    check("a persisted recommended=False is trusted as-is too",
+          ui.recommendation("proposed", {"recommended": False, "recommended_reason": "no"}) ==
+          (False, "no"))
+
+    print(NL + "[recommended-for-benchmarking: the backlog page]")
+    db = tmp / "memory_recommended.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, agent TEXT, topic TEXT, state TEXT,"
+        " memory_ref TEXT, created_at TEXT, updated_at TEXT);"
+        "CREATE TABLE turns (id INTEGER PRIMARY KEY, task_id TEXT, agent TEXT, role TEXT,"
+        " raw TEXT, presented TEXT, created_at TEXT, conv_id TEXT);")
+    rows = [
+        ("scout:coder:org__great-candidate", "model-scout", "coding", "proposed"),
+        ("scout:super:bcckfdn__no-gguf", "model-scout", "text", "proposed"),
+        ("scout:muse:some__already-approved", "model-scout", "text", "approved"),
+        ("scout:dispatch:other__rejected-thing", "model-scout", "text", "rejected"),
+    ]
+    for i, (tid, agent, topic, state) in enumerate(rows):
+        conn.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?)",
+                     (tid, agent, topic, state, None, "1791542000.0", f"179154{2500 - i}.0"))
+    payloads = [
+        {"category": "coding", "gguf_repo": "org/great-candidate-GGUF",
+         "publisher_claim": {"model_index_present": True},
+         "fit": "~20GB Q4 (dense) — fits alongside current backends"},
+        {"category": "text", "fit": "size unknown (no safetensors metadata)"},
+        {"category": "text", "fit": "~30GB Q4 (dense) — fits only if a non-Core backend is "
+                                    "freed first"},
+        {"category": "text", "gguf_repo": "x",
+         "fit": "~9GB Q4 (dense) — fits alongside current backends"},
+    ]
+    for (tid, *_rest), payload in zip(rows, payloads):
+        conn.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                     (tid, "model-scout", "scout", json.dumps(payload), "1791542490.0"))
+    conn.commit()
+    conn.close()
+
+    orig_db = ui.MEMORY_DB
+    ui.MEMORY_DB = str(db)
+    try:
+        rec_html = ui.render_backlog_recommended()
+        check("the comfortable-fit GGUF proposed candidate appears in the recommended section",
+              "org/great-candidate" in rec_html)
+        check("the size-unknown no-GGUF candidate does not",
+              "bcckfdn/no-gguf" not in rec_html)
+        check("the approved candidate appears too, regardless of its own (tight) fit",
+              "some/already-approved" in rec_html)
+        check("a rejected candidate never appears, even with a comfortable fit and a GGUF build",
+              "other/rejected-thing" not in rec_html)
+
+        full_html = ui.render_backlog()
+        check("the promising proposed candidate gets the inline star badge in the full table",
+              "★ recommended" in full_html and "great-candidate" in full_html)
+        check("exactly one row earns the badge -- approved rows mean it without one",
+              full_html.count("★ recommended") == 1, str(full_html.count("★ recommended")))
+    finally:
+        ui.MEMORY_DB = orig_db
 
 
 def check_highlights(ui, tmp):
@@ -1335,6 +1424,7 @@ def main():
         check_history_schema(ui)
         check_benchmark_ranking(ui, tmp)
         check_backlog(ui, tmp)
+        check_recommended(ui, tmp)
         check_highlights(ui, tmp)
         check_models(ui)
         check_escaping(ui)

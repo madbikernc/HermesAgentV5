@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
 #
 # Offline checks for S20's two scripts. No network, no hermes-memory, no Matrix, no model call —
 # every outbound call is stubbed, so this runs anywhere Python 3 does, including off-fleet.
@@ -11,6 +11,9 @@
 #   * every legal and illegal state transition, as a table
 #   * the done-reconciliation date/label matching, including the weak-match path
 #   * publisher model-index parsing, including base_model-as-a-list (seen live) and absent cards
+#   * 1.1.0: the recommended/recommended_reason verdict is stamped onto a candidate's own turn at
+#     proposal time, and named in its Matrix offer -- the heuristic itself (bc.is_promising()) is
+#     stubbed here and checked for real in infra/model-benchmark/tests/test_is_promising.py
 #
 # Run: python3 infra/hermes-model-scout/tests/test_model_scout.py
 import importlib.util
@@ -75,6 +78,10 @@ def load(name, filename, stub_siblings=True):
         bc = types.ModuleType("hermes_benchmark_common")
         bc.ALL_SUITES = ["mmlu_pro", "ifeval", "bfcl"]
         bc.load_history = lambda: []
+        # A safe default, not the real heuristic -- tests that care about the verdict monkeypatch
+        # this explicitly (see test_recommended_stamp). Present at all so propose()/offer_text()
+        # never hit an AttributeError in a test that doesn't care about it either way.
+        bc.is_promising = lambda detail: (False, "stub: unspecified")
         sys.modules["hermes_benchmark_common"] = bc
 
     spec = importlib.util.spec_from_file_location(name, TOOLS / filename)
@@ -428,6 +435,40 @@ def test_offer_and_roles(scout, monkey):
           scout.router_roles() == {})
 
 
+def test_recommended_stamp(scout, monkey):
+    print(NL + "[the recommended verdict is stamped onto a candidate at proposal time]")
+    monkey(scout, "fetch_task", lambda tid: None)
+    monkey(scout, "upsert_task", lambda *a, **k: True)
+    turns = []
+    monkey(scout, "write_turn", lambda tid, phase, payload: turns.append((phase, payload)) or True)
+    notices = []
+    monkey(scout, "matrix_notice", lambda text: notices.append(text) or True)
+
+    base = {"model_id": "org/great-candidate", "category": "coding", "roles": ["coder"],
+            "fit": "~9GB Q4 (dense) — fits alongside current backends",
+            "gguf_repo": "org/great-candidate-GGUF", "incumbent": {"checkpoint": "incumbent-x"},
+            "incumbent_scores": None, "publisher_claim": {"model_index_present": True},
+            "source": "hf-new-listing"}
+
+    monkey(scout.bc, "is_promising", lambda detail: (True, "stub reason: comfortable fit"))
+    proposed, skipped = scout.propose([dict(base)])
+    check("the candidate is proposed", len(proposed) == 1 and not skipped, str((proposed, skipped)))
+    phase, payload = turns[-1]
+    check("the stamped verdict is written onto the candidate's own turn",
+          payload.get("recommended") is True
+          and payload.get("recommended_reason") == "stub reason: comfortable fit", str(payload))
+    check("the Matrix offer names it too",
+          bool(notices) and "recommended for benchmarking: stub reason: comfortable fit"
+          in notices[-1], str(notices))
+
+    monkey(scout, "fetch_task", lambda tid: None)
+    notices.clear()
+    monkey(scout.bc, "is_promising", lambda detail: (False, "stub reason: no GGUF build"))
+    scout.propose([dict(base, model_id="org/other-candidate")])
+    check("a non-recommended candidate's offer carries no star line at all",
+          bool(notices) and "recommended for benchmarking" not in notices[-1], str(notices))
+
+
 def _fake_urlopen(payload):
     class _Resp:
         def __enter__(self):
@@ -529,6 +570,7 @@ def main():
     test_done_reconciliation(scout, monkey)
     test_publisher_claim(scout, monkey)
     test_offer_and_roles(scout, monkey)
+    test_recommended_stamp(scout, monkey)
 
     for obj, name, old in reversed(saved):
         if old is not None:

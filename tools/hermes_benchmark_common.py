@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-10-25) — direct operator request: is_promising(), a deterministic "is this
+# model-scout candidate worth a benchmark run" heuristic over the candidate's own stored facts
+# (fit, gguf_repo, publisher_claim, category) -- never the advisory_narrative, which
+# hermes-model-scout.py's own build_narrative_prompt() documents as LLM-written and never a
+# source of fact. Lives here, not in hermes-model-scout.py or hermes-fleetops-ui.py, so both can
+# import the one function rather than risk disagreeing about what "promising" means: the scout
+# stamps the verdict onto a candidate's turn at proposal time, and the UI's backlog page falls
+# back to computing it live, by this exact function, for candidates proposed before it existed.
 #
 # 1.3.0 (2026-10-22) — S39 Phase B: check_tier2_gate(), formalizing design doc S9 rule 4 ("a
 # candidate that clears Tier 1 but regresses Tier 2 does not get promoted on Tier 1's strength
@@ -473,6 +482,44 @@ def run_swebench(role_or_endpoint: str, chat_completions_url: str, limit: int | 
                 "submitted_instances": submitted, "resolved_instances": resolved,
                 "empty_patch_instances": report.get("empty_patch_instances"),
                 "infra_failure_instances": report.get("infra_failure_instances")}
+
+
+# --- Candidate promise (model-scout backlog) ---------------------------------
+
+def is_promising(detail: dict) -> tuple:
+    """Deterministic "worth a benchmark run" verdict over a model-scout candidate's own stored
+    facts. `detail` is the candidate's turn payload (or an equivalent dict) -- the same shape
+    hermes-model-scout.py's propose() writes: category, fit, gguf_repo, publisher_claim.
+
+    Deliberately never reads advisory_narrative: that paragraph is LLM-written from these same
+    facts and is documented (build_narrative_prompt()) as never a source of fact, so it is not
+    one here either.
+
+    Returns (bool, reason) -- reason is filled in on a negative verdict too, same discipline
+    `fit`/arch_note() already follow, since a human looking at "not recommended" needs to know
+    why rather than just that."""
+    if (detail.get("category") or "") == "architecture":
+        return False, "a loader/architecture finding, not a benchmarkable checkpoint"
+    fit = str(detail.get("fit") or "")
+    if "too large" in fit:
+        return False, "hardware fit says this candidate is too large for its target node"
+    if "WARNING: architecture" in fit:
+        return False, "flagged with a known-unloadable-architecture warning"
+    if not detail.get("gguf_repo"):
+        return False, "no GGUF build found — llama.cpp likely cannot serve this candidate yet"
+    claim = detail.get("publisher_claim") or {}
+    has_claim = bool(claim.get("model_index_present"))
+    comfortable = "fits alongside current backends" in fit
+    if comfortable and has_claim:
+        return True, ("comfortable hardware fit, a GGUF build exists, and the publisher has "
+                       "published formal eval numbers")
+    if comfortable:
+        return True, "comfortable hardware fit and a GGUF build already exists"
+    if has_claim:
+        return True, ("a GGUF build exists and the publisher has published formal eval numbers, "
+                       "despite a tighter hardware fit")
+    return False, ("a GGUF build exists but the fit is tight/uncertain and the publisher has "
+                   "published no formal eval numbers")
 
 
 # --- Comparison ---------------------------------------------------------------

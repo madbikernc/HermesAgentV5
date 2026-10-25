@@ -1,12 +1,12 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.7.0
+**Version:** 2.9.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
-backlog, which checkpoint backs each role, benchmark results, the news digest's stored highlights,
-curated benchmark-driven model-swap recommendations, and security/integrity recommendations
-written by the fleet's scanners. Runs on **Watch (spark)** only, over **HTTPS**, Basic Auth
-required.
+backlog (now leading with a "Recommended for benchmarking" section), which checkpoint backs each
+role, benchmark results, the news digest's stored highlights, curated benchmark-driven model-swap
+recommendations, Market Watch, and security/integrity recommendations written by the fleet's
+scanners. Runs on **Watch (spark)** only, over **HTTPS**, Basic Auth required.
 
 **<https://spark.tail1a534.ts.net:8103/>**
 
@@ -194,6 +194,7 @@ missing-table crash on first run — is the concrete precedent.
 |---|---|---|
 | `/backlog` | reads `tasks`/`turns` in `memory.db` read-only; **writes** via hermes-memory's HTTP API | **Not `GET /tasks`** — see below |
 | `/backlog` | `published` column from the candidate turn's `created_at` | date plus age; under a week is flagged |
+| `/backlog` (top section) | `recommendation()`, computed over the same `tasks`/`turns` read | "Recommended for benchmarking" — see below |
 | `/models` | `GET {router}/v1/models`, live per page load | checkpoint, abliterated, host, residency |
 | `/models` | `usage_log` in `usage.db`, counted in SQL | two trailing 7-day windows, no commentary |
 | `/benchmarks` | the NAS `history.jsonl` + local fallback | same two paths the benchmark tooling writes |
@@ -225,6 +226,21 @@ a staged replacement candidate is actually behind the endpoint being measured. G
 `(role, suite, metric)` across every model's latest result is therefore exactly "every result
 anyone has recorded for this role's suite": the role filter narrows to one such group, and a row's
 `/highest` is the best value in that same group, even when that happens to be the row's own value.
+
+**`/backlog` leads with "Recommended for benchmarking"**, direct operator request: every
+`approved` candidate, plus any still-`proposed` one whose own stored facts — hardware fit, an
+existing GGUF build, published formal eval numbers — clear a deterministic bar,
+`hermes_benchmark_common.is_promising()` (new in `bc` 1.4.0). Deliberately never reads
+`advisory_narrative`: that paragraph is LLM-written from these same facts and is documented
+elsewhere as never a source of fact, so it is not one here either. `hermes-model-scout.py` 1.4.0
+stamps the verdict onto every new candidate's turn at proposal time — `recommended` /
+`recommended_reason` — and names it in the Matrix offer too, so the list grows on its own with
+each daily scout run without this page having to recompute anything for a new candidate.
+`recommendation()` falls back to calling `is_promising()` live only for a candidate proposed
+before that field existed, by the exact same function, so an old row and a new one are never
+judged by two different rules. An `approved` candidate is never re-judged by the heuristic — a
+human already decided. The main backlog table also gets a small "★ recommended" badge next to any
+qualifying `proposed` row, so the two views agree at a glance.
 
 **The model-swap section at the top of `/recommendations` is curated, not queried.** Every other
 section on these pages reads a store the fleet already writes to; there is no live store yet for
@@ -260,7 +276,7 @@ route, since even with a stolen CSRF token a form on someone else's page cannot 
 
 ## 6. Tests
 
-`tests/test_fleetops_ui.py` — 270 offline checks, no network, no live store, no socket bound. The
+`tests/test_fleetops_ui.py` — 292 offline checks, no network, no live store, no socket bound. The
 fixtures are the real schemas read off the live stores on 2026-10-09, because the first draft got
 two of them wrong from the plan's own prose. Also asserts the things that are easy to break
 silently: that the NAS and local history paths still equal `hermes_benchmark_common`'s own
@@ -346,3 +362,5 @@ rather than silent. A restart re-fetches the credentials.
 | 2.5.0 | 2026-10-25 | Direct operator request: `/recommendations` now leads with a "Recommended model swaps" section, ahead of the existing `REC-<node>` security findings, surfacing the S39 spark2 candidate-benchmark run's own outperformance findings (`infra/model-benchmark/spark2-candidate-results.md`) — GLM-4.7-Flash vs. the retired-but-still-resident `coder2`, Hermes-4.3-36B vs. `super` on log-analysis, Nemotron-3.5-Bolt-74B vs. `omni` on vision-judging, and Nemotron-3-Nano-Omni-30B vs. `muse` on persona/override-resistance. `MODEL_SWAP_RECOMMENDATIONS` is a curated constant, not a queried store — there is no live store yet for "a candidate beat an incumbent" the way there is for every other section here, and the page says so plainly, pointing back at the source doc and warning that role assignments on this fleet are confirmed to drift from their own service descriptions. 240 offline checks (14 new). |
 | 2.6.0 | 2026-10-25 | New `/market` page (S38i), direct operator request ("add a formatted report to the Fleetops-ui"), fulfilling `MARKET_WATCH_DESIGN.md` §9's deferred "browsable report history" now that S38a-h's real data exists to browse. A date-picked, filterable daily-report table re-sorted into the fixed `REPORT_SECTION_ORDER` (not the table's own alphabetical `item_type` order), read via `hermes_market_common.read_report_items()` — the same function the daily email, Matrix notice and a `market report` gate reply already render from, so this page can never show different numbers for the same day. Plus a read-only "Pending tag candidate proposals" section over S38h's `tag_proposals` table, framed the same "deciding stays a Matrix reply, not a button here" way `/recommendations` already frames its own findings. No new write route. 19 new offline checks (259 total). *(Backfilled into this changelog; the commit itself is `e30746a`.)* |
 | 2.7.0 | 2026-10-25 | Direct operator request: `/benchmarks`' "Current" table gets a role filter, a high-to-low score sort, and the value column now shows `value/highest` whenever a higher score for the exact same role/suite/metric has been recorded by any `model_id`. Grouped by `(role_or_endpoint, suite, metric)` rather than suite/metric alone — every eval tool writes `role_or_endpoint` as the fleet ROLE it is scoring a candidate *for*, regardless of which `model_id` is actually behind the endpoint (`hermes-vision-judge-eval.py` always writes `"omni"`), so this is exactly "every result anyone has recorded for this role's suite", computed off the same latest-per-model snapshot the table already builds. `fmt_value()` gained an optional `best` parameter (default `None`, so `render_history_all()`'s own per-run summary and the pre-existing single-argument offline tests are unaffected); `page_benchmarks()` now takes `query` like every other page here. 11 new offline checks. |
+| 2.8.0 | 2026-10-25 | Direct operator request to enhance `/market`'s "detail" column: every ticker-level line (movers, 30-day trend, the two AI-watch sections) names the registered company in parens right after its ticker (`"MSFT (Microsoft) rose..."`), via a FleetOps-UI-only cosmetic splice (`with_company_name()`) that never touches the stored `report_items.text` the email/Matrix/gate paths also render from. Sector/tag-trend rows are excluded by an item-type allowlist, not just the splice's own guard. The daily report's single flat table (one row per item, a repeated "section" column) is now one table per section, each under its own divider/title, with "#" (rank) leading each section's own columns. The row-count cap now counts across all sections combined. 19 new offline checks. |
+| 2.9.0 | 2026-10-25 | Direct operator request: `/backlog` now leads with a "Recommended for benchmarking" section — every `approved` candidate, plus any still-`proposed` one whose own stored facts clear `hermes_benchmark_common.is_promising()`'s deterministic bar (new in `bc` 1.4.0), never the advisory narrative. `hermes-model-scout.py` 1.4.0 stamps that verdict onto every new candidate's turn at proposal time, so the list grows on its own with each daily run; `recommendation()` falls back to the live heuristic only for a candidate proposed before that field existed, so the two can never disagree. The main table also gets an inline "★ recommended" badge on a qualifying `proposed` row. 13 new offline checks (292 total). |
