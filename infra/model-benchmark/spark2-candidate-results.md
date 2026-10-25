@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.11.0
+**Version:** 1.12.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -335,6 +335,8 @@ a secondary data point, not a new finding.
 
 This closes out Phase 3.
 
+## Phase 4 — vision-capable, role TBD
+
 ### Tooling note: `hermes-vision-judge-eval.py` expects `--endpoint` *without* `/v1`
 
 Unlike every other eval tool in this run, `hermes-vision-judge-eval.py` passes `--endpoint` straight into
@@ -433,9 +435,70 @@ specifically, not `omni`.
 Nemotron-3.5-Bolt remains the strongest vision-judge candidate of the three on every axis. This closes
 out Phase 4.
 
-## Phase 5 — in progress
+## Phase 5 — large coder candidate
 
-(continues below as each candidate completes)
+### `Qwen3-Coder-Next-UD-Q4_K_M.gguf` (46GB)
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.850 | |
+| `fleet_log_analyst` | accuracy 6/7 = **0.857** (11 unclear), fact-extraction 24/25 = 0.960 | Highest raw accuracy number in the run, though on a small n=7 scored sample — read cautiously next to Hermes-4.3-36B's 9/12 and Huihui-Claude-4.7's 6/8 (both 0.750 on larger samples) |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, padding_restraint 0/1 = 0.000 | Same restraint failure pattern as several others |
+| `fleet_muse_contract` | capability 9/9, groundedness 9/9, override 3/9, overall 0.778 | |
+| `fleet_dualcoder_precision` | recall 0/3, precision 0/3, overall **0.000** | Weak result on the suite most relevant to a "Coder-Next" candidate — see incumbent comparison below |
+| `fleet_coder_fix` | repro 0/1, judge 10/10 = 1.000, 4 `env_unavailable` | **Zero timeouts** on this 46GB model |
+| `fleet_coder_build` | fixture 2/3 = 0.667, judge 7/7 = 1.000, 1 `unclear` (transient judge 503, correctly recorded) | Zero timeouts |
+
+**Direct comparison against the live `coder` incumbent** (`Qwen3.8-27B-abliterated`, port 8094), measured
+read-only on the identical coder-focused suites, same day — the most relevant comparison for a model
+explicitly staged as a "Coder-Next" candidate:
+
+| Suite | `coder` incumbent (live) | Qwen3-Coder-Next (candidate) |
+|---|---|---|
+| `fleet_dualcoder_precision` | recall 1/3, precision 0/3, overall **0.167** | recall 0/3, precision 0/3, overall **0.000** |
+| `fleet_coder_fix` | judge 7/7 = 1.000, **3/10 tasks timed out** | judge 10/10 = 1.000, **0/10 timed out** |
+| `fleet_coder_build` | judge 5/5 = 1.000, **3/8 tasks timed out** | judge 7/7 = 1.000, **0/8 timed out** |
+
+**Mixed result, not a clean outperformance finding**: Qwen3-Coder-Next completed every single coder_fix/
+coder_build task with zero timeouts, while the live `coder` incumbent itself times out on 3/10 and 3/8
+tasks under the identical harness (confirming the earlier timeout pattern is a genuine harness/latency
+characteristic, not an artifact of the missing `--reasoning off` fix — `coder`'s own production launch
+script already applies it). That's a real reliability advantage. But on `fleet_dualcoder_precision`, the
+one suite where both models completed every case without timeouts, the incumbent actually scores better
+(0.167 vs. 0.000). Given the quality signal cuts against the candidate on the most directly-relevant
+suite, this does **not** clear the bar for a saved outperformance recommendation — recorded here plainly,
+not pushed to memory.
+
+This closes out Phase 5 and the full Phase 2-5 run authorized by the operator. **Phase 6**
+(`NVIDIA-Nemotron-3.5-Super-VL-120B-A12B`, ~81GB) remains explicitly held back, not started, pending
+separate authorization (the `--free-omni` llama.cpp flag it needs is confirmed broken on spark2 per the
+sequencing runbook's own pre-flight notes).
+
+## Run summary (Phases 1-5)
+
+Four candidates were found to genuinely outperform their live incumbent on a fair, same-day, same-suite
+basis, each saved to memory:
+
+1. **GLM-4.7-Flash** vs. the retired-but-still-loaded `coder2` (Muse-Glimmer-30B): `fleet_dualcoder_precision`
+   1.000 vs. 0.000.
+2. **Hermes-4.3-36B** vs. the live `super` role (serving log-analysis traffic): `fleet_log_analyst` accuracy
+   0.750 vs. 0.375.
+3. **Nemotron-3.5-Bolt-74B** vs. the live `omni` role: `fleet_vision_judge` recall 0.963 vs. 0.407
+   (false_fail_rate 0.037 vs. 0.593); also the best all-round `fleet_muse_contract` score among the three
+   vision candidates.
+4. **Nemotron-3-Nano-Omni-30B-Reasoning** vs. the live `muse` role: `fleet_muse_contract` 0.963 vs. 0.704 —
+   the largest gap of any finding in this run, but specifically a `muse`-role recommendation, not `omni`
+   (its own vision-judge numbers were the weakest of the three Phase 4 candidates).
+
+Real infrastructure/tooling findings surfaced along the way, independent of any single candidate's score:
+stale `Description=` metadata on two systemd services (Phase 1); a byte-identical reranker duplicate
+excluded from scoring (Phase 1); `coder2`/Muse-Glimmer-30B still fully loaded four days after being marked
+"unloaded" in the router's own changelog (Phase 3); a missing `--reasoning off` flag in the candidate
+wrapper that corrupted at least one candidate's results outright and is the likely cause of several
+unexplained timeout spikes (Phase 3, fixed); an endpoint-URL-format gotcha in `hermes-vision-judge-eval.py`
+(Phase 4, fixed); and a judge-leniency pattern where judge-only axes scored near 1.000 across many
+candidates while every objective axis in the same runs stayed weak (Phase 2, flagged as needing independent
+spot-checking, not yet resolved).
 
 ## Revision History
 
@@ -453,3 +516,4 @@ out Phase 4.
 | 1.9.0 | 2026-10-25 | Started Phase 4 (vision-capable candidates) with NVIDIA-Nemotron-3.5-Bolt-74B-A9B. Found and fixed a `hermes-vision-judge-eval.py` endpoint-format gotcha (no `/v1` suffix, unlike every other tool). Third outperformance finding, and the strongest yet: live `omni` incumbent (gemma-4-26B-A4B-it) has fleet_vision_judge recall 0.407 and false_fail_rate 0.593 (rejects most good images); Nemotron-3.5-Bolt scores recall 0.963, false_fail_rate 0.037, and also posts the best fleet_muse_contract score of the entire run (0.852). Saved to memory. |
 | 1.10.0 | 2026-10-25 | Added Qwen3VL-30B-A3B-Instruct results: best Tier 0 score of the run (0.950), ties Nemotron-3.5-Bolt for best muse_contract (0.852), and also clearly beats the omni incumbent on vision-judge recall -- but its false_pass_rate (0.714) is the worst of all three models compared, keeping Nemotron-3.5-Bolt as the stronger vision-role candidate. |
 | 1.11.0 | 2026-10-25 | Added NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning results, closing Phase 4. Fourth outperformance finding: scores 0.963 on fleet_muse_contract against the real muse-incumbent baseline of 0.704 -- the largest gap in the run -- despite the weakest vision-judge numbers of the three Phase 4 candidates. Saved to memory as a muse-role (not omni-role) recommendation. Added a Phase 4 vision-candidate summary table. |
+| 1.12.0 | 2026-10-25 | Added Qwen3-Coder-Next-UD-Q4_K_M results, closing Phase 5 and the full operator-authorized Phase 2-5 run. Direct comparison against the live `coder` incumbent on coder-focused suites is mixed, not a clean outperformance finding: the candidate has zero timeouts vs. the incumbent's 3/10 and 3/8, but the incumbent scores better on fleet_dualcoder_precision (0.167 vs. 0.000) -- recorded plainly, not saved to memory. Added a Phase 4/5 structural fix (missing `##` section headers) and a full run summary covering all four saved outperformance findings and the cross-cutting infra/tooling findings. Phase 6 remains explicitly held back pending separate authorization. |
