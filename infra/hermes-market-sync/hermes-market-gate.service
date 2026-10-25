@@ -1,0 +1,20 @@
+[Unit]
+Description=hermes-market-gate — S38e on-demand FleetOps Matrix commands
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-market-gate.py
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

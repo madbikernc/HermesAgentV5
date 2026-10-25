@@ -1,0 +1,11 @@
+[Unit]
+Description=hermes-market-sync daily run (S38b/c) — instruments, tags, prices
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-market-sync.py daily
+StandardOutput=journal
+StandardError=journal

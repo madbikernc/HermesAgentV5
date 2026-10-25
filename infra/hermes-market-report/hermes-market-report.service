@@ -1,0 +1,10 @@
+[Unit]
+Description=hermes-market-report daily run (S38d) — sector/movers/30-day trend, email + Matrix
+After=network.target
+
+[Service]
+Type=oneshot
+User=pmoney
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-market-report.py daily
+StandardOutput=journal
+StandardError=journal

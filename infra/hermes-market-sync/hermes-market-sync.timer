@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily run of hermes-market-sync (S38b/c)
+
+[Timer]
+OnCalendar=*-*-* 21:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

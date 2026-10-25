@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.2.0
+**Version:** 1.4.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -231,9 +231,15 @@ doesn't exist yet.
 
 ## 10. Screening and secrets `[PROPOSED]`
 
-Vendor API key: a new Vaultwarden item (e.g. `market-data-api`), fetched through `vault-get-secret.sh`,
-env-var-first pattern identical to `hermes_alert_common.py`'s `EMAIL_PASSWORD`/`FLEETOPS_MATRIX_TOKEN`
-fallback (1.1.0) — not a new secrets mechanism.
+**Correction, S38b (1.3.0):** no vendor API key is needed. This section originally proposed a new
+Vaultwarden item (`market-data-api`) — written before §2's vendor decision, which settled on
+keyless free sources (Yahoo's chart endpoint, Wikipedia) for the MVP. That premise is moot now
+that the decision is made. The only secrets Market Watch touches are the two
+`hermes_alert_common.py` already resolves end-to-end (`email-sintra` for delivery, `matrix-fleetops`
+for the FleetOps gate), reused exactly as that module exposes them (`send_email()`/
+`matrix_notice()`/`_resolve_fleetops()`) — not a new secrets mechanism, and no new egress-guard
+registry entry either, since those two helpers already wrap their own network calls with a
+hardcoded caller identity regardless of which tool invokes them.
 
 Any vendor-supplied free text (a company description field, an index-membership note) is third-party,
 open-internet-adjacent content and gets the same treatment `hermes-model-scan.py`'s `_sanitize_hf_text()`
@@ -280,23 +286,65 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
 - **S38a** — **Done 2026-10-21.** Vendor decision and bounded starting universe, verified live against
   the real endpoints (§2/§3): Yahoo's chart endpoint for price, Wikipedia's S&P 500 list for
   instruments/sector, US-only MVP.
-- **S38b** — Not yet built. `tools/hermes-market-sync.py`, the `instruments`/`prices`/`sync_state`
-  schema, the single daily timer (§6).
-- **S38c** — `tags.yaml` and the sector/industry/thematic categorization pass.
-- **S38d** — `tools/hermes-market-report.py` — daily sector-trend/movers/30-day-trend computation,
-  `report_items` write, email + Matrix push.
-- **S38e** — `tools/hermes-market-gate.py` — the FleetOps on-demand command grammar.
-- **S38f** — Offline test suite, live verification, and the exit gate below.
+- **S38b** — **Built 2026-10-24.** `tools/hermes_market_common.py` (shared schema/connect/
+  compute/render) and `tools/hermes-market-sync.py` (`instruments`/`prices`/`sync_state`), plus
+  the daily timer/service units under `infra/hermes-market-sync/`. Wikipedia's constituents table
+  is parsed with a small stdlib `HTMLParser` subclass rather than `bs4` (not installed on this
+  session's dev machine; keeps the offline suite dependency-free). `to_yahoo_symbol()`'s
+  dotted-to-dashed mapping (`BRK.B` → `BRK-B`) is implemented but explicitly flagged as
+  unverified until a real live call — see S38f below.
+- **S38c** — **Built 2026-10-24**, same session as S38b. `infra/hermes-market-sync/tags.yaml`
+  (seeded with the six named tags) and `apply_tags()`/`load_tags()` in `hermes-market-sync.py`
+  1.1.0.
+- **S38d** — **Built 2026-10-24.** `tools/hermes-market-report.py` — sector-trend/tag-trend/
+  movers/30-day-trend computation, `report_items` write (delete-then-reinsert per day, guarded
+  against erasing an earlier good run), email + Matrix push via `hermes_alert_common.py`. One
+  correction made while building, against this document's own `[PROPOSED]` schema: every
+  `item_type` uses `category="ALL"` uniformly (an earlier draft had `sector_trend`/`tag_trend`
+  use the group's own name as `category`, which made `rank` redundant — see the file's own header
+  comment for why).
+- **S38e** — **Built 2026-10-24.** `tools/hermes-market-gate.py` — the six-command FleetOps
+  grammar (§8's table), each handler re-querying `market.db` fresh.
+- **S38f** — **Built and fully live-verified 2026-10-24.** Offline: 58 checks
+  (`infra/hermes-market-sync/tests/test_hermes_market_sync.py`, covering sync and the gate) + 43
+  checks (`infra/hermes-market-report/tests/test_hermes_market_report.py`, covering the shared
+  compute module and the report tool) — 101 total, no network/Vaultwarden/Matrix dependency. One
+  real bug found and fixed by this suite before it ever ran against real data: `top_n()`
+  originally sorted the *entire* ticker list by direction without filtering by sign, so with
+  fewer real movers than the requested count, a falling ticker could be listed under "today's
+  biggest gainers."
+  Live, on `dgx-spark`: real Wikipedia pull (503 instruments, 0 skipped); `to_yahoo_symbol()`
+  confirmed against real multi-class tickers (`BRK.B`→`BRK-B`, `BF.B`→`BF-B` both synced
+  successfully); a full 400-day backfill across all 503 tickers, zero failures, 200,063 rows
+  written; `tags.yaml` applied (315 ticker-tag pairs, six real tag distributions); the real daily
+  report computed and delivered — confirmed landed by reading the FleetOps Matrix room's own
+  event stream, not the log; all three systemd units installed and run for real
+  (`Result=success` for both oneshots, `active (running)` for the gate) rather than only by hand;
+  and a full gate round trip — all six command shapes plus both refusal paths posted into the
+  real room and every reply read back from the room itself, including both named refusals
+  (`Unknown sector/tag 'NotRealSector'`, `Unknown ticker 'ZZZZ'`) and the one unmatched message
+  (`market bogus foo`) correctly drawing no reply at all. Both timers confirmed scheduled for
+  their next real run via `systemctl list-timers`.
 
 ---
 
-## 13. Exit gate
+## 13. Exit gate — **MET, 2026-10-24**
 
 A real daily email **and** Matrix post landing on a real trading day, citing real sector movement and
 real movers an operator can check against an independent source; and a real `market <command>` round trip
 through the actual gate script and actual Matrix replies, not a dry run — the same two-part bar (scheduled
 push confirmed, on-demand pull confirmed) every comparable stage in `IMPLEMENTATION_PLAN.md` sets for
 itself.
+
+Both halves done live on `dgx-spark`, 2026-10-24: the daily report ran for real through its own
+systemd unit (`Result=success`) and its `[market]` notice was read back directly from the live
+FleetOps Matrix room's event stream; the email send logged no failure. The gate round trip covered
+every command in §8's table plus both named refusal paths, each posted into the real room and
+each reply read back from the room itself, not trusted from a log line — see S38f's entry in §12
+for the full detail. **Not yet independently cross-checked against an outside finance site by a
+human** — the numbers (Energy +2.68%, CCI +9.06% top gainer, etc.) are real and internally
+consistent, but this exit gate's own "an operator can check against an independent source" clause
+is satisfied by the data being real and checkable, not by someone having actually checked it yet.
 
 ---
 
@@ -326,3 +374,5 @@ own commit to that table in the same change, not a thing done here.
 | 1.0.0 | 2026-10-17 | Initial design — direct operator request for a daily global-exchange equity tracking capability: sector/industry and thematic categorization, historical price storage, a daily sector-trend/movers/30-day-trend report, and on-demand report requests from the Fleet Matrix room. Tracked as `IMPLEMENTATION_PLAN.md` S38. |
 | 1.1.0 | 2026-10-20 | Added §14, recording the `CLAUDE.md` 1.2.0 benchmark-evaluation call: no new `FLEET_BENCHMARK_DESIGN.md` scenario needed (the MVP makes no model call; the one optional model-touching path reuses `dispatch`'s existing coverage), but the eventual build is a real candidate for §6.8's `fleet_coder_build` corpus once it has a commit. Also: §8's `market sector list` gate command was added to this file's body at some point without a version bump, breaking this project's own enforced convention — caught and folded into this bump rather than left unaccounted, since nothing else in this file's content changed meaning. Minor bump — new section, no prior guidance reversed. **Note added 2026-10-21: the top `**Version:**` header line was not actually updated when this row was written, the identical gap this row itself called out one paragraph up — caught and fixed in the 1.2.0 bump below, not silently left.** |
 | 1.2.0 | 2026-10-21 | **S38a decided, direct operator instruction ("use whatever free services we can for now, limit markets to ones free services can report on") verified live before being written down.** §2 rewritten: Stooq ruled out (a real client-side JS proof-of-work challenge blocks every `stooq.com/q/d/l/` request from this environment, confirmed by curl with and without a browser user-agent) — Yahoo Finance's unofficial chart endpoint decided instead for price data (live-tested against a US/LSE/Tokyo ticker and a full 1-year pull, returns `adjclose` for free) and Wikipedia's "List of S&P 500 companies" decided for the instrument list/GICS sector (live-tested, real `wikitable`). §3 narrowed to US/S&P-500-only for the MVP after confirming FTSE 100/Nikkei 225 have no equally clean free constituent-list table yet — international expansion named as a real, gated follow-up rather than guessed at. §5 gained `adj_close`, resolving risk 5 (corporate actions) for this source. §6 simplified from a per-exchange timer fleet to one daily US-close timer, with the per-exchange design kept as the documented scaling path. §11 risks 1 and 5 marked resolved; §12's S38a marked done. Minor bump — open questions resolved and one early recommendation corrected against real evidence, nothing restructured. |
+| 1.3.0 | 2026-10-24 | **S38b-f built: the full capability (direct operator request to build the whole remaining sequence), 101 offline checks passing, live verification explicitly NOT done.** §10 corrected: the "new Vaultwarden item" paragraph was stale after §2's keyless-source decision — removed, replaced with a note that this build reuses `hermes_alert_common.py`'s existing two secrets as-is. §12 updated with what each sub-stage actually built, including one schema correction found while building S38d (`report_items.category="ALL"` uniformly, not the group's own name — see that entry) and one real bug `test_hermes_market_sync.py`/`test_hermes_market_report.py` caught before any live run (`top_n()`'s sign-filtering gap). New files: `tools/hermes_market_common.py`, `tools/hermes-market-sync.py` (1.1.0), `tools/hermes-market-report.py`, `tools/hermes-market-gate.py`, `infra/hermes-market-sync/tags.yaml` + timer/service units, `infra/hermes-market-report/` timer/service units, both test files. Stated plainly per §13: this session had no fleet node, Vaultwarden, or Matrix access — every check above ran offline, against synthetic data, on a dev machine with no `bs4` installed (the Wikipedia table parser was written against stdlib `html.parser` instead, deliberately, rather than assume `bs4`'s real ambient availability on the deploy host would also hold here). `to_yahoo_symbol()`'s dotted-to-dashed ticker mapping is implemented but not live-verified. Minor bump — a planned stage built and tested, with its live-verification gap stated honestly rather than glossed over; nothing prior reversed. |
+| 1.4.0 | 2026-10-24 | **§13's exit gate MET, live, minutes after 1.3.0 was written — the operator corrected this session's own "no fleet access" assumption.** Files copied directly onto `dgx-spark`'s existing checkout (not committed/pushed — no git action was requested this session) and run for real: Wikipedia pull (503 instruments), `to_yahoo_symbol()` confirmed against real `BRK.B`/`BF.B`, a full 400-day/503-ticker backfill (200,063 rows, zero failures), `tags.yaml` applied (315 pairs), the real report delivered and its Matrix notice read back from the room's own event stream, all three systemd units installed and run for real (`Result=success`/`active (running)`, not just by hand), and a full gate round trip — every command shape and both refusal paths posted into the real FleetOps room and every reply read back from the room itself. §12's S38f entry and §13 both rewritten from "not done" to the real result. Minor bump — a stage's live verification executed and its real record written in, nothing prior reversed. |

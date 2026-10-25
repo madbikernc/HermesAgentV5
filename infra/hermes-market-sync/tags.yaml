@@ -1,0 +1,35 @@
+# S38c Market Watch thematic tags — one rule per line: `tag | match_type | pattern`.
+#
+# Boss-edited directly, like feeds.yaml/topics.yaml. hermes-market-sync.py's `tags` pass reads
+# this file verbatim on every run and rebuilds the `tags` table from it in full — no NLP, no LLM
+# judgment. Blank lines and lines starting with # are ignored.
+#
+# Despite the .yaml extension, this is NOT real YAML — flat delimited text, same precedent as
+# feeds.yaml/topics.yaml, so no PyYAML dependency anywhere in this repo. This file also carries
+# no **Version:** header, the same (already-existing) gap feeds.yaml and topics.yaml both have
+# despite CLAUDE.md's literal "every file" text — noted here rather than silently picked one way.
+#
+# match_type:
+#   sector   exact, case-insensitive match against instruments.sector OR instruments.industry
+#   ticker   exact ticker symbol (Wikipedia-canonical form — dots, not dashes: BRK.B not BRK-B)
+#   keyword  case-insensitive substring match against name + sector + industry, concatenated
+#
+# A ticker can carry more than one tag; a tag can be seeded by more than one rule (deduplicated
+# automatically). The six tags below are the ones MARKET_WATCH_DESIGN.md §4 names explicitly —
+# "including but not limited to," i.e. add more lines/tags freely.
+
+information_technology | sector  | Information Technology
+ai                     | keyword | semiconductor
+ai                     | keyword | artificial intelligence
+ai                     | ticker  | NVDA
+ai                     | ticker  | MSFT
+ai                     | ticker  | GOOGL
+ai                     | ticker  | META
+agricultural           | keyword | agricultural
+agricultural           | keyword | agriculture
+fintech                | sector  | Financials
+fintech                | keyword | payment
+fintech                | keyword | fintech
+industrials            | sector  | Industrials
+energy_utilities       | sector  | Energy
+energy_utilities       | sector  | Utilities
