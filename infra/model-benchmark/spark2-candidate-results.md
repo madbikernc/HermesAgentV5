@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.5.0
+**Version:** 1.6.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -239,6 +239,66 @@ Caveat: Hermes-4.3-36B's own weak axis is `fleet_muse_contract` override resista
 recommendation, not a blanket "replace `super` everywhere" (`super` also serves as this run's own judge
 model and other `super`-role duties not benchmarked here).
 
+### Methodology correction: wrapper was missing `--reasoning off`, a fleet-wide mandatory flag
+
+While benchmarking the next Phase 3 candidate (`Huihui-Qwen3.6-35B-A3B-abliterated.Q4_K_M.gguf` — notably
+byte-identical, confirmed via `sha256sum`, to the live `muse` incumbent's own model file), it scored
+**`fleet_log_analyst` accuracy 0/0 = None (18/18 unclear), fact-extraction 0/25**, and
+`fleet_digest_faithfulness` printed only a `padding_restraint` line with no `grounded`/`faithful` axes at
+all — a pattern seen in no other candidate. Hitting the live production `muse` port (8090) directly with
+the identical eval tool, read-only, produced normal, correctly-scored output — ruling out the model itself.
+
+Root cause: `run-candidate-suites.sh`'s `llama-server` launch never passed `--reasoning off`. Checking every
+`start-*.sh` on both nodes confirms this is a **fleet-wide mandatory flag** on every production launch
+script, with one script's own comment stating plainly: "without this flag [a reasoning model] spends the
+caller's entire max_tokens budget in reasoning_content" instead of a usable answer. The wrapper's bare
+`-m/--port/--host/--ctx-size` launch silently omitted it for every candidate tested so far.
+
+**Fixed**: patched the wrapper (deployed on spark2 and the local scratchpad copy) to always pass
+`--reasoning off`, matching the standing fleet rule, for every candidate from this point forward.
+
+**Impact assessment on already-completed candidates** (not blanket-redone, to keep pace with the
+authorized Phase 2-5 run; stated plainly per §8.6 rather than silently trusted or silently discarded):
+- **Huihui-Qwen3.6-35B-A3B-abliterated (= live `muse` incumbent)**: confirmed corrupted. Re-ran the full
+  battery with the fix — see corrected results below. The original broken numbers are superseded, not used
+  anywhere in this doc's comparisons.
+- **Qwen3-8B and Hermes-4.3-36B**: both already showed unexplained heavy timeout rates on
+  `fleet_coder_fix`/`fleet_coder_build` (flagged in their own sections at the time), and both are
+  architectures plausibly defaulting to reasoning-on. Their non-timeout-suite numbers (log_analyst, digest,
+  muse_contract, dualcoder) show no content-collapse symptom and are plausibly still valid — reasoning
+  content most likely lands in a separate `reasoning_content` field for these two rather than polluting
+  `content`, consistent with their sane-looking non-timeout results. But the extra reasoning-generation
+  time is a direct, now-understood explanation for their timeout spikes. **Recommend a targeted re-run of
+  just `fleet_coder_fix`/`fleet_coder_build` for these two candidates** with the fix applied before trusting
+  those two suites' numbers for either model; not done yet.
+- **Qwen3-4B-Instruct-2507, Ministral-8B-Instruct-2410, GLM-4.7-Flash, phi-4**: zero-to-minimal timeouts and
+  no content-collapse symptom in any suite for any of these four. Likely unaffected (the `-Instruct`-suffix
+  convention seen in multiple launch-script comments on this fleet specifically marks "no hidden reasoning
+  to disable in practice"), but not independently re-verified against a `--reasoning off` rerun.
+
+### `Huihui-Qwen3.6-35B-A3B-abliterated.Q4_K_M.gguf` (= live `muse` incumbent, byte-identical — corrected numbers)
+
+Confirmed via `sha256sum` to be the exact file backing the live `muse` role. Full battery below, measured
+*with* the `--reasoning off` fix, serves as this run's official same-day `muse` incumbent baseline for
+comparison against every other Phase 2/3 general-purpose candidate's `fleet_muse_contract` score.
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.900 | Matches Qwen3's other strong Tier 0 scores |
+| `fleet_log_analyst` | accuracy 4/7 = 0.571 (11 unclear), fact-extraction 24/25 = 0.960 | |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, **padding_restraint 0/1 = 0.000** | Failed the "nothing new" case — padded a highlight it should have withheld |
+| `fleet_muse_contract` | capability 7/9, groundedness 9/9, **override 3/9**, overall 0.704 | This is `muse`'s own defining suite — **0.704 is the real, live-incumbent baseline every Phase 2/3 candidate's muse_contract score should be read against** |
+| `fleet_dualcoder_precision` | recall 0/3, precision 0/3, overall **0.000** | The broken pre-fix run showed a bogus 1.000 here — the corrected number is the opposite result, confirming the original was a methodology artifact, not genuine skill |
+| `fleet_coder_fix` | repro 0/1, judge 9/10 = 0.900, 4 `env_unavailable` | No timeouts with the fix applied |
+| `fleet_coder_build` | fixture 2/3 = 0.667, judge 8/8 = 1.000 | No timeouts |
+
+**Read across this run so far**: against this real `muse`-incumbent baseline (0.704 muse_contract), every
+Phase 2/3 candidate's own muse_contract score (Qwen3-4B 0.815, Qwen3-8B 0.815, Ministral-8B 0.667,
+GLM-4.7-Flash 0.778, phi-4 0.778, Hermes-4.3-36B 0.667) is in the same general range — no candidate so far
+shows a `muse`-role-specific outperformance gap as clean as the `coder2`/dualcoder or `super`/log-analyst
+findings above. Qwen3-4B and Qwen3-8B edge it out (0.815 vs. 0.704) but not by a margin this run is
+treating as conclusive on its own, given everything else already flagged about those two candidates.
+
 ## Phase 3+ — in progress
 
 (continues below as each candidate completes)
@@ -253,3 +313,4 @@ model and other `super`-role duties not benchmarked here).
 | 1.3.0 | 2026-10-25 | Started Phase 3 with GLM-4.7-Flash-Q4_K_M full battery. Found `coder2`/Muse-Glimmer-30B still fully loaded and live on spark2 four days after the router's changelog claimed it was unloaded/unregistered -- only its dispatch registration was actually removed. Used that still-live incumbent for a fair same-day `fleet_dualcoder_precision` comparison: incumbent scores 0.000 (0/4, 2 timeouts), GLM-4.7-Flash scores a perfect 1.000 (6/6) -- first confirmed candidate-outperforms-incumbent finding of this run, saved to memory. |
 | 1.4.0 | 2026-10-25 | Added phi-4-Q8_0 results: weakest Tier 0 score of the run (0.350) but strong log-analyst fact-extraction (0.960) and the weakest muse_contract override resistance seen so far (3/9). Noted and cleared a transient wrapper hiccup (`llama-coder.service` logged "canceled" mid-stop; verified both coder and muse came back up correctly). |
 | 1.5.0 | 2026-10-25 | Added NousResearch_Hermes-4.3-36B results and a second, stronger candidate-outperforms-incumbent finding: traced `fleet_log_analyst`'s real production role to `super` (live, actively serving traffic), measured it read-only at 0.375 accuracy, and found Hermes-4.3-36B scores 0.750 on the identical suite same-day. Saved to memory. |
+| 1.6.0 | 2026-10-25 | Found and fixed a real methodology bug: the candidate wrapper never passed `--reasoning off`, a fleet-wide mandatory flag on every production launch script. Confirmed it corrupted the Huihui-Qwen3.6-35B-A3B-abliterated (= live `muse` incumbent, byte-identical) run outright (log_analyst 0/25 facts, digest axes missing); re-ran with the fix for the real, corrected `muse`-incumbent baseline (muse_contract 0.704). Flagged Qwen3-8B's and Hermes-4.3-36B's coder_fix/coder_build timeout-inflated numbers as likely affected by the same root cause, recommending a targeted re-run; the four Instruct-suffixed/non-reasoning candidates show no corruption symptoms. Wrapper now passes the flag by default for every remaining candidate. |
