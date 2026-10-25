@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.10.0
+**Version:** 1.11.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -472,7 +472,7 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
   same-day direct operator request enriched the page further (2.8.0): every ticker-level detail
   line now names the registered company in parens, and the daily report renders one table per
   section (an `<h3>` divider/title) instead of a repeated "section" column.
-- **S38j** — **Built 2026-10-25, direct operator request** ("have a 'Graph' button [on /market]
+- **S38j** — **Built, live-verified, and committed 2026-10-25, direct operator request** ("have a 'Graph' button [on /market]
   that breaks out a new window containing a time-series graph with the history that is remembered
   in The Firmament fleet... evaluate if [the] appstack is retaining enough history, preferring up
   to one year... allow picking a time duration, which will autoscale the time-axis"). Retention
@@ -497,6 +497,18 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
   own title, never auto-escaped, since every other caller passes a static string), was the first
   user-controlled value ever placed there — a hostile ticker, escaped everywhere else on the
   page, still broke out via the heading until `page_market_history()` was fixed to `esc()` it.
+  Live, on `dgx-spark`: a real `prices --backfill-range 5y` run against the full 503-ticker
+  universe (additive/idempotent `INSERT ... ON CONFLICT DO UPDATE`, confirmed against a running
+  `/market` page mid-backfill correctly showing a transient "database is locked" on that one
+  section — the rollback-journal write lock this stack has always had, not a regression — then
+  resolving cleanly once the backfill committed). Real result: NVDA's own history actually
+  extended from its original ~1.6-year backfill out to a full 5 years (`2021-10-25`→`2026-10-23`),
+  confirmed through every duration bucket on the real `/market/history` page returning the
+  correct real date window (30/90/180/365/1825/all), a real short-history ticker (`VYLR`, added
+  after the original backfill) degrading sanely rather than crashing, and an unknown ticker
+  showing its named empty state — checked over both loopback and the real public tailnet URL
+  (`https://spark.tail1a534.ts.net:8103/market`), with all 52 real ticker-level rows on the live
+  report carrying a working Graph link.
 
 ---
 
@@ -522,8 +534,7 @@ is satisfied by the data being real and checkable, not by someone having actuall
 exit gate already established as real (S38j's new history graph included — it reads the exact
 same `prices` rows `market sector`/`market ticker` already read, drawn from a new angle), not a
 new push/pull path of its own. Each one's own "done" is stated in its own §12 entry instead.
-S38i is built, live-verified on `dgx-spark`, and committed; S38j is offline-tested as of this
-revision, live verification and commit to follow the same two-stage workflow.
+Both S38i and S38j are built, live-verified on `dgx-spark`, and committed.
 
 ---
 
@@ -582,3 +593,4 @@ own commit to that table in the same change, not a thing done here.
 | 1.8.0 | 2026-10-25 | **S38h live-verified on `dgx-spark`, minutes after 1.7.0 was written — direct operator request to deploy it the same way as every prior sub-stage.** The real classification run is the headline result: every exact ticker §4's heuristic measurement found as a false positive (`FTNT`/`GEN`/`NOW`/`PANW`/`TWLO`/`RDDT`) was correctly cleared by `dispatch`, each with a sound, specific rationale — directly validating the decision to use an LLM instead of a sector heuristic. Zero genuine candidates were left pending (the curated lists already cover the real universe), so the approve/reject/override gate round trip was verified with two synthetic test proposals, fully cleaned up from `tags.yaml`/`tag_proposals`/`tags` afterward. One confirming finding: approving a nonsense ticker (`TESTCO`) correctly added zero rows to the real `tags` table, since `apply_tags()` found no matching real instrument — the mechanism degrades safely. The installed `hermes-market-sync.service` unit was reinstalled to `/etc/systemd/system/` with its new `hermes-router.service` dependency and run for real end to end (`Result=success`) through all four steps including `scan-tags`. §13 now reads "MET — S38a-h in full." Minor bump — a feature's live verification executed for real and its record written in, nothing prior reversed. |
 | 1.9.0 | 2026-10-25 | **S38i added, direct operator request ("add a formatted report to the Fleetops-ui"), fulfilling §9's long-deferred "browsable report history" now that S38a-h's real data exists to browse.** §9 moved `[PROPOSED]` → `[DECIDED]`: new `/market` page on `hermes-fleetops-ui.py` (now 2.6.0) with a date-picked, filterable daily-report table (re-sorted into the fixed `REPORT_SECTION_ORDER` rather than the table's own alphabetical `item_type` order) read via `hermes_market_common.read_report_items()` — the same function the email/Matrix/gate paths already render from — plus a read-only "Pending tag candidate proposals" section over S38h's `tag_proposals` table, framed the same "deciding stays a Matrix reply" way `/recommendations` already frames its own findings. No new write route. §12 gained the S38i entry (19 new offline checks, 259 total on that page's suite); §13 notes S38i is offline-tested only and not part of S38a-h's own exit-gate bar, being a read-only view over data that bar already proved real; §14 re-evaluated — no model call at all, so no benchmark-gap question even arises, the simplest of the three S38 evaluations recorded there. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
 | 1.10.0 | 2026-10-25 | **S38j added, direct operator request** ("have a 'Graph' button [on /market] that breaks out a new window... evaluate if [the] appstack is retaining enough history, preferring up to one year... allow picking a time duration, which will autoscale the time-axis"), plus the S38i correction this same edit found while touching this file's own build-sequence entry. §11 risk 4 ("Unbounded storage growth") resolved: no pruning exists anywhere in this codebase, and a direct live check of Yahoo's chart endpoint showed 10 years of daily history available — decision is to retain every row forever (trivial size at this universe scale), and the operator raised the backfill goal from the risk's original ~1-year framing to 5 years once that ceiling was confirmed. §12's S38i entry corrected from its stale "not yet live-verified or committed" (it has been, since 1.9.0 was written) and gained a note about its same-day company-name/per-section follow-up enrichment; new S38j entry records the history-graph build — `ticker_price_history()` (`hermes_market_common.py` 1.3.0), the `backfill_days`→`backfill_range` rename and new-ticker auto-backfill (`hermes-market-sync.py` 1.3.0 — Yahoo's `Nd` range token turned out to count trading days, not calendar days), and the `/market/history` page itself (`hermes-fleetops-ui.py` 2.10.0), including a real bug its own test suite caught (the ticker query parameter breaking out of `section()`'s un-escaped heading argument — the first caller to put request-controlled data there). §13 corrected to reflect S38i's real completed state and extended to exclude S38j from the exit-gate bar on the same "read-only view, no new push/pull path" grounds as S38i. §14 re-evaluated for S38j: no model call at all, same conclusion as S38i's own evaluation, call recorded per `CLAUDE.md`'s rule. Minor bump — a new, additive feature plus a factual correction to this file's own prior content, nothing restructured or reversed. |
+| 1.11.0 | 2026-10-25 | **S38j live-verified on `dgx-spark`, minutes after 1.10.0 was written — direct operator request to deploy it the same way as every prior sub-stage.** A real `prices --backfill-range 5y` run against the full 503-ticker universe actually raised NVDA's own history from its original ~1.6-year backfill to a full 5 years. Every duration bucket on the real `/market/history` page returned the correct real date window; a real short-history ticker (`VYLR`) and a real unknown ticker both degraded exactly as designed; all 52 real ticker-level rows on the live `/market` report carried a working Graph link, confirmed over both loopback and the real public tailnet URL. §12's S38j entry and §13 both updated from "built" to the real live result; committed and pushed (`23bda8e`). Minor bump — a feature's live verification executed for real and its record written in, nothing prior reversed. |
