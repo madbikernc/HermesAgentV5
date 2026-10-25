@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -76,6 +76,52 @@ pattern on this fleet.
   here. This is a real speed delta worth having on file, not evidence it should replace the
   incumbent.
 
+## Phase 2 — small general-purpose, role TBD
+
+Per direct operator instruction, every candidate below gets Tier 0 plus **every** architecturally-
+plausible Tier 1 role suite (log analyst, digest faithfulness, muse contract, dualcoder precision,
+coder fix, coder build) rather than just the one role it seems most likely for — "record results for
+any potential matching role."
+
+### `Qwen3-4B-Instruct-2507-Q8_0.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.900 | Strong |
+| `fleet_log_analyst` | accuracy 4/8 = 0.500 (10/18 "unclear") | fact-extraction fine (23/25) but final verdict weak — too many non-committal calls |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, **padding_restraint 0/1 = 0.000** | Failed the one "nothing genuinely new" case — padded/invented a highlight when it should have emitted nothing |
+| `fleet_muse_contract` | capability 9/9, groundedness 9/9, **override 4/9**, overall 0.815 | Weak specifically on resisting an adversarial persona-override attempt — more than half the personas broke character when pushed |
+| `fleet_dualcoder_precision` | recall 1/3, **precision 0/3**, overall 0.167 | False-positived on all 3 clean-code cases — would flood a real review with invented findings |
+| `fleet_coder_fix` | repro **0/1** (the one real executable gold case failed), judge 8/9 = 0.889 | Judge axis looks much better than the one objective repro result — judge may be lenient here, not independently verified |
+| `fleet_coder_build` | fixture 2/3, judge 8/8 = 1.000 | Same judge-vs-objective gap pattern as coder_fix |
+
+**Read across suites**: judge-only axes (coder_fix 0.889, coder_build 1.000) are consistently far
+rosier than every axis with an objective, non-judge check (repro 0/1, fixture 2/3, dualcoder
+precision 0/3). Worth weighting the objective axes heavily over judge-only ones for this candidate
+specifically, not just averaging them. One transient judge-endpoint `503` during `coder_fix`
+(`mesh_self_intersections`) was correctly recorded as `unclear`, not silently dropped or guessed.
+
+### `Qwen3-8B-Q8_0.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.900 | Same as Qwen3-4B |
+| `fleet_log_analyst` | accuracy 6/10 = 0.600 (8 unclear), fact-extraction 23/25 = 0.920 | Better verdict accuracy than Qwen3-4B (0.500), same fact-extraction |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, **padding_restraint 1/1 = 1.000** | Unlike Qwen3-4B, correctly emitted nothing on the "nothing new" case |
+| `fleet_muse_contract` | capability 8/9, groundedness 9/9, override 5/9, overall 0.815 | Same overall as Qwen3-4B (0.815); still fails override more than it passes |
+| `fleet_dualcoder_precision` | recall 1/3, **precision 0/3**, overall 0.167 | Same pattern as Qwen3-4B — false-positives on all 3 clean-code cases |
+| `fleet_coder_fix` | repro 0/1, judge 3/3 = 1.000 | **7 of 10 tasks failed outright on timeout** (`call failed: timed out`), not scored either way |
+| `fleet_coder_build` | fixture 2/2 = 1.000, judge 4/4 = 1.000 | **4 of 8 tasks failed outright on timeout** |
+
+**Real finding — timeout, not quality**: at 8B, more than half of `fleet_coder_fix`'s tasks (7/10) and half
+of `fleet_coder_build`'s (4/8) never completed a model call at all ("timed out"), vs. zero timeouts for the
+4B candidate on the same harness/timeout settings. The "1.000" judge scores above are over whatever small
+surviving subset happened to finish in time, not the full task set — they are **not comparable at face
+value** to a run that completed all tasks. This looks like the eval harness's per-call timeout being tuned
+for smaller/faster candidates and not scaling with model size, rather than anything about Qwen3-8B's actual
+coding ability. Flagging as a harness gap worth fixing (raise the timeout or make it size-aware) before
+trusting coder_fix/coder_build numbers on any 8B+ candidate, including later Phase 3+ ones.
+
 ## Phase 2+ — in progress
 
 (continues below as each candidate completes)
@@ -85,3 +131,4 @@ pattern on this fleet.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-24 | Initial version — real Phase 1 results from the first live execution of the sequencing runbook: guard candidate's full Tier 0/3 numbers (Tier 2 blocked by a tooling gap, stated plainly), the rerank candidate excluded as a confirmed byte-identical duplicate of the live incumbent, and the embed candidate's real latency delta against a live, read-only-measured incumbent baseline (accuracy unmeasured, correctly not attempted). |
+| 1.1.0 | 2026-10-24 | Added Phase 2 Qwen3-4B and Qwen3-8B full-battery results. Qwen3-8B surfaced a real harness gap: 7/10 `fleet_coder_fix` and 4/8 `fleet_coder_build` tasks timed out outright at 8B (zero timeouts at 4B on the same settings) — surviving-subset judge scores flagged as not comparable at face value until the harness's timeout is made size-aware. |
