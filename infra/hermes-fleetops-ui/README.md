@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.5.0
+**Version:** 2.7.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog, which checkpoint backs each role, benchmark results, the news digest's stored highlights,
@@ -218,6 +218,14 @@ measurement and renders as a number; a `null` is a suite that was attempted and 
 and says so. Both cases are pinned by the offline test, because the first draft assumed one suite
 and a `scores` blob per row and would have collapsed them.
 
+**The "Current" table's role filter and `value/highest` column both key off `role_or_endpoint`,
+not `model_id`.** Every eval tool writes that field as the fleet ROLE it is scoring a candidate
+*for* — `hermes-vision-judge-eval.py` always writes `"omni"`, whether the real `omni` incumbent or
+a staged replacement candidate is actually behind the endpoint being measured. Grouping by
+`(role, suite, metric)` across every model's latest result is therefore exactly "every result
+anyone has recorded for this role's suite": the role filter narrows to one such group, and a row's
+`/highest` is the best value in that same group, even when that happens to be the row's own value.
+
 **The model-swap section at the top of `/recommendations` is curated, not queried.** Every other
 section on these pages reads a store the fleet already writes to; there is no live store yet for
 "a staged candidate beat the real incumbent on a benchmark suite", so `MODEL_SWAP_RECOMMENDATIONS`
@@ -252,7 +260,7 @@ route, since even with a stolen CSRF token a form on someone else's page cannot 
 
 ## 6. Tests
 
-`tests/test_fleetops_ui.py` — 240 offline checks, no network, no live store, no socket bound. The
+`tests/test_fleetops_ui.py` — 270 offline checks, no network, no live store, no socket bound. The
 fixtures are the real schemas read off the live stores on 2026-10-09, because the first draft got
 two of them wrong from the plan's own prose. Also asserts the things that are easy to break
 silently: that the NAS and local history paths still equal `hermes_benchmark_common`'s own
@@ -336,3 +344,5 @@ rather than silent. A restart re-fetches the credentials.
 | 2.3.0 | 2026-10-09 | **New `/recommendations` page (S21h)**, direct request: surface every `REC-<node>-<date>-<seq>` security/integrity finding written to hermes-memory by `hermes-node-baseline-scan.py` (spark/spark-2/HomeD13, S17) and `hermes-linodemercury-watch.py` (LinodeMercury, S29) — keyed by the `REC-` id prefix rather than an agent allowlist, so a future producer needs no code change here. Read-only; no new write route. **Found a real, large pre-existing problem on first load**: 227,116 `REC-*` rows, 139,853 still pending since 2026-09-07, overwhelmingly `aide` noise against unexcluded rotating paths (`/var/log/sysstat/sa<DD>`) on spark/spark-2 — the same class of gap S29 independently found for LinodeMercury's own directories. A naive capped query buried every node but whichever was churning fastest *right now*; fixed by filtering `state != 'resolved'` in SQL by default (not after the cap), with a separate true-total `COUNT(*)` so "showing N of total" is never misleading, and an explicit `state=all` option to see resolved history anyway. 201 offline checks (19 new). |
 | 2.4.0 | 2026-10-16 | Decide availability is now checked at render time and the buttons are hidden with a reason when `MEMORY_TOKEN` or the gate module is missing — after the service ran five days with an empty token from a post-reboot vault failure, rendering buttons that could not work. A 401 on the task lookup no longer reports as `writefail`: `unauthorized`, `readfail` and `notoken` are distinct and each states that nothing was written. Every decide outcome now logs, and the route logs the action and candidates it was asked to apply — the old 401 branch returned bare, leaving only a `303` in the journal. 226 offline checks. |
 | 2.5.0 | 2026-10-25 | Direct operator request: `/recommendations` now leads with a "Recommended model swaps" section, ahead of the existing `REC-<node>` security findings, surfacing the S39 spark2 candidate-benchmark run's own outperformance findings (`infra/model-benchmark/spark2-candidate-results.md`) — GLM-4.7-Flash vs. the retired-but-still-resident `coder2`, Hermes-4.3-36B vs. `super` on log-analysis, Nemotron-3.5-Bolt-74B vs. `omni` on vision-judging, and Nemotron-3-Nano-Omni-30B vs. `muse` on persona/override-resistance. `MODEL_SWAP_RECOMMENDATIONS` is a curated constant, not a queried store — there is no live store yet for "a candidate beat an incumbent" the way there is for every other section here, and the page says so plainly, pointing back at the source doc and warning that role assignments on this fleet are confirmed to drift from their own service descriptions. 240 offline checks (14 new). |
+| 2.6.0 | 2026-10-25 | New `/market` page (S38i), direct operator request ("add a formatted report to the Fleetops-ui"), fulfilling `MARKET_WATCH_DESIGN.md` §9's deferred "browsable report history" now that S38a-h's real data exists to browse. A date-picked, filterable daily-report table re-sorted into the fixed `REPORT_SECTION_ORDER` (not the table's own alphabetical `item_type` order), read via `hermes_market_common.read_report_items()` — the same function the daily email, Matrix notice and a `market report` gate reply already render from, so this page can never show different numbers for the same day. Plus a read-only "Pending tag candidate proposals" section over S38h's `tag_proposals` table, framed the same "deciding stays a Matrix reply, not a button here" way `/recommendations` already frames its own findings. No new write route. 19 new offline checks (259 total). *(Backfilled into this changelog; the commit itself is `e30746a`.)* |
+| 2.7.0 | 2026-10-25 | Direct operator request: `/benchmarks`' "Current" table gets a role filter, a high-to-low score sort, and the value column now shows `value/highest` whenever a higher score for the exact same role/suite/metric has been recorded by any `model_id`. Grouped by `(role_or_endpoint, suite, metric)` rather than suite/metric alone — every eval tool writes `role_or_endpoint` as the fleet ROLE it is scoring a candidate *for*, regardless of which `model_id` is actually behind the endpoint (`hermes-vision-judge-eval.py` always writes `"omni"`), so this is exactly "every result anyone has recorded for this role's suite", computed off the same latest-per-model snapshot the table already builds. `fmt_value()` gained an optional `best` parameter (default `None`, so `render_history_all()`'s own per-run summary and the pre-existing single-argument offline tests are unaffected); `page_benchmarks()` now takes `query` like every other page here. 11 new offline checks. |

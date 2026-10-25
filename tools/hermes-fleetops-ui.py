@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 2.6.0
+# Version: 2.7.0
+#
+# 2.7.0 (2026-10-25) — direct operator request: /benchmarks' "Current" table gets a role filter,
+# a high-to-low score sort, and the value column now shows `value/highest` whenever a HIGHER
+# score for the exact same role/suite/metric has been recorded by any model_id. The grouping key
+# is (role_or_endpoint, suite, metric) rather than suite/metric alone, because every eval tool
+# writes role_or_endpoint as the fleet ROLE it is scoring a candidate *for* regardless of which
+# model_id is actually behind the endpoint (hermes-vision-judge-eval.py always writes "omni") —
+# so grouping on it is exactly "every result anyone has recorded for this role's suite", computed
+# off the same latest-per-model snapshot the table already builds, not the full historical peak.
+# fmt_value() gained an optional `best` parameter (default None, so render_history_all()'s own
+# per-run summary line, and the existing offline tests calling it with one argument, are
+# unaffected); render_history_current() gained `role_filter`/`sort_by_score` parameters, so
+# page_benchmarks() now takes `query` like every other page here, and the /benchmarks route entry
+# changed from a wrapping lambda to a direct reference to match.
 #
 # 2.6.0 (2026-10-25) — direct operator request: a new /market page (S38i, fulfilling
 # MARKET_WATCH_DESIGN.md §9's long-deferred "browsable report history" once S38's own data
@@ -1001,33 +1015,82 @@ def suite_results(entry):
     return out
 
 
-def fmt_value(v):
+def fmt_value(v, best=None):
+    """`best`, when given, is the highest currently-recorded value for this exact same
+    role/suite/metric (see render_history_current()) — rendered as `value/best` so a score reads
+    in context rather than in isolation. Omitted (the default) by every caller with no such
+    group to compare against, e.g. render_history_all()'s own per-run summary line, which mixes
+    several suites/metrics in one line and has no single group for any one of them."""
     if v is None:
         return '<span class="empty">no result</span>'
-    if isinstance(v, (int, float)):
-        return f"{v:.4g}"
-    return esc(v)
+    if not isinstance(v, (int, float)):
+        return esc(v)
+    s = f"{v:.4g}"
+    if isinstance(best, (int, float)):
+        s += f"/{best:.4g}"
+    return s
 
 
-def render_history_current():
+def render_history_current(role_filter, sort_by_score):
     """Each model's latest run per suite — the same grouping `hermes-benchmark-compare.py
-    --model-id` already does, read off the same history rather than recomputed differently."""
+    --model-id` already does, read off the same history rather than recomputed differently.
+
+    Every eval tool writes `role_or_endpoint` as the fleet ROLE it is scoring a candidate *for*,
+    regardless of which model_id is actually being measured (hermes-vision-judge-eval.py always
+    writes "omni", whether the real omni incumbent or a staged replacement candidate is what's
+    behind the endpoint) — so grouping by (role, suite, metric) across every model_id's latest
+    entry is exactly "every result anyone has recorded for this role's suite", which is both what
+    the role filter narrows to and what each row's `best` is computed over."""
     latest = {}
     for e in read_history():                       # already newest-first
         model_id = str(e.get("model_id") or "?")
+        role = e.get("role_or_endpoint") or ""
         for name, metric, value in suite_results(e):
-            latest.setdefault((model_id, name), (e, metric, value))
+            latest.setdefault((model_id, name), (e, metric, value, role))
+
+    best = {}
+    for (_model_id, suite), (_e, metric, value, role) in latest.items():
+        if not isinstance(value, (int, float)):
+            continue
+        key = (role, suite, metric)
+        if key not in best or value > best[key]:
+            best[key] = value
+
+    items = list(latest.items())
+    if role_filter:
+        items = [it for it in items if it[1][3] == role_filter]
+    if sort_by_score:
+        def score_key(it):
+            value = it[1][2]
+            return (0, -value) if isinstance(value, (int, float)) else (1, 0)
+        items.sort(key=score_key)
+    else:
+        items.sort(key=lambda it: it[0])            # (model_id, suite) — the original order
+
+    roles = sorted({role for (_mid, _s), (_e, _m, _v, role) in latest.items() if role})
+    ropts = [f'<option value=""{"" if role_filter else " selected"}>(every role)</option>']
+    for r in roles:
+        sel = " selected" if r == role_filter else ""
+        ropts.append(f'<option value="{esc(r)}"{sel}>{esc(r)}</option>')
+    sopts = (f'<option value=""{"" if sort_by_score else " selected"}>model, suite</option>'
+             f'<option value="score"{" selected" if sort_by_score else ""}>score, high to low'
+             f'</option>')
+    form = (f'<form method="get"><select name="role">{"".join(ropts)}</select> '
+            f'<select name="sort">{sopts}</select> '
+            f'<button type="submit">show</button></form>')
+
     rows = []
-    for (model_id, suite), (e, metric, value) in sorted(latest.items()):
+    for (model_id, suite), (e, metric, value, role) in items:
         rows.append([
             f'<span class="mono">{esc(model_id)}</span>',
             esc(suite),
             f'<span class="mono">{esc(metric or "")}</span>',
-            fmt_value(value),
-            esc(e.get("role_or_endpoint") or ""),
+            fmt_value(value, best.get((role, suite, metric))),
+            esc(role),
             esc(when(e.get("date"))),
         ])
-    return table(["model", "suite", "metric", "value", "role", "latest run"], rows, numeric={3})
+    return form + table(["model", "suite", "metric", "value", "role", "latest run"], rows,
+                        numeric={3})
 
 
 def render_history_all():
@@ -1056,8 +1119,15 @@ def render_history_all():
         ["when", "model", "role", "suite results", "notes"], rows) + "</div>"
 
 
-def page_benchmarks():
-    body = section("Current — each model's latest run per suite", "", render_history_current)
+def page_benchmarks(query):
+    role_filter = (query.get("role") or [""])[0]
+    sort_by_score = (query.get("sort") or [""])[0] == "score"
+    body = section(
+        "Current — each model's latest run per suite",
+        "Filter to one role, or sort high to low, with the controls above the table. The value "
+        "column shows this model's own latest score — and, whenever any model's latest score for "
+        "this exact role/suite/metric is higher, that highest score too, as value/highest.",
+        lambda: render_history_current(role_filter, sort_by_score))
     body += section("All recorded runs", "Newest first, with a hard render cap. Both views read "
                     "the same history file the benchmark tooling writes, so there is never a "
                     "second copy to drift.", render_history_all)
@@ -1583,7 +1653,7 @@ ROUTES = {
     "/": lambda q: page_home(),
     "/backlog": page_backlog,
     "/models": lambda q: page_models(),
-    "/benchmarks": lambda q: page_benchmarks(),
+    "/benchmarks": page_benchmarks,
     "/highlights": page_highlights,
     "/recommendations": page_recommendations,
     "/egress-blocks": page_egress_blocks,

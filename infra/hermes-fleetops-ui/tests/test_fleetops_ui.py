@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 2.6.0
+# Version: 2.7.0
+#
+# 2.7.0 (2026-10-25) — check_benchmark_ranking() covers /benchmarks' "Current" table getting a
+# role filter, a high-to-low score sort, and value/highest rendering (hermes-fleetops-ui.py
+# 2.7.0): every role appears as a filter option, a trailing candidate's value is shown alongside
+# its role's current best, a role with only one model recorded still shows value/highest against
+# itself, the role filter narrows correctly, score sort ranks highest-first with no-result rows
+# last, page_benchmarks(query) threads both params through end to end (scoped to the "Current"
+# section only -- "All recorded runs" stays deliberately unfiltered), and a hostile role value is
+# still escaped.
 #
 # 2.6.0 (2026-10-25) — check_market() covers the new /market page (hermes-fleetops-ui.py 2.6.0,
 # S38i): report rows render in REPORT_SECTION_ORDER (not the table's own alphabetical item_type
@@ -107,6 +116,88 @@ def check_history_schema(ui):
     check("and so does the local fallback",
           ui.LOCAL_HISTORY == bc.LOCAL_HISTORY_PATH,
           f"{ui.LOCAL_HISTORY} vs {bc.LOCAL_HISTORY_PATH}")
+
+
+def check_benchmark_ranking(ui, tmp):
+    print(NL + "[benchmark current table: role filter, score sort, value/highest]")
+    # Every eval tool writes role_or_endpoint as the fleet ROLE it is scoring a candidate *for*,
+    # not the model_id being measured -- two different model_ids sharing a role is exactly the
+    # "incumbent vs. staged candidate" shape this feature is for.
+    entries = [
+        {"date": "2026-10-25T01:00:00+00:00", "model_id": "incumbent-omni",
+         "role_or_endpoint": "omni",
+         "suites": {"fleet_vision_judge_recall": {"metric": "recall", "value": 0.407}}},
+        {"date": "2026-10-25T02:00:00+00:00", "model_id": "candidate-bolt",
+         "role_or_endpoint": "omni",
+         "suites": {"fleet_vision_judge_recall": {"metric": "recall", "value": 0.963}}},
+        {"date": "2026-10-25T03:00:00+00:00", "model_id": "incumbent-muse",
+         "role_or_endpoint": "muse",
+         "suites": {"fleet_muse_contract": {"metric": "overall", "value": 0.704}}},
+        # No result at all -- must sort last under score mode and never grow a "/highest" suffix.
+        {"date": "2026-10-25T04:00:00+00:00", "model_id": "untested-guard",
+         "role_or_endpoint": "guard",
+         "suites": {"fleet_guard_latency": {"metric": "p50_ms", "value": None}}},
+    ]
+    hist = tmp / "bench-ranking.jsonl"
+    hist.write_text(NL.join(json.dumps(e) for e in entries), encoding="utf-8")
+    orig_nas, orig_local = ui.NAS_HISTORY, ui.LOCAL_HISTORY
+    ui.NAS_HISTORY = hist
+    ui.LOCAL_HISTORY = tmp / "bench-ranking-local-fallback-does-not-exist.jsonl"
+    try:
+        html = ui.render_history_current("", False)
+        check("every role appears as a filter option",
+              'value="omni"' in html and 'value="muse"' in html and 'value="guard"' in html,
+              html[:400])
+        check("a trailing candidate's value is shown alongside the role's current best",
+              "0.407/0.963" in html, html)
+        check("a role with only one model recorded still shows value/highest against itself",
+              "0.704/0.704" in html, html)
+        check("a None result renders as no-result, not a crashed/blank cell",
+              "no result" in html)
+
+        print(NL + "[role filter narrows to just that role]")
+        omni_only = ui.render_history_current("omni", False)
+        check("the other roles' models are excluded",
+              "incumbent-muse" not in omni_only and "untested-guard" not in omni_only
+              and "candidate-bolt" in omni_only and "incumbent-omni" in omni_only, omni_only)
+
+        print(NL + "[score sort: highest first, missing/non-numeric results sort last]")
+        ranked = ui.render_history_current("", True)
+        positions = {m: ranked.find(m) for m in
+                     ("candidate-bolt", "incumbent-muse", "incumbent-omni", "untested-guard")}
+        check("0.963 (candidate-bolt) ranks above 0.704 (incumbent-muse)",
+              0 <= positions["candidate-bolt"] < positions["incumbent-muse"], str(positions))
+        check("0.704 (incumbent-muse) ranks above 0.407 (incumbent-omni)",
+              positions["incumbent-muse"] < positions["incumbent-omni"], str(positions))
+        check("the no-result row (untested-guard) sorts last of all",
+              positions["untested-guard"] > max(positions["candidate-bolt"],
+                                                 positions["incumbent-muse"],
+                                                 positions["incumbent-omni"]), str(positions))
+
+        print(NL + "[page_benchmarks(query) threads the role/sort params through]")
+        page = ui.page_benchmarks({"role": ["omni"], "sort": ["score"]}).decode()
+        # The role filter is scoped to the "Current" section only -- "All recorded runs" below it
+        # is deliberately unfiltered, so the check is scoped to the same section.
+        current_section = page[page.find("Current — each model"):page.find("All recorded runs")]
+        p_bolt = current_section.find("candidate-bolt")
+        p_omni_inc = current_section.find("incumbent-omni")
+        check("the Current section honours both query params at once",
+              "incumbent-muse" not in current_section and 0 <= p_bolt < p_omni_inc,
+              (p_bolt, p_omni_inc))
+        check("an empty query dict still renders (every param optional)",
+              b"Current" in ui.page_benchmarks({}))
+
+        print(NL + "[a hostile role value is escaped, not rendered as markup]")
+        hist.write_text(json.dumps({
+            "date": "2026-10-25T05:00:00+00:00", "model_id": "<script>steal()</script>",
+            "role_or_endpoint": "<img src=x onerror=alert(1)>",
+            "suites": {"s": {"metric": "m", "value": 1.0}},
+        }), encoding="utf-8")
+        nasty = ui.render_history_current("", False)
+        check("escaped, not rendered as markup",
+              "<script>" not in nasty and "<img src=x" not in nasty)
+    finally:
+        ui.NAS_HISTORY, ui.LOCAL_HISTORY = orig_nas, orig_local
 
 
 def check_backlog(ui, tmp):
@@ -1193,6 +1284,7 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         check_history_schema(ui)
+        check_benchmark_ranking(ui, tmp)
         check_backlog(ui, tmp)
         check_highlights(ui, tmp)
         check_models(ui)
