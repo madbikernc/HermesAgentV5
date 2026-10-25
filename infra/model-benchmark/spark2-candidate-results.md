@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.8.0
+**Version:** 1.9.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -335,6 +335,40 @@ a secondary data point, not a new finding.
 
 This closes out Phase 3.
 
+### Tooling note: `hermes-vision-judge-eval.py` expects `--endpoint` *without* `/v1`
+
+Unlike every other eval tool in this run, `hermes-vision-judge-eval.py` passes `--endpoint` straight into
+`hermes-media.py`'s `ROUTER_URL`, and `evaluate_image()` appends `/v1/chat/completions` itself — passing
+the usual `.../v1` convention produces a double `/v1/v1/chat/completions` path and a 404 on every image
+(confirmed: all 34 fixtures failed this way on first attempt against Nemotron-3.5-Bolt). The tool's own
+docstring usage example already shows the bare-host form; re-ran with `--endpoint http://127.0.0.1:8093`
+(no `/v1`) and it worked immediately. Noting this so Phase 4's remaining two candidates use the correct
+form from the start.
+
+### `NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf`
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.750 | |
+| `fleet_log_analyst` | accuracy 7/10 = 0.700 (8 unclear), fact-extraction 22/25 = 0.880 | |
+| `fleet_digest_faithfulness` | grounded 1.000, faithful 1.000, padding_restraint 1.000 | Clean sweep |
+| `fleet_muse_contract` | capability 9/9, groundedness 9/9, override 5/9, **overall 0.852** | **Best muse_contract score of the entire run** (previous best: 0.815) |
+| `fleet_dualcoder_precision` | recall 0/3, precision 0/3, overall 0.000 | |
+| `fleet_coder_fix` | repro 0/1, judge 10/10 = 1.000, 4 `env_unavailable` | No timeouts |
+| `fleet_coder_build` | fixture 2/3 = 0.667, judge 8/8 = 1.000 | No timeouts |
+| `fleet_vision_judge` (n=34, corrected endpoint) | precision 0.897, **recall 0.963**, false_pass_rate 0.429, **false_fail_rate 0.037** | See outperformance finding below |
+
+**Real finding — candidate strongly outperforms a live, actively-serving incumbent on a fair, same-day,
+same-suite basis**: ran the identical, corrected `fleet_vision_judge` suite against the live `omni` role
+(`gemma-4-26B-A4B-it`, spark2 port 8091), read-only, no disruption: **precision 0.846, recall 0.407,
+false_pass_rate 0.286, false_fail_rate 0.593**. The incumbent incorrectly rejects more than half of
+genuinely good images (`false_fail_rate` 0.593 — burning render compute on needless regenerations more
+often than not), vs. Nemotron-3.5-Bolt's 0.037. Nemotron-3.5-Bolt trades a somewhat higher
+`false_pass_rate` (0.429 vs. 0.286, on a small n=7 "fail" sample — one additional missed bad image) for a
+dramatically better recall and false-fail rate. Combined with this candidate's also-best-in-run
+`fleet_muse_contract` score (0.852), this is the strongest outperformance finding of the run so far —
+saved to memory per standing instruction.
+
 ## Phase 4+ — in progress
 
 (continues below as each candidate completes)
@@ -352,3 +386,4 @@ This closes out Phase 3.
 | 1.6.0 | 2026-10-25 | Found and fixed a real methodology bug: the candidate wrapper never passed `--reasoning off`, a fleet-wide mandatory flag on every production launch script. Confirmed it corrupted the Huihui-Qwen3.6-35B-A3B-abliterated (= live `muse` incumbent, byte-identical) run outright (log_analyst 0/25 facts, digest axes missing); re-ran with the fix for the real, corrected `muse`-incumbent baseline (muse_contract 0.704). Flagged Qwen3-8B's and Hermes-4.3-36B's coder_fix/coder_build timeout-inflated numbers as likely affected by the same root cause, recommending a targeted re-run; the four Instruct-suffixed/non-reasoning candidates show no corruption symptoms. Wrapper now passes the flag by default for every remaining candidate. |
 | 1.7.0 | 2026-10-25 | Added Huihui-Qwen3.6-35B-A3B-Claude-4.6-Opus-abliterated results (measured with the `--reasoning off` fix). Tracks the base model/`muse` incumbent closely across every suite -- no meaningful difference found. |
 | 1.8.0 | 2026-10-25 | Added Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated results, closing out Phase 3. Ties Hermes-4.3-36B's log-analyst accuracy but posts the worst muse_contract override/overall score of the entire run -- a real tradeoff, not a new recommendation. |
+| 1.9.0 | 2026-10-25 | Started Phase 4 (vision-capable candidates) with NVIDIA-Nemotron-3.5-Bolt-74B-A9B. Found and fixed a `hermes-vision-judge-eval.py` endpoint-format gotcha (no `/v1` suffix, unlike every other tool). Third outperformance finding, and the strongest yet: live `omni` incumbent (gemma-4-26B-A4B-it) has fleet_vision_judge recall 0.407 and false_fail_rate 0.593 (rejects most good images); Nemotron-3.5-Bolt scores recall 0.963, false_fail_rate 0.037, and also posts the best fleet_muse_contract score of the entire run (0.852). Saved to memory. |
