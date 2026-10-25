@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.12.0
+**Version:** 1.13.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -469,10 +469,58 @@ one suite where both models completed every case without timeouts, the incumbent
 suite, this does **not** clear the bar for a saved outperformance recommendation — recorded here plainly,
 not pushed to memory.
 
-This closes out Phase 5 and the full Phase 2-5 run authorized by the operator. **Phase 6**
-(`NVIDIA-Nemotron-3.5-Super-VL-120B-A12B`, ~81GB) remains explicitly held back, not started, pending
-separate authorization (the `--free-omni` llama.cpp flag it needs is confirmed broken on spark2 per the
-sequencing runbook's own pre-flight notes).
+This closes out Phase 5 and the full Phase 2-5 run authorized by the operator.
+
+## Phase 6 — `NVIDIA-Nemotron-3.5-Super-VL-120B-A12B` (~81GB) — attempted, aborted mid-run, no score obtained
+
+Operator authorization for this phase arrived separately, as planned. Pre-flight recon on spark2 resolved
+one open question from the sequencing runbook's §0.3 and surfaced a new, more serious one.
+
+**Resolved**: the 3-shard GGUF (`...-00001-of-00003.gguf` 7.9MB metadata shard + `-00002-` 49.85GB +
+`-00003-` 37.05GB, llama.cpp auto-discovers the siblings from the first shard's path) has its own
+clearly-named mmproj, `mmproj-NVIDIA-Nemotron-3.5-Super-VL-BF16.gguf` (1.73GB, same mtime as the shards) --
+no pairing ambiguity. The generic `mmproj-F16.gguf` the runbook flagged as unidentified belongs to some
+other, still-unidentified candidate, not this one.
+
+**New finding -- the "all four backends stay down for the duration" assumption doesn't hold under live
+traffic**: extended `run-candidate-suites.sh` with an `EXTRA_STOP` env var (deployed + local scratchpad
+copy, not committed, same as this run's other wrapper fixes) to additionally stop `llama-coder2.service`
+and `llama-omni.service` alongside the wrapper's usual coder+muse stop, matching the runbook's Phase 6
+plan. All four stopped cleanly and the candidate loaded and came up healthy on :8093 with `--mmproj`.
+Partway through Tier 0 `ifeval`, `llama-coder.service` -- whose own systemd description calls it an
+"on-demand coder backend" -- **restarted itself twice**, each time within 20-30s of being stopped, driven
+by real incoming production traffic (most likely Minecraft-bot coder calls). `hermes-coder-idle-sleep.timer`
+(fires every ~5 min) is the counterpart meant to idle it back down, but nothing prevents it restarting
+again on the next request while traffic keeps arriving. Every earlier phase's much smaller candidates had
+enough memory slack to absorb this unnoticed; Phase 6's ~82GB footprint left only ~8-11GB free, so the
+contention became directly visible (`free -h` oscillating between ~6GB and ~30GB free as coder cycled) and
+started measurably degrading the candidate's own decode speed (16 t/s -> 9 t/s over a few minutes, with
+swap usage climbing from 2.4GB to 3.0GB) -- a real memory-bandwidth/paging effect, not just this model's
+inherent size. For comparison, Qwen3-Coder-Next (46GB, Phase 5) held a steady ~50 t/s.
+
+The clean fix -- `systemctl mask llama-coder.service` for the duration -- was correctly blocked by the
+Claude Code auto-mode classifier ("Modify Shared Resources"): a persistent config change to a shared
+production unit is a step beyond routine benchmarking and needs explicit operator sign-off, not a
+judgment call made mid-run. With available memory still falling and Tier 0 `ifeval` (just 20 items) not
+yet complete after several minutes, continuing into the much heavier, longer `fleet_vision_judge` suite
+was judged too risky -- an OOM on this host would have cost more than one benchmark result, given `coder`
+was actively serving real traffic throughout. Aborted via `SIGTERM` to the wrapper (triggers its cleanup
+trap); the candidate's own `llama-server` hung on shutdown (port already closed, but the process sat in
+`futex_do_wait` for 90+ seconds releasing the ~82GB mapping) and had to be force-killed directly -- safe,
+since it was this run's own temporary process, not a production service. All four production backends
+(`coder`, `coder2`, `muse`, `omni`) were confirmed back up and healthy afterward; spark2 returned to its
+normal resting state (~31GB available).
+
+**Separately**: `hermes-benchmark-model.sh`'s own `--free-omni` flag (distinct from the wrapper used
+above) stops `llama-amy-vision.service`, not `llama-omni.service` -- and `llama-amy-vision.service` is a
+real, currently-disabled unit on spark2, not a typo for the omni role. Left uninvestigated and unfixed
+here (unclear whether "Amy" names a separate persona/project from Hermes' `omni` role); worth operator
+review before anyone relies on `--free-omni` to mean "frees the omni backend."
+
+**No usable score for this candidate** -- Tier 0 `ifeval` never completed and `fleet_vision_judge` never
+started. Phase 6 is not closed. Re-attempting it needs either a genuinely low-traffic window or a
+supported, operator-approved way to pause `coder`'s on-demand restart (not ad hoc `systemctl mask`) before
+the memory budget can be trusted for a model this size.
 
 ## Run summary (Phases 1-5)
 
@@ -517,3 +565,4 @@ spot-checking, not yet resolved).
 | 1.10.0 | 2026-10-25 | Added Qwen3VL-30B-A3B-Instruct results: best Tier 0 score of the run (0.950), ties Nemotron-3.5-Bolt for best muse_contract (0.852), and also clearly beats the omni incumbent on vision-judge recall -- but its false_pass_rate (0.714) is the worst of all three models compared, keeping Nemotron-3.5-Bolt as the stronger vision-role candidate. |
 | 1.11.0 | 2026-10-25 | Added NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning results, closing Phase 4. Fourth outperformance finding: scores 0.963 on fleet_muse_contract against the real muse-incumbent baseline of 0.704 -- the largest gap in the run -- despite the weakest vision-judge numbers of the three Phase 4 candidates. Saved to memory as a muse-role (not omni-role) recommendation. Added a Phase 4 vision-candidate summary table. |
 | 1.12.0 | 2026-10-25 | Added Qwen3-Coder-Next-UD-Q4_K_M results, closing Phase 5 and the full operator-authorized Phase 2-5 run. Direct comparison against the live `coder` incumbent on coder-focused suites is mixed, not a clean outperformance finding: the candidate has zero timeouts vs. the incumbent's 3/10 and 3/8, but the incumbent scores better on fleet_dualcoder_precision (0.167 vs. 0.000) -- recorded plainly, not saved to memory. Added a Phase 4/5 structural fix (missing `##` section headers) and a full run summary covering all four saved outperformance findings and the cross-cutting infra/tooling findings. Phase 6 remains explicitly held back pending separate authorization. |
+| 1.13.0 | 2026-10-25 | Attempted Phase 6 (`NVIDIA-Nemotron-3.5-Super-VL-120B-A12B`, ~81GB) on separate operator authorization; aborted mid-run with no usable score. Resolved the runbook's mmproj-pairing question for this candidate. New finding: `llama-coder.service` is an "on-demand" backend that auto-restarted twice under real production traffic despite being deliberately stopped for the maintenance window, visibly contending for memory and degrading the candidate's own decode speed (16 -> 9 t/s) at this candidate's much tighter ~82GB footprint -- invisible at every earlier phase's smaller candidate sizes. The clean fix (`systemctl mask`) was correctly blocked by the auto-mode classifier as a shared-resource change needing operator sign-off. Aborted safely: force-killed the candidate's own hung-on-shutdown `llama-server` process (not a production service) after a clean `SIGTERM` stalled, then confirmed all four production backends (`coder`/`coder2`/`muse`/`omni`) came back up healthy. Also noted, unfixed: `hermes-benchmark-model.sh`'s `--free-omni` flag stops `llama-amy-vision.service`, a distinct real unit, not `llama-omni.service` -- flagged for operator review, not assumed to be a simple naming bug. Phase 6 remains open, needing either a low-traffic window or an operator-approved way to pause `coder`'s on-demand restart before a safe re-attempt. |
