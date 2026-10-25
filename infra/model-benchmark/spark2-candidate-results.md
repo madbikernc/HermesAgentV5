@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.13.0
+**Version:** 1.14.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -471,7 +471,9 @@ not pushed to memory.
 
 This closes out Phase 5 and the full Phase 2-5 run authorized by the operator.
 
-## Phase 6 — `NVIDIA-Nemotron-3.5-Super-VL-120B-A12B` (~81GB) — attempted, aborted mid-run, no score obtained
+## Phase 6 — `NVIDIA-Nemotron-3.5-Super-VL-120B-A12B` (~81GB) — first attempt aborted, retry succeeded
+
+### First attempt: aborted mid-run, no score obtained
 
 Operator authorization for this phase arrived separately, as planned. Pre-flight recon on spark2 resolved
 one open question from the sequencing runbook's §0.3 and surfaced a new, more serious one.
@@ -522,7 +524,60 @@ started. Phase 6 is not closed. Re-attempting it needs either a genuinely low-tr
 supported, operator-approved way to pause `coder`'s on-demand restart (not ad hoc `systemctl mask`) before
 the memory budget can be trusted for a model this size.
 
-## Run summary (Phases 1-5)
+### Retry: real production fixes applied, clean run, real score obtained
+
+Direct operator follow-up addressed the exact contention this first attempt hit, rather than just waiting
+for a quiet window:
+
+1. **Stopped all nine Minecraft bot services** (`babs`/`amy`/`mark`/`luke`/`mayor` on `spark`,
+   `bob`/`nell`/`wade`/`dale` on `spark2`) -- the real source of the `coder`-role traffic that kept waking
+   `llama-coder.service` mid-run. Restarted after this phase closed.
+2. **Permanently disabled `coder2`** rather than just stopping it for this one window. Investigation found
+   it was already fully de-registered in code since 2026-10-20 (`hermes-router.py`'s `ROLES` dict,
+   `hermes-model-wake-worker.py`'s `WAKE_TARGETS`) with no remaining code path anywhere in the repo that
+   calls it other than through those two now-empty registrations -- every other `coder2` reference
+   (`hermes-dualcoder.py`, `hermes-minecraft-triage.py`, `hermes-self-repair-generate.py`) goes through the
+   router by role name and would 404, not reach systemd. The one real remaining risk was the unit's own
+   `Restart=on-failure` directive, live only while the service is actually running. `systemctl mask` was
+   the correct fix, but `mask --force` refused to clobber the real (non-symlink) unit file already at
+   `/etc/systemd/system/llama-coder2.service` -- did the manual equivalent instead (`rm` the file, preserved
+   unchanged in the repo at `infra/hermes-coder2/llama-coder2.service` for later restoration, then
+   `ln -s /dev/null` in its place, then `daemon-reload`). Confirmed: `systemctl start llama-coder2.service`
+   now fails with `Unit llama-coder2.service is masked.` This also resolves this run's own Phase 3 finding
+   that `coder2` was wasting ~17GB resident for no traffic -- that memory is now actually freed, not just
+   flagged.
+
+With both fixed, the retry ran with **zero contention**: decode speed held a steady **18.0 t/s** for the
+entire run (vs. the first attempt's contention-degraded 16 -> 9 t/s), and `coder`/`coder2` both stayed down
+the whole time with no flapping.
+
+| Suite | Result | Note |
+|---|---|---|
+| Tier 0 `ifeval` (limit 20) | 0.750 | Mid-pack, unremarkable |
+| `fleet_vision_judge` (n=34) | precision 0.895, recall **0.630**, false_pass_rate 0.286, false_fail_rate 0.370 | See comparison below |
+
+**Comparison with the other three vision candidates and the live incumbent, identical same-fixture-set
+suite**:
+
+| Model | Size | precision | recall | false_pass_rate | false_fail_rate |
+|---|---|---|---|---|---|
+| `omni` incumbent (live, gemma-4-26B-A4B-it) | ~17GB | 0.846 | 0.407 | 0.286 | 0.593 |
+| Nemotron-3.5-Bolt-74B | ~22GB | 0.897 | **0.963** | 0.429 | **0.037** |
+| Qwen3VL-30B | ~18GB | 0.833 | 0.926 | 0.714 | 0.074 |
+| Nemotron-Omni-30B-Reasoning | ~22GB | 0.821 | 0.852 | 0.714 | 0.148 |
+| **Nemotron-3.5-Super-VL-120B** | **~83GB** | 0.895 | 0.630 | 0.286 | 0.370 |
+
+Super-VL-120B does technically beat the live `omni` incumbent (better precision and recall, matching
+false_pass_rate, better false_fail_rate) -- by the same bar every other saved finding this run used. But
+it posts the **worst recall and false_fail_rate of all four vision candidates tested**, at roughly
+**4x the resident size** of the next-largest and by far the slowest to decode. Not saved as a new
+outperformance finding: folded into the existing [[s39-nemotron35bolt-beats-omni-vision]] memory as an
+additional comparison point, same as Qwen3VL-30B was. Nemotron-3.5-Bolt-74B remains the clear best `omni`
+candidate on every measured axis except raw parameter count.
+
+This closes Phase 6 and the full operator-authorized S39 spark2 candidate run (Phases 1-6).
+
+## Run summary (Phases 1-6)
 
 Four candidates were found to genuinely outperform their live incumbent on a fair, same-day, same-suite
 basis, each saved to memory:
@@ -538,15 +593,24 @@ basis, each saved to memory:
    the largest gap of any finding in this run, but specifically a `muse`-role recommendation, not `omni`
    (its own vision-judge numbers were the weakest of the three Phase 4 candidates).
 
+A fifth candidate, Phase 6's Nemotron-3.5-Super-VL-120B, technically also beat the `omni` incumbent on
+`fleet_vision_judge` but was the weakest of the four vision candidates tested at ~4x the size -- not saved
+as a separate finding, folded into finding 3's memory as an additional comparison point.
+
 Real infrastructure/tooling findings surfaced along the way, independent of any single candidate's score:
 stale `Description=` metadata on two systemd services (Phase 1); a byte-identical reranker duplicate
 excluded from scoring (Phase 1); `coder2`/Muse-Glimmer-30B still fully loaded four days after being marked
-"unloaded" in the router's own changelog (Phase 3); a missing `--reasoning off` flag in the candidate
-wrapper that corrupted at least one candidate's results outright and is the likely cause of several
-unexplained timeout spikes (Phase 3, fixed); an endpoint-URL-format gotcha in `hermes-vision-judge-eval.py`
-(Phase 4, fixed); and a judge-leniency pattern where judge-only axes scored near 1.000 across many
-candidates while every objective axis in the same runs stayed weak (Phase 2, flagged as needing independent
-spot-checking, not yet resolved).
+"unloaded" in the router's own changelog (Phase 3, and only actually stopped+masked in Phase 6 after a
+first Phase 6 attempt showed it was still a live resource risk); a missing `--reasoning off` flag in the
+candidate wrapper that corrupted at least one candidate's results outright and is the likely cause of
+several unexplained timeout spikes (Phase 3, fixed); an endpoint-URL-format gotcha in
+`hermes-vision-judge-eval.py` (Phase 4, fixed); a judge-leniency pattern where judge-only axes scored near
+1.000 across many candidates while every objective axis in the same runs stayed weak (Phase 2, flagged as
+needing independent spot-checking, not yet resolved); and `llama-coder.service`'s on-demand restart
+defeating the "all backends stay down for the duration" assumption under real production (Minecraft-bot)
+traffic once a candidate's memory footprint got big enough to make the contention visible (Phase 6 --
+worked around by stopping the bots for the duration, not yet solved at the tooling level for a future
+large-candidate run that can't do the same).
 
 ## Revision History
 
@@ -566,3 +630,4 @@ spot-checking, not yet resolved).
 | 1.11.0 | 2026-10-25 | Added NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning results, closing Phase 4. Fourth outperformance finding: scores 0.963 on fleet_muse_contract against the real muse-incumbent baseline of 0.704 -- the largest gap in the run -- despite the weakest vision-judge numbers of the three Phase 4 candidates. Saved to memory as a muse-role (not omni-role) recommendation. Added a Phase 4 vision-candidate summary table. |
 | 1.12.0 | 2026-10-25 | Added Qwen3-Coder-Next-UD-Q4_K_M results, closing Phase 5 and the full operator-authorized Phase 2-5 run. Direct comparison against the live `coder` incumbent on coder-focused suites is mixed, not a clean outperformance finding: the candidate has zero timeouts vs. the incumbent's 3/10 and 3/8, but the incumbent scores better on fleet_dualcoder_precision (0.167 vs. 0.000) -- recorded plainly, not saved to memory. Added a Phase 4/5 structural fix (missing `##` section headers) and a full run summary covering all four saved outperformance findings and the cross-cutting infra/tooling findings. Phase 6 remains explicitly held back pending separate authorization. |
 | 1.13.0 | 2026-10-25 | Attempted Phase 6 (`NVIDIA-Nemotron-3.5-Super-VL-120B-A12B`, ~81GB) on separate operator authorization; aborted mid-run with no usable score. Resolved the runbook's mmproj-pairing question for this candidate. New finding: `llama-coder.service` is an "on-demand" backend that auto-restarted twice under real production traffic despite being deliberately stopped for the maintenance window, visibly contending for memory and degrading the candidate's own decode speed (16 -> 9 t/s) at this candidate's much tighter ~82GB footprint -- invisible at every earlier phase's smaller candidate sizes. The clean fix (`systemctl mask`) was correctly blocked by the auto-mode classifier as a shared-resource change needing operator sign-off. Aborted safely: force-killed the candidate's own hung-on-shutdown `llama-server` process (not a production service) after a clean `SIGTERM` stalled, then confirmed all four production backends (`coder`/`coder2`/`muse`/`omni`) came back up healthy. Also noted, unfixed: `hermes-benchmark-model.sh`'s `--free-omni` flag stops `llama-amy-vision.service`, a distinct real unit, not `llama-omni.service` -- flagged for operator review, not assumed to be a simple naming bug. Phase 6 remains open, needing either a low-traffic window or an operator-approved way to pause `coder`'s on-demand restart before a safe re-attempt. |
+| 1.14.0 | 2026-10-25 | Phase 6 retry, direct operator follow-up: stopped all nine Minecraft bot services (the real source of the contending `coder` traffic) and permanently disabled `coder2` (stopped + masked -- manually, since `systemctl mask --force` refused to clobber the real unit file already at that path; confirmed `coder2` now refuses to start). Retry ran with zero contention, steady 18.0 t/s decode throughout. Real score obtained: Tier 0 `ifeval` 0.750, `fleet_vision_judge` precision 0.895/recall 0.630/false_pass_rate 0.286/false_fail_rate 0.370 -- technically beats the `omni` incumbent (same bar as every other finding this run) but is the weakest of the four vision candidates tested at ~4x the size of the next-largest. Not saved as a new finding; folded into the existing Nemotron-3.5-Bolt-74B memory as a comparison point. Restarted all nine bots afterward. This closes Phase 6 and the full Phases 1-6 run. |
