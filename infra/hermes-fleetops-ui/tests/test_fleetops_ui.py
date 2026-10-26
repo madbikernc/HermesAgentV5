@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 2.10.1
+# Version: 2.11.0
+#
+# 2.11.0 (2026-10-25) — check_market() extended for hermes-fleetops-ui.py 2.13.0's new share-price
+# column: a ticker-level report row (NVDA) shows its real current price computed from the
+# fixture's own deterministic `prices` drift ("$133.15"), a ticker with no `prices` row at all
+# (ABC) shows a dash rather than a crash or a fabricated 0.00, the ticker-level section header
+# gains the new <th>price</th>, and the "Monitored stocks" table shows the same real price for
+# NVDA and the same dash for a no-price ticker (EVIL).
 #
 # 2.10.1 (2026-10-25) — check_write_surface() extended for hermes-fleetops-ui.py 2.10.1's decide
 # body-cap fix (the old bare 8192 that could desync a reused HTTP/1.1 connection into a spurious
@@ -1298,8 +1305,14 @@ def check_market(ui, tmp):
           '/market/company?ticker=NVDA' in html)
     check("a sector-trend row gets no Graph/Company button -- no per-sector series is stored",
           "ticker=Information" not in html)
-    check("ticker-level sections gain a trailing (unlabeled) graph column header",
-          "<th>#</th><th>ticker/group</th><th>move</th><th>detail</th><th></th>" in html)
+    check("ticker-level sections gain a price column and a trailing (unlabeled) graph column",
+          "<th>#</th><th>ticker/group</th><th>price</th><th>move</th><th>detail</th><th></th>"
+          in html)
+    check("a ticker-level row shows its real current share price",
+          "$133.15" in html, html[:2000])
+    check("ABC (no prices row at all) shows a dash for price, not a crash or a fabricated 0.00",
+          '<span class="num">—</span></td><td class="num"><span class="num">-9.99%</span>' in html,
+          html[:2000])
 
     print(NL + "[a requested date with no report falls back, and says so]")
     html_missing = ui.render_market_report("2026-01-01")
@@ -1498,6 +1511,8 @@ def check_market(ui, tmp):
     check("the monitored row carries both the Graph and Company buttons",
           "/market/history?ticker=NVDA" in monitored_html
           and "/market/company?ticker=NVDA" in monitored_html, monitored_html)
+    check("the monitored row shows NVDA's real current share price",
+          "$133.15" in monitored_html, monitored_html)
     check("the Add form is present", 'action="/market/monitor/add"' in monitored_html)
 
     ui.add_monitored_ticker_checked("EVIL")  # has an instruments row (from the escaping checks
@@ -1505,6 +1520,8 @@ def check_market(ui, tmp):
     monitored_html_2 = ui.render_monitored_tickers()
     check("a monitored ticker with no price data on file degrades, not crashes",
           "has no price data on file yet" in monitored_html_2, monitored_html_2)
+    check("that same no-price ticker shows a dash for its price column, not a crash or 0.00",
+          '<span class="num">—</span>' in monitored_html_2, monitored_html_2)
 
     print(NL + "[the assembled page carries all three sections, and the route is registered]")
     page = ui.page_market({}).decode()

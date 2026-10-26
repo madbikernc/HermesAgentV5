@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-10-25) - direct operator request: latest_prices(), a bulk ({ticker: adj_close},
+# latest_date) read for the single most recent trading date on file -- the one new query
+# hermes-fleetops-ui.py needs to show a literal current share price on ticker-level rows,
+# alongside the pct-move fields daily_pct_changes()/trend30_pct_changes() already provide.
 #
 # 1.4.0 (2026-10-25) - Market Watch "Monitored stocks": MONITORED_TICKERS_PATH/
 # load_monitored_tickers()/add_monitored_ticker() -- a new flat-text file, atomic
@@ -175,6 +180,21 @@ def ticker_price_history(conn, ticker, exchange="US"):
     return conn.execute(
         "SELECT date, adj_close FROM prices WHERE ticker=? AND exchange=? ORDER BY date",
         (ticker, exchange)).fetchall()
+
+
+def latest_prices(conn, exchange="US"):
+    """Returns ({ticker: adj_close}, latest_date) for the single most recent trading date on
+    file -- a literal share price, not a pct move, so it mirrors daily_pct_changes/
+    trend30_pct_changes's own (dict, date) shape rather than a bespoke one. Returns ({}, None)
+    if `prices` is still empty."""
+    dates = latest_dates(conn, exchange, 1)
+    if not dates:
+        return {}, None
+    latest = dates[0]
+    rows = conn.execute(
+        "SELECT ticker, adj_close FROM prices WHERE exchange=? AND date=?",
+        (exchange, latest)).fetchall()
+    return {ticker: price for ticker, price in rows}, latest
 
 
 def daily_pct_changes(conn, exchange="US"):

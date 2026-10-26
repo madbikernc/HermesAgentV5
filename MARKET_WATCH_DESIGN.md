@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.13.0
+**Version:** 1.15.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -576,6 +576,33 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
   Enterprise)` with working Graph/Company links — checked over both loopback and the real public
   tailnet URL.
 
+- **S38m** — **Built, live-verified, and committed 2026-10-26, direct operator request** ("for
+  rows related to an individual stock or company, add a field for the current share price"): a
+  `price` column on every ticker-level row on `/market` — the daily report's own ticker-level
+  sections (movers, 30-day trend, the two AI-watch sections) and the "Monitored stocks" table
+  alike — via `hermes_market_common.py` 1.5.0's new `latest_prices()`, a bulk
+  `({ticker: adj_close}, latest_date)` read for the single most recent trading date on file,
+  mirroring `daily_pct_changes()`/`trend30_pct_changes()`'s own `(dict, date)` shape. Read once
+  per page render inside the same `ro_sqlite()` connection each section already holds open — no
+  new SQLite access, so `check_write_surface()`'s "exactly one `sqlite3.connect(`" invariant stays
+  untouched; no caching, no new table. A sector/tag-trend row never gets this column — its `group`
+  names a cross-sectional average, not one ticker with one price, the same distinction that
+  already gates the Graph/Company buttons. A ticker on `instruments` with no `prices` row yet (the
+  real "synced before a price ever landed" case S38l's own EVIL fixture already exercises) renders
+  a plain em dash, never a crash or a fabricated `$0.00`. 4 new offline checks plus one existing
+  header-shape check updated to match on `hermes-fleetops-ui.py`'s own suite (338 total, up from
+  334). **Live verification was delayed about a day by an incident unrelated to this feature**:
+  `dgx-spark` rebooted and its `/mnt/hermes-data` volume (local LVM, not this feature's own
+  storage) didn't come back mounted, crash-looping `hermes-fleetops-ui.service` and several other,
+  unrelated services for hours until the operator remounted it directly; a resulting
+  thundering-herd of queued `vault-get-secret.sh` calls (every service's credential fetch firing
+  at once on recovery) delayed the service actually binding its port by several more minutes.
+  Once resolved, the real page confirmed the feature cleanly: the live "Monitored stocks" row
+  shows HPE's real current price (`$56.69`), multiple real ticker-level report rows across
+  sections show their own real prices (`$524.51`, `$248.00`, etc.), and the `price` column header
+  appears ahead of `move` in every ticker-level section — checked over both loopback and the real
+  public tailnet URL.
+
 ---
 
 ## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full; S38i-l excluded, see below**
@@ -596,16 +623,17 @@ human** — the numbers (Energy +2.68%, CCI +9.06% top gainer, etc.) are real an
 consistent, but this exit gate's own "an operator can check against an independent source" clause
 is satisfied by the data being real and checkable, not by someone having actually checked it yet.
 
-**S38i, S38j, and S38k are not part of this bar** — all three are a read-only view over data
-S38a-h's own exit gate already established as real (S38j's history graph and S38k's company
-summary both read the exact same `instruments`/`prices` rows `market sector`/`market ticker`
-already read, drawn from a new angle), not a new push/pull path of their own. **S38l is
-different in kind** — it genuinely adds a new write path (`/market/monitor/add`), so it isn't
-excluded from this bar by the same "read-only" reasoning; it simply isn't the kind of thing this
-bar measures at all (a Matrix daily-push/on-demand-pull round trip). Its own "done" is a real
-add-ticker round trip through the live UI, stated in its own §12 entry. Each sub-stage's own
-"done" is stated there instead of restated here. S38i, S38j, S38k, and S38l are all built,
-live-verified on `dgx-spark`, and (as of the next revision) committed.
+**S38i, S38j, S38k, and S38m are not part of this bar** — all four are a read-only view over data
+S38a-h's own exit gate already established as real (S38j's history graph, S38k's company
+summary, and S38m's share-price column all read the exact same `instruments`/`prices` rows
+`market sector`/`market ticker` already read, drawn from a new angle), not a new push/pull path
+of their own. **S38l is different in kind** — it genuinely adds a new write path
+(`/market/monitor/add`), so it isn't excluded from this bar by the same "read-only" reasoning; it
+simply isn't the kind of thing this bar measures at all (a Matrix daily-push/on-demand-pull round
+trip). Its own "done" is a real add-ticker round trip through the live UI, stated in its own §12
+entry. Each sub-stage's own "done" is stated there instead of restated here. S38i, S38j, S38k,
+S38l, and S38m are all built, live-verified on `dgx-spark`, and (as of the next revision)
+committed.
 
 ---
 
@@ -654,6 +682,12 @@ functions S38g already built and S38a-h's own exit gate already proved real — 
 `hermes-router.py` call anywhere in this feature. No new benchmark scenario needed. Call recorded
 per `CLAUDE.md`'s rule rather than silently skipped.
 
+**Re-evaluated for S38m (2026-10-25): no model call at all, same conclusion as S38i/S38j/S38l's
+own evaluations above.** The share-price column is a bulk `prices` read
+(`hermes_market_common.latest_prices()`) rendered straight into the existing report/watchlist
+tables — no role, no `hermes-router.py` call anywhere in this feature. No new benchmark scenario
+needed. Call recorded per `CLAUDE.md`'s rule rather than silently skipped.
+
 What this design *is* relevant to, once actually built: `FLEET_BENCHMARK_DESIGN.md` gap 8 / §6.8
 (`fleet_coder_build`) draws its corpus from exactly this shape of work — a direct operator request, a
 vendor integration or parsing pipeline built from nothing to satisfy it. S38b/S38d/S38e's eventual build
@@ -681,3 +715,5 @@ own commit to that table in the same change, not a thing done here.
 | 1.11.0 | 2026-10-25 | **S38j live-verified on `dgx-spark`, minutes after 1.10.0 was written — direct operator request to deploy it the same way as every prior sub-stage.** A real `prices --backfill-range 5y` run against the full 503-ticker universe actually raised NVDA's own history from its original ~1.6-year backfill to a full 5 years. Every duration bucket on the real `/market/history` page returned the correct real date window; a real short-history ticker (`VYLR`) and a real unknown ticker both degraded exactly as designed; all 52 real ticker-level rows on the live `/market` report carried a working Graph link, confirmed over both loopback and the real public tailnet URL. §12's S38j entry and §13 both updated from "built" to the real live result; committed and pushed (`23bda8e`). Minor bump — a feature's live verification executed for real and its record written in, nothing prior reversed. |
 | 1.12.0 | 2026-10-25 | **S38k and S38l added, two direct operator follow-up requests landed back-to-back in the same session.** S38k: a "Company" button alongside Graph on every ticker-level `/market` row, an AI-generated company summary via a new `summarize_company()` (the exact `call_router()`/classify_batch() shape `hermes-market-sync.py` already establishes for an advisory `dispatch` call), deliberately uncached — matching `/models`' own existing "no cache kept here" policy rather than adding a new table/write path. S38l: a "Monitored stocks" watchlist section with an Add form, seeded with HPE — a new flat file and a genuine second write route (`/market/monitor/add`), both deliberate, documented relaxations of this file's own enforced invariants (`check_write_surface()`'s assertions updated to match, not silently loosened). A real deploy-time finding, not caught in review: the flat file was first placed inside the repo like `tags.yaml`, and the live Add form failed every time — `hermes-fleetops-ui.service`'s own `ProtectSystem=strict`/`ProtectHome=read-only` sandboxing makes the whole repo unwritable to that process; relocated to `~/.hermes/state` (the one directory its `ReadWritePaths` grants, already `HERMES_USAGE_DB`'s home), which is also the more correct call regardless of sandboxing since this is live per-host state, not git-tracked config. §11 unchanged; §12 gained both entries; §13's exclusion paragraph extended and corrected (S38l doesn't fit the "read-only, so excluded" framing S38i/j/k share — it has a real write path, it just isn't the kind of thing the exit-gate bar measures); §14 gained both evaluations (S38k: dispatch's existing Tier 0 coverage, no new gap; S38l: no model call at all). `hermes_market_common.py` now 1.4.0 (`load_monitored_tickers()`/`add_monitored_ticker()`); `hermes-fleetops-ui.py` now 2.12.0. 24 new checks on that page's own suite (334 total, up from 310) plus 8 on `hermes_market_common.py`'s file-format behavior via `hermes-market-sync.py`'s own suite (119 total, up from 111) — including a real bug this round's own suite caught (an unknown-ticker lookup inside `add_monitored_ticker_checked()` was case-sensitive against already-uppercase `instruments` rows; fixed to normalize at that function's own entry rather than trust every future caller to have already). Minor bump — two new, additive features on top of a stage already met, nothing prior reversed. |
 | 1.13.0 | 2026-10-25 | **S38k and S38l live-verified on `dgx-spark`, minutes after 1.12.0 was written — direct operator request to deploy them the same way as every prior sub-stage.** The real deploy attempt immediately surfaced the `ProtectSystem=strict`/`ProtectHome=read-only` sandboxing finding already folded into 1.12.0's own text above (not a separate bump, since it was caught and fixed before this live-verification pass ever completed) — `MONITORED_TICKERS_PATH` relocated to `~/.hermes/state`, redeployed, and the real Add round trip then worked cleanly: HPE seeded for real through the live form itself (not a hand-written file), a lowercase re-add correctly reported "already monitored," an unmatched ticker and a wrong CSRF token each refused by name. A real `/market/company?ticker=HPE` call through the real `dispatch` role returned a sound profile in ~4 seconds. Both confirmed over loopback and the real public tailnet URL, with the real `/market` page showing `HPE (Hewlett Packard Enterprise)` and working Graph/Company links. §12's S38k/S38l entries and §13 both updated from "built" to the real live result. Minor bump — two features' live verification executed for real, including a real bug caught and fixed along the way, nothing prior reversed. |
+| 1.14.0 | 2026-10-25 | **S38m added, direct operator request** ("for rows related to an individual stock or company, add a field for the current share price"): a `price` column on every ticker-level row on `/market` — the daily report's ticker-level sections and the "Monitored stocks" table alike — via `hermes_market_common.py` 1.5.0's new `latest_prices()` (a bulk `({ticker: adj_close}, latest_date)` read, same shape as `daily_pct_changes()`/`trend30_pct_changes()`). No new SQLite access, no caching, no new table — `check_write_surface()`'s invariants stay untouched. A ticker with no `prices` row renders a dash, never a crash or a fabricated `$0.00`. §12 gained the S38m entry; §13's read-only exclusion list extended to include it; §14 gained its evaluation (no model call, no new benchmark gap). 4 new offline checks plus one existing header-shape check updated on `hermes-fleetops-ui.py`'s own suite (338 total, up from 334). Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
+| 1.15.0 | 2026-10-26 | **S38m live-verified on `dgx-spark` and committed, a day after 1.14.0 was written.** The delay was an unrelated infrastructure incident: `dgx-spark` rebooted and its `/mnt/hermes-data` local LVM volume didn't come back mounted, crash-looping `hermes-fleetops-ui.service` and several other, unrelated services for hours until the operator remounted it directly; recovery then produced a thundering herd of queued `vault-get-secret.sh` calls that delayed the service binding its port by several more minutes. None of it touched this feature's own code or storage. Once resolved, the real page confirmed the feature cleanly: the live "Monitored stocks" row shows HPE's real current price (`$56.69`), multiple real ticker-level report rows show their own real prices, and the `price` column header appears ahead of `move` in every ticker-level section — checked over both loopback and the real public tailnet URL. §12's S38m entry and §13 both updated from "offline-tested" to the real live result. Minor bump — a feature's live verification executed for real, nothing prior reversed. |

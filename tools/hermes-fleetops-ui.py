@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 2.12.0
+# Version: 2.13.0
+#
+# 2.13.0 (2026-10-25) — direct operator request: a current share price column on every
+# ticker-level row — the daily report's own ticker-level sections and the "Monitored stocks"
+# table alike — via hermes_market_common.py 1.5.0's new latest_prices() (the single most recent
+# trading date's adj_close, bulk-read once per page render, same shape as
+# daily_pct_changes()/trend30_pct_changes()). A sector/tag-trend row never gets this column —
+# its "group" names a cross-sectional average, not one ticker with one price. Missing price
+# data (a ticker on `instruments` with no `prices` row yet) renders as "—", never a crash or a
+# fabricated 0.00.
 #
 # 2.12.0 (2026-10-25) — direct operator request: a "Monitored stocks" section on /market, a
 # personal watchlist above the daily report, with an "Add" form (ticker-existence checked
@@ -1838,6 +1847,7 @@ def render_market_report(requested_date):
         report_date = requested_date if requested_date in dates else dates[0]
         rows = market_common.read_report_items(conn, report_date)
         name_by_ticker = {r[0]: r[1] for r in conn.execute("SELECT ticker, name FROM instruments")}
+        price_by_ticker, _latest_price_date = market_common.latest_prices(conn)
     finally:
         conn.close()
 
@@ -1881,12 +1891,14 @@ def render_market_report(requested_date):
         for rank, group, value, text in items:
             if is_ticker_level:
                 text = with_company_name(text, group, name_by_ticker)
-            row = [
-                f'<span class="num">{rank}</span>',
-                esc(group),
-                f'<span class="num">{value:+.2f}%</span>',
-                esc(text),
-            ]
+            row = [f'<span class="num">{rank}</span>', esc(group)]
+            if is_ticker_level:
+                # Only ticker-level rows get a price: a sector/tag row's "group" names a
+                # cross-sectional average recomputed from current membership, not a single
+                # ticker with one current share price to show.
+                price = price_by_ticker.get(group)
+                row.append(f'<span class="num">{"${:,.2f}".format(price) if price is not None else "—"}</span>')
+            row += [f'<span class="num">{value:+.2f}%</span>', esc(text)]
             if is_ticker_level:
                 # Only ticker-level rows get these buttons: a sector/tag row's "group" names a
                 # cross-sectional average recomputed from current membership, not a single
@@ -1895,9 +1907,11 @@ def render_market_report(requested_date):
                 row.append(ticker_row_buttons(group))
             body_rows.append(row)
         title = esc(market_common.REPORT_SECTION_TITLES[item_type])
-        headers = ["#", "ticker/group", "move", "detail"] + ([""] if is_ticker_level else [])
+        headers = ["#", "ticker/group"] + (["price"] if is_ticker_level else [])
+        headers += ["move", "detail"] + ([""] if is_ticker_level else [])
+        numeric = {0, 2, 3} if is_ticker_level else {0, 2}
         sections_html.append(f'<h3 class="mkt-sec">{title}</h3>' + table(
-            headers, body_rows, numeric={0, 2}))
+            headers, body_rows, numeric=numeric))
 
     cap = "" if not truncated else f" Truncated at {MAX_MARKET_ROWS} total row(s)."
     search = (f'<p><input type="search" placeholder="filter rows…" data-filter="#market">'
@@ -1951,6 +1965,7 @@ def render_monitored_tickers():
             name_by_ticker = {r[0]: r[1] for r in conn.execute("SELECT ticker, name FROM instruments")}
             daily, _dates = market_common.daily_pct_changes(conn)
             trend30, _latest = market_common.trend30_pct_changes(conn)
+            price_by_ticker, _latest_price_date = market_common.latest_prices(conn)
         finally:
             conn.close()
         body_rows = []
@@ -1962,14 +1977,16 @@ def render_monitored_tickers():
                 text, value = market_common.render_ai_watch_line(
                     ticker, daily_pct, trend30.get(ticker)), daily_pct
             text = with_company_name(text, ticker, name_by_ticker)
+            price = price_by_ticker.get(ticker)
             body_rows.append([
                 f'<span class="num">{i}</span>',
                 esc(ticker),
+                f'<span class="num">{"${:,.2f}".format(price) if price is not None else "—"}</span>',
                 f'<span class="num">{value:+.2f}%</span>',
                 esc(text),
                 ticker_row_buttons(ticker),
             ])
-        rows_html = table(["#", "ticker/group", "move", "detail", ""], body_rows, numeric={0, 2})
+        rows_html = table(["#", "ticker/group", "price", "move", "detail", ""], body_rows, numeric={0, 2, 3})
 
     add_form = (
         f'<form method="post" action="/market/monitor/add">'
