@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 2.13.0
+# Version: 2.14.0
+#
+# 2.14.0 (2026-10-26) — direct operator request: the benchmark backlog table now defaults to
+# hiding `rejected` candidates, matching hermes-model-scout.py's own `--backlog` CLI convention
+# ("every non-rejected, non-done entry") that the UI's table had never followed. A new state
+# filter (a <select>, GET-submitted, same pattern as /recommendations' own state filter) shows
+# them again on request -- "(open — excludes rejected)" by default, "(every state, including
+# rejected)", or any one state alone. read_backlog() now filters in SQL rather than in Python,
+# for the same reason read_recommendations() already does: `rejected` is terminal and only grows
+# (hermes-model-scout.py's TERMINAL_OR_HELD, "never re-proposed"), so a flat
+# `ORDER BY updated_at DESC LIMIT 400` with no filter would eventually let old rejections crowd
+# out the open proposed/deferred candidates the page exists to surface. The summary pills now
+# show true per-state counts across the whole table, not just the loaded/filtered page, so
+# "how many are rejected" stays visible even while the table itself hides them.
 #
 # 2.13.0 (2026-10-25) — direct operator request: a current share price column on every
 # ticker-level row — the daily report's own ticker-level sections and the "Monitored stocks"
@@ -684,7 +697,13 @@ def page_home():
 
 # ── S21b: model benchmark backlog ─────────────────────────────────────────────────────────────
 
-def read_backlog():
+# hermes-model-scout.py's own TRANSITIONS table (the only states a scout task is ever written
+# with), in the order an operator thinks about them -- used both to order the summary pills and
+# to list the filter dropdown's specific-state options.
+BACKLOG_STATE_ORDER = ["proposed", "deferred", "approved", "rejected"]
+
+
+def read_backlog(state_filter=""):
     """hermes-memory has no task-list route — `/tasks` is POST-only (upsert), and the plan's
     assumption that this could use `GET /tasks` is wrong. `hermes-model-scout.py`'s own
     `list_scout_tasks()` already established the answer and the reason: read the one non-vector
@@ -693,12 +712,34 @@ def read_backlog():
 
     The cost is a direct dependency on the `tasks`/`turns` column names, shared with
     `hermes-model-scout.py` and `hermes-attention-reminder.py` — a schema change breaks all three
-    in the same place, loudly."""
+    in the same place, loudly.
+
+    `state_filter` is applied in SQL, not on the capped Python-side result, for the same reason
+    `read_recommendations()` does it: `reject`ed is terminal (hermes-model-scout.py's own
+    TERMINAL_OR_HELD/"never re-proposed"), so it only ever accumulates, and a flat
+    `ORDER BY updated_at DESC LIMIT N` with no filter would eventually spend the whole cap on
+    whichever candidates were rejected most recently, burying the still-open proposed/deferred
+    ones the operator actually needs to decide on. "" (the default) means open — excludes
+    rejected; "all" means every state; anything else means exactly that state."""
     conn = ro_sqlite(MEMORY_DB)
     try:
+        where = ["agent=?"]
+        params = [SCOUT_AGENT]
+        if state_filter == "all":
+            pass
+        elif state_filter:
+            where.append("state = ?")
+            params.append(state_filter)
+        else:
+            where.append("state != 'rejected'")
+        clause = " AND ".join(where)
+        total = conn.execute(f"SELECT count(*) FROM tasks WHERE {clause}", params).fetchone()[0]
+        state_counts = dict(conn.execute(
+            "SELECT state, count(*) FROM tasks WHERE agent=? GROUP BY state",
+            (SCOUT_AGENT,)).fetchall())
         tasks = conn.execute(
-            "SELECT id, state, topic, created_at, updated_at FROM tasks WHERE agent=? "
-            "ORDER BY updated_at DESC LIMIT ?", (SCOUT_AGENT, MAX_BACKLOG_ROWS)).fetchall()
+            f"SELECT id, state, topic, created_at, updated_at FROM tasks WHERE {clause} "
+            f"ORDER BY updated_at DESC LIMIT ?", params + [MAX_BACKLOG_ROWS]).fetchall()
         detail = {}
         for t in tasks:
             row = conn.execute(
@@ -711,7 +752,7 @@ def read_backlog():
                 except (ValueError, TypeError):
                     payload = {}
             detail[t["id"]] = payload if isinstance(payload, dict) else {}
-        return [dict(t) for t in tasks], detail
+        return [dict(t) for t in tasks], detail, total, state_counts
     finally:
         conn.close()
 
@@ -944,7 +985,7 @@ def recommendation(state, detail):
 
 
 def render_backlog_recommended():
-    tasks, detail = read_backlog()
+    tasks, detail, _total, _state_counts = read_backlog()
     rows = []
     for t in tasks:
         state = t["state"] or "?"
@@ -970,12 +1011,27 @@ def render_backlog_recommended():
         ["state", "role", "candidate", "category", "fit", "why recommended", "updated"], rows)
 
 
-def render_backlog():
+def render_backlog(state_filter=""):
     blocked = decide_unavailable()
-    tasks, detail = read_backlog()
-    counts = Counter(t["state"] or "?" for t in tasks)
-    summary = " · ".join(f'<span class="pill s-{esc(k)}">{esc(k)} {v}</span>'
-                         for k, v in counts.most_common())
+    tasks, detail, total, state_counts = read_backlog(state_filter)
+    # True counts across every state, not just the loaded/filtered rows -- so the summary line
+    # still says how many are sitting in `rejected` even while the table itself hides them.
+    summary = " · ".join(
+        f'<span class="pill s-{esc(k)}">{esc(k)} {v:,}</span>'
+        for k, v in sorted(state_counts.items(),
+                           key=lambda kv: BACKLOG_STATE_ORDER.index(kv[0])
+                           if kv[0] in BACKLOG_STATE_ORDER else len(BACKLOG_STATE_ORDER)))
+    sopts = [f'<option value=""{"" if state_filter else " selected"}>(open — excludes rejected)'
+             f'</option>',
+             f'<option value="all"{" selected" if state_filter == "all" else ""}>'
+             f'(every state, including rejected)</option>']
+    for s in BACKLOG_STATE_ORDER:
+        if s not in state_counts:
+            continue
+        sel = " selected" if s == state_filter else ""
+        sopts.append(f'<option value="{esc(s)}"{sel}>{esc(s)} only</option>')
+    filter_form = (f'<form method="get"><select name="state">{"".join(sopts)}</select> '
+                   f'<button type="submit">show</button></form>')
     rows = []
     for t in tasks:
         role, model_id = split_task_id(t["id"])
@@ -1040,14 +1096,17 @@ def render_backlog():
             copy_cell,
         ])
     if not blocked:
-        note = (f'{summary}<br>Showing {len(rows)} of at most {MAX_BACKLOG_ROWS}. '
+        note = (f'{summary} (true totals across every state)<br>Showing {len(rows)} of '
+                f'{total:,} matching this filter, capped at {MAX_BACKLOG_ROWS}. '
                 f'Deciding here writes the same transition, through the same code, as replying '
                 f'<span class="mono">benchmark|defer|reject|override &lt;id&gt;</span> in FleetOps '
                 f'— and is announced there too, tagged '
                 f'<span class="mono">fleetops-ui</span> so the two routes stay distinguishable. '
-                f'<b>Reject is permanent</b>; only <span class="mono">un-reject</span> comes back.')
+                f'<b>Reject is permanent</b>; only <span class="mono">un-reject</span> comes back '
+                f'— pick the <span class="mono">rejected</span> filter above to reach it.')
     else:
-        note = (f'{summary}<br>Showing {len(rows)} of at most {MAX_BACKLOG_ROWS}. '
+        note = (f'{summary} (true totals across every state)<br>Showing {len(rows)} of '
+                f'{total:,} matching this filter, capped at {MAX_BACKLOG_ROWS}. '
                 f'<b>Decide buttons are unavailable</b> and are not rendered, because '
                 f'{esc(blocked)}. The reports on this page are unaffected.')
     body = f'<p class="note">{note}</p>' + table(
@@ -1055,12 +1114,14 @@ def render_backlog():
          "updated", "legal"],
         rows)
     if blocked:
-        return ('<p class="err"><b>Decide is unavailable.</b> ' + esc(blocked) +
+        return (filter_form + '<p class="err"><b>Decide is unavailable.</b> ' + esc(blocked) +
                 '</p>' + body)
     # ONE form around the whole table, because HTML forms cannot nest: that is what makes
     # multi-select possible, and it is why the copy-command button had to become type="button".
+    # The state filter is a second, separate GET form, outside this one, for the same reason.
     bar = bulk_bar()
-    return (f'<form method="post" action="/backlog/decide" data-decide>'
+    return (filter_form +
+            f'<form method="post" action="/backlog/decide" data-decide>'
             f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
             f'{bar}{body}{bar}</form>')
 
@@ -1087,7 +1148,9 @@ def bulk_bar():
 
 
 def page_backlog(query=None):
-    body = results_banner(query or {})
+    query = query or {}
+    state_filter = (query.get("state") or [""])[0]
+    body = results_banner(query)
     body += section(
         "Recommended for benchmarking",
         "Every candidate <b>approved</b> for benchmarking, plus any still-<b>proposed</b> "
@@ -1098,7 +1161,7 @@ def page_backlog(query=None):
         "its own with each daily run; a candidate proposed before that existed is judged live "
         "here, by the exact same rule, so the two views can never disagree.",
         render_backlog_recommended)
-    body += section("Model benchmark backlog", "", render_backlog)
+    body += section("Model benchmark backlog", "", lambda: render_backlog(state_filter))
     return shell("Benchmark backlog", body)
 
 

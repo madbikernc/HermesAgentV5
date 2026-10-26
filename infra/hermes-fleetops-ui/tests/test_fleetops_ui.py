@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 2.11.0
+# Version: 2.12.0
+#
+# 2.12.0 (2026-10-26) — check_backlog() extended for hermes-fleetops-ui.py 2.14.0's backlog state
+# filter: read_backlog() now returns a 4-tuple (true total and true per-state counts added), its
+# default excludes `rejected` while state="all"/state="rejected" still reach it, and
+# render_backlog()'s own default view hides the rejected row (its model id, the summary pill's
+# true count surviving anyway) behind a GET <select> whose default option is pre-selected and
+# which sits in its own <form>, outside the decide POST form. check_multiselect() now renders
+# with state="all" explicitly, since its whole point is exercising the rejected row's
+# override-only checkbox alongside the proposed/approved ones, which the new default would hide.
 #
 # 2.11.0 (2026-10-25) — check_market() extended for hermes-fleetops-ui.py 2.13.0's new share-price
 # column: a ticker-level report row (NVDA) shows its real current price computed from the
@@ -281,7 +290,7 @@ def check_backlog(ui, tmp):
     conn.close()
 
     ui.MEMORY_DB = str(db)
-    tasks, detail = ui.read_backlog()
+    tasks, detail, all_total, state_counts = ui.read_backlog("all")
     check("only the scout's own tasks are listed", len(tasks) == 3, str([t["id"] for t in tasks]))
     check("another agent's task is not shown",
           all("selfrepair" not in t["id"] for t in tasks))
@@ -290,6 +299,21 @@ def check_backlog(ui, tmp):
           detail[rows[2][0]] == {}, str(detail[rows[2][0]]))
     check("the advisory narrative is read off the latest turn",
           detail[rows[1][0]]["advisory_narrative"].startswith("Worth a run"))
+    check("state=all's own total covers every scout task", all_total == 3, all_total)
+    check("the true per-state counts are correct regardless of filter",
+          state_counts == {"proposed": 1, "approved": 1, "rejected": 1}, state_counts)
+
+    print("\n[the default filter hides rejected, like hermes-model-scout.py's own --backlog]")
+    open_tasks, _open_detail, open_total, _counts = ui.read_backlog()
+    check("the rejected task is excluded from the default (open) view",
+          all(t["id"] != rows[2][0] for t in open_tasks), str([t["id"] for t in open_tasks]))
+    check("the other two scout tasks still show", len(open_tasks) == 2,
+          str([t["id"] for t in open_tasks]))
+    check("the default view's own total excludes it too", open_total == 2, open_total)
+    rejected_tasks, _rej_detail, rejected_total, _counts = ui.read_backlog("rejected")
+    check("picking the rejected filter shows exactly the rejected one",
+          [t["id"] for t in rejected_tasks] == [rows[2][0]], str(rejected_tasks))
+    check("its own total is 1", rejected_total == 1, rejected_total)
 
     print("\n[the task id encodes role and model, and is decoded for display]")
     role, model = ui.split_task_id("scout:super:bcckfdn__cevher-test-10-lc-it-4-GGUF")
@@ -327,6 +351,29 @@ def check_backlog(ui, tmp):
           'data-confirm=' in html and "{n} candidate(s)?" in html)
     check("the page says a decision here is the same write as the Matrix reply",
           "benchmark|defer|reject|override" in html and "fleetops-ui" in html)
+
+    print("\n[the rejected row is hidden from the table by default]")
+    check("the rejected candidate's model id does not appear in the default view",
+          "other/thing" not in html, "rejected row leaked into the default view")
+    check("the filter select defaults to the open (excludes rejected) option",
+          '<option value="" selected>(open — excludes rejected)</option>' in html, html)
+    check("a GET form drives the filter, outside the decide POST form",
+          html.index('<form method="get">') < html.index('action="/backlog/decide"'))
+    check("the true rejected count still shows in the summary pills, even though hidden",
+          '<span class="pill s-rejected">rejected 1</span>' in html, html)
+
+    print("\n[picking the rejected filter explicitly shows it, with its own legal action]")
+    all_html = ui.render_backlog("all")
+    check("every known state offers its own specific-state option",
+          '<option value="rejected">rejected only</option>' in all_html, all_html)
+    rejected_html = ui.render_backlog("rejected")
+    check("the rejected candidate now appears", "other/thing" in rejected_html)
+    check("and only the override action is legal for it",
+          '<span class="mono" style="color:var(--dim)">override</span>' in rejected_html,
+          rejected_html)
+    check("the other two scout tasks are excluded by this specific-state filter",
+          "bcckfdn/cevher-test-10-lc-it-4-GGUF" not in rejected_html
+          and "some/model-v2" not in rejected_html, rejected_html)
 
     print("\n[the store is opened read-only]")
     ro = ui.ro_sqlite(db)
@@ -824,7 +871,10 @@ def check_multiselect(ui):
     print(NL + "[multi-select: one action over many candidates]")
     gate = ui.load_gate()
     ui.GATE = gate
-    html = ui.render_backlog()
+    # state="all", not the default -- the default view hides the fixture's rejected row (and
+    # thus its "override" checkbox), checked on its own in check_backlog(). Multi-select itself
+    # needs that third, differently-legal row in view to be exercised meaningfully.
+    html = ui.render_backlog("all")
 
     # HTML forms cannot nest, so multi-select requires exactly one form around the whole table.
     # Per-row submit buttons and a bulk bar cannot coexist; the row shows its legal verbs as text.
