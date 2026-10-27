@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.15.0
+**Version:** 2.16.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog (now leading with a "Recommended for benchmarking" section), which checkpoint backs each
@@ -253,6 +253,16 @@ judged by two different rules. An `approved` candidate is never re-judged by the
 human already decided. The main backlog table also gets a small "★ recommended" badge next to any
 qualifying `proposed` row, so the two views agree at a glance.
 
+**A `deferred` row can mean two different things, and the table says which.** `hermes-model-
+scout.py` 1.5.0 (S46) can now default a new candidate straight to `deferred` itself, when its new
+`hermes_benchmark_common.find_similar_known()` check is confident the candidate is the same
+underlying model, at a compatible quantization, as something already `TERMINAL_OR_HELD` or already
+in the benchmark history — the fleet's own real noise being the same checkpoint re-hosted/
+re-quantized by a dozen different orgs. Without a visible distinction, that would look identical to
+a human having deferred it. The table gets a second badge, "auto-deferred", on exactly those rows,
+titled with the reason and the model it matched, so a reader is never confused about whether a
+decision here was made by a person.
+
 **The model-swap section at the top of `/recommendations` is curated, not queried.** Every other
 section on these pages reads a store the fleet already writes to; there is no live store yet for
 "a staged candidate beat the real incumbent on a benchmark suite", so `MODEL_SWAP_RECOMMENDATIONS`
@@ -391,3 +401,4 @@ rather than silent. A restart re-fetches the credentials.
 | 2.13.0 | 2026-10-26 | *(Backfilled into this changelog; the commit itself is `dd01646`.)* Market Watch S38m: a current share-price column on every ticker-level row — the daily report's own ticker-level sections and the "Monitored stocks" table alike — via the single most recent trading date's `adj_close`, bulk-read once per page render. A sector/tag-trend row never gets this column, since its "group" names a cross-sectional average, not one ticker with one price. Missing price data renders as "—", never a crash or a fabricated 0.00. |
 | 2.14.0 | 2026-10-26 | Direct operator request: the benchmark backlog table now defaults to hiding `rejected` candidates, matching `hermes-model-scout.py`'s own `--backlog` CLI convention ("every non-rejected, non-done entry") that this page's table had never followed. A new state filter — a GET-submitted `<select>`, the same pattern `/recommendations`' own state filter already established — shows them again on request: "(open — excludes rejected)" by default, "(every state, including rejected)", or any one state alone. `read_backlog()` now filters in SQL rather than in Python, for the same reason `read_recommendations()` already does: `rejected` is terminal and only grows, so a flat `ORDER BY updated_at DESC LIMIT 400` with no filter would eventually let old rejections crowd out the open proposed/deferred candidates the page exists to surface. The summary pills show true per-state counts across the whole table, not just the loaded/filtered page, so "how many are rejected" stays visible even while the table itself hides them. 15 new offline checks (353 total). |
 | 2.15.0 | 2026-10-27 | New `/status` page (S45), direct operator request: Sintra/Amy/HomeD13 compute health (CPU, memory, GPU, disk), plus broker, injection-guard, and inter-node-comms status. This service's sandbox rules out reaching that data live — no subprocess or SSH anywhere in this file — so it reads `hermes-fleet-health.py` 1.7.0's new daily JSON snapshot (`FLEET_HEALTH_PATH`, a subpath of the `ReadWritePaths` grant already held for `usage.db`'s sidecar) instead of probing anything itself. Same per-identity/broker/guard/comms data that script's own daily email already carries; the page states its snapshot's own age and flags it once it's more than ~36h stale. No sandbox or unit changes on either service. 16 new offline checks (377 total). |
+| 2.16.0 | 2026-10-27 | S46: `/backlog` gets an "auto-deferred" badge, next to the existing "★ recommended" one, on a `deferred` row whose turn carries `auto_deferred: true` — `hermes-model-scout.py` 1.5.0's new `find_similar_known()` check defaulting a confident near-duplicate candidate straight to `deferred` instead of `proposed`. Titled with the reason and the matched model, so a human can never mistake a scout-made call for a prior human decision — both rendered as an identical plain pill before this change. No read-path change; `read_backlog()`'s existing turn-payload read already carries whatever fields scout.py stamps. 3 new offline checks (380 total). |

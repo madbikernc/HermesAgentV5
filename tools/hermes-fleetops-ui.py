@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.17.0
+# Version: 2.18.0
+#
+# 2.18.0 (2026-10-27) — S46: render_backlog() gets an "auto-deferred" badge, next to the existing
+# "★ recommended" one, on a `deferred` row whose turn payload has `auto_deferred: true`
+# (hermes-model-scout.py 1.5.0's new find_similar_known() check) — titled with the reason and the
+# matched model it's similar to. Without this, a scout-made "confidently redundant" call and a
+# prior human defer decision rendered as the exact same plain pill; a human reading the backlog
+# could not tell them apart. No read-path change: read_backlog()'s existing turn-payload read
+# already carries whatever fields scout.py stamps.
 #
 # 2.17.0 (2026-10-27) — S45, direct operator request: a new "System status and health" tab
 # (/status). This UI's own sandbox rules out reaching fleet health data directly — no subprocess,
@@ -1095,6 +1103,15 @@ def render_backlog(state_filter=""):
             # `approved` rows don't need the badge -- the whole row already means "recommended".
             state_cell += (f' <span class="pill" style="border-color:var(--accent);'
                            f'color:var(--accent)" title="{esc(rec_reason)}">★ recommended</span>')
+        if d.get("auto_deferred") and state == "deferred":
+            # S46: a `deferred` row otherwise looks identical whether a human decided that or
+            # hermes-model-scout.py's own find_similar_known() did — this is the one place that
+            # distinction has to be visible, since both render as the same plain pill otherwise.
+            auto_title = d.get("auto_defer_reason") or ""
+            if d.get("similar_to"):
+                auto_title += f" — similar to {d['similar_to']}"
+            state_cell += (f' <span class="pill" style="border-color:var(--warn);'
+                           f'color:var(--warn)" title="{esc(auto_title)}">auto-deferred</span>')
 
         legal = [] if blocked else legal_actions(state)
         # One checkbox per actionable row. A row with no legal transition (`approved`, or anything

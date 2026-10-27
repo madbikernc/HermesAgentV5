@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-10-27) — S46, direct operator request: propose() now checks a new candidate against
+# already-`TERMINAL_OR_HELD` scout candidates for the same role (new known_candidates_for_role())
+# and the benchmark history (bc.load_history()) via the new bc.find_similar_known() — a confident
+# "same underlying model, compatible quantization" match defaults the candidate straight to
+# `deferred` (STATE_DEFERRED, new), stamped with `auto_deferred`/`auto_defer_reason`/`similar_to`
+# on its turn, and skips the Matrix notice entirely (just a log line) rather than announcing
+# something confidently redundant. `propose()`'s return signature is unchanged (still
+# `(proposed, skipped)`); an auto-deferred entry's `why` string just says so. `--dry-run` now
+# previews this verdict too, unlike is_promising()'s existing dry-run gap — this feature changes
+# initial task state, not just advisory metadata, so it earns the preview is_promising() never got.
 #
 # 1.4.0 (2026-10-25) — direct operator request: every proposed candidate is now stamped with
 # `recommended`/`recommended_reason` from hermes_benchmark_common.is_promising() (new in bc
@@ -125,6 +136,9 @@ STATE_FILE = Path.home() / ".hermes" / "state" / "model_scout_state.json"
 # One task per role:model. These are the only states this script writes; the gate owns the rest.
 STATE_PROPOSED = "proposed"
 STATE_DONE = "done"
+# S46: propose() also writes this directly, for a candidate bc.find_similar_known() judges
+# confidently redundant -- never STATE_PROPOSED followed by a human/gate transition.
+STATE_DEFERRED = "deferred"
 TERMINAL_OR_HELD = {"rejected", "deferred", "approved", "done"}
 
 # Categories from hermes-model-scan.py's ROLE_TARGETS map onto the router's own role ids. A
@@ -269,6 +283,56 @@ def list_scout_tasks():
             "ORDER BY updated_at DESC", (AGENT,),
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def known_candidates_for_role(role):
+    """S46: already-`TERMINAL_OR_HELD` scout candidates for this ROLE, with just enough of each
+    one's own stored facts (model_id, gguf_repo, publisher-declared base_model) for
+    bc.find_similar_known() to compare a new candidate against. Same read-only-sqlite-via-
+    MEMORY_DB idiom as list_scout_tasks() just above, and the same two-query shape
+    hermes-fleetops-ui.py's read_backlog() already uses (one query for the tasks, one per task for
+    its latest turn) -- reading these N turns through hermes-memory's HTTP API instead would mean
+    N round-trips per role, every single discovery run, for state this fleet already has sitting
+    in one local sqlite file.
+
+    Role is parsed out of the task id itself (`scout:<role>:<encoded-model-id>`, task_id_for())
+    rather than a column, since none stores it separately."""
+    import sqlite3
+    db = os.environ.get("MEMORY_DB", "/mnt/hermes-data/memory/memory.db")
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in TERMINAL_OR_HELD)
+        tasks = conn.execute(
+            f"SELECT id, state FROM tasks WHERE agent=? AND state IN ({placeholders})",
+            (AGENT, *TERMINAL_OR_HELD),
+        ).fetchall()
+        out = []
+        for t in tasks:
+            parts = t["id"].split(":", 2)
+            if len(parts) != 3 or parts[1] != role:
+                continue
+            row = conn.execute(
+                "SELECT raw FROM turns WHERE task_id=? ORDER BY id DESC LIMIT 1",
+                (t["id"],)).fetchone()
+            payload = {}
+            if row and row["raw"]:
+                try:
+                    payload = json.loads(row["raw"])
+                except (ValueError, TypeError):
+                    payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            out.append({
+                "task_id": t["id"],
+                "state": t["state"],
+                "model_id": payload.get("model_id"),
+                "gguf_repo": payload.get("gguf_repo"),
+                "base_model": (payload.get("publisher_claim") or {}).get("base_model"),
+            })
+        return out
     finally:
         conn.close()
 
@@ -650,6 +714,13 @@ def offer_text(task_id, rec):
 
 def propose(records, dry_run=False):
     proposed, skipped = [], []
+    # S46: loaded/queried once per propose() call, not once per candidate -- history is two JSONL
+    # files read fresh every call (bc.load_history()), and the same role repeats across many
+    # records, so known_cache avoids re-scanning memory.db's tasks/turns tables for a role already
+    # looked up this run (same one-call-per-invocation discipline reconcile_done() already follows
+    # for its own bc.load_history() call).
+    history = bc.load_history()
+    known_cache = {}
     for rec in records:
         for role in (rec.get("roles") or [rec["category"]]):
             tid = task_id_for(role, rec["model_id"])
@@ -660,15 +731,25 @@ def propose(records, dry_run=False):
             if existing and existing.get("state") == STATE_PROPOSED:
                 skipped.append((tid, "already proposed"))
                 continue
+            if role not in known_cache:
+                known_cache[role] = known_candidates_for_role(role)
+            # Computed even under --dry-run, unlike is_promising() just below: this one changes
+            # the task's INITIAL STATE rather than only advisory metadata, so an operator previewing
+            # a run before trusting it live should be able to see exactly what would be
+            # auto-deferred and why, not just that something would be proposed.
+            auto_defer, auto_defer_reason, similar_to = bc.find_similar_known(
+                rec, known_cache[role], history)
             if dry_run:
-                proposed.append((tid, "dry-run"))
+                why = f"dry-run, would auto-defer: {auto_defer_reason}" if auto_defer else "dry-run"
+                proposed.append((tid, why))
                 continue
             # Stamped once, here, at proposal time -- rec carries it through to offer_text()'s
             # Matrix message below, and the turn write makes it part of the authoritative record
             # the backlog page reads. See hermes_benchmark_common.is_promising() for what it does
             # and does not consider.
             rec["recommended"], rec["recommended_reason"] = bc.is_promising(rec)
-            upsert_task(tid, STATE_PROPOSED, topic=rec["category"])
+            initial_state = STATE_DEFERRED if auto_defer else STATE_PROPOSED
+            upsert_task(tid, initial_state, topic=rec["category"])
             write_turn(tid, "candidate", {
                 "model_id": rec["model_id"],
                 "role": role,
@@ -689,10 +770,23 @@ def propose(records, dry_run=False):
                 "recommended": rec["recommended"],
                 "recommended_reason": rec["recommended_reason"],
                 "prescribed_benchmark_label": benchmark_label_for(rec["model_id"]),
-                "summary": f"{rec['model_id']} proposed for {role}",
+                # S46: a human reading /backlog must never mistake a scout-made call for a prior
+                # human decision -- both render as the same `deferred` state otherwise.
+                "auto_deferred": auto_defer,
+                "auto_defer_reason": auto_defer_reason,
+                "similar_to": similar_to,
+                "summary": (f"{rec['model_id']} auto-deferred for {role}: {auto_defer_reason}"
+                            if auto_defer else f"{rec['model_id']} proposed for {role}"),
             })
-            matrix_notice(offer_text(tid, rec))
-            proposed.append((tid, STATE_PROPOSED))
+            if auto_defer:
+                # The whole point: don't trade Matrix noise for backlog noise. A human-made defer
+                # already carries this exact semantic (hermes-model-scout-gate.py's canned reply:
+                # "stays out of the daily candidate notices, stays visible in --backlog").
+                log(f"auto-deferred {tid}: {auto_defer_reason}")
+            else:
+                matrix_notice(offer_text(tid, rec))
+            why = f"auto-deferred: {auto_defer_reason}" if auto_defer else STATE_PROPOSED
+            proposed.append((tid, why))
     return proposed, skipped
 
 

@@ -5469,6 +5469,49 @@ for every other tab on this page. It is not coding capability on `coder`/`coder2
 
 ---
 
+### S46 — `hermes-model-scout`: auto-defer near-duplicate candidates (2026-10-27, executed)
+
+Direct operator request: `propose()` only ever deduped on the exact `role:model_id` pair
+(`task_id_for()`) — nothing compared a new candidate against a *different* repo id that is really
+the same checkpoint. This fleet's own real noise is exactly that shape, confirmed in
+`infra/model-watch/alert-state.json`'s seeded `GLM-5.3-Flash` list: the same checkpoint re-hosted
+and re-quantized by `unsloth`, `AtomicChat`, `avar6`, and others, each a different `model_id` that
+would otherwise get proposed, Matrix-pinged, and sit in the backlog as if it were new information.
+
+**Scope.** `hermes_benchmark_common.py` 1.6.0 adds `same_core_identity()`/`extract_quant_code()`/
+`quant_compatible()`/`find_similar_known()` — new, narrow, explainable matching primitives
+deliberately biased toward precision over recall (a missed duplicate costs one redundant benchmark
+run later; a wrongly-collapsed match would silently hide a genuinely different candidate from ever
+being benchmarked, the far worse failure). Deliberately does **not** reuse
+`incumbent_history()`/`reconcile_done()`'s normalized-containment substring match
+(`hermes-model-scout.py`) — containment would wrongly collapse `"GLM-5.3"` into `"GLM-5.3-Flash"`,
+a real, different model one suffix away, against the same fixture data above. `hermes-model-
+scout.py` 1.5.0 adds `known_candidates_for_role()` (the same read-only-sqlite-via-`MEMORY_DB`
+idiom as `list_scout_tasks()`) and wires the check into `propose()`: a confident match defaults the
+candidate straight to `STATE_DEFERRED` (stamped `auto_deferred`/`auto_defer_reason`/`similar_to` on
+its turn) instead of `STATE_PROPOSED`, and skips the Matrix notice entirely rather than announcing
+something confidently redundant — the same semantics a human defer already carries
+(`hermes-model-scout-gate.py`'s canned reply: "stays out of the daily candidate notices, stays
+visible in `--backlog`"). `propose()`'s return signature is unchanged. `--dry-run` previews the
+verdict too, a deliberate improvement over `is_promising()`'s own existing dry-run gap, since this
+feature changes initial task state rather than only advisory metadata. `hermes-fleetops-ui.py`
+2.18.0 adds an "auto-deferred" badge on `/backlog`, next to the existing "★ recommended" one, so a
+`deferred` row never looks identical whether a human or the scout made that call.
+
+**Exit gate.** `infra/model-benchmark/tests/test_similar_known.py` (new, 29 checks) against real
+identity strings pulled from this fleet's own data; `infra/hermes-model-scout/tests/
+test_model_scout.py`'s new `check_auto_defer` (123/123 total); `infra/hermes-fleetops-ui/tests/
+test_fleetops_ui.py`'s extended `check_backlog` (380/380 total). No live verification possible from
+this machine — scout only runs on `spark`, against the real HF API and `hermes-memory`.
+
+**Benchmark evaluation (`CLAUDE.md` 1.2.0), recorded 2026-10-27.** Evaluated against
+`FLEET_BENCHMARK_DESIGN.md` §4 — no new scenario needed. This is discovery/classification tooling
+that feeds a human-facing backlog, not a capability built for or consumed by The Firmament's own
+agent roles, same call already made for every other scout/`bc` change (e.g. `is_promising()`,
+never given its own S-number either, per the S20 record above).
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise

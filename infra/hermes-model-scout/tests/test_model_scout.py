@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-10-27) — test_auto_defer(), new for hermes-model-scout.py 1.5.0's S46 auto-defer
+# check: bc.find_similar_known() and known_candidates_for_role() both get safe-default stubs in
+# load() (same discipline as bc.is_promising() just above them — a real match found here would
+# otherwise mean propose() tries to open a real memory.db that doesn't exist in this offline
+# environment). Covers a confident match (deferred not proposed, turn carries
+# auto_deferred/auto_defer_reason/similar_to, no Matrix notice, propose()'s 2-tuple shape
+# unchanged), a non-match behaving exactly as before this feature existed, and --dry-run
+# previewing the verdict.
 #
 # Offline checks for S20's two scripts. No network, no hermes-memory, no Matrix, no model call —
 # every outbound call is stubbed, so this runs anywhere Python 3 does, including off-fleet.
@@ -82,12 +91,24 @@ def load(name, filename, stub_siblings=True):
         # this explicitly (see test_recommended_stamp). Present at all so propose()/offer_text()
         # never hit an AttributeError in a test that doesn't care about it either way.
         bc.is_promising = lambda detail: (False, "stub: unspecified")
+        # S46: same discipline as is_promising() just above -- the real heuristic is checked for
+        # real in infra/model-benchmark/tests/test_similar_known.py. "Nothing similar found" by
+        # default so propose() behaves exactly as it did before this feature existed, for every
+        # check here that doesn't explicitly care (see check_auto_defer).
+        bc.find_similar_known = lambda rec, known, history: (False, "", None)
         sys.modules["hermes_benchmark_common"] = bc
 
     spec = importlib.util.spec_from_file_location(name, TOOLS / filename)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
+    if stub_siblings:
+        # known_candidates_for_role() opens memory.db directly (sqlite3, mode=ro) -- real I/O that
+        # has no business running in an offline test. An empty-fleet default keeps every existing
+        # check's propose() calls exactly as inert as they were before this feature existed;
+        # check_auto_defer overrides this (or just bc.find_similar_known, which is simpler when
+        # the test doesn't care what "known" data produced the verdict).
+        mod.known_candidates_for_role = lambda role: []
     return mod
 
 
@@ -469,6 +490,69 @@ def test_recommended_stamp(scout, monkey):
           bool(notices) and "recommended for benchmarking" not in notices[-1], str(notices))
 
 
+def test_auto_defer(scout, monkey):
+    print(NL + "[S46: a confident similarity match defers instead of proposing]")
+    monkey(scout, "fetch_task", lambda tid: None)
+    upserts = []
+    monkey(scout, "upsert_task",
+           lambda tid, state, topic=None: upserts.append((tid, state)) or True)
+    turns = []
+    monkey(scout, "write_turn", lambda tid, phase, payload: turns.append((phase, payload)) or True)
+    notices = []
+    monkey(scout, "matrix_notice", lambda text: notices.append(text) or True)
+    monkey(scout.bc, "is_promising", lambda detail: (False, "stub: unspecified"))
+    role_calls = []
+    monkey(scout, "known_candidates_for_role", lambda role: role_calls.append(role) or [])
+
+    base = {"model_id": "org/dup-candidate", "category": "coding", "roles": ["coder"],
+            "fit": "~9GB Q4 (dense) — fits alongside current backends",
+            "gguf_repo": "org/dup-candidate-GGUF", "incumbent": {"checkpoint": "incumbent-x"},
+            "incumbent_scores": None, "publisher_claim": {"model_index_present": True},
+            "source": "hf-new-listing"}
+
+    monkey(scout.bc, "find_similar_known", lambda rec, known, history: (
+        True, "same underlying model as already-rejected candidate 'org/original'", "org/original"))
+    proposed, skipped = scout.propose([dict(base)])
+    check("known_candidates_for_role is called for the candidate's own role, not skipped",
+          role_calls == ["coder"], str(role_calls))
+    check("the candidate is still tracked, not silently dropped",
+          len(proposed) == 1 and not skipped, str((proposed, skipped)))
+    check("it's upserted as deferred, not proposed",
+          upserts and upserts[-1][1] == scout.STATE_DEFERRED, str(upserts))
+    phase, payload = turns[-1]
+    check("the turn records that it was auto-deferred, why, and what it matched",
+          payload.get("auto_deferred") is True
+          and "already-rejected" in payload.get("auto_defer_reason", "")
+          and payload.get("similar_to") == "org/original", str(payload))
+    check("no Matrix notice is sent for a confidently-redundant candidate",
+          not notices, str(notices))
+    check("propose()'s own 2-tuple return shape is unchanged; the reason rides in its 'why' string",
+          len(proposed[0]) == 2 and "auto-deferred" in proposed[0][1], str(proposed))
+
+    print(NL + "[a non-match behaves exactly as this feature never existed]")
+    notices.clear()
+    turns.clear()
+    monkey(scout, "fetch_task", lambda tid: None)
+    monkey(scout.bc, "find_similar_known", lambda rec, known, history: (False, "", None))
+    proposed2, skipped2 = scout.propose([dict(base, model_id="org/genuinely-new")])
+    check("an unmatched candidate is proposed normally, not deferred",
+          proposed2 and proposed2[-1][1] == scout.STATE_PROPOSED, str(proposed2))
+    check("and still gets its Matrix notice", bool(notices), str(notices))
+    phase2, payload2 = turns[-1]
+    check("a non-matched candidate's turn says so plainly, not just by omission",
+          payload2.get("auto_deferred") is False, str(payload2))
+
+    print(NL + "[--dry-run previews the verdict rather than hiding this feature's own effect]")
+    monkey(scout, "fetch_task", lambda tid: None)
+    monkey(scout.bc, "find_similar_known", lambda rec, known, history: (
+        True, "same underlying model as already-rejected candidate 'org/original'", "org/original"))
+    upserts.clear()
+    proposed3, skipped3 = scout.propose([dict(base, model_id="org/dup-candidate-2")], dry_run=True)
+    check("dry-run previews the auto-defer verdict, not just a generic 'dry-run'",
+          proposed3 and "would auto-defer" in proposed3[-1][1], str(proposed3))
+    check("dry-run writes nothing", not upserts, str(upserts))
+
+
 def _fake_urlopen(payload):
     class _Resp:
         def __enter__(self):
@@ -571,6 +655,7 @@ def main():
     test_publisher_claim(scout, monkey)
     test_offer_and_roles(scout, monkey)
     test_recommended_stamp(scout, monkey)
+    test_auto_defer(scout, monkey)
 
     for obj, name, old in reversed(saved):
         if old is not None:

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.15.0
+# Version: 2.16.0
+#
+# 2.16.0 (2026-10-27) — check_backlog() extended for hermes-fleetops-ui.py 2.18.0's S46
+# auto-deferred badge: a `deferred` row whose turn carries `auto_deferred: true` gets the new
+# badge, titled with its reason and the model it matched; a plain human-deferred row (no
+# `auto_deferred` key) gets none — the exact distinction the badge exists to draw.
 #
 # 2.15.0 (2026-10-27) — check_system_status(), new for hermes-fleetops-ui.py 2.17.0's S45
 # "System status and health" page: a fixture shaped exactly like hermes-fleet-health.py 1.7.0's
@@ -400,6 +405,49 @@ def check_backlog(ui, tmp):
     check("the other two scout tasks are excluded by this specific-state filter",
           "bcckfdn/cevher-test-10-lc-it-4-GGUF" not in rejected_html
           and "some/model-v2" not in rejected_html, rejected_html)
+
+    print("\n[S46: an auto-deferred row is visibly distinct from a human-deferred one]")
+    # A SEPARATE db/file, not more rows in `db` -- check_multiselect(ui) below reuses whatever
+    # ui.MEMORY_DB was left pointing at and asserts this fixture's exact 3-row shape (proposed/
+    # approved/rejected); mutating `db` itself here would leak two extra rows forward into it.
+    defer_db = tmp / "memory-defer.db"
+    conn4 = sqlite3.connect(defer_db)
+    conn4.executescript(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, agent TEXT, topic TEXT, state TEXT,"
+        " memory_ref TEXT, created_at TEXT, updated_at TEXT);"
+        "CREATE TABLE turns (id INTEGER PRIMARY KEY, task_id TEXT, agent TEXT, role TEXT,"
+        " raw TEXT, presented TEXT, created_at TEXT, conv_id TEXT);")
+    conn4.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?)",
+                  ("scout:coder:dup__candidate-GGUF", "model-scout", "coding", "deferred", None,
+                   "1791542000.0", "1791542600.0"))
+    conn4.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                  ("scout:coder:dup__candidate-GGUF", "model-scout", "scout", json.dumps({
+                      "advisory_narrative": "", "category": "coding",
+                      "fit": "~9GB Q4 (dense) — fits alongside current backends",
+                      "auto_deferred": True,
+                      "auto_defer_reason": "same underlying model as already-rejected candidate "
+                                            "'org/original' (core-name match, compatible "
+                                            "quantization)",
+                      "similar_to": "org/original"}), "1791542600.0"))
+    conn4.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?)",
+                  ("scout:coder:human__deferred-GGUF", "model-scout", "coding", "deferred", None,
+                   "1791542000.0", "1791542601.0"))
+    conn4.execute("INSERT INTO turns (task_id, agent, role, raw, created_at) VALUES (?,?,?,?,?)",
+                  ("scout:coder:human__deferred-GGUF", "model-scout", "scout", json.dumps({
+                      "advisory_narrative": "", "category": "coding",
+                      "fit": "~9GB Q4 (dense) — fits alongside current backends"}),
+                   "1791542601.0"))
+    conn4.commit()
+    conn4.close()
+    ui.MEMORY_DB = str(defer_db)
+    defer_html = ui.render_backlog("all")
+    check("an auto-deferred row gets the auto-deferred badge",
+          "auto-deferred</span>" in defer_html, defer_html)
+    check("its title carries the reason and what it matched",
+          "already-rejected candidate" in defer_html and "org/original" in defer_html, defer_html)
+    check("a human-deferred row (no auto_deferred key) gets no such badge",
+          defer_html.count("auto-deferred</span>") == 1, defer_html)
+    ui.MEMORY_DB = str(db)
 
     print("\n[the store is opened read-only]")
     ro = ui.ro_sqlite(db)

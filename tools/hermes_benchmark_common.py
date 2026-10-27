@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-10-27) — S46, direct operator request: find_similar_known(), a deterministic "is
+# this new scout candidate confidently the same underlying model, at a compatible quantization,
+# as something already decided (TERMINAL_OR_HELD) or already benchmarked (history)" check, for
+# hermes-model-scout.py's propose() to default a confident match straight to `deferred` instead of
+# `proposed`. same_core_identity()/quant_compatible() are new, narrow, explainable matching
+# primitives — biased hard toward precision over recall, same discipline is_promising() already
+# follows: a missed duplicate just costs one redundant benchmark run later, a wrongly-collapsed
+# match would silently hide a genuinely different candidate from ever being benchmarked.
+# Deliberately does NOT reuse incumbent_history()/reconcile_done()'s normalized-containment
+# substring match (hermes-model-scout.py) — containment would wrongly collapse "GLM-5.3" into
+# "GLM-5.3-Flash", a real, different model one suffix away, confirmed against this fleet's own
+# seeded `infra/model-watch/alert-state.json` GLM-5.3-Flash data.
 #
 # 1.5.0 (2026-10-25) — direct operator request, after reading is_promising() against the REAL
 # live backlog (891 proposed, 5 approved) on dgx-spark: the 1.4.0 heuristic's "comfortable fit OR
@@ -92,6 +105,7 @@ silently lost, just temporarily split across two files.
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -537,6 +551,151 @@ def is_promising(detail: dict) -> tuple:
                        "is tight or uncertain")
     return False, ("a GGUF build exists but the fit is tight/uncertain and the publisher has "
                    "published no formal eval numbers")
+
+
+# --- Candidate similarity (dedup a new candidate against known/history) ------
+#
+# S46: is this new candidate confidently "the same underlying model, a similar quantization, and
+# no behavior-changing variant" as something hermes-model-scout.py (or a real benchmark run) has
+# already weighed in on? Biased hard toward precision over recall: a missed duplicate just costs
+# one redundant benchmark run later; a wrongly-collapsed match would silently hide a genuinely
+# different candidate from ever being benchmarked, the far worse failure. Every check below only
+# fires on a narrow, explainable signal and otherwise leaves the candidate alone -- same
+# discipline is_promising() already follows with its named AND-conditions.
+
+# Packaging/format/platform artifacts, never part of a model's actual name -- safe to strip
+# before comparing two identity strings. Deliberately excludes anything that could be a real
+# behavior-changing variant (abliterated, heretic, derisked, instruct, reasoning, ...): those stay
+# in the token set on purpose, so a variant that might behave differently breaks the match.
+_QUANT_CODE_RE = re.compile(
+    r"\b(?:i?q\d[a-z0-9_]*|bf16|fp16|fp8|awq|gptq|exl2|mlx|nvfp4)\b", re.IGNORECASE)
+_PACKAGING_NOISE_RE = re.compile(r"\b(?:gguf|ud|i1|imatrix|dgx[- ]?spark)\b", re.IGNORECASE)
+
+
+def extract_quant_code(s: str) -> str | None:
+    """The first explicit quant/precision code named in an identity string (`Q4_K_M`, `Q8_0`,
+    `BF16`, `NVFP4`, ...), normalized for comparison, or None when the string names none."""
+    m = _QUANT_CODE_RE.search(s or "")
+    return re.sub(r"[-\s]", "_", m.group(0)).upper() if m else None
+
+
+def quant_compatible(a: str, b: str) -> bool:
+    """Operationalizes "similar quantization" as a real, explainable gate rather than ignoring it.
+    Compatible when neither side names an explicit quant code (both unspecified — the common case
+    for a scout candidate's own bare repo id), or both name the identical one. Two DIFFERENT named
+    codes are not compatible: there is no principled basis in this codebase today to rank
+    arbitrary quant codes by "closeness," so an ambiguous case is left for a real benchmark run
+    rather than guessed at."""
+    qa, qb = extract_quant_code(a), extract_quant_code(b)
+    if qa is None or qb is None:
+        return True
+    return qa == qb
+
+
+def _normalize_core_tokens(s: str, drop_prefix: str = "") -> tuple:
+    """Lowercased, tokenized "core name" of an identity string (an HF `org/repo` id, or a bare
+    free-text benchmark-history label), with packaging/format/platform noise stripped.
+
+    `drop_prefix` is the OTHER side's own org name — when it's a literal, case-insensitive prefix
+    of what's left after the `org/` split, it's dropped too. This covers a free-text
+    benchmark-history label naming its source org as a plain leading word (a real shape seen in
+    this fleet's own history: "NousResearch Hermes-4.3-36B-Q4_K_M" vs. scout's own
+    "NousResearch/Hermes-4.3-36B" — the label has no slash to split on, so the org word would
+    otherwise be the one extra token keeping an otherwise-identical pair from matching).
+
+    Known, accepted limitation: an original org name embedded *inside* the repo-name segment
+    itself with a dot (e.g. "DevQuasar/zai-org.GLM-5.3-Flash-GGUF") is not unwound — a false
+    negative, not worked around with a one-off special case for a single observed string."""
+    s = (s or "").split("/", 1)[-1]
+    if drop_prefix and s.lower().startswith(drop_prefix.lower()):
+        s = s[len(drop_prefix):]
+    s = _QUANT_CODE_RE.sub(" ", s)
+    s = _PACKAGING_NOISE_RE.sub(" ", s)
+    return tuple(t for t in re.split(r"[^a-z0-9]+", s.lower()) if t)
+
+
+def same_core_identity(model_id_a: str, label_b: str) -> bool:
+    """True only when the two identity strings' core-name token SETS are exactly equal once
+    packaging/format noise and a repeated org-name word are stripped — never a containment or
+    substring check, which would wrongly collapse e.g. "GLM-5.3" into "GLM-5.3-Flash" (a real,
+    different model one HF digit-and-suffix away from this one)."""
+    if not model_id_a or not label_b:
+        return False
+    org_a = model_id_a.split("/", 1)[0] if "/" in model_id_a else ""
+    org_b = label_b.split("/", 1)[0] if "/" in label_b else ""
+    ta = _normalize_core_tokens(model_id_a, drop_prefix=org_b)
+    tb = _normalize_core_tokens(label_b, drop_prefix=org_a)
+    return bool(ta) and set(ta) == set(tb)
+
+
+def _base_model_candidates(base_model) -> list:
+    """`publisher_claim.base_model` is already normalized to `None` or a comma-joined string (up
+    to 3 reported bases — hermes-model-scout.py's publisher_claim(), itself normalizing an HF card
+    field that comes back as a list on some cards and a string on others). A reported multi-base
+    merge is checked against each part, not just the first."""
+    if not base_model:
+        return []
+    return [p.strip() for p in str(base_model).split(",") if p.strip()]
+
+
+def find_similar_known(rec: dict, known: list, history: list) -> tuple:
+    """Is `rec` (a model-scout candidate dict, same shape `propose()` builds) confidently the same
+    underlying model, at a compatible quantization, as something already decided or already
+    benchmarked? `known` is a list of already-`TERMINAL_OR_HELD` scout candidates for the SAME
+    role, each `{"task_id", "state", "model_id", "gguf_repo", "base_model"}`
+    (hermes-model-scout.py's `known_candidates_for_role()`); `history` is `load_history()`'s list
+    (free-text `model_id` labels, one real benchmark run each).
+
+    Returns (bool, reason, matched_against) -- same (bool, reason) contract shape as
+    is_promising(), plus the matched item's own identity string so a human reading the backlog can
+    verify or override without re-deriving anything. Checks, in order, stopping at the first
+    confident hit; finds nothing confident -> (False, "", None), never a guess."""
+    rec_id = rec.get("model_id") or ""
+    rec_gguf = rec.get("gguf_repo") or ""
+    rec_bases = _base_model_candidates((rec.get("publisher_claim") or {}).get("base_model"))
+
+    def reason_for(what, state, identity, tier):
+        status = f"already-{state}" if state else "a known"
+        return f"{what} as {status} candidate {identity!r} ({tier}, compatible quantization)"
+
+    for item in known:
+        other_id = item.get("model_id") or ""
+        state = item.get("state") or ""
+        other_gguf = item.get("gguf_repo") or ""
+        # Tier 1: rec's own publisher-declared lineage against the known item's identity.
+        for base in rec_bases:
+            if same_core_identity(base, other_id) and quant_compatible(base, other_id):
+                return (True, reason_for("same underlying model (publisher-declared base model)",
+                                          state, other_id, "base_model match"), other_id)
+        # Tier 2: the known item's OWN declared base model against rec's id.
+        for other_base in _base_model_candidates(item.get("base_model")):
+            if rec_id and same_core_identity(rec_id, other_base) and quant_compatible(rec_id, other_base):
+                return (True, reason_for("same underlying model (matches a known candidate's own "
+                                          "publisher-declared base model)", state, other_id,
+                                          "base_model match"), other_id)
+        # Tier 3: rec's own id against the known item's id directly.
+        if rec_id and same_core_identity(rec_id, other_id) and quant_compatible(rec_id, other_id):
+            return (True, reason_for("same underlying model", state, other_id, "core-name match"),
+                    other_id)
+        # Tier 4: rec's GGUF conversion repo against the known item's id or its own GGUF repo.
+        for a, b in ((rec_gguf, other_id), (rec_gguf, other_gguf)):
+            if a and b and same_core_identity(a, b) and quant_compatible(a, b):
+                return (True, reason_for("same underlying model (GGUF conversion)", state, other_id,
+                                          "core-name match"), other_id)
+
+    for entry in history:
+        label = entry.get("model_id") or ""
+        if not label:
+            continue
+        if ((rec_id and same_core_identity(rec_id, label) and quant_compatible(rec_id, label))
+                or any(same_core_identity(b, label) and quant_compatible(b, label)
+                       for b in rec_bases)
+                or (rec_gguf and same_core_identity(rec_gguf, label)
+                    and quant_compatible(rec_gguf, label))):
+            return (True, f"same underlying model as a prior benchmark result {label!r} "
+                          f"(core-name match, compatible quantization)", label)
+
+    return False, "", None
 
 
 # --- Comparison ---------------------------------------------------------------
