@@ -1,34 +1,36 @@
 # hermes-coder2 — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
-`coder2` — Meta's Muse Glimmer 30B (stock, Apache-2.0), the second coding backend for
-`tools/hermes-dualcoder.py`'s cross-review workflow. Deployed on **`spark-2`**, deliberately not
+`coder2` — **GLM-4.7-Flash-Q4_K_M (stock)** as of IMPLEMENTATION_PLAN.md S44 (2026-10-27), the
+second coding backend for `tools/hermes-dualcoder.py`'s cross-review workflow. Previously Meta's
+Muse Glimmer 30B (stock, Apache-2.0) — retired 2026-10-20 for chronic reasoning-token-bloat/timeout
+problems (hermes-dualcoder.py's own comments), then replaced rather than left empty once S39's
+dedicated `fleet_dualcoder_precision` suite measured GLM-4.7-Flash at 1.000 (6/6) against Muse
+Glimmer's 0.000 (0/4, 2 timeouts) on the identical task. Deployed on **`spark-2`**, deliberately not
 alongside `coder` on `spark` — see `tools/hermes-router.py` 2.10.0's own changelog for why
 (memory-bandwidth isolation between the two coding backends, and keeping the review traffic off
-`spark`'s always-resident `dispatch` role). This is `spark-2`'s **first on-demand role** — until now
-it only ran always-resident `muse`/`omni`, so several pieces here (the wake worker, idle-sleep timer)
-are genuinely new territory on this node, not copies of something already running there.
+`spark`'s always-resident `dispatch` role). This was `spark-2`'s **first on-demand role** — until
+then it only ran always-resident `muse`/`omni`, so several pieces here (the wake worker, idle-sleep
+timer) were genuinely new territory on this node, not copies of something already running there.
 
 ## 1. Model file
 
-Real bake-off used `bartowski/Muse-Glimmer-30B-GGUF`'s `Muse-Glimmer-30B-Q4_K_M.gguf`
-(byte-verified 17,306,324,000 bytes via a live HF content-length check before download — the same
-gate every model file in this fleet goes through). Move the already-downloaded bake-off copy from
-`spark` to `spark-2` rather than re-downloading:
+**As of S44 (2026-10-27):** `GLM-4.7-Flash-Q4_K_M.gguf` (18,474,983,296 bytes, 17.2GiB) — already
+staged on `spark-2` at `/opt/hermes-models/` from the S39 candidate-benchmark run
+(`infra/model-benchmark/spark2-candidate-sequencing-runbook.md`), and already present on `spark` at
+`/mnt/hermes-data/models/` (it's the stock base `super`'s own `Huihui-GLM-4.7-Flash-abliterated`
+fine-tune was built from). Copy from the benchmark staging path into production rather than
+re-downloading or re-transferring:
 
 ```bash
-# On spark, verify before moving:
-sha256sum /mnt/hermes-data/models/bakeoff/Muse-Glimmer-30B-Q4_K_M.gguf
-
-# Transfer to spark-2 — the fabric SSH aliases (network-planes.md) are a good fit for a one-time
-# ~16GB move:
-rsync -avP /mnt/hermes-data/models/bakeoff/Muse-Glimmer-30B-Q4_K_M.gguf \
-  spark2-fabric:/mnt/hermes-data/models/Muse-Glimmer-30B-Q4_K_M.gguf
-
-# On spark-2, confirm identical:
-sha256sum /mnt/hermes-data/models/Muse-Glimmer-30B-Q4_K_M.gguf
+# On spark-2:
+cp /opt/hermes-models/GLM-4.7-Flash-Q4_K_M.gguf /mnt/hermes-data/models/GLM-4.7-Flash-Q4_K_M.gguf
 ```
+
+Muse-Glimmer-30B-Q4_K_M.gguf is left in place at `/mnt/hermes-data/models/` (not deleted) in case
+this decision is revisited — see `infra/model-benchmark/spark2-candidate-results.md` for the
+original bake-off this file's prior revision described.
 
 ## 2. Backend service
 
@@ -42,11 +44,10 @@ sudo systemctl daemon-reload
 # `systemctl start` should ever bring this up.
 ```
 
-**Verify `start-coder2.sh`'s flags against Muse Glimmer's own real behavior before trusting it** —
-it does not include `coder`'s own `--reasoning off` flag (that's tied to Qwen3.8's specific
-think-tag behavior, not copied on faith since Muse Glimmer is a different architecture with its own
-documented multi-step-reasoning design). Start it manually once and confirm real, coherent output
-before wiring it into the wake worker.
+**Verify `start-coder2.sh`'s flags against GLM-4.7-Flash's own real behavior before trusting it** —
+`--flash-attn off --reasoning off` are copied from `super`'s own start script since it runs the same
+base checkpoint, not re-derived from a fresh bake-off of this exact file. Start it manually once and
+confirm real, coherent output before wiring it into the wake worker.
 
 ## 3. Firewall — opposite direction from `coder`'s own rule
 
@@ -113,3 +114,4 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-09-05 | Initial version — `coder2` deployment checklist for the dual-coder review orchestrator's second reviewer. |
+| 1.1.0 | 2026-10-27 | S44: model swapped from Muse Glimmer 30B to GLM-4.7-Flash-Q4_K_M, per S39's `fleet_dualcoder_precision` bake-off (1.000 vs 0.000). Port, node, caller and firewall rule unchanged. |

@@ -1,5 +1,5 @@
 [Unit]
-Description=llama.cpp server - Muse Glimmer 30B (on-demand coder2 backend, spark-2)
+Description=llama.cpp server - GLM-4.7-Flash-Q4_K_M (on-demand coder2/dualcoder-review backend, spark-2)
 Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-coder2/README.md
 After=network.target
 

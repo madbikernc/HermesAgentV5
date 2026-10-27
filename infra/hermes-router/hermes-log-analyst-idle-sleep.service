@@ -1,0 +1,9 @@
+[Unit]
+Description=Stop llama-log-analyst if it has sat idle too long (spark only, triggered by hermes-log-analyst-idle-sleep.timer)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-log-analyst/README.md
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-idle-sleep.sh log-analyst llama-log-analyst 900

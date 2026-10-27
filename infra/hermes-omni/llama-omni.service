@@ -1,0 +1,20 @@
+# /etc/systemd/system/llama-omni.service
+[Unit]
+Description=llama.cpp server - NVIDIA-Nemotron-3.5-Bolt-74B-A9B (Omni, vision-judge backend, spark-2)
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/opt/llama.cpp/start-omni.sh
+Restart=always
+RestartSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

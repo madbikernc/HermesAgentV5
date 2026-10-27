@@ -1,0 +1,18 @@
+# /etc/systemd/system/llama-log-analyst.service
+[Unit]
+Description=llama.cpp server - NousResearch Hermes-4.3-36B-Q4_K_M (on-demand log-analyst backend, spark)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-log-analyst/README.md
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/opt/llama.cpp/start-log-analyst.sh
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
