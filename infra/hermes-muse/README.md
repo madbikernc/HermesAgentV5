@@ -1,6 +1,6 @@
 # hermes-muse — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.0.1
 
 `muse` — **NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)** as of
 IMPLEMENTATION_PLAN.md S44 (2026-10-27). Previously Huihui-Qwen3.6-35B-A3B-abliterated (huihui-ai)
@@ -40,10 +40,12 @@ the candidate's own S39 caveat flagged this as worth checking: a generic, uniden
 not wired in here. If vision is ever needed for this role, re-derive the matching mmproj from the
 real release first rather than assuming that file is it.
 
-**Verify `start-muse.sh`'s `--reasoning` choice against real behavior before trusting it as
-final** — see the script's own comment. This candidate is deliberately left at its default
-reasoning behavior, unlike every other backend on this fleet, since it's explicitly the
-"-Reasoning" variant S39 benchmarked.
+**`--reasoning off` is live-confirmed necessary, not left at default** — see the script's own
+comment: a real test call came back with the correct complete answer sitting in
+`reasoning_content` while `content` itself was truncated mid-word once `max_tokens` ran out, the
+same failure class Muse Glimmer's and gemma's own scripts already documented. This has **not**
+been re-verified against the `fleet_muse_contract` suite itself with reasoning off — if
+override-resistance regresses there, that's a real open question, not something to assume away.
 
 ## 3. Verify
 
@@ -64,3 +66,4 @@ mode `omni`'s own gemma swap hit without `--reasoning off`.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-27 | Initial version — S44's `muse` model swap (Huihui-Qwen3.6-35B-A3B-abliterated to NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning), closing S35's tracking gap for this role opportunistically. |
+| 1.0.1 | 2026-10-27 | Live-verified fix: `--reasoning off` added after a real test call showed the correct answer landing entirely in `reasoning_content` while `content` itself came back truncated. Not yet re-verified against `fleet_muse_contract` with reasoning off. |
