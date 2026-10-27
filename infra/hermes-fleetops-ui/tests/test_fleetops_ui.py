@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-# Version: 2.12.0
+# Version: 2.14.0
+#
+# 2.14.0 (2026-10-27) — check_market() extended for S38o (hermes-fleetops-ui.py's wording-only
+# "S&P 500 + Nasdaq-100" update): a real NULL-sector/industry instrument (exactly the shape
+# hermes-market-sync.py 1.5.0's refresh_nasdaq100() inserts for a Nasdaq-100-only ticker) is
+# treated as a known instrument by render_company_summary(), not refused as unknown, and its
+# NULL sector/industry reach summarize_company() as coalesced empty strings, never the literal
+# word "None" leaking into the prompt sent to the router.
+#
+# 2.13.0 (2026-10-27) — check_market() extended for hermes-fleetops-ui.py 2.15.0's S38n "track
+# anyway" checkbox: force=True on an already-monitored real ticker behaves identically to
+# force=False ("exists"); force=True still refuses a non-ticker-shaped string via
+# TICKER_FORMAT_RE ("badformat"), reusing the existing "unknown"-ticker fixture (too long to
+# match) rather than a new one; force=False on a real-shaped but untracked ticker (SPCX) still
+# refuses as "unknown" — force must be explicit, never implied by shape alone; force=True on that
+# same ticker is accepted and named distinctly ("added_untracked"), persists, and reports plain
+# "exists" (not "added_untracked" again) on a second force-add. The Add form's new checkbox
+# markup is asserted present on the rendered page.
 #
 # 2.12.0 (2026-10-26) — check_backlog() extended for hermes-fleetops-ui.py 2.14.0's backlog state
 # filter: read_backlog() now returns a 4-tuple (true total and true per-state counts added), its
@@ -1526,6 +1543,23 @@ def check_market(ui, tmp):
     check("an unknown ticker degrades with a named empty state, never calling the router",
           "No instrument on file for NOSUCHTICKER" in html_unknown and not calls, html_unknown)
 
+    # S38o: a Nasdaq-100-only instrument (refresh_nasdaq100() inserts these with NULL
+    # sector/industry, by design -- no fabricated GICS classification). summarize_company()
+    # already coalesces sector/industry with `or ''` before sanitizing; confirm that holds for a
+    # real NULL row, not just a non-NULL string, and that the page doesn't crash or show "unknown".
+    conn_n100 = sqlite3.connect(ui.MARKET_DB)
+    conn_n100.execute(
+        "INSERT INTO instruments VALUES ('NQONLY','US','NasdaqOnly Corp.','USD',NULL,NULL,"
+        "'2026-10-27','2026-10-27')")
+    conn_n100.commit()
+    conn_n100.close()
+    calls.clear()
+    html_n100 = ui.render_company_summary("NQONLY")
+    check("a NULL-sector/industry instrument (Nasdaq-100-only) is treated as known, not unknown",
+          "No instrument on file" not in html_n100, html_n100)
+    check("NULL sector/industry reach summarize_company() as empty strings, never the literal "
+          "word 'None'", calls[0]["messages"][1]["content"].count("None") == 0, calls[0])
+
     def fake_call_router_boom(payload):
         raise OSError("router unreachable")
     ui.call_router = fake_call_router_boom
@@ -1555,6 +1589,25 @@ def check_market(ui, tmp):
           ui.add_monitored_ticker_checked("nvda") == "exists"
           and ui.market_common.load_monitored_tickers() == ["NVDA"])
 
+    print(NL + "[S38n: 'track anyway' force-add, outside the S&P 500 instruments check]")
+    check("force=True on a real tracked ticker behaves exactly as without it (already monitored)",
+          ui.add_monitored_ticker_checked("NVDA", force=True) == "exists")
+    check("force=True still refuses a string that isn't ticker-shaped, named, without touching "
+          "the file -- the same 'unknown'-ticker fixture, too long for TICKER_FORMAT_RE",
+          ui.add_monitored_ticker_checked("ZZZZNOTREAL", force=True) == "badformat"
+          and ui.market_common.load_monitored_tickers() == ["NVDA"])
+    check("force=False on an untracked but real-shaped ticker is still refused as 'unknown' -- "
+          "force must be explicit, never implied",
+          ui.add_monitored_ticker_checked("SPCX") == "unknown"
+          and ui.market_common.load_monitored_tickers() == ["NVDA"])
+    check("force=True on an untracked, real-shaped ticker (SPCX) is accepted and named distinctly",
+          ui.add_monitored_ticker_checked("SPCX", force=True) == "added_untracked")
+    check("it actually persisted alongside NVDA",
+          ui.market_common.load_monitored_tickers() == ["NVDA", "SPCX"])
+    check("re-adding that same force-added ticker is a plain 'exists', not 'added_untracked' again",
+          ui.add_monitored_ticker_checked("SPCX", force=True) == "exists"
+          and ui.market_common.load_monitored_tickers() == ["NVDA", "SPCX"])
+
     monitored_html = ui.render_monitored_tickers()
     check("the monitored row names the company and shows a real daily move",
           "NVDA (NVIDIA Corporation)" in monitored_html, monitored_html)
@@ -1564,6 +1617,8 @@ def check_market(ui, tmp):
     check("the monitored row shows NVDA's real current share price",
           "$133.15" in monitored_html, monitored_html)
     check("the Add form is present", 'action="/market/monitor/add"' in monitored_html)
+    check("the Add form carries the 'track anyway' force checkbox",
+          'name="force" value="1"' in monitored_html, monitored_html)
 
     ui.add_monitored_ticker_checked("EVIL")  # has an instruments row (from the escaping checks
     # above), but no `prices` row at all -- exactly the "synced before a price ever landed" case.

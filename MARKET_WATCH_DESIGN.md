@@ -1,6 +1,6 @@
 # Firmament Market Watch — Target Design
 
-**Version:** 1.15.0
+**Version:** 1.17.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-10-17. This is a *target-state* design
 for a new daily capability — nothing in `tools/`, `infra/`, or `skills/` exists for it yet. Same
@@ -97,6 +97,64 @@ Widening past the US is a real follow-up, not assumed into this design: it needs
 no-JS instrument-list-plus-sector source per additional exchange, confirmed live the same way §2
 confirmed this one — not before. Widening the universe later is otherwise just a data change (§5's
 `instruments` table gains rows), not a rebuild.
+
+**`[DECIDED]` S38n, direct operator request ("add a track-anyway for any manually targeted
+stocks") — an individual human-picked ticker can now land on the personal "Monitored stocks"
+watchlist outside this section's own S&P-500-only scope, without widening that scope itself.**
+The trigger was a real, concrete ticker, not a hypothetical: SPCX, SpaceX's own symbol since its
+2026 Nasdaq Global Select IPO — real, exchange-listed, and simply not S&P 500-eligible yet (the
+index requires trailing four-quarter GAAP profitability; SpaceX's 2025 financials don't clear
+that bar). `instruments` stays exactly what `refresh_instruments()` derives from Wikipedia's S&P
+500 table — this does not touch §2's vendor decision, §4's sector/tag categorization, or any
+sector-trend/movers/30-day-trend computation, all of which still require a real `instruments`
+row and intentionally never see a "tracked anyway" ticker. What widens is narrower and more
+deliberate: the Add form's existing `instruments` lookup gets an explicit, opt-in "track anyway"
+checkbox, still format-checked (`TICKER_FORMAT_RE`) against arbitrary text, and
+`hermes-market-sync.py`'s daily sync is taught to also fetch prices for whatever lands there
+(`hermes_market_common.monitored_only_tickers()`) — a monitored ticker gets a real Yahoo-sourced
+price history if Yahoo recognizes the symbol, and degrades to "no price data on file yet" (the
+same degradation an S&P 500 ticker gets before its first sync) if it doesn't. A ticker this
+doesn't help with — OTC/Pink names, thinly-traded micro-caps, a SPAC ticker reused across a
+merger-renaming event — is a real, named limitation, not silently assumed away: Yahoo's free
+chart endpoint is reliable for major-exchange names like SPCX but materially less so for those,
+and `sync_prices()`'s own per-ticker try/except isolation is what keeps a bad manual add from
+affecting anything else, not a guarantee that every manually-added ticker will actually sync.
+
+**`[DECIDED]` S38o, direct operator request ("add NASDAQ, all the same goals") — the automatic
+`instruments` universe widens a second time, now to the Nasdaq-100 index, after a live check
+scoped "NASDAQ" down from what the operator was asked to choose between.** Two readings exist
+and both were checked before building either: the full NASDAQ exchange (~4,000-6,000 tickers)
+has a free, keyless ticker list (`nasdaqtrader.com`'s own symbol directory) but it carries ZERO
+sector/industry classification at all, and it would multiply the daily per-ticker Yahoo fetch
+loop 8-12x against an endpoint §2 already flagged "unofficial, rate-limit unknown" — real risk of
+throttling the existing S&P 500 sync too, for a universe sector-trend reporting couldn't even
+use. The Nasdaq-100 index, by contrast, is the same ~100-ticker scale as the S&P 500 MVP itself —
+but, also checked live rather than assumed, has no Wikipedia-shaped source either:
+`en.wikipedia.org/wiki/Nasdaq-100` carries no constituent table at all (a plain name-only
+bulleted list in a navbox), and the expected `List_of_Nasdaq-100_companies` spinoff article
+doesn't exist. The operator chose Nasdaq-100, given those two real costs named side by side.
+
+**What this means mechanically: a second, hand-curated membership source, not a second scrape.**
+`infra/hermes-market-sync/nasdaq100.yaml` (`TICKER | Company Name` per line, boss-edited like
+tags.yaml/feeds.yaml/topics.yaml) feeds a new `refresh_nasdaq100()`, upsert-shaped like
+`refresh_instruments()` but deliberately asymmetric: a ticker already in `instruments` (almost
+always because it's ALSO an S&P 500 member — the two universes overlap heavily) is never
+touched, so this pass can never clobber a real GICS sector with this file's own name-only text; a
+genuinely new ticker is inserted with `sector`/`industry` left NULL — no fabricated
+classification. That NULL is why "all the same goals" holds without any other code changing:
+every sector-trend path already skips a `sector IS NULL` row (so a Nasdaq-100-only ticker
+correctly never appears there, rather than appearing under a guessed sector), while
+movers/30-day-trend/`market ticker`/the Monitored-stocks table all operate on `prices`/`name`
+alone and already handle a NULL sector gracefully (checked against the real code, not assumed) —
+so a Nasdaq-100-only ticker gets the daily report's movers/trend sections, graphable history, and
+on-demand lookup exactly like an S&P 500 one, just never a sector-trend line. The curated list is
+explicitly NOT asserted complete: pulled live 2026-10-27 from one source cross-checked against a
+second for the overlapping portion, with two independent aggregators disagreeing with each other
+by 1-3 tickers on the real total and neither's full list reachable to resolve which — stated
+plainly in the file's own header rather than presented as authoritative. One pleasant
+confirmation found live while building this: SPCX (S38n's own worked example) turned out to
+already be a real, current Nasdaq-100 member, so it stops needing the "track anyway" checkbox
+the moment this pass runs for real.
 
 ---
 
@@ -603,9 +661,70 @@ Tracked in `IMPLEMENTATION_PLAN.md` as sub-stages under **S38**:
   appears ahead of `move` in every ticker-level section — checked over both loopback and the real
   public tailnet URL.
 
+- **S38n** — **Built, direct operator request, 2026-10-27** ("add a track-anyway for any
+  manually targeted stocks"), prompted by a real attempt to monitor SPCX (SpaceX's own ticker,
+  Nasdaq-listed since its 2026 IPO but not yet S&P 500-eligible) that the existing `instruments`
+  check silently refused. §3 above gained the `[DECIDED]` addendum recording exactly what widens
+  (the personal watchlist's own Add path and daily sync) and what deliberately does not (the
+  S&P-500-only `instruments` universe every sector/tag/movers/30-day computation still reads).
+  The Add form on `/market` gains a "track anyway" checkbox (`force`);
+  `add_monitored_ticker_checked()` now takes a `force` param that skips the `instruments`
+  requirement but still runs a new `TICKER_FORMAT_RE` against the raw input — `force` widens
+  which tickers are accepted, never what shape of text is accepted — and reports the distinct
+  `added_untracked` result so the UI can tell the user up front that there's no company/sector
+  data and that price history depends on Yahoo actually recognizing the symbol.
+  `hermes_market_common.py` 1.6.0 gains `monitored_only_tickers()` (monitored tickers absent
+  from `instruments`); `hermes-market-sync.py` 1.4.0's `_tickers_to_sync()` folds those into the
+  default daily-sync universe, and `cmd_daily()` gives a never-before-synced one the same
+  one-time `BACKFILL_RANGE` deep backfill a brand-new S&P 500 entrant already gets (keyed off
+  having zero existing `prices` rows, captured before the main sync call would otherwise mask
+  that with a few catch-up-window rows). A monitored-only ticker that isn't real, or that Yahoo's
+  endpoint simply doesn't recognize, fails `sync_prices()`'s existing per-ticker try/except in
+  isolation — logged, never a crash, never silently dropped. 8 new offline checks on
+  `hermes-fleetops-ui.py`'s own suite (360 total, up from 338) plus 8 new checks across
+  `hermes_market_common.py`'s file-format behavior and `hermes-market-sync.py`'s own daily-sync
+  wiring (both via that tool's own test suite, 127 total, up from 119). **S38n is offline-tested
+  only, not yet live-verified or committed** —
+  same two-stage workflow as every prior S38 sub-stage.
+
+- **S38o** — **Built, direct operator request, 2026-10-27** ("add NASDAQ, all the same goals"),
+  scoped from a live check of two real readings: the full NASDAQ exchange (~4,000-6,000 tickers,
+  a free ticker list but zero sector data, and 8-12x the daily Yahoo-fetch volume against an
+  endpoint already flagged "rate-limit unknown") vs. the Nasdaq-100 index (same ~100-ticker scale
+  as the S&P 500 MVP, but no Wikipedia-shaped GICS source exists for it either — checked, not
+  assumed). The operator chose Nasdaq-100 given both real costs. §3 gained a `[DECIDED]`
+  addendum recording the choice and its mechanics. New hand-curated
+  `infra/hermes-market-sync/nasdaq100.yaml` (`TICKER | Company Name`, boss-edited like
+  tags.yaml), fed by `hermes_market_common.py` 1.7.0's new `load_nasdaq100()` into
+  `hermes-market-sync.py` 1.5.0's new `refresh_nasdaq100()` — upsert-shaped like
+  `refresh_instruments()` but deliberately asymmetric: an already-S&P-500 ticker (the common
+  overlap case) is never touched, so its real GICS sector/name can never be clobbered by this
+  curated file's own name-only text; a genuinely new ticker gets inserted with `sector`/
+  `industry` left NULL, never fabricated. New `nasdaq100` CLI subcommand, folded into `daily`
+  right after `instruments`; its own new-tickers list feeds the same `BACKFILL_RANGE`
+  deep-backfill mechanism S38n's monitored-only tickers already use. Every sector-trend code
+  path already skips a `sector IS NULL` row correctly, and movers/30-day-trend/`market
+  ticker`/Monitored-stocks all already degrade gracefully on a NULL sector (checked against the
+  real code, confirmed by a new offline test inserting a real NULL-sector row rather than
+  assumed) — so "all the same goals" holds for a Nasdaq-100-only ticker everywhere except
+  sector-trend, with zero changes needed to any of those other paths. `hermes-market-gate.py`
+  1.1.1 and `hermes-fleetops-ui.py` 2.16.0 both got a wording-only fix: the Monitored-stocks
+  banners, the Add form's checkbox label, and `market ticker`'s unknown-ticker refusal all named
+  "the S&P 500" specifically as the one tracked universe, which would have become misleading now
+  that a second curated universe exists — reworded generically rather than silently left stale.
+  One pleasant confirmation found live while building this: SPCX (S38n's own worked example) is
+  already a real, current Nasdaq-100 member, so the curated list picks it up automatically and it
+  stops needing "track anyway" at all. The curated list is stated plainly as possibly incomplete
+  (1-3 tickers, per two aggregators disagreeing with each other and neither's full list
+  reachable to resolve which) rather than presented as authoritative. 2 new checks on
+  `hermes-fleetops-ui.py`'s own suite (362 total, up from 360) plus 16 new checks across
+  `hermes_market_common.py`/`hermes-market-sync.py`'s shared suite (143 total, up from 127).
+  **S38o is offline-tested only, not yet live-verified or committed** — same two-stage workflow
+  as every prior S38 sub-stage.
+
 ---
 
-## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full; S38i-l excluded, see below**
+## 13. Exit gate — **MET, 2026-10-25 — S38a-h in full; S38i-o excluded, see below**
 
 A real daily email **and** Matrix post landing on a real trading day, citing real sector movement and
 real movers an operator can check against an independent source; and a real `market <command>` round trip
@@ -623,17 +742,22 @@ human** — the numbers (Energy +2.68%, CCI +9.06% top gainer, etc.) are real an
 consistent, but this exit gate's own "an operator can check against an independent source" clause
 is satisfied by the data being real and checkable, not by someone having actually checked it yet.
 
-**S38i, S38j, S38k, and S38m are not part of this bar** — all four are a read-only view over data
-S38a-h's own exit gate already established as real (S38j's history graph, S38k's company
-summary, and S38m's share-price column all read the exact same `instruments`/`prices` rows
-`market sector`/`market ticker` already read, drawn from a new angle), not a new push/pull path
-of their own. **S38l is different in kind** — it genuinely adds a new write path
+**S38i, S38j, S38k, S38m, and S38o are not part of this bar** — all five are a read-only view
+over data S38a-h's own exit gate already established as real, or (S38o specifically) a backend
+data-source addition with no new UI route at all (S38j's history graph, S38k's company summary,
+and S38m's share-price column all read the exact same `instruments`/`prices` rows `market
+sector`/`market ticker` already read, drawn from a new angle; S38o's `refresh_nasdaq100()` only
+adds rows to `instruments` for every existing read path to pick up unchanged), not a new
+push/pull path of their own. **S38l is different in kind** — it genuinely adds a new write path
 (`/market/monitor/add`), so it isn't excluded from this bar by the same "read-only" reasoning; it
 simply isn't the kind of thing this bar measures at all (a Matrix daily-push/on-demand-pull round
 trip). Its own "done" is a real add-ticker round trip through the live UI, stated in its own §12
-entry. Each sub-stage's own "done" is stated there instead of restated here. S38i, S38j, S38k,
-S38l, and S38m are all built, live-verified on `dgx-spark`, and (as of the next revision)
-committed.
+entry. **S38n extends S38l's same write path rather than opening a new one** (one new form field
+on the existing route), so it is excluded from this bar on the identical grounds as S38l itself —
+its own "done" is a real force-add round trip for a real non-S&P-500 ticker, stated in its own
+§12 entry. Each sub-stage's own "done" is stated there instead of restated here. S38i, S38j,
+S38k, S38l, and S38m are all built, live-verified on `dgx-spark`, and (as of the next revision)
+committed. **S38n and S38o are not yet live-verified**, per their own §12 entries.
 
 ---
 
@@ -688,6 +812,20 @@ own evaluations above.** The share-price column is a bulk `prices` read
 tables — no role, no `hermes-router.py` call anywhere in this feature. No new benchmark scenario
 needed. Call recorded per `CLAUDE.md`'s rule rather than silently skipped.
 
+**Re-evaluated for S38n (2026-10-27): no model call at all, same conclusion as S38i/S38j/S38l/
+S38m's own evaluations above.** The "track anyway" checkbox is a format-regex check plus the
+same existing `instruments` lookup; the sync-side change is a plain SQL union and a reuse of
+`sync_prices()`'s already-built Yahoo-fetch/backfill machinery against a wider ticker list — no
+role, no `hermes-router.py` call anywhere in this feature. No new benchmark scenario needed.
+Call recorded per `CLAUDE.md`'s rule rather than silently skipped.
+
+**Re-evaluated for S38o (2026-10-27): no model call at all, same conclusion as every prior S38
+sub-stage evaluation above.** Nasdaq-100 membership is a hand-curated static file, read by a
+plain upsert against `instruments` — no classification step, no LLM judgment call anywhere
+(unlike S38h's tag-scout, which genuinely does route through `dispatch`), no `hermes-router.py`
+call of any kind. No new benchmark scenario needed. Call recorded per `CLAUDE.md`'s rule rather
+than silently skipped.
+
 What this design *is* relevant to, once actually built: `FLEET_BENCHMARK_DESIGN.md` gap 8 / §6.8
 (`fleet_coder_build`) draws its corpus from exactly this shape of work — a direct operator request, a
 vendor integration or parsing pipeline built from nothing to satisfy it. S38b/S38d/S38e's eventual build
@@ -717,3 +855,5 @@ own commit to that table in the same change, not a thing done here.
 | 1.13.0 | 2026-10-25 | **S38k and S38l live-verified on `dgx-spark`, minutes after 1.12.0 was written — direct operator request to deploy them the same way as every prior sub-stage.** The real deploy attempt immediately surfaced the `ProtectSystem=strict`/`ProtectHome=read-only` sandboxing finding already folded into 1.12.0's own text above (not a separate bump, since it was caught and fixed before this live-verification pass ever completed) — `MONITORED_TICKERS_PATH` relocated to `~/.hermes/state`, redeployed, and the real Add round trip then worked cleanly: HPE seeded for real through the live form itself (not a hand-written file), a lowercase re-add correctly reported "already monitored," an unmatched ticker and a wrong CSRF token each refused by name. A real `/market/company?ticker=HPE` call through the real `dispatch` role returned a sound profile in ~4 seconds. Both confirmed over loopback and the real public tailnet URL, with the real `/market` page showing `HPE (Hewlett Packard Enterprise)` and working Graph/Company links. §12's S38k/S38l entries and §13 both updated from "built" to the real live result. Minor bump — two features' live verification executed for real, including a real bug caught and fixed along the way, nothing prior reversed. |
 | 1.14.0 | 2026-10-25 | **S38m added, direct operator request** ("for rows related to an individual stock or company, add a field for the current share price"): a `price` column on every ticker-level row on `/market` — the daily report's ticker-level sections and the "Monitored stocks" table alike — via `hermes_market_common.py` 1.5.0's new `latest_prices()` (a bulk `({ticker: adj_close}, latest_date)` read, same shape as `daily_pct_changes()`/`trend30_pct_changes()`). No new SQLite access, no caching, no new table — `check_write_surface()`'s invariants stay untouched. A ticker with no `prices` row renders a dash, never a crash or a fabricated `$0.00`. §12 gained the S38m entry; §13's read-only exclusion list extended to include it; §14 gained its evaluation (no model call, no new benchmark gap). 4 new offline checks plus one existing header-shape check updated on `hermes-fleetops-ui.py`'s own suite (338 total, up from 334). Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
 | 1.15.0 | 2026-10-26 | **S38m live-verified on `dgx-spark` and committed, a day after 1.14.0 was written.** The delay was an unrelated infrastructure incident: `dgx-spark` rebooted and its `/mnt/hermes-data` local LVM volume didn't come back mounted, crash-looping `hermes-fleetops-ui.service` and several other, unrelated services for hours until the operator remounted it directly; recovery then produced a thundering herd of queued `vault-get-secret.sh` calls that delayed the service binding its port by several more minutes. None of it touched this feature's own code or storage. Once resolved, the real page confirmed the feature cleanly: the live "Monitored stocks" row shows HPE's real current price (`$56.69`), multiple real ticker-level report rows show their own real prices, and the `price` column header appears ahead of `move` in every ticker-level section — checked over both loopback and the real public tailnet URL. §12's S38m entry and §13 both updated from "offline-tested" to the real live result. Minor bump — a feature's live verification executed for real, nothing prior reversed. |
+| 1.16.0 | 2026-10-27 | **S38n added: direct operator request ("add a track-anyway for any manually targeted stocks"), prompted by a real attempt to monitor SPCX (SpaceX's own ticker, Nasdaq-listed since its 2026 IPO but not yet S&P 500-eligible) that the existing S&P-500-only `instruments` check silently refused.** §3 gained a `[DECIDED]` addendum stating precisely what widens (the personal watchlist's own Add path and daily sync) and what deliberately does not (the S&P-500-only `instruments` universe every sector/tag/movers/30-day computation still reads). The Add form gains a "track anyway" checkbox (`force`); `add_monitored_ticker_checked()` now takes a `force` param that skips the `instruments` requirement but still runs a new `TICKER_FORMAT_RE` against the raw input, reporting the distinct `added_untracked` result rather than plain `added` so the UI can tell the user up front there's no company/sector data and price history depends on Yahoo recognizing the symbol. `hermes_market_common.py` now 1.6.0 (`monitored_only_tickers()`); `hermes-market-sync.py` now 1.4.0 (`_tickers_to_sync()` folds monitored-only tickers into the default sync universe; `cmd_daily()` backfills a never-synced one the same way a brand-new S&P 500 entrant already gets, keyed off having zero existing `prices` rows rather than `refresh_instruments()`'s own new-ticker list, since this ticker never appears there); `hermes-fleetops-ui.py` now 2.15.0. §12 gained the S38n entry; §13's exclusion paragraph extended (S38n is excluded on the same grounds as S38l, extending that same write path rather than opening a new one); §14 gained its evaluation (no model call, no new benchmark gap). 8 new checks on `hermes-fleetops-ui.py`'s own suite (360 total, up from 338) plus 8 new checks across `hermes_market_common.py`/`hermes-market-sync.py`'s shared suite (127 total, up from 119). **S38n is offline-tested only, not yet live-verified or committed** — same two-stage workflow as every prior S38 sub-stage. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |
+| 1.17.0 | 2026-10-27 | **S38o added: direct operator request ("add NASDAQ, all the same goals"), scoped down from a live check of two real readings.** The full NASDAQ exchange (~4,000-6,000 tickers) has a free ticker list but zero sector data and would multiply the daily Yahoo-fetch volume 8-12x against an already-flagged-unofficial endpoint; the Nasdaq-100 index is the same ~100-ticker scale as the S&P 500 MVP but has no Wikipedia-shaped GICS source either (checked live, not assumed — no constituent table on Wikipedia, the expected spinoff article doesn't exist). The operator chose Nasdaq-100 given both real costs. §3 gained a `[DECIDED]` addendum. New hand-curated `infra/hermes-market-sync/nasdaq100.yaml`, fed by `hermes_market_common.py` 1.7.0's new `load_nasdaq100()` into `hermes-market-sync.py` 1.5.0's new `refresh_nasdaq100()` — upsert-shaped like `refresh_instruments()` but deliberately asymmetric: an already-S&P-500 ticker is never touched (its real GICS data can never be clobbered by this curated file's own name-only text), while a genuinely new ticker gets NULL sector/industry, never fabricated. New `nasdaq100` CLI subcommand, folded into `daily`; its new-tickers list feeds the same `BACKFILL_RANGE` deep-backfill mechanism S38n's monitored-only tickers already use. Every sector-trend path already skips a NULL-sector row correctly, and movers/30-day-trend/`market ticker`/Monitored-stocks already degrade gracefully on one (confirmed by a new test inserting a real NULL-sector row, not assumed) — so "all the same goals" holds everywhere except sector-trend, with zero other-path changes needed. `hermes-market-gate.py` (now 1.1.1) and `hermes-fleetops-ui.py` (now 2.16.0) got a wording-only fix: banners/labels/refusals that named "the S&P 500" specifically now say "S&P 500 + Nasdaq-100." One confirmation found live: SPCX (S38n's own worked example) is already a real Nasdaq-100 member, so it stops needing "track anyway." The curated list is stated plainly as possibly missing 1-3 tickers (two aggregators disagree, neither's full list reachable) rather than presented as complete. §12 gained the S38o entry; §13's exit-gate heading/exclusion paragraph extended (S38o excluded on the same "no new write path" grounds as S38i/j/k/m); §14 gained its evaluation (no model call, no new benchmark gap). 2 new checks on `hermes-fleetops-ui.py`'s own suite (362 total, up from 360) plus 16 new checks across `hermes_market_common.py`/`hermes-market-sync.py`'s shared suite (143 total, up from 127). **S38o is offline-tested only, not yet live-verified or committed** — same two-stage workflow as every prior S38 sub-stage. Minor bump — a new, additive feature on top of a stage already met, nothing prior reversed. |

@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.7.0
+#
+# 1.7.0 (2026-10-27) - S38o, direct operator request ("add NASDAQ, all the same goals"):
+# NASDAQ100_PATH/load_nasdaq100() -- a new hand-curated `infra/hermes-market-sync/nasdaq100.yaml`
+# (TICKER | Company Name per line), the same flat-delimited-text precedent tags.yaml/feeds.yaml/
+# topics.yaml already establish. Curated rather than scraped because there is no free, keyless,
+# no-JS source for Nasdaq-100 membership with GICS-shaped sector/industry columns the way
+# Wikipedia's S&P 500 table has (checked live before building, same discipline §2 of
+# MARKET_WATCH_DESIGN.md already applied to its own vendor survey) -- en.wikipedia.org/wiki/
+# Nasdaq-100 has no constituent table at all, and List_of_Nasdaq-100_companies doesn't exist.
+#
+# 1.6.0 (2026-10-27) - S38n, direct operator request ("add a track-anyway for any manually
+# targeted stocks"): monitored_only_tickers(), the one new query hermes-market-sync.py needs to
+# keep syncing prices for a monitored ticker that `add_monitored_ticker_checked()` accepted
+# outside the S&P 500 `instruments` check (e.g. SPCX -- SpaceX, real and Nasdaq-listed, but not
+# yet S&P-500-eligible). Deliberately NOT placed on `add_monitored_ticker()` itself -- that
+# function already stays DB-free by design (see its own docstring); this is the one other caller
+# that already holds a connection for exactly this kind of `instruments` cross-check.
 #
 # 1.5.0 (2026-10-25) - direct operator request: latest_prices(), a bulk ({ticker: adj_close},
 # latest_date) read for the single most recent trading date on file -- the one new query
@@ -73,6 +90,8 @@ REPO_DIR = TOOLS_DIR.parent
 TAGS_PATH = Path(os.environ.get(
     "TAGS_PATH", str(REPO_DIR / "infra" / "hermes-market-sync" / "tags.yaml")))
 VALID_MATCH_TYPES = {"sector", "ticker", "keyword"}
+NASDAQ100_PATH = Path(os.environ.get(
+    "NASDAQ100_PATH", str(REPO_DIR / "infra" / "hermes-market-sync" / "nasdaq100.yaml")))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS instruments (
@@ -341,6 +360,33 @@ def apply_tags(conn, dry_run=False):
     return len(pairs), bad
 
 
+def load_nasdaq100(path=None):
+    """`TICKER | Company Name` per line, # comments and blanks ignored -- same flat-delimited-
+    text precedent as tags.yaml/feeds.yaml/topics.yaml (nasdaq100.yaml's own header explains why
+    this is hand-curated rather than scraped: no free, keyless, GICS-shaped Nasdaq-100 source
+    exists, checked live before writing this). A malformed line is reported and skipped, never
+    fatal -- same discipline load_tags() already applies. Returns (rows, bad): rows is
+    [(ticker, name), ...] (ticker uppercased), bad is a list of problem descriptions. A missing
+    file is an empty list plus one named problem, not a silent no-op -- this file is meant to
+    exist and be operator-maintained, unlike monitored-tickers.yaml's "nothing monitored yet"
+    case."""
+    path = Path(path or NASDAQ100_PATH)
+    rows, bad = [], []
+    if not path.is_file():
+        return rows, [f"{path} does not exist"]
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|", 1)]
+        if len(parts) != 2 or not all(parts):
+            bad.append(f"line {lineno}: expected 'TICKER | Company Name', got {raw!r}")
+            continue
+        ticker, name = parts
+        rows.append((ticker.upper(), name))
+    return rows, bad
+
+
 def sanitize_llm_input(s, max_len=4000):
     """Copied verbatim from hermes_rag_common.py's own implementation rather than imported --
     that module requires the RAG venv's sqlite_vec extension at import time, unavailable under
@@ -437,6 +483,24 @@ def add_monitored_ticker(ticker, path=None):
         return True, "added"
     except Exception as exc:
         return False, str(exc)
+
+
+def monitored_only_tickers(conn, exchange="US", path=None):
+    """Monitored tickers (load_monitored_tickers()) that have no `instruments` row for this
+    exchange -- S38n's "track anyway" tickers, added outside the S&P 500 universe on purpose.
+    hermes-market-sync.py's own `_tickers_to_sync()` reads `instruments` alone for its daily
+    universe, so without this a monitored-only ticker would simply never get a price synced,
+    ever -- this is what closes that gap without widening `instruments` itself, which stays
+    exactly what refresh_instruments() derives from Wikipedia's S&P 500 table. `path` forwards to
+    load_monitored_tickers() unchanged (test isolation, same convention as that function's own
+    `path` param); real callers never pass it, same as every other MONITORED_TICKERS_PATH
+    caller in this module."""
+    monitored = load_monitored_tickers(path)
+    if not monitored:
+        return []
+    known = {r[0] for r in conn.execute(
+        "SELECT ticker FROM instruments WHERE exchange=?", (exchange,))}
+    return [t for t in monitored if t not in known]
 
 
 # S38h: the three sectors every current frontier_llm/ai_hardware member actually lives in.

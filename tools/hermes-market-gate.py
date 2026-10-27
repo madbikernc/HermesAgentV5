@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.1.1
+#
+# 1.1.1 (2026-10-27) - S38o wording fix: handle_ticker()'s unknown-ticker refusal named the
+# tracked universe as "today's S&P 500 universe", which became misleading once `instruments` can
+# also carry a curated Nasdaq-100 member (hermes-market-sync.py 1.5.0's refresh_nasdaq100()) --
+# reworded to the same generic "not a tracked instrument on file" phrasing hermes-fleetops-ui.py
+# already uses, rather than naming either universe specifically (a future third universe would
+# make this stale again otherwise). No behavior change.
 #
 # 1.1.0 (2026-10-25) - S38h: four new commands -- `market tag approve/reject/override <TICKER>`
 # and `market tag pending` -- the human approval gate for hermes-market-sync.py's new tag-scout
@@ -178,7 +185,7 @@ def handle_ticker(sym):
         "SELECT name, sector, industry FROM instruments WHERE ticker=? AND exchange='US'",
         (sym,)).fetchone()
     if not row:
-        return f"[market] Unknown ticker {sym!r} — not in today's S&P 500 universe."
+        return f"[market] Unknown ticker {sym!r} — not a tracked instrument on file."
     name, sector, industry = row
     bits = [f"{sym} — {name} ({sector or 'unknown sector'} / {industry or 'unknown industry'})"]
 

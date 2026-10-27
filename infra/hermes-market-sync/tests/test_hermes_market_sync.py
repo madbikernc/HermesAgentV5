@@ -1,5 +1,31 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-10-27) - S38o: load_nasdaq100() against a real temp file (missing-file-is-a-named-
+# problem, well-formed parsing, malformed-line reporting, comments/blanks, uppercasing);
+# refresh_nasdaq100() against a real `instruments` table proving the asymmetry that's the whole
+# point of this function -- an already-S&P-500 ticker's real GICS name/sector/industry survive
+# completely untouched by the curated file's own name text, while a genuinely new ticker lands
+# with that curated name but NULL sector/industry (never fabricated), on both the first run and a
+# later re-run (first_seen preserved, last_seen bumped, sector still NULL, not newly "fixed").
+# cmd_daily()'s own two existing backfill tests now also stub refresh_nasdaq100() (it is no
+# longer a no-op inside cmd_daily as of hermes-market-sync.py 1.5.0) so their exact-list
+# assertions stay exact; a new third cmd_daily test exercises refresh_nasdaq100() for REAL
+# (deliberately left unstubbed) against an isolated nasdaq100.yaml fixture, confirming its
+# new-ticker list folds into the same deep-backfill mechanism S38n's monitored-only tickers and
+# S&P 500 new entrants already share, and that it never touches an overlapping ticker's real
+# sector.
+#
+# 1.5.0 (2026-10-27) - S38n: monitored_only_tickers() against a real `instruments` table (a
+# monitored S&P 500 member excluded, a monitored non-member like SPCX kept); _tickers_to_sync()
+# folds monitored-only tickers into the default (no --only) universe without duplicating one
+# already in `instruments`, while an explicit --only list stays untouched; cmd_daily() gives a
+# never-synced monitored-only ticker the same one-time BACKFILL_RANGE deep backfill a brand-new
+# S&P 500 entrant gets, while a monitored-only ticker that already has a price row is correctly
+# left out of that backfill. The existing new-ticker-backfill test now pins
+# MONITORED_TICKERS_PATH to a guaranteed-missing file, since cmd_daily() reads it unconditionally
+# as of this version and that test's own exact-list assertion must never depend on whatever real
+# monitored-tickers.yaml happens to exist on the machine running this suite.
 #
 # 1.4.0 (2026-10-25) - Market Watch "Monitored stocks": load_monitored_tickers()/
 # add_monitored_ticker() against a real temp file -- missing-file, atomic append, case-
@@ -220,6 +246,89 @@ def test_refresh_instruments(sync_mod):
     check("a ticker dropped from the live page is never deleted", still_there is not None)
 
 
+def test_nasdaq100(sync_mod):
+    print("\n[load_nasdaq100() -- S38o, nasdaq100.yaml parsing]")
+    tmpdir = Path(tempfile.mkdtemp())
+    path = tmpdir / "nasdaq100.yaml"
+
+    check("a missing file is an empty list plus a named problem, not a silent no-op",
+          sync_mod.common.load_nasdaq100(path) == ([], [f"{path} does not exist"]),
+          sync_mod.common.load_nasdaq100(path))
+
+    path.write_text(
+        "# S38o curated Nasdaq-100 membership\n\n"
+        "aapl | Apple Inc.\n"
+        "not a real line at all\n"
+        "# a comment\n"
+        "msft | Microsoft Corporation\n",
+        encoding="utf-8")
+    rows, bad = sync_mod.common.load_nasdaq100(path)
+    check("well-formed lines parse, tickers uppercased, comments/blanks skipped",
+          rows == [("AAPL", "Apple Inc."), ("MSFT", "Microsoft Corporation")], rows)
+    check("a malformed line is reported and skipped, never fatal",
+          len(bad) == 1 and "not a real line at all" in bad[0], bad)
+
+    print("\n[refresh_nasdaq100() -- never overwrites a real GICS-sourced row, NULL for a new one]")
+    db_path, con = new_db()
+    con.executescript(sync_mod.common.SCHEMA)
+    now = "2026-10-20"
+    con.execute(
+        "INSERT INTO instruments (ticker, exchange, name, currency, sector, industry, first_seen, last_seen) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("AAPL", "US", "Apple Inc.", "USD", "Information Technology", "Technology Hardware", now, now))
+    con.commit()
+    con.close()
+    sync_mod.common.DB_PATH = db_path
+
+    curated_path = tmpdir / "nasdaq100-full.yaml"
+    curated_path.write_text(
+        "AAPL | THIS NAME MUST NEVER BE WRITTEN\n"
+        "NEWCO100 | NewCo Nasdaq-100 Test\n",
+        encoding="utf-8")
+    count, bad2, new_tickers = sync_mod.refresh_nasdaq100(
+        sync_mod.common.connect(), dry_run=False, path=curated_path)
+    check("both curated rows are counted, none skipped", count == 2 and bad2 == [], str((count, bad2)))
+    check("only the genuinely new ticker is reported new -- AAPL already had a real row",
+          new_tickers == ["NEWCO100"], new_tickers)
+
+    con = sqlite3.connect(db_path)
+    aapl = con.execute(
+        "SELECT name, sector, industry FROM instruments WHERE ticker='AAPL'").fetchone()
+    newco = con.execute(
+        "SELECT name, sector, industry, first_seen, last_seen FROM instruments "
+        "WHERE ticker='NEWCO100'").fetchone()
+    con.close()
+    check("AAPL's real GICS-sourced name/sector/industry are untouched by the curated file's own "
+          "name text", aapl == ("Apple Inc.", "Information Technology", "Technology Hardware"), aapl)
+    check("the genuinely new ticker gets the curated name but NULL sector/industry -- no "
+          "fabricated GICS classification", newco[:3] == ("NewCo Nasdaq-100 Test", None, None), newco)
+
+    # A second, later-day run must preserve first_seen, bump last_seen, never report NEWCO100 as
+    # new again, and still never touch sector/industry (NULL stays NULL, not "re-fixed").
+    real_datetime = sync_mod.datetime
+
+    class _LaterDate:
+        @staticmethod
+        def now(tz):
+            return real_datetime(2099, 1, 1, tzinfo=tz)
+    sync_mod.datetime = _LaterDate
+    try:
+        _count3, _bad3, new_tickers_2 = sync_mod.refresh_nasdaq100(
+            sync_mod.common.connect(), dry_run=False, path=curated_path)
+    finally:
+        sync_mod.datetime = real_datetime
+    check("a re-run reports no ticker as new", new_tickers_2 == [], new_tickers_2)
+
+    con = sqlite3.connect(db_path)
+    newco2 = con.execute(
+        "SELECT sector, first_seen, last_seen FROM instruments WHERE ticker='NEWCO100'").fetchone()
+    con.close()
+    check("sector stays NULL on a re-run, never fabricated on a later pass",
+          newco2[0] is None, newco2)
+    check("first_seen is preserved across the re-run", newco2[1] == newco[3], (newco2, newco))
+    check("last_seen advances on the re-run", newco2[2] == "2099-01-01", newco2)
+
+
 def test_tags(sync_mod):
     print("\n[tags.yaml parsing and apply_tags]")
     tmpdir = Path(tempfile.mkdtemp())
@@ -348,6 +457,27 @@ def test_monitored_tickers(sync_mod):
           "duplicate keeps only the first occurrence",
           sync_mod.common.load_monitored_tickers(path) == ["AAPL", "MSFT"],
           str(sync_mod.common.load_monitored_tickers(path)))
+
+    print("\n[monitored_only_tickers() -- S38n, against a real `instruments` table]")
+    db_path2, con2 = new_db()
+    con2.executescript(sync_mod.common.SCHEMA)
+    now2 = "2026-10-20"
+    con2.execute(
+        "INSERT INTO instruments (ticker, exchange, name, currency, sector, industry, first_seen, last_seen) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("AAPL", "US", "Apple Inc.", "USD", "Information Technology", "Technology Hardware", now2, now2))
+    con2.commit()
+
+    check("no monitored tickers on file at all -> empty",
+          sync_mod.common.monitored_only_tickers(con2, "US", path=tmpdir / "doesnotexist.yaml") == [])
+
+    monitored_path2 = tmpdir / "monitored2.yaml"
+    monitored_path2.write_text("AAPL\nSPCX\n", encoding="utf-8")
+    result_only = sync_mod.common.monitored_only_tickers(con2, "US", path=monitored_path2)
+    check("a monitored S&P 500 member (AAPL) is excluded; a monitored non-member (SPCX, "
+          "SpaceX's own real ticker -- Nasdaq-listed but not yet S&P 500-eligible) is kept",
+          result_only == ["SPCX"], result_only)
+    con2.close()
 
 
 def test_tag_scout(sync_mod):
@@ -524,10 +654,189 @@ def test_cmd_daily_backfills_new_tickers(sync_mod):
     con.executescript(sync_mod.common.SCHEMA)
     con.close()
     sync_mod.common.DB_PATH = db_path
+    # S38n's cmd_daily() also reads MONITORED_TICKERS_PATH now -- pin it to a guaranteed-missing
+    # file so this test's exact ["NEWCO"]-only assertion below can never depend on whatever real
+    # monitored-tickers.yaml (if any) happens to exist on the machine running this suite.
+    sync_mod.common.MONITORED_TICKERS_PATH = db_path.parent / "monitored-tickers.yaml"
     calls = []
 
     def fake_refresh_instruments(conn, dry_run=False):
         return 2, [], ["NEWCO"]
+
+    def fake_refresh_nasdaq100(conn, dry_run=False):
+        return 0, [], []  # S38o's own wiring gets its own dedicated test below
+
+    def fake_apply_tags(conn, dry_run=False):
+        return 0, []
+
+    def fake_sync_prices(conn, only=None, backfill_range=None, dry_run=False, update_watermark=True):
+        calls.append({"only": only, "backfill_range": backfill_range, "update_watermark": update_watermark})
+        return {"ok": len(only) if only else 0, "failed": [], "rows_written": 0, "total": len(only) if only else 0}
+
+    def fake_run_scan_tags(conn, dry_run):
+        return []
+
+    real_refresh = sync_mod.refresh_instruments
+    real_refresh_n100 = sync_mod.refresh_nasdaq100
+    real_apply_tags = sync_mod.common.apply_tags
+    real_sync_prices = sync_mod.sync_prices
+    real_scan_tags = sync_mod._run_scan_tags
+    sync_mod.refresh_instruments = fake_refresh_instruments
+    sync_mod.refresh_nasdaq100 = fake_refresh_nasdaq100
+    sync_mod.common.apply_tags = fake_apply_tags
+    sync_mod.sync_prices = fake_sync_prices
+    sync_mod._run_scan_tags = fake_run_scan_tags
+    try:
+        class _Args:
+            dry_run = False
+        sync_mod.cmd_daily(_Args())
+    finally:
+        sync_mod.refresh_instruments = real_refresh
+        sync_mod.refresh_nasdaq100 = real_refresh_n100
+        sync_mod.common.apply_tags = real_apply_tags
+        sync_mod.sync_prices = real_sync_prices
+        sync_mod._run_scan_tags = real_scan_tags
+
+    check("sync_prices is called exactly twice (main catch-up, then the new-ticker backfill)",
+          len(calls) == 2, str(calls))
+    check("the main call uses the normal catch-up window (no backfill_range)",
+          calls[0]["backfill_range"] is None, str(calls))
+    check("the backfill call targets only the new ticker",
+          calls[1]["only"] == ["NEWCO"], str(calls))
+    check("the backfill call uses BACKFILL_RANGE",
+          calls[1]["backfill_range"] == sync_mod.BACKFILL_RANGE, str(calls))
+    check("the backfill call never touches the main watermark",
+          calls[1]["update_watermark"] is False, str(calls))
+
+
+def test_tickers_to_sync_includes_monitored_only(sync_mod):
+    print("\n[_tickers_to_sync() -- S38n: the default universe folds in monitored-only tickers]")
+    db_path, con = new_db()
+    con.executescript(sync_mod.common.SCHEMA)
+    now = "2026-10-20"
+    con.executemany(
+        "INSERT INTO instruments (ticker, exchange, name, currency, sector, industry, first_seen, last_seen) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        [("AAPL", "US", "Apple Inc.", "USD", "Information Technology", "Technology Hardware", now, now),
+         ("MSFT", "US", "Microsoft Corp.", "USD", "Information Technology", "Software", now, now)])
+    con.commit()
+    sync_mod.common.DB_PATH = db_path
+
+    tmpdir = Path(tempfile.mkdtemp())
+    monitored_path = tmpdir / "monitored-tickers.yaml"
+    monitored_path.write_text("MSFT\nSPCX\n", encoding="utf-8")
+    sync_mod.common.MONITORED_TICKERS_PATH = monitored_path
+
+    check("an explicit --only list is used verbatim, never widened by monitored tickers",
+          sync_mod._tickers_to_sync(con, only=["ZZZ"]) == ["ZZZ"])
+    result = sync_mod._tickers_to_sync(con)
+    check("the default universe is every instruments ticker (alphabetical) plus the one "
+          "monitored-only ticker -- MSFT is already in instruments, so it is never duplicated",
+          result == ["AAPL", "MSFT", "SPCX"], result)
+    con.close()
+
+
+def test_cmd_daily_backfills_monitored_only_tickers(sync_mod):
+    print("\n[cmd_daily S38n monitored-only-ticker backfill wiring]")
+    db_path, con = new_db()
+    con.executescript(sync_mod.common.SCHEMA)
+    now = "2026-10-20"
+    con.execute(
+        "INSERT INTO instruments (ticker, exchange, name, currency, sector, industry, first_seen, last_seen) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("AAPL", "US", "Apple Inc.", "USD", "Information Technology", "Technology Hardware", now, now))
+    # VYLR is monitored AND already has one real price row on file -- must NOT be re-backfilled.
+    # SPCX is monitored and has never had a price row -- it's the one that needs the backfill.
+    con.execute(
+        "INSERT INTO prices (ticker, exchange, date, open, high, low, close, adj_close, volume) "
+        "VALUES ('VYLR','US','2026-10-19',1,1,1,1,1,100)")
+    con.commit()
+    con.close()
+    sync_mod.common.DB_PATH = db_path
+
+    tmpdir = Path(tempfile.mkdtemp())
+    monitored_path = tmpdir / "monitored-tickers.yaml"
+    monitored_path.write_text("SPCX\nVYLR\n", encoding="utf-8")
+    sync_mod.common.MONITORED_TICKERS_PATH = monitored_path
+
+    calls = []
+
+    def fake_refresh_instruments(conn, dry_run=False):
+        return 1, [], []  # no new S&P 500 ticker this run
+
+    def fake_refresh_nasdaq100(conn, dry_run=False):
+        return 0, [], []  # S38o's own wiring gets its own dedicated test
+
+    def fake_apply_tags(conn, dry_run=False):
+        return 0, []
+
+    def fake_sync_prices(conn, only=None, backfill_range=None, dry_run=False, update_watermark=True):
+        calls.append({"only": only, "backfill_range": backfill_range, "update_watermark": update_watermark})
+        return {"ok": len(only) if only else 0, "failed": [], "rows_written": 0, "total": len(only) if only else 0}
+
+    def fake_run_scan_tags(conn, dry_run):
+        return []
+
+    real_refresh = sync_mod.refresh_instruments
+    real_refresh_n100 = sync_mod.refresh_nasdaq100
+    real_apply_tags = sync_mod.common.apply_tags
+    real_sync_prices = sync_mod.sync_prices
+    real_scan_tags = sync_mod._run_scan_tags
+    sync_mod.refresh_instruments = fake_refresh_instruments
+    sync_mod.refresh_nasdaq100 = fake_refresh_nasdaq100
+    sync_mod.common.apply_tags = fake_apply_tags
+    sync_mod.sync_prices = fake_sync_prices
+    sync_mod._run_scan_tags = fake_run_scan_tags
+    try:
+        class _Args:
+            dry_run = False
+        sync_mod.cmd_daily(_Args())
+    finally:
+        sync_mod.refresh_instruments = real_refresh
+        sync_mod.refresh_nasdaq100 = real_refresh_n100
+        sync_mod.common.apply_tags = real_apply_tags
+        sync_mod.sync_prices = real_sync_prices
+        sync_mod._run_scan_tags = real_scan_tags
+
+    check("sync_prices is called exactly twice (main catch-up, then the backfill)",
+          len(calls) == 2, str(calls))
+    check("the backfill call targets only the never-synced monitored ticker (SPCX) -- never "
+          "the already-S&P-500 AAPL (no new_tickers from refresh_instruments this run) nor the "
+          "already-has-history monitored ticker (VYLR)",
+          calls[1]["only"] == ["SPCX"], str(calls))
+    check("the backfill call uses BACKFILL_RANGE",
+          calls[1]["backfill_range"] == sync_mod.BACKFILL_RANGE, str(calls))
+    check("the backfill call never touches the main watermark",
+          calls[1]["update_watermark"] is False, str(calls))
+
+
+def test_cmd_daily_backfills_nasdaq100_new_tickers(sync_mod):
+    print("\n[cmd_daily S38o Nasdaq-100 new-ticker backfill wiring, against the REAL refresh_nasdaq100()]")
+    db_path, con = new_db()
+    con.executescript(sync_mod.common.SCHEMA)
+    now = "2026-10-20"
+    # AAPL is already a real S&P 500 instrument and ALSO in the curated Nasdaq-100 fixture below
+    # -- must never be re-reported as new, and its real sector must survive untouched.
+    con.execute(
+        "INSERT INTO instruments (ticker, exchange, name, currency, sector, industry, first_seen, last_seen) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("AAPL", "US", "Apple Inc.", "USD", "Information Technology", "Technology Hardware", now, now))
+    con.commit()
+    con.close()
+    sync_mod.common.DB_PATH = db_path
+    # Isolate from both this run's real monitored-tickers.yaml and the real, committed
+    # nasdaq100.yaml -- this test's own exact-list assertion below must depend only on its own
+    # tiny fixture, never on whatever either real file happens to contain.
+    sync_mod.common.MONITORED_TICKERS_PATH = db_path.parent / "monitored-tickers.yaml"
+    tmpdir = Path(tempfile.mkdtemp())
+    nasdaq100_path = tmpdir / "nasdaq100.yaml"
+    nasdaq100_path.write_text("AAPL | Apple Inc.\nNEWCO100 | NewCo Nasdaq-100 Test\n", encoding="utf-8")
+    sync_mod.common.NASDAQ100_PATH = nasdaq100_path
+
+    calls = []
+
+    def fake_refresh_instruments(conn, dry_run=False):
+        return 1, [], []  # no new S&P 500 ticker this run
 
     def fake_apply_tags(conn, dry_run=False):
         return 0, []
@@ -544,6 +853,8 @@ def test_cmd_daily_backfills_new_tickers(sync_mod):
     real_sync_prices = sync_mod.sync_prices
     real_scan_tags = sync_mod._run_scan_tags
     sync_mod.refresh_instruments = fake_refresh_instruments
+    # refresh_nasdaq100() itself is deliberately left REAL here -- this test's whole point is its
+    # real wiring into cmd_daily()'s new_tickers/backfill list, not a mocked stand-in for it.
     sync_mod.common.apply_tags = fake_apply_tags
     sync_mod.sync_prices = fake_sync_prices
     sync_mod._run_scan_tags = fake_run_scan_tags
@@ -557,16 +868,23 @@ def test_cmd_daily_backfills_new_tickers(sync_mod):
         sync_mod.sync_prices = real_sync_prices
         sync_mod._run_scan_tags = real_scan_tags
 
-    check("sync_prices is called exactly twice (main catch-up, then the new-ticker backfill)",
+    check("sync_prices is called exactly twice (main catch-up, then the backfill)",
           len(calls) == 2, str(calls))
-    check("the main call uses the normal catch-up window (no backfill_range)",
-          calls[0]["backfill_range"] is None, str(calls))
-    check("the backfill call targets only the new ticker",
-          calls[1]["only"] == ["NEWCO"], str(calls))
+    check("the backfill call targets only the genuinely new curated ticker (NEWCO100) -- never "
+          "the already-S&P-500/already-curated AAPL",
+          calls[1]["only"] == ["NEWCO100"], str(calls))
     check("the backfill call uses BACKFILL_RANGE",
           calls[1]["backfill_range"] == sync_mod.BACKFILL_RANGE, str(calls))
-    check("the backfill call never touches the main watermark",
-          calls[1]["update_watermark"] is False, str(calls))
+
+    con = sqlite3.connect(db_path)
+    aapl_sector = con.execute("SELECT sector FROM instruments WHERE ticker='AAPL'").fetchone()[0]
+    newco_row = con.execute(
+        "SELECT name, sector FROM instruments WHERE ticker='NEWCO100'").fetchone()
+    con.close()
+    check("AAPL's real GICS sector survives cmd_daily's own nasdaq100 pass untouched",
+          aapl_sector == "Information Technology", aapl_sector)
+    check("the new curated ticker actually landed in `instruments`, NULL sector",
+          newco_row == ("NewCo Nasdaq-100 Test", None), newco_row)
 
 
 def test_gate_regexes(gate_mod):
@@ -738,6 +1056,7 @@ def main():
     test_to_yahoo_symbol(sync_mod)
     test_yahoo_chart_parsing(sync_mod)
     test_refresh_instruments(sync_mod)
+    test_nasdaq100(sync_mod)
     test_tags(sync_mod)
     test_append_tag_rule(sync_mod)
     test_monitored_tickers(sync_mod)
@@ -745,6 +1064,9 @@ def main():
     test_sync_prices_honesty_split(sync_mod)
     test_backfill_range_and_watermark(sync_mod)
     test_cmd_daily_backfills_new_tickers(sync_mod)
+    test_tickers_to_sync_includes_monitored_only(sync_mod)
+    test_cmd_daily_backfills_monitored_only_tickers(sync_mod)
+    test_cmd_daily_backfills_nasdaq100_new_tickers(sync_mod)
     test_gate_regexes(gate_mod)
     test_gate_handlers(gate_mod)
     test_gate_tag_commands(gate_mod)

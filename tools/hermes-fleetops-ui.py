@@ -1,5 +1,30 @@
 #!/usr/bin/env python3
-# Version: 2.14.0
+# Version: 2.16.0
+#
+# 2.16.0 (2026-10-27) — S38o wording-only follow-up, direct operator request ("add NASDAQ, all
+# the same goals"): `instruments` can now also carry a curated Nasdaq-100 member with no
+# `instruments` row from S&P 500 (hermes-market-sync.py 1.5.0's new refresh_nasdaq100()), so the
+# S38n-era "unknown"/"added_untracked" Monitored-stocks messages and the Add form's "track
+# anyway" checkbox label, which all named the S&P 500 specifically as the one tracked universe,
+# would have become misleading -- reworded to "S&P 500 + Nasdaq-100" throughout. No behavior
+# change: add_monitored_ticker_checked() already treats anything in `instruments` as known
+# regardless of which refresh pass put it there, so a Nasdaq-100-only ticker simply becomes a
+# normal (non-forced) "added" the moment hermes-market-sync.py's daily sync picks it up -- this
+# version only fixes what the banners and checkbox label SAY.
+#
+# 2.15.0 (2026-10-27) — S38n, direct operator request ("add a track-anyway for any manually
+# targeted stocks"): a real attempt to add SPCX (SpaceX's own ticker, real and Nasdaq-listed
+# since its 2026 IPO, but not yet S&P 500-eligible) was silently refused by the existing
+# S&P-500-only `instruments` check, with no way past it. The Add form on /market gains a "track
+# anyway" checkbox (`force`); add_monitored_ticker_checked() now takes a `force` param that skips
+# the `instruments` lookup but still runs TICKER_FORMAT_RE against the raw input first (force was
+# never meant to accept arbitrary text, just a ticker outside the S&P 500) — a forced add outside
+# `instruments` returns the new "added_untracked" result code rather than plain "added", so the
+# banner can tell the user up front that there's no company/sector data and price history
+# depends on whether hermes-market-sync.py's own universe (now hermes_market_common.py 1.6.0's
+# monitored_only_tickers(), picked up by hermes-market-sync.py 1.4.0) can actually sync it from
+# Yahoo. A ticker already known to `instruments` ignores `force` entirely and behaves exactly as
+# before — this only widens what's accepted when the normal check would otherwise refuse.
 #
 # 2.14.0 (2026-10-26) — direct operator request: the benchmark backlog table now defaults to
 # hiding `rejected` candidates, matching hermes-model-scout.py's own `--backlog` CLI convention
@@ -233,6 +258,7 @@ import hmac
 import html
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -1984,20 +2010,42 @@ def render_market_report(requested_date):
 
 MONITOR_RESULT_MESSAGES = {
     "added": "Added to your monitored list.",
+    "added_untracked": "Added, outside the tracked universe (S&P 500 + Nasdaq-100) — no company "
+                        "name or sector data, and price history depends on whether Yahoo Finance "
+                        "recognizes the ticker.",
     "exists": "Already in your monitored list.",
-    "unknown": "Not a tracked instrument on file — nothing added.",
+    "unknown": "Not a tracked instrument on file — nothing added. Check \"track anyway\" to add "
+               "it outside the S&P 500 + Nasdaq-100 universe.",
+    "badformat": "That doesn't look like a real ticker symbol — nothing added.",
     "empty": "No ticker given — nothing added.",
     "csrf": "Could not confirm the request — nothing added. Try again.",
     "badaction": "Something went wrong — nothing added.",
 }
 
+# S38n: a plain ticker (SPCX) or a multi-share-class one (BRK.B / BRK-B), 1-10 symbol characters
+# plus an optional 1-4 character suffix -- loose enough for every real shape this fleet's own
+# `instruments` table already carries, strict enough to refuse stray punctuation/whitespace/HTML
+# a "track anyway" add would otherwise write to monitored-tickers.yaml unchecked. Only consulted
+# when `force` bypasses the real `instruments` lookup below -- a normal (non-forced) add is
+# already constrained by that lookup and needs no separate format check.
+TICKER_FORMAT_RE = re.compile(r"^[A-Z0-9]{1,10}([.\-][A-Z0-9]{1,4})?$")
 
-def add_monitored_ticker_checked(ticker):
+
+def add_monitored_ticker_checked(ticker, force=False):
     """Validates against the real `instruments` table before ever touching
     monitored-tickers.yaml -- returns one of MONITOR_RESULT_MESSAGES' keys. The ticker-existence
     check needs a DB read, which market_common.add_monitored_ticker() deliberately doesn't do
     itself (see that function's own docstring) -- this is the one caller that holds a
     connection, via the same ro_sqlite() helper every other read on this page uses.
+
+    `force=True` (S38n's "track anyway" checkbox) skips the `instruments` requirement for a
+    ticker real/legitimate but outside the tracked universe (e.g. SPCX, real and Nasdaq-listed
+    but neither an S&P 500 nor a curated Nasdaq-100 member) -- but still runs TICKER_FORMAT_RE
+    first, since force was never meant to accept arbitrary text. A ticker that
+    IS known to `instruments` behaves identically regardless of `force`. The result is
+    "added_untracked" rather than plain "added" only when a force-add actually lands outside
+    `instruments` -- an already-monitored ticker still reports "exists" either way, and a known
+    ticker still reports plain "added".
 
     Normalizes case itself rather than trusting the caller to have already -- the one existing
     caller (do_POST's /market/monitor/add handler) already upper()s the form field, but this
@@ -2013,9 +2061,16 @@ def add_monitored_ticker_checked(ticker):
     finally:
         conn.close()
     if not known:
-        return "unknown"
+        if not force:
+            return "unknown"
+        if not TICKER_FORMAT_RE.match(ticker):
+            return "badformat"
     ok, result = market_common.add_monitored_ticker(ticker)
-    return result if ok else "badaction"
+    if not ok:
+        return "badaction"
+    if not known and result == "added":
+        return "added_untracked"
+    return result
 
 
 def render_monitored_tickers():
@@ -2055,6 +2110,9 @@ def render_monitored_tickers():
         f'<form method="post" action="/market/monitor/add">'
         f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
         f'<input type="text" name="ticker" placeholder="ticker, e.g. HPE" maxlength="12" required> '
+        f'<label><input type="checkbox" name="force" value="1"> track anyway (outside S&amp;P '
+        f'500 + Nasdaq-100 — no company/sector data, price history only if Yahoo Finance has '
+        f'it)</label> '
         f'<button type="submit">Add</button></form>'
     )
     return rows_html + add_form
@@ -2455,9 +2513,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/market/monitor/add":
             ticker = (form.get("ticker") or [""])[0].strip().upper()
+            force = (form.get("force") or [""])[0] == "1"
             who = tailnet_identity(self.headers)
-            result = add_monitored_ticker_checked(ticker)
-            log(f"monitor add requested: ticker={ticker!r} by {who or 'unidentified'} -> {result}")
+            result = add_monitored_ticker_checked(ticker, force=force)
+            log(f"monitor add requested: ticker={ticker!r} force={force} by "
+                f"{who or 'unidentified'} -> {result}")
             self._redirect(f"/market?monitor={result}")
             return
 

@@ -1,5 +1,41 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-10-27) - S38o, direct operator request ("add NASDAQ, all the same goals"). "NASDAQ"
+# was scoped down to the Nasdaq-100 index after a live check: there is no free, keyless source
+# for the full ~4,000-6,000-ticker exchange with any sector/industry data at all (nasdaqtrader.com's
+# own symbol directory has ticker/name only), and that volume would also multiply the daily
+# per-ticker Yahoo fetch loop 8-12x against an endpoint already flagged "rate-limit unknown" --
+# real risk of throttling the existing S&P 500 sync too. New refresh_nasdaq100(), the same
+# upsert-by-(ticker,exchange) shape refresh_instruments() already uses, reading
+# hermes_market_common.py 1.7.0's new load_nasdaq100() (a hand-curated
+# infra/hermes-market-sync/nasdaq100.yaml, since no free Wikipedia-shaped GICS source exists for
+# this index) instead of a live Wikipedia scrape. Deliberately asymmetric from
+# refresh_instruments(): a ticker ALREADY in `instruments` (almost always an S&P 500 overlap) is
+# never touched -- its real GICS sector/name is never clobbered by this file's own name-only
+# text -- while a genuinely new one gets inserted with sector/industry left NULL (no fabricated
+# classification; every sector-trend/tag-scout code path already skips a NULL-sector row
+# correctly, with zero changes needed there). New `nasdaq100` CLI subcommand, folded into
+# `daily` right after `instruments`; its own new-tickers list feeds the exact same
+# BACKFILL_RANGE deep-backfill mechanism S38n's monitored-only tickers already use, so a
+# Nasdaq-100-only ticker gets real price history on day one, not just an empty row. One nice
+# confirmation found live while building this: SPCX (S38n's own running example for "track
+# anyway") turned out to already be a real, current Nasdaq-100 member -- it'll now be picked up
+# automatically by this pass, with no "track anyway" checkbox needed for it going forward.
+#
+# 1.4.0 (2026-10-27) - S38n, direct operator request ("add a track-anyway for any manually
+# targeted stocks"): hermes-fleetops-ui.py's Add form can now accept a ticker outside the S&P
+# 500 `instruments` universe (e.g. SPCX -- SpaceX, real and Nasdaq-listed, but not yet S&P
+# 500-eligible). Without a change here, such a ticker would be stuck forever with no price data:
+# `_tickers_to_sync()`'s default universe was `instruments` alone. It now also includes
+# hermes_market_common.monitored_only_tickers() -- any monitored ticker with no `instruments`
+# row -- so the normal daily catch-up window covers it going forward, and cmd_daily() gives it
+# the same one-time BACKFILL_RANGE deep backfill a brand-new S&P 500 entrant already gets
+# (keyed off having zero existing `prices` rows yet, rather than `refresh_instruments()`'s own
+# "new to instruments" list, since this ticker will never appear there). A monitored-only ticker
+# that isn't a real/recognized symbol simply fails Yahoo's lookup -- isolated and logged by
+# sync_prices()'s existing per-ticker try/except, the same honest degradation every other ticker
+# failure already gets, never a crash or a silently-dropped row.
 #
 # 1.3.0 (2026-10-25) - Market Watch history graphs: the real backfill ceiling was checked live
 # against Yahoo's chart endpoint (NVDA, interval=1d) -- range=5y returned 1255 points spanning a
@@ -79,6 +115,7 @@
 # Config (environment):
 #   MARKET_DB          as hermes_market_common.py defines it (default /mnt/hermes-data/market/market.db)
 #   TAGS_PATH          as hermes_market_common.py defines it (default infra/hermes-market-sync/tags.yaml)
+#   NASDAQ100_PATH     as hermes_market_common.py defines it (default infra/hermes-market-sync/nasdaq100.yaml, S38o)
 #   ROUTER_URL         default http://127.0.0.1:8080 (S38h tag-scout classification)
 #   TAG_SCOUT_MODEL    default "dispatch" (S38h)
 #   BACKFILL_RANGE     default "5y" -- Yahoo range token used to backfill a ticker newly added
@@ -86,6 +123,7 @@
 #
 # Usage:
 #   hermes-market-sync.py instruments [--dry-run]
+#   hermes-market-sync.py nasdaq100 [--dry-run]              # S38o -- curated Nasdaq-100 membership
 #   hermes-market-sync.py tags [--dry-run]
 #   hermes-market-sync.py prices [--dry-run] [--only SYM1,SYM2] [--backfill-range TOKEN]
 #   hermes-market-sync.py scan-tags [--dry-run]              # S38h -- classify, propose, notify
@@ -290,6 +328,43 @@ def refresh_instruments(conn, dry_run=False):
     return len(rows), bad, new_tickers
 
 
+def refresh_nasdaq100(conn, dry_run=False, path=None):
+    """S38o: upserts hermes_market_common.load_nasdaq100()'s curated (ticker, name) rows into
+    `instruments`. Deliberately NEVER overwrites sector/industry/name -- unlike
+    refresh_instruments()'s own upsert (which legitimately refreshes those from a fresh
+    Wikipedia pull), this curated list carries no GICS data at all, and most of its tickers are
+    ALSO real S&P 500 members with real GICS sector/industry already on file from
+    refresh_instruments() -- overwriting that with sector=NULL and this file's own name text
+    would be a straight regression for every overlapping ticker. A ticker with no prior row at
+    all gets inserted with sector=NULL/industry=NULL (honest: no fabricated GICS classification;
+    sector_members() already skips any `sector IS NULL` row, so a Nasdaq-100-only ticker simply
+    never appears in sector-trend reporting). `last_seen` still advances on every run for every
+    curated ticker, same "still confirmed current as of today's source" semantics
+    refresh_instruments() already uses for its own rows -- harmless for an overlapping ticker
+    (refresh_instruments() already set the same value this run) and correct for a Nasdaq-100-only
+    one dropped from the S&P 500 (if it ever was a member) but still curated-current here.
+
+    Returns (count, bad, new_tickers) in the same shape refresh_instruments() does -- `new_tickers`
+    (no prior `instruments` row at all, checked BEFORE the upsert) feeds cmd_daily()'s existing
+    deep-backfill mechanism, the same way a brand-new S&P 500 entrant already does. `path`
+    forwards to load_nasdaq100() unchanged (test isolation, same convention
+    monitored_only_tickers() already establishes); real callers never pass it."""
+    rows, bad = common.load_nasdaq100(path)
+    now = datetime.now(timezone.utc).date().isoformat()
+    existing = {r[0] for r in conn.execute(
+        "SELECT ticker FROM instruments WHERE exchange=?", (EXCHANGE,))}
+    new_tickers = [ticker for ticker, _name in rows if ticker not in existing]
+    if not dry_run:
+        for ticker, name in rows:
+            conn.execute("""
+                INSERT INTO instruments (ticker, exchange, name, currency, sector, industry, first_seen, last_seen)
+                VALUES (?, ?, ?, 'USD', NULL, NULL, ?, ?)
+                ON CONFLICT(ticker, exchange) DO UPDATE SET last_seen=excluded.last_seen
+            """, (ticker, EXCHANGE, name, now, now))
+        conn.commit()
+    return len(rows), bad, new_tickers
+
+
 # ── tag candidate scout (S38h) ──────────────────────────────────────────────────────────────────
 
 def call_router(payload):
@@ -425,10 +500,15 @@ def parse_yahoo_chart(payload, ticker):
 
 
 def _tickers_to_sync(conn, only=None):
+    """The default (no `only`) universe is every S&P 500 `instruments` ticker PLUS every S38n
+    "track anyway" monitored ticker that has no `instruments` row -- without the latter, a
+    manually-added ticker outside the S&P 500 would never get a price synced at all, daily
+    catch-up or otherwise."""
     if only:
         return [t.strip().upper() for t in only]
-    return [r[0] for r in conn.execute(
+    instruments_tickers = [r[0] for r in conn.execute(
         "SELECT ticker FROM instruments WHERE exchange=? ORDER BY ticker", (EXCHANGE,)).fetchall()]
+    return instruments_tickers + common.monitored_only_tickers(conn, EXCHANGE)
 
 
 def sync_prices(conn, only=None, backfill_range=None, dry_run=False, update_watermark=True):
@@ -500,6 +580,17 @@ def cmd_instruments(args):
     return 0
 
 
+def cmd_nasdaq100(args):
+    conn = common.connect()
+    count, bad, new_tickers = refresh_nasdaq100(conn, dry_run=args.dry_run)
+    for problem in bad:
+        log(f"nasdaq100.yaml: {problem}")
+    log(f"{'[dry-run] ' if args.dry_run else ''}{count} curated ticker(s) refreshed from "
+        f"nasdaq100.yaml ({len(bad)} line(s) skipped, {len(new_tickers)} new: "
+        f"{', '.join(new_tickers) or '-'})")
+    return 0
+
+
 def cmd_tags(args):
     conn = common.connect()
     count, bad = common.apply_tags(conn, dry_run=args.dry_run)
@@ -563,10 +654,10 @@ def _report_prices_result(result, dry_run):
 
 
 def cmd_daily(args):
-    """What hermes-market-sync.service runs: instruments, then tags, then prices, then the
-    tag-scout, in sequence. A tag-scout failure (e.g. the router unreachable) is isolated and
-    logged, never fails the whole daily pipeline -- the same "one failing piece doesn't take the
-    others down" discipline as every other step here."""
+    """What hermes-market-sync.service runs: instruments, then nasdaq100, then tags, then
+    prices, then the tag-scout, in sequence. A tag-scout failure (e.g. the router unreachable) is
+    isolated and logged, never fails the whole daily pipeline -- the same "one failing piece
+    doesn't take the others down" discipline as every other step here."""
     conn = common.connect()
 
     count, bad, new_tickers = refresh_instruments(conn, dry_run=args.dry_run)
@@ -574,10 +665,31 @@ def cmd_daily(args):
         log(f"wikitable: {problem}")
     log(f"instruments: {count} refreshed ({len(bad)} row(s) skipped, {len(new_tickers)} new)")
 
+    # S38o: Nasdaq-100's own curated membership, folded into the same `new_tickers` backfill list
+    # below -- a ticker already in `instruments` (almost always an S&P 500 overlap) is untouched
+    # by refresh_nasdaq100() itself, so it can never show up here as "new" twice.
+    n100_count, n100_bad, n100_new = refresh_nasdaq100(conn, dry_run=args.dry_run)
+    for problem in n100_bad:
+        log(f"nasdaq100.yaml: {problem}")
+    log(f"nasdaq100: {n100_count} curated ticker(s) refreshed ({len(n100_bad)} line(s) skipped, "
+        f"{len(n100_new)} new)")
+    new_tickers = new_tickers + n100_new
+
     tag_count, tag_bad = common.apply_tags(conn, dry_run=args.dry_run)
     for problem in tag_bad:
         log(f"tags.yaml: {problem}")
     log(f"tags: {tag_count} ticker-tag pair(s) applied ({len(tag_bad)} line(s) skipped)")
+
+    # S38n: a monitored-only ticker (tracked outside the tracked universe, by direct request)
+    # that has never had a price row synced ALSO gets folded into `new_tickers`, for the same
+    # deep backfill every other source above already feeds into below -- captured BEFORE the
+    # main sync_prices() call, which would otherwise already have written a few catch-up-window
+    # rows for it and hidden the "never synced" case this is meant to catch.
+    monitored_only = common.monitored_only_tickers(conn, EXCHANGE)
+    if monitored_only:
+        already_has_history = {r[0] for r in conn.execute(
+            "SELECT DISTINCT ticker FROM prices WHERE exchange=?", (EXCHANGE,))}
+        new_tickers = new_tickers + [t for t in monitored_only if t not in already_has_history]
 
     result = sync_prices(conn, dry_run=args.dry_run)
     rc = _report_prices_result(result, args.dry_run)
@@ -610,6 +722,9 @@ def main():
     p = sub.add_parser("instruments", help="refresh instruments from Wikipedia's S&P 500 list")
     p.add_argument("--dry-run", action="store_true")
 
+    p = sub.add_parser("nasdaq100", help="refresh Nasdaq-100 membership from the curated nasdaq100.yaml (S38o)")
+    p.add_argument("--dry-run", action="store_true")
+
     p = sub.add_parser("tags", help="rebuild the tags table from tags.yaml")
     p.add_argument("--dry-run", action="store_true")
 
@@ -623,12 +738,12 @@ def main():
     p = sub.add_parser("scan-tags", help="classify the frontier_llm/ai_hardware candidate pool via the router (S38h)")
     p.add_argument("--dry-run", action="store_true")
 
-    p = sub.add_parser("daily", help="instruments, then tags, then prices, then scan-tags -- what the systemd timer runs")
+    p = sub.add_parser("daily", help="instruments, then nasdaq100, then tags, then prices, then scan-tags -- what the systemd timer runs")
     p.add_argument("--dry-run", action="store_true")
 
     args = ap.parse_args()
-    dispatch = {"instruments": cmd_instruments, "tags": cmd_tags, "prices": cmd_prices,
-                "scan-tags": cmd_scan_tags, "daily": cmd_daily}
+    dispatch = {"instruments": cmd_instruments, "nasdaq100": cmd_nasdaq100, "tags": cmd_tags,
+                "prices": cmd_prices, "scan-tags": cmd_scan_tags, "daily": cmd_daily}
     return dispatch[args.command](args)
 
 

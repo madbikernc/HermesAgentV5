@@ -1,0 +1,135 @@
+# S38o Market Watch Nasdaq-100 membership — one curated row per line: `TICKER | Company Name`.
+#
+# Why this file exists at all, rather than a scrape like refresh_instruments()'s own S&P 500
+# pull: checked live before building (S38o) and there is no free, keyless, no-JS-challenge
+# source for Nasdaq-100 membership that carries GICS-shaped Sector/Sub-Industry columns the way
+# Wikipedia's "List of S&P 500 companies" wikitable does. en.wikipedia.org/wiki/Nasdaq-100 has no
+# constituent table at all (a plain name-only bulleted list in a navbox), and the expected
+# spinoff article `List_of_Nasdaq-100_companies` doesn't exist (HTTP 404). So this is a
+# hand-curated membership list instead — boss-edited directly, same convention as tags.yaml/
+# feeds.yaml/topics.yaml, despite the .yaml extension (NOT real YAML, no PyYAML dependency).
+#
+# hermes-market-sync.py's `nasdaq100` pass (folded into `daily`) reads this file on every run and
+# upserts any ticker here with no `instruments` row yet — `sector`/`industry` are deliberately
+# left NULL for those (no fabricated GICS classification; sector_members() already skips any
+# `sector IS NULL` row, so a Nasdaq-100-only ticker simply never appears in sector-trend
+# reporting, which is correct, not a bug). A ticker ALREADY in `instruments` (almost always
+# because it's also an S&P 500 member) is never touched by this pass — its real GICS sector/name
+# from Wikipedia is never overwritten by this file's own name text.
+#
+# Pulled 2026-10-27 from stockanalysis.com's Nasdaq-100 holdings list, cross-checked against the
+# same source's QQQ holdings for the overlapping top 25 (exact match, no discrepancy). Stated
+# plainly rather than glossed over: two independent ETF-data aggregators (etfrc.com, wisesheets.io)
+# report QQQ's total holdings as 104 and 102 respectively, 1-3 more than the 101 rows below (100
+# companies — Alphabet counted twice, GOOGL/GOOG, both real index constituents) — their full
+# lists were paywalled past the top ~25, so the specific missing ticker(s), if any, could not be
+# confirmed. This file may be missing 1-3 current members as a result.
+#
+# Nasdaq-100 reconstitutes roughly annually (plus occasional interim additions for fast-growing
+# new listings, the same "fast-entry rule" that added SPCX — already in this list — within weeks
+# of its own 2026 IPO) — this file needs an occasional operator refresh against the real current
+# roster, the same "not automatic upkeep" caveat tags.yaml's own header states for itself. No
+# **Version:** header on this file either, the same already-existing gap feeds.yaml/topics.yaml/
+# tags.yaml all have despite CLAUDE.md's literal "every file" text — noted here rather than
+# silently picked one way.
+AAPL | Apple Inc.
+ABNB | Airbnb, Inc.
+ADBE | Adobe Inc.
+ADI | Analog Devices, Inc.
+ADP | Automatic Data Processing, Inc.
+ADSK | Autodesk, Inc.
+AEP | American Electric Power Company, Inc.
+ALAB | Astera Labs, Inc.
+ALNY | Alnylam Pharmaceuticals, Inc.
+AMAT | Applied Materials, Inc.
+AMD | Advanced Micro Devices, Inc.
+AMGN | Amgen Inc.
+AMZN | Amazon.com, Inc.
+APP | AppLovin Corporation
+ARM | Arm Holdings plc
+ASML | ASML Holding N.V.
+AVGO | Broadcom Inc.
+AXON | Axon Enterprise, Inc.
+BKNG | Booking Holdings Inc.
+BKR | Baker Hughes Company
+CCEP | Coca-Cola Europacific Partners PLC
+CDNS | Cadence Design Systems, Inc.
+CEG | Constellation Energy Corporation
+CMCSA | Comcast Corporation
+COST | Costco Wholesale Corporation
+CPRT | Copart, Inc.
+CRWD | CrowdStrike Holdings, Inc.
+CRWV | CoreWeave, Inc.
+CSCO | Cisco Systems, Inc.
+CSX | CSX Corporation
+CTAS | Cintas Corporation
+DASH | DoorDash, Inc.
+DDOG | Datadog, Inc.
+DXCM | DexCom, Inc.
+EXC | Exelon Corporation
+FANG | Diamondback Energy, Inc.
+FAST | Fastenal Company
+FER | Ferrovial N.V.
+FTNT | Fortinet, Inc.
+GEHC | GE HealthCare Technologies Inc.
+GILD | Gilead Sciences, Inc.
+GOOG | Alphabet Inc.
+GOOGL | Alphabet Inc.
+HON | Honeywell International Inc.
+HONA | Honeywell Aerospace Inc.
+IDXX | IDEXX Laboratories, Inc.
+INTC | Intel Corporation
+INTU | Intuit Inc.
+ISRG | Intuitive Surgical, Inc.
+KDP | Keurig Dr Pepper Inc.
+KLAC | KLA Corporation
+LIN | Linde plc
+LITE | Lumentum Holdings Inc.
+LRCX | Lam Research Corporation
+MAR | Marriott International, Inc.
+MCHP | Microchip Technology Incorporated
+MDLZ | Mondelez International, Inc.
+MELI | MercadoLibre, Inc.
+META | Meta Platforms, Inc.
+MNST | Monster Beverage Corporation
+MPWR | Monolithic Power Systems, Inc.
+MRNA | Moderna, Inc.
+MRVL | Marvell Technology, Inc.
+MSFT | Microsoft Corporation
+MSTR | Strategy Inc
+MU | Micron Technology, Inc.
+NBIS | Nebius Group N.V.
+NFLX | Netflix, Inc.
+NVDA | NVIDIA Corporation
+NXPI | NXP Semiconductors N.V.
+ODFL | Old Dominion Freight Line, Inc.
+ORLY | O'Reilly Automotive, Inc.
+PANW | Palo Alto Networks, Inc.
+PAYX | Paychex, Inc.
+PCAR | PACCAR Inc
+PDD | PDD Holdings Inc.
+PEP | PepsiCo, Inc.
+PLTR | Palantir Technologies Inc.
+PYPL | PayPal Holdings, Inc.
+QCOM | QUALCOMM Incorporated
+REGN | Regeneron Pharmaceuticals, Inc.
+RKLB | Rocket Lab Corporation
+ROP | Roper Technologies, Inc.
+ROST | Ross Stores, Inc.
+SBUX | Starbucks Corporation
+SHOP | Shopify Inc.
+SNDK | Sandisk Corporation
+SNPS | Synopsys, Inc.
+SPCX | Space Exploration Technologies Corp.
+STX | Seagate Technology Holdings plc
+TER | Teradyne, Inc.
+TMUS | T-Mobile US, Inc.
+TRI | Thomson Reuters Corporation
+TSLA | Tesla, Inc.
+TTWO | Take-Two Interactive Software, Inc.
+TXN | Texas Instruments Incorporated
+VRTX | Vertex Pharmaceuticals Incorporated
+WDAY | Workday, Inc.
+WDC | Western Digital Corporation
+WMT | Walmart Inc.
+XEL | Xcel Energy Inc.

@@ -1,5 +1,5 @@
 [Unit]
-Description=hermes-market-sync daily run (S38b/c/h) — instruments, tags, prices, tag-scout
+Description=hermes-market-sync daily run (S38b/c/h/o) — instruments, nasdaq100, tags, prices, tag-scout
 After=network-online.target hermes-router.service
 Wants=network-online.target
 
