@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Version: 2.0.0
+# Version: 2.1.0
+#
+# 2.1.0 (2026-10-27) — IMPLEMENTATION_PLAN.md S44 follow-up: now passes the `$before`/`$after`
+# SHAs it already computes to `hermes-restart-fleet.sh` as `--since`/`--to`, enabling that
+# script's own new diff-aware skip (3.2.0) -- real cost found live: an unrelated commit (a pure
+# IMPLEMENTATION_PLAN.md edit, then separately an infra/hermes-muse/ README fix) each bounced the
+# whole core stack including hermes-buzz.service, producing a real ~60s "poll failed" window
+# across all nine Minecraft bots, which depend on Buzz continuously. See that script's own 3.2.0
+# changelog for the full mechanism; nothing here changes except the two new flags on the one call.
 #
 # 2.0.0 (2026-09-05) — direct request: "re-imagine hermes-repo-sync to be compatible with current
 # ecosystem." Full rewrite, not a patch — the problem this script originally solved is gone, and a
@@ -258,7 +266,7 @@ if [ "$commit_count" -gt "$MAX_COMMITS_SHOWN" ]; then
 ... ($((commit_count - MAX_COMMITS_SHOWN)) more)"
 fi
 
-if "$REPO_DIR/tools/hermes-restart-fleet.sh" --node "$NODE" 2>&1 | sed "s/^/[hermes-repo-sync:$NODE] /"; then
+if "$REPO_DIR/tools/hermes-restart-fleet.sh" --node "$NODE" --since "$before" --to "$after" 2>&1 | sed "s/^/[hermes-repo-sync:$NODE] /"; then
   restart_status="restarted cleanly"
 else
   restart_status="RESTART FAILED -- check: journalctl -u hermes-repo-sync.service on $NODE, or rerun hermes-restart-fleet.sh --node $NODE by hand"

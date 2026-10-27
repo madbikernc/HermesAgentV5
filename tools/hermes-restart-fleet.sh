@@ -1,5 +1,25 @@
 #!/usr/bin/env bash
-# Version: 3.1.0
+# Version: 3.2.0
+#
+# 3.2.0 (2026-10-27) — IMPLEMENTATION_PLAN.md S44 follow-up: real cost found live while deploying
+# S44's own changes -- every one of this script's `--node` auto-restarts (hermes-repo-sync.sh's
+# own autopull trigger, every 5 minutes) bounces the WHOLE core stack unconditionally, including
+# `hermes-buzz.service`, even when the commit that triggered it touched nothing buzz depends on
+# (observed twice in one session: a pure-markdown IMPLEMENTATION_PLAN.md commit and an
+# infra/hermes-muse/ README fix each produced a real ~60s window of "poll failed" errors across
+# all nine Minecraft bots, which depend on Buzz continuously for cross-bot coordination). New
+# optional `--since <sha> --to <sha>` (hermes-repo-sync.sh 2.1.0 now passes `$before`/`$after`,
+# which it already computed): when both are given, each service in SPARK_SERVICES/
+# SPARK2_SERVICES is checked against `git diff --name-only $since $to` against a new per-service
+# SERVICE_PATHS map, and skipped (not restarted) if none of its own mapped paths appear in that
+# diff. A service with no mapping entry (nothing in this repo it depends on is tracked, e.g.
+# `llama-dispatch.service`'s own `/opt/llama.cpp/start-dispatch.sh`, still untracked per S35) is
+# never skippable -- defaults to always-restart, the same as every service already behaved before
+# this change. **Deliberately does NOT change the no-`--since`/`--to` behavior at all** -- a human
+# running this by hand (the original design, still the documented default) always gets the full
+# blanket restart it always has; this is additive, only exercised by the automated repo-sync path.
+# homed13's own stack is untouched by this change (its own in-flight-job check already handles its
+# real cost correctly; the gap found here was specifically Buzz/the core spark stack).
 #
 # 3.1.0 (2026-09-05) — direct request, part of re-imagining hermes-repo-sync.sh (2.0.0) for the
 # current three-peer-node ecosystem (no more Sintra/Amy identities to fan out to; every node
@@ -97,6 +117,8 @@ DRY_RUN=0
 NODE_FILTER=""          # "" = full fleet (default, unchanged); spark|spark2|homed13 = that node only
 RUN_LOCAL_SPARK2=0      # 1 when --node spark2: restart spark-2's own services locally, no SSH
 RUN_LOCAL_HOMED13=0     # 1 when --node homed13: restart homed13's own services locally, no SSH
+DIFF_SINCE=""           # 3.2.0: with --to, enables the skip-if-untouched check below
+DIFF_TO=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -110,13 +132,61 @@ while [ $# -gt 0 ]; do
       esac
       shift 2
       ;;
-    *) echo "Usage: $0 [--force] [--dry-run] [--node spark|spark2|homed13]" >&2; exit 2 ;;
+    --since) DIFF_SINCE="${2:-}"; shift 2 ;;
+    --to) DIFF_TO="${2:-}"; shift 2 ;;
+    *) echo "Usage: $0 [--force] [--dry-run] [--node spark|spark2|homed13] [--since <sha> --to <sha>]" >&2; exit 2 ;;
   esac
 done
 
 log() { echo "[hermes-restart-fleet] $*"; }
 
 exit_code=0
+
+# 3.2.0: per-service path prefixes this repo tracks that the named service actually depends on --
+# used only when --since/--to are both given (the automated repo-sync path). A service with no
+# entry here is never skippable (see service_touched()). Paths are relative to $PMONEY_REPO, same
+# as `git diff --name-only` already reports them.
+declare -A SERVICE_PATHS=(
+  [continuwuity.service]="infra/continuwuity/"
+  [hermes-broker.service]="tools/hermes-broker.py tools/hermes-broker-wrapper.sh infra/hermes-broker/"
+  [hermes-model-wake-worker.service]="tools/hermes-model-wake-worker.py infra/hermes-router/"
+  [hermes-buzz.service]="tools/hermes-buzz.py tools/hermes-buzz-wrapper.sh infra/hermes-buzz/"
+  [hermes-memory.service]="tools/hermes-memory.py infra/hermes-memory/"
+  [hermes-guard.service]="tools/hermes-guard.py infra/hermes-guard/"
+  [hermes-router.service]="tools/hermes-router.py tools/hermes-router-wrapper.sh tools/hermes_alert_common.py tools/hermes_egress_guard.py tools/hermes_injection_guard.py tools/hermes_usage_log.py infra/hermes-router/"
+  [hermes-dispatch.service]="tools/hermes-dispatch.py tools/hermes_injection_guard.py tools/hermes_conversation_common.py infra/hermes-dispatch/"
+  [hermes-presenter.service]="tools/hermes-presenter.py tools/hermes_conversation_common.py infra/hermes-presenter/"
+  [hermes-media.service]="tools/hermes-media.py tools/hermes_injection_guard.py tools/hermes_conversation_common.py infra/hermes-media/"
+  [llama-omni.service]="infra/hermes-omni/"
+  [llama-muse.service]="infra/hermes-muse/"
+)
+DIFF_FILES=""
+if [ -n "$DIFF_SINCE" ] && [ -n "$DIFF_TO" ]; then
+  DIFF_FILES="$(git -C "$PMONEY_REPO" diff --name-only "$DIFF_SINCE" "$DIFF_TO" 2>/dev/null)"
+  if [ -z "$DIFF_FILES" ]; then
+    log "WARNING: --since/--to given but 'git diff --name-only' returned nothing -- treating every service as touched (fail safe, same as no entry below)"
+  fi
+fi
+
+# True if $1 should restart: always true without --since/--to (unchanged default behavior), true
+# for any service with no SERVICE_PATHS entry (unmapped == always restart, never skippable), and
+# otherwise true only if at least one of that service's own mapped paths appears in the real diff.
+service_touched() {
+  local svc="$1" paths p
+  if [ -z "$DIFF_SINCE" ] || [ -z "$DIFF_TO" ]; then
+    return 0
+  fi
+  paths="${SERVICE_PATHS[$svc]:-}"
+  if [ -z "$paths" ]; then
+    return 0
+  fi
+  for p in $paths; do
+    if printf '%s\n' "$DIFF_FILES" | grep -qF "$p"; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 # Spark services, in the order they actually depend on each other: Matrix first (presenter/broker
 # post to it) -> dispatch's own resident backend -> the broker (needs the LUKS-container mount) ->
@@ -163,6 +233,10 @@ check_luks_mount() {
 
 restart_unit() {
   local svc="$1"
+  if ! service_touched "$svc"; then
+    log "SKIPPED $svc: nothing in its own mapped paths changed between $DIFF_SINCE and $DIFF_TO"
+    return 0
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
     log "DRY RUN: would restart $svc"
     return 0
@@ -178,6 +252,10 @@ restart_unit() {
 
 restart_spark2_unit() {
   local svc="$1"
+  if ! service_touched "$svc"; then
+    log "SKIPPED $svc: nothing in its own mapped paths changed between $DIFF_SINCE and $DIFF_TO"
+    return 0
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
     if [ "$RUN_LOCAL_SPARK2" -eq 1 ]; then
       log "DRY RUN: would restart $svc (local)"
