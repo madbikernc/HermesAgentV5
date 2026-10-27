@@ -5434,6 +5434,41 @@ coverage (all six have it, per S39 Phase C). It is not coding capability built o
 
 ---
 
+### S45 — `hermes-fleetops-ui`: "System status and health" tab (2026-10-27, executed)
+
+Direct operator request: add a tab surfacing Sintra/Amy/HomeD13 compute health (CPU, memory, GPU,
+disk), plus broker, injection-guard, and inter-node-comms status, to `hermes-fleetops-ui`
+(S21). That data has never lived anywhere this service could read: it is assembled once daily at
+06:00 by `hermes-fleet-health.py` (Phase 14), which SSHes into Amy and HomeD13, and the result was
+only ever emailed — never persisted to a file — while `hermes-fleetops-ui.py`'s own sandbox
+(`ProtectSystem=strict`, no subprocess/SSH anywhere in the file, enforced by
+`check_write_surface`/`check_unit_sandbox`) rules out reaching it live, the same way every other
+page here is a read of something the fleet already produces rather than a new probe.
+
+**Scope.** `hermes-fleet-health.py` 1.7.0 persists its full JSON report to
+`FLEET_HEALTH_SNAPSHOT_PATH` (default `~/.hermes/state/fleet-health/last-report.json`) on every
+run, unconditionally — a subpath of the `ReadWritePaths` grant `hermes-fleetops-ui`'s unit already
+holds for `usage.db`'s WAL sidecar, so no sandbox or systemd change was needed on either service.
+`hermes-fleetops-ui.py` 2.17.0 adds `/status`, reading that same path (`FLEET_HEALTH_PATH`) and
+rendering the same per-identity/broker/guard/comms data `hermes-fleet-health.py`'s own
+`render_text()` already emails daily, as tables — unreachable identities and a missing/stale
+snapshot degrade their own section rather than the page, and the page states its snapshot's own
+age, flagging it past ~36h since the last run. Freshness was a direct operator choice: daily
+(reusing the existing 06:00 run) over a new, more-frequent polling timer, matching how Market
+Watch and the rest of this UI are already "daily digest" views rather than live probes.
+
+**Exit gate.** `infra/hermes-fleetops-ui/tests/test_fleetops_ui.py` passing with the new
+`check_system_status` (377/377 checks); `check_write_surface`/`check_unit_sandbox` unchanged and
+still passing, confirming the sandbox was not widened.
+
+**Benchmark evaluation (`CLAUDE.md` 1.2.0), recorded 2026-10-27.** Evaluated against
+`FLEET_BENCHMARK_DESIGN.md` §4 — no new scenario needed. `hermes-fleetops-ui` is a human-facing,
+read-only ops dashboard, not a capability built for or consumed by The Firmament's own agent
+roles, so §4's gap structure doesn't apply, the same call already made (implicitly, by precedent)
+for every other tab on this page. It is not coding capability on `coder`/`coder2` either.
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise

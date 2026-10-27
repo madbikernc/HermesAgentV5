@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.7.0
+#
+# 1.7.0 (2026-10-27) — S45, fleetops-ui's new "System status and health" tab: this report was
+# previously only ever emailed, so there was nothing for a UI running elsewhere to read. main()
+# now also writes the full `fleet` dict built by build_report() to FLEET_HEALTH_SNAPSHOT_PATH
+# (default ~/.hermes/state/fleet-health/last-report.json) on every run, unconditionally — same
+# "every run persists its own state" precedent hermes-node-health.py's STATE_PATH already sets.
+# No new flag: this happens regardless of --format/--no-email, which keep their existing meaning.
 #
 # 1.6.0 (2026-10-16) - S32 item (e): render_text() now also prints each identity's `checks_na`
 # count alongside `checks_unknown` (hermes-node-health.py 1.3.0 split the one bucket into a
@@ -73,12 +80,14 @@ Usage:
 """
 import argparse
 import json
+import os
 import smtplib
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
+from pathlib import Path
 
 DEAD_LETTER_RECENT_WINDOW_SECONDS = 24 * 3600
 
@@ -99,6 +108,12 @@ BROKER_URL = "http://10.129.1.15:8100"
 ROUTER_SSH_HOST = "spark2"
 EMAIL_TO = "notifications@canislupisnc.net"
 EMAIL_TO_NAME = "Fleet Notifications"
+
+# S45: fleetops-ui's "System status and health" tab reads this file directly (plain read, no
+# subprocess/SSH of its own) — it is the only way that sandboxed, read-only UI can ever see this
+# report. Same directory family as hermes-fleetops-ui.py's own USAGE_DB default.
+FLEET_HEALTH_SNAPSHOT_PATH = os.environ.get(
+    "FLEET_HEALTH_SNAPSHOT_PATH", str(Path.home() / ".hermes" / "state" / "fleet-health" / "last-report.json"))
 
 TARGETS = [
     {"label": "Sintra", "kind": "local-identity", "user": "sintra", "hermes_home": "/home/sintra/.hermes",
@@ -367,6 +382,10 @@ def main():
     args = parser.parse_args()
 
     fleet = build_report()
+
+    snapshot_path = Path(FLEET_HEALTH_SNAPSHOT_PATH)
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(json.dumps(fleet, indent=2))
 
     if args.format == "json":
         print(json.dumps(fleet, indent=2))

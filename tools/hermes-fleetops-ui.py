@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 2.16.0
+# Version: 2.17.0
+#
+# 2.17.0 (2026-10-27) — S45, direct operator request: a new "System status and health" tab
+# (/status). This UI's own sandbox rules out reaching fleet health data directly — no subprocess,
+# no SSH, nothing but sqlite reads and loopback HTTP, enforced by check_write_surface/
+# check_unit_sandbox — so this reads hermes-fleet-health.py 1.7.0's new daily JSON snapshot
+# (FLEET_HEALTH_PATH, default ~/.hermes/state/fleet-health/last-report.json, already under this
+# unit's existing ReadWritePaths grant) rather than probing anything live. Same per-identity
+# status/compute/broker/guard/inter-node-comms data hermes-fleet-health.py's own render_text()
+# already emails daily, laid out as tables. Freshness is therefore whatever that daily 06:00 run
+# last wrote — the page says so, with a stale note past ~36h since the last snapshot.
 #
 # 2.16.0 (2026-10-27) — S38o wording-only follow-up, direct operator request ("add NASDAQ, all
 # the same goals"): `instruments` can now also carry a curated Nasdaq-100 member with no
@@ -285,6 +295,8 @@ RAG_DB = os.environ.get("HERMES_RAG_DB", "/mnt/hermes-data/rag/vectors.db")
 USAGE_DB = os.environ.get("HERMES_USAGE_DB", str(Path.home() / ".hermes" / "state" / "usage.db"))
 RAG_PORTAL_URL = os.environ.get("RAG_PORTAL_URL", "http://100.96.59.79:8093/")
 MARKET_DB = os.environ.get("MARKET_DB", "/mnt/hermes-data/market/market.db")
+FLEET_HEALTH_PATH = os.environ.get(
+    "FLEET_HEALTH_PATH", str(Path.home() / ".hermes" / "state" / "fleet-health" / "last-report.json"))
 
 TOOLS = Path(__file__).resolve().parent
 REPO = TOOLS.parent
@@ -498,7 +510,7 @@ footer { color:var(--dim); padding:18px 20px; border-top:1px solid var(--line); 
 NAV = [("/", "Home"), ("/backlog", "Benchmark backlog"), ("/models", "Models &amp; usage"),
        ("/benchmarks", "Benchmark results"), ("/highlights", "Topic highlights"),
        ("/recommendations", "Recommendations"), ("/egress-blocks", "Egress-guard denials"),
-       ("/market", "Market Watch")]
+       ("/market", "Market Watch"), ("/status", "System status and health")]
 
 
 def log(msg):
@@ -711,6 +723,10 @@ def page_home():
          "The daily sector/tag-trend, movers, and 30-day-trend report (S38), plus the frontier-LLM "
          "and AI-hardware watchlists and any tag candidate the LLM-judged scout (S38h) has "
          "proposed and is awaiting a human reply on. Read-only."),
+        ("System status and health", "/status",
+         "Sintra/Amy/HomeD13 compute health (CPU, memory, GPU, disk), plus broker, injection-guard, "
+         "and inter-node-comms status, from hermes-fleet-health.py's daily rollup (S45). As fresh "
+         "as that run's own last 06:00 pass. Read-only."),
     ]
     body = ['<p class="note">Read-only views over data this fleet already produces. '
             'Nothing here starts, stops or approves anything.</p><div class="cards">']
@@ -2388,6 +2404,129 @@ def page_market(query):
     return shell("Market Watch", body)
 
 
+# ── S45: System status and health ───────────────────────────────────────────────────────────────
+#
+# This UI's sandbox rules out reaching fleet health data directly -- no subprocess, no SSH,
+# nothing but sqlite reads and loopback HTTP, enforced by check_write_surface/check_unit_sandbox.
+# hermes-fleet-health.py 1.7.0 persists its daily JSON report (the same per-identity/broker/guard/
+# inter-node-comms data its own render_text() already emails) to FLEET_HEALTH_PATH on every run;
+# this page reads that file and lays it out as tables. It can never be fresher than that run.
+
+STATUS_COLOR = {"Healthy": "var(--ok)", "ok": "var(--ok)",
+                "Degraded": "var(--warn)", "warn": "var(--warn)",
+                "Critical": "var(--bad)", "critical": "var(--bad)"}
+
+# The snapshot is written once daily at 06:00 (hermes-fleet-health.timer); past roughly double
+# that interval, a missing run is a real gap worth saying so, not a rounding error.
+STALE_AFTER_HOURS = 36
+
+
+def read_fleet_health():
+    return json.loads(Path(FLEET_HEALTH_PATH).read_text())
+
+
+def render_compute_summary(compute):
+    """One line per compute figure worth a glance at, from hermes-node-health.py's
+    section_compute() shape -- CPU load, memory %, GPU util/temp, disk % per mount. A key missing
+    entirely (an older report, a platform with no nvidia-smi) is skipped rather than guessed at."""
+    bits = []
+    load = compute.get("load")
+    if load:
+        bits.append(f"CPU {load.get('1m', '?')}/{load.get('5m', '?')}/{load.get('15m', '?')} "
+                     f"(ncpu={load.get('ncpu', '?')})")
+    mem = compute.get("memory")
+    if mem:
+        bits.append(f"mem {mem.get('pct', '?')}%")
+    for gpu in compute.get("gpus", []):
+        bits.append(f"GPU{gpu.get('index', '?')} {gpu.get('util_pct', '?')}% {gpu.get('temp_c', '?')}C")
+    for disk in compute.get("disks", []):
+        bits.append(f"{disk.get('path', '?')} {disk.get('pct', '?')}%")
+    return esc(", ".join(bits)) if bits else '<span class="empty">—</span>'
+
+
+def render_system_status():
+    fleet = read_fleet_health()
+    status = fleet.get("fleet_status", "Unknown")
+    ts = fleet.get("timestamp")
+    stale = ""
+    try:
+        age_hours = ((datetime.datetime.now(datetime.timezone.utc)
+                      - datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00")))
+                     .total_seconds() / 3600)
+        if age_hours > STALE_AFTER_HOURS:
+            stale = (f' <span style="color:var(--bad)">— stale, {age_hours:.0f}h since the last '
+                      f'hermes-fleet-health.py run</span>')
+    except (TypeError, ValueError):
+        stale = ' <span style="color:var(--bad)">— no valid timestamp in this snapshot</span>'
+    color = STATUS_COLOR.get(status, "var(--dim)")
+    out = [f'<p><b style="color:{color}">Fleet status: {esc(status)}</b> '
+           f'— snapshot from {esc(when(ts))}{stale}</p>']
+
+    rows = []
+    for r in fleet.get("identities", []):
+        label = r.get("label", "?")
+        if not r.get("reachable"):
+            rows.append([esc(label), '<b style="color:var(--bad)">UNREACHABLE</b>',
+                         esc(r.get("error") or ""), ""])
+            continue
+        summ = (r.get("report") or {}).get("summary", {})
+        compute = (r.get("report") or {}).get("sections", {}).get("compute", {})
+        ident_status = summ.get("overall_status", "?")
+        counts = (f"{summ.get('checks_ok', 0)} ok / {summ.get('checks_warn', 0)} warn / "
+                  f"{summ.get('checks_critical', 0)} critical / "
+                  f"{summ.get('checks_unknown', 0)} unknown / {summ.get('checks_na', 0)} n/a")
+        detail = render_compute_summary(compute)
+        if summ.get("issues"):
+            detail += "<br>" + "; ".join(esc(i) for i in summ["issues"])
+        rows.append([esc(label),
+                     f'<b style="color:{STATUS_COLOR.get(ident_status, "var(--dim)")}">'
+                     f'{esc(ident_status)}</b>',
+                     counts, detail])
+    out.append(table(["identity", "status", "checks", "compute / issues"], rows))
+
+    b = fleet.get("broker", {})
+    out.append("<h3>Broker</h3>")
+    if b.get("reachable"):
+        out.append(table(["jobs (all-time)", "done", "dead-lettered", "dead (24h)", "in flight"],
+                          [[b.get("total", 0), b.get("done", 0), b.get("dead", 0),
+                            b.get("dead_recent", 0), b.get("in_flight", 0)]],
+                          numeric=(0, 1, 2, 3, 4)))
+    else:
+        out.append(f'<p class="empty">UNREACHABLE — {esc(b.get("error") or "")}</p>')
+
+    g = fleet.get("guard", {})
+    out.append(f'<h3>Injection guard — last 24h ({g.get("block", 0)} blocked, '
+               f'{g.get("flag", 0)} flagged fleet-wide)</h3>')
+    guard_rows = []
+    for node, stats in g.get("per_node", {}).items():
+        if not stats.get("reachable"):
+            guard_rows.append([esc(node), "unavailable", esc(stats.get("error") or "")])
+            continue
+        cats = ", ".join(f"{k}={v}" for k, v in sorted(stats.get("categories", {}).items()))
+        guard_rows.append([esc(node), f"{stats.get('block', 0)} blocked / {stats.get('flag', 0)} flagged",
+                            esc(cats)])
+    out.append(table(["node", "blocked / flagged", "categories"], guard_rows))
+
+    out.append("<h3>Inter-node comms</h3>")
+    comms_rows = [[esc(c.get("name", "?")), "OK" if c.get("ok") else "FAIL", esc(c.get("detail") or "")]
+                  for c in fleet.get("inter_node_comms", [])]
+    out.append(table(["check", "status", "detail"], comms_rows))
+
+    return "".join(out)
+
+
+def page_system_status(query):
+    body = section(
+        "System status and health",
+        "Sintra/Amy/HomeD13 compute health (CPU, memory, GPU, disk), plus broker, "
+        "injection-guard, and inter-node-comms status (S45) — read straight from "
+        "<span class=\"mono\">hermes-fleet-health.py</span>'s own daily JSON snapshot, the same "
+        "data its email already carries. This page is never fresher than that snapshot's last "
+        "run. Read-only.",
+        render_system_status)
+    return shell("System status and health", body)
+
+
 # ── server ────────────────────────────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -2401,6 +2540,7 @@ ROUTES = {
     "/market": page_market,
     "/market/history": page_market_history,
     "/market/company": page_market_company,
+    "/status": page_system_status,
 }
 
 

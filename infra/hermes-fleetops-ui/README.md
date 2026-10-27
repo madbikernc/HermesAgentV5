@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.14.0
+**Version:** 2.15.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog (now leading with a "Recommended for benchmarking" section), which checkpoint backs each
@@ -211,6 +211,7 @@ missing-table crash on first run — is the concrete precedent.
 | `/highlights` | `news_digest_daily` in `vectors.db` | every stored rank, not just the emailed top 20 |
 | `/recommendations` | `tasks`/`turns` in `memory.db`, `id LIKE 'REC-%'` | read-only; keyed by id prefix, not an agent list — see below |
 | `/recommendations` (top section) | `MODEL_SWAP_RECOMMENDATIONS`, a curated constant in the module itself | **not** read from a live store — see below |
+| `/status` | `FLEET_HEALTH_PATH` (default `~/.hermes/state/fleet-health/last-report.json`), a plain JSON file | `hermes-fleet-health.py` 1.7.0 writes it every run (daily, 06:00); never fresher than that — see below |
 
 **The plan was wrong about the backlog source and the code follows the store, not the plan.** S21b
 said to read the scout's tasks with "the same `GET /tasks` shape `hermes-self-repair-status.py`
@@ -261,6 +262,15 @@ candidate-benchmark run's own outperformance findings
 sentence that tells the reader to re-verify against that doc and the live role before acting —
 this fleet's role assignments are confirmed to drift from their own service descriptions. Update
 the list in the same change that records a new outperformance finding in that doc.
+
+**`/status` reads a file, not a live probe, because this service's sandbox rules that out.** The
+unit is `ProtectSystem=strict` with no subprocess or SSH use anywhere in this file (enforced by
+`check_write_surface`/`check_unit_sandbox`), so it cannot itself reach Sintra's/Amy's/HomeD13's
+compute health. `hermes-fleet-health.py` already assembles exactly that (CPU/memory/GPU/disk per
+identity, plus broker/injection-guard/inter-node-comms) once daily at 06:00 and used to only email
+it; 1.7.0 also persists the same JSON to `FLEET_HEALTH_PATH`, a subpath of the `ReadWritePaths`
+grant this unit already has for `usage.db`'s `-shm` sidecar (§1), so no sandbox change was needed.
+The page states its own snapshot's age and flags it past ~36h since the last run.
 
 **Everything rendered is escaped.** Not decoration: these pages show Hugging Face repo ids and
 advisory text derived from model cards — anyone can publish a repo saying anything — plus
@@ -380,3 +390,4 @@ rather than silent. A restart re-fetches the credentials.
 | 2.12.0 | 2026-10-25 | *(Backfilled into this changelog; the commit itself is `3b1532a`.)* Market Watch S38l: a "Monitored stocks" section on `/market`, a personal watchlist above the daily report, with an "Add" form (ticker existence checked against the real `instruments` table before anything is written). Seeded with HPE. Storage is a new flat file (`~/.hermes/state/monitored-tickers.yaml`), not a new SQLite table, so the "every SQLite access goes through the single `ro_sqlite()` helper" invariant stays untouched. Found live, on the first real deploy attempt: this service's own `ProtectSystem=strict`/`ProtectHome=read-only` sandboxing makes the entire repo unwritable no matter what the code does — `~/.hermes/state` is the one directory the service's own `ReadWritePaths` already grants. The real architecture change: this file now has a **second** write route, `/market/monitor/add` alongside `/backlog/decide`, both inside the one `do_POST` handler — a deliberate, documented relaxation of "serves only `/backlog/decide`" rather than a silent one. |
 | 2.13.0 | 2026-10-26 | *(Backfilled into this changelog; the commit itself is `dd01646`.)* Market Watch S38m: a current share-price column on every ticker-level row — the daily report's own ticker-level sections and the "Monitored stocks" table alike — via the single most recent trading date's `adj_close`, bulk-read once per page render. A sector/tag-trend row never gets this column, since its "group" names a cross-sectional average, not one ticker with one price. Missing price data renders as "—", never a crash or a fabricated 0.00. |
 | 2.14.0 | 2026-10-26 | Direct operator request: the benchmark backlog table now defaults to hiding `rejected` candidates, matching `hermes-model-scout.py`'s own `--backlog` CLI convention ("every non-rejected, non-done entry") that this page's table had never followed. A new state filter — a GET-submitted `<select>`, the same pattern `/recommendations`' own state filter already established — shows them again on request: "(open — excludes rejected)" by default, "(every state, including rejected)", or any one state alone. `read_backlog()` now filters in SQL rather than in Python, for the same reason `read_recommendations()` already does: `rejected` is terminal and only grows, so a flat `ORDER BY updated_at DESC LIMIT 400` with no filter would eventually let old rejections crowd out the open proposed/deferred candidates the page exists to surface. The summary pills show true per-state counts across the whole table, not just the loaded/filtered page, so "how many are rejected" stays visible even while the table itself hides them. 15 new offline checks (353 total). |
+| 2.15.0 | 2026-10-27 | New `/status` page (S45), direct operator request: Sintra/Amy/HomeD13 compute health (CPU, memory, GPU, disk), plus broker, injection-guard, and inter-node-comms status. This service's sandbox rules out reaching that data live — no subprocess or SSH anywhere in this file — so it reads `hermes-fleet-health.py` 1.7.0's new daily JSON snapshot (`FLEET_HEALTH_PATH`, a subpath of the `ReadWritePaths` grant already held for `usage.db`'s sidecar) instead of probing anything itself. Same per-identity/broker/guard/comms data that script's own daily email already carries; the page states its snapshot's own age and flags it once it's more than ~36h stale. No sandbox or unit changes on either service. 16 new offline checks (377 total). |

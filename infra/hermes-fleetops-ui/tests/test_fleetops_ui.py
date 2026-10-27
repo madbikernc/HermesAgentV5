@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 2.14.0
+# Version: 2.15.0
+#
+# 2.15.0 (2026-10-27) — check_system_status(), new for hermes-fleetops-ui.py 2.17.0's S45
+# "System status and health" page: a fixture shaped exactly like hermes-fleet-health.py 1.7.0's
+# JSON snapshot (written to a tmp file, with ui.FLEET_HEALTH_PATH monkeypatched to it, same
+# pattern check_market()/check_benchmark_ranking() already use for their own path constants)
+# covers a reachable identity's status/compute figures, an unreachable identity rendering
+# "UNREACHABLE" with its error instead of crashing, a hostile issue string being escaped, broker/
+# guard/inter-node-comms figures, a stale-timestamp warning, and a missing snapshot file
+# degrading only its own section (via the shared section() catch) rather than the whole page.
 #
 # 2.14.0 (2026-10-27) — check_market() extended for S38o (hermes-fleetops-ui.py's wording-only
 # "S&P 500 + Nasdaq-100" update): a real NULL-sector/industry instrument (exactly the shape
@@ -1640,6 +1649,87 @@ def check_market(ui, tmp):
     check("no OTHER write form sneaks onto this page", page.count('method="post"') == 1)
 
 
+def check_system_status(ui, tmp):
+    print(NL + "[system status: S45's /status reads hermes-fleet-health.py's JSON snapshot]")
+    snapshot = tmp / "fleet-health-last-report.json"
+    healthy_fleet = {
+        "timestamp": "2026-10-27T06:00:03+00:00",
+        "fleet_status": "Degraded",
+        "identities": [
+            {"label": "Sintra", "reachable": True, "error": None, "report": {"summary": {
+                "overall_status": "ok", "checks_ok": 40, "checks_warn": 0, "checks_critical": 0,
+                "checks_unknown": 0, "checks_na": 3, "issues": []},
+                "sections": {"compute": {
+                    "load": {"1m": "0.42", "5m": "0.38", "15m": "0.30", "ncpu": 20},
+                    "memory": {"total": 1000, "used": 400, "pct": 40},
+                    "gpus": [{"index": 0, "name": "GB10", "util_pct": "12", "temp_c": "48"}],
+                    "disks": [{"path": "/", "total": 1000, "used": 500, "pct": 50}]}}}},
+            {"label": "Amy", "reachable": True, "error": None, "report": {"summary": {
+                "overall_status": "warn", "checks_ok": 35, "checks_warn": 2, "checks_critical": 0,
+                "checks_unknown": 1, "checks_na": 2,
+                "issues": ["Memory: 93% used", "<script>steal()</script>: hostile issue text"]},
+                "sections": {"compute": {}}}},
+            {"label": "HomeD13", "reachable": False, "error": "ssh: connection timed out",
+             "report": None},
+        ],
+        "broker": {"reachable": True, "error": None, "total": 120, "done": 110, "dead": 3,
+                   "dead_recent": 1, "in_flight": 6},
+        "guard": {"block": 2, "flag": 5, "per_node": {
+            "spark": {"reachable": True, "block": 1, "flag": 3, "categories": {"pii": 2}},
+            "spark-2": {"reachable": False, "error": "exit 28"}}},
+        "inter_node_comms": [
+            {"name": "Spark -> HomeD13 SSH", "ok": True, "detail": "ok"},
+            {"name": "Spark's own NAS2 mount", "ok": False, "detail": "not mounted"}],
+    }
+    snapshot.write_text(json.dumps(healthy_fleet))
+    orig_path = ui.FLEET_HEALTH_PATH
+    ui.FLEET_HEALTH_PATH = str(snapshot)
+    try:
+        html = ui.render_system_status()
+        check("the fleet-wide status appears", "Degraded" in html, html[:400])
+        check("every identity label appears", all(
+            label in html for label in ("Sintra", "Amy", "HomeD13")), html)
+        check("an unreachable identity renders UNREACHABLE with its error, not a crash",
+              "UNREACHABLE" in html and "connection timed out" in html, html)
+        check("a reachable identity's overall_status appears", "warn" in html, html)
+        check("compute figures from section_compute()'s shape are surfaced",
+              "GPU0" in html and "mem 40%" in html, html)
+        check("a hostile issue string is escaped, not rendered as markup",
+              "<script>steal()</script>" not in html and "&lt;script&gt;" in html, html)
+        check("broker figures appear", "120" in html and "6" in html, html)
+        check("per-node guard figures and an unavailable node both appear",
+              "pii=2" in html and "unavailable" in html, html)
+        check("inter-node comms render OK/FAIL", "FAIL" in html and "not mounted" in html, html)
+
+        print(NL + "[the assembled page carries the section, and the route is registered]")
+        page = ui.page_system_status({}).decode()
+        check("the page renders under its own heading", "System status and health" in page)
+        check("the route is wired up", ui.ROUTES.get("/status") is ui.page_system_status)
+        check("the nav links to it", 'href="/status"' in ui.shell("x", "").decode())
+
+        print(NL + "[a stale snapshot says so]")
+        stale_fleet = dict(healthy_fleet, timestamp="2026-01-01T00:00:00+00:00")
+        snapshot.write_text(json.dumps(stale_fleet))
+        stale_html = ui.render_system_status()
+        check("an old snapshot is flagged stale rather than presented as current",
+              "stale" in stale_html, stale_html[:600])
+    finally:
+        ui.FLEET_HEALTH_PATH = orig_path
+
+    print(NL + "[a missing snapshot degrades its own section, not the whole page]")
+    ui.FLEET_HEALTH_PATH = str(tmp / "no-such-fleet-health-report.json")
+    try:
+        page = ui.page_system_status({}).decode()
+        check("a missing snapshot file does not crash the page",
+              "This section is unavailable" in page, page[:600])
+        check("the nav still works on a degraded page", 'href="/market"' in page)
+    except Exception as exc:
+        check("a missing snapshot file does not crash the page", False,
+              f"{type(exc).__name__}: {exc}")
+    finally:
+        ui.FLEET_HEALTH_PATH = orig_path
+
+
 def check_decide_unavailable(ui):
     print(NL + "[a page must not offer an action it knows it cannot perform]")
     # 2026-10-16: the service came up during post-reboot vault contention, its wrapper fetches
@@ -1755,6 +1845,7 @@ def main():
         check_recommendations(ui, tmp)
         check_egress_blocks(ui, tmp)
         check_market(ui, tmp)
+        check_system_status(ui, tmp)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:
