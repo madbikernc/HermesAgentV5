@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-# Version: 2.18.0
+# Version: 2.19.0
+#
+# 2.19.0 (2026-10-27) - IMPLEMENTATION_PLAN.md S44: `coder2` re-registered on both branches as the
+# replacement model decision 2.18.0's own retirement comment said was pending -- GLM-4.7-Flash-
+# Q4_K_M (stock), not Muse-Glimmer-30B, on the same port 8099/spark-2 shape. S39's dedicated
+# `fleet_dualcoder_precision` suite (built after 2.18.0 was written) measured it 1.000 (6/6) against
+# the retired incumbent's 0.000 (0/4, 2 timeouts) -- a direct, task-specific result superseding the
+# 2026-09-05 BFCL proxy that originally justified Muse-Glimmer. `hermes-dualcoder.py`'s
+# security_review()/meta_review() calls still hard-code the role name "coder2" and need no change --
+# this re-registration is exactly what unblocks them. Also updates `omni`'s and `muse`'s metadata
+# labels for their own S44 model swaps (gemma-4-26B-A4B-it -> Nemotron-3.5-Bolt-74B-A9B;
+# Qwen3.6-35B-A3B-abliterated -> Nemotron-3-Nano-Omni-30B-A3B-Reasoning) -- per this file's own
+# "update this dict when a checkpoint changes" policy. Flagging plainly, not silently: the new
+# `muse` checkpoint is NVIDIA stock, not one of this fleet's `Huihui-*-abliterated` forks -- the
+# `abliterated` field changes True->False to match reality. S39's `fleet_muse_contract` suite
+# measured it beating the abliterated incumbent decisively on override-resistance (8/9 vs 3/9)
+# regardless, but this is the one S44 swap with a live downstream consumer (Minecraft bot
+# in-character chat) outside the benchmark suite itself -- watch for new refusal patterns there.
 #
 # 2.18.0 (2026-10-20) - `coder2` retired from ROLES on both branches, direct operator request
 # (IMPLEMENTATION_PLAN.md S31's coder2 follow-up): real usage measured at ~1 wake/week over 30
@@ -341,29 +358,31 @@ if NODE == "spark":
         # coder moved to spark-2 2026-10-07 (fleet-health investigation: spark was chronically
         # at ~97% memory / swapping; coder was its single largest avoidable resident consumer).
         "coder": (f"http://{SPARK2_IP}:8094", True, "Qwen3.8-27B-abliterated", True),
-        "muse": (f"http://{SPARK2_IP}:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
-        "omni": (f"http://{SPARK2_IP}:8091", False, "gemma-4-26B-A4B-it (Google, stock)", False),
+        "muse": (f"http://{SPARK2_IP}:8090", False, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
+        "omni": (f"http://{SPARK2_IP}:8091", False, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
         # Port 8097, not the target's proposed 8088 -- that was nano's port and moving dispatch onto
         # it now that nano is retired (S13) would mean touching start-dispatch.sh, this unit, ufw,
         # and S12's DISPATCH_CHAT_URL standby override in the same pass for a cosmetic port-number
         # match with no functional benefit. Deferred, not forgotten -- see IMPLEMENTATION_PLAN.md S13.
         "dispatch": ("http://127.0.0.1:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
-        # "coder2" retired 2026-10-20 -- see this file's own 2.18.0 changelog entry below and
-        # IMPLEMENTATION_PLAN.md S31's coder2 follow-up. Muse-Glimmer-30B unloaded/unregistered,
-        # weights kept on disk. hermes-dualcoder.py's security_review()/meta_review() calls hard-code
-        # the role name "coder2" and will now get a routing error if that path is ever actually
-        # exercised -- a known, accepted consequence pending a replacement model decision, not
-        # silently patched around here.
+        # S44 (2026-10-27): re-registered -- see this file's own 2.19.0 changelog entry above.
+        "coder2": (f"http://{SPARK2_IP}:8099", True, "GLM-4.7-Flash-Q4_K_M (stock)", False),
+        # S44 (2026-10-27): new role, split off `super`'s own log-analyst duty -- see
+        # hermes-logs.py's own changelog. On-demand like `super`, same node (spark), new port 8098.
+        "log-analyst": ("http://127.0.0.1:8098", True, "NousResearch Hermes-4.3-36B-Q4_K_M (stock)", False),
     }
 else:
     ROLES = {
         "super": (f"http://{SPARK_IP}:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
         # coder moved here from spark 2026-10-07 -- see spark branch's own comment above.
         "coder": ("http://127.0.0.1:8094", True, "Qwen3.8-27B-abliterated", True),
-        "muse": ("http://127.0.0.1:8090", False, "Qwen3.6-35B-A3B-abliterated (huihui-ai)", True),
-        "omni": ("http://127.0.0.1:8091", False, "gemma-4-26B-A4B-it (Google, stock)", False),
+        "muse": ("http://127.0.0.1:8090", False, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
+        "omni": ("http://127.0.0.1:8091", False, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
         "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
-        # "coder2" retired 2026-10-20 -- see spark branch's own comment above.
+        # S44 (2026-10-27): re-registered -- see spark branch's own comment above.
+        "coder2": ("http://127.0.0.1:8099", True, "GLM-4.7-Flash-Q4_K_M (stock)", False),
+        # S44 (2026-10-27): see spark branch's own comment above -- log-analyst lives on spark.
+        "log-analyst": (f"http://{SPARK_IP}:8098", True, "NousResearch Hermes-4.3-36B-Q4_K_M (stock)", False),
     }
 
 ON_DEMAND_ROLES = {role for role, (_, on_demand, _, _) in ROLES.items() if on_demand}

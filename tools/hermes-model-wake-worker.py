@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-10-27) — IMPLEMENTATION_PLAN.md S44: `coder2` re-added to spark-2's WAKE_TARGETS
+# (GLM-4.7-Flash-Q4_K_M now, not Muse-Glimmer-30B -- see hermes-router.py 2.19.0's changelog), and
+# a new `log-analyst` entry added to spark's WAKE_TARGETS (Hermes-4.3-36B-Q4_K_M, port 8098,
+# `llama-log-analyst` unit) -- spark's first-ever on-demand role alongside the de-facto-resident
+# `super`.
 #
 # 1.5.0 (2026-10-20) — `coder2` removed from spark-2's WAKE_TARGETS, direct operator request
 # (IMPLEMENTATION_PLAN.md S31's coder2 follow-up). See the removed entry's own replacement
@@ -115,14 +121,14 @@ if NODE == "spark":
         "super": ("http://127.0.0.1:8095/health", "llama-super", 25),
         # coder moved to spark-2 2026-10-07 (spark was chronically at ~97% memory) -- see its
         # entry on the spark-2 branch below.
+        # S44 (2026-10-27): new on-demand role, split off `super`'s own log-analyst duty -- see
+        # hermes-logs.py's own changelog and hermes-router.py 2.19.0's. Hermes-4.3-36B-Q4_K_M,
+        # byte-verified 21,762,146,144 bytes (20.27GiB). 29 = 20.27GiB * the same ~1.45 margin
+        # ratio super's own 17.2GB->25GiB figure used.
+        "log-analyst": ("http://127.0.0.1:8098/health", "llama-log-analyst", 29),
     }
 else:
     WAKE_TARGETS = {
-        # "coder2" retired 2026-10-20, direct operator request (IMPLEMENTATION_PLAN.md S31's
-        # coder2 follow-up) -- real usage measured at ~1 wake/week over 30 days, and its own
-        # reasoning-token-bloat/timeout problems (hermes-dualcoder.py's own comments) matched what
-        # an unrelated S31 bake-off just found. Unloaded (llama-coder2.service stopped) and
-        # unregistered here plus in hermes-router.py 2.18.0's ROLES -- weights kept on disk.
         # coder = Huihui-Qwen3.8-27B-abliterated, byte-verified 16,810,714,400 bytes (15.65GiB).
         # Moved here from spark 2026-10-07 (fleet-health investigation: spark was chronically at
         # ~97% memory/swapping; coder was its single largest avoidable resident consumer) -- was
@@ -132,6 +138,12 @@ else:
         # tasks tolerate the wake latency. 23 = 15.65GiB real size * the same ~1.45 margin ratio
         # super's own 17.2GB->25GiB figure used.
         "coder": ("http://127.0.0.1:8094/health", "llama-coder", 23),
+        # S44 (2026-10-27): "coder2" re-added -- GLM-4.7-Flash-Q4_K_M now, not Muse-Glimmer-30B
+        # (see hermes-router.py 2.19.0's changelog), the replacement model decision 1.5.0's own
+        # removal comment said was pending. Byte-verified 18,474,983,296 bytes (17.2GiB) -- the
+        # same file size as `super`'s own 17.2GB->25GiB figure, so reusing 25 directly rather than
+        # re-deriving it.
+        "coder2": ("http://127.0.0.1:8099/health", "llama-coder2", 25),
     }
 
 
