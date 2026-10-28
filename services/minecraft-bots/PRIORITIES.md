@@ -50,7 +50,7 @@ identical for every bot regardless of role — it governs *urgency*, not *role p
 | GOAL_STEP | 0 | `goalTick`'s own physical-action span | — |
 | HUNGER_CRITICAL | 5 | Near-starving eat/fish | Outranks goals and chores, never a player command |
 | DIRECT_COMMAND | 10 | A live player named this bot directly | "A live player command always wins immediately" |
-| RECOVERY | 15 | Post-death gear retrieval | — |
+| RECOVERY | 15 | Unused in production since 2026-10-28 (item drop on death is off — nothing to retrieve); the tier/owner remain only as a test fixture (unit/live tests' arbiter-preemption checks) | — |
 | SQUAD_RESPONSE | 20 | Responding to a teammate's threat alert | — |
 | SELF_DEFENSE | 30 | `checkSelfDefense()` / post-wake threat response | Fight-or-flee decision lives here (§3) |
 | DROWNING | 40 | Oxygen-critical emergency surface | Outranks health-critical: real seconds of margin before drowning *damage* starts, vs. health-critical meaning a near-fatal hit already landed |

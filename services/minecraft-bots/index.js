@@ -1,4 +1,18 @@
-// Version: 2.123.0
+// Version: 2.124.0
+//
+// 2.124.0 (2026-10-28) -- direct request: item drop on death is now off (keepInventory), so the
+// old post-death "walk back to where she died" march has nothing left to recover and is removed.
+// Deleted deathPosition/recovering/recoveryAttempts/lastDeathAt/MAX_RECOVERY_ATTEMPTS/
+// RAPID_DEATH_WINDOW_MS and the bot.on("spawn") recovery block that re-requested RECOVERY-tier
+// arbiter control and called actions.js's "recover" action (retrying up to MAX_RECOVERY_RETRIES
+// times) to path back to the death spot before vanilla's 5-minute despawn timer -- none of that
+// applies anymore since nothing despawns. bot.on("death") still broadcasts a death alert (squad
+// awareness/response is unrelated to item recovery) and bot.on("spawn") still abandons her
+// standing goal on respawn (her position reset to spawn/bed makes it stale regardless of gear).
+// actions.js's "recover" action and arbiter.js's OWNERS.RECOVERY are left in place -- they were
+// never a player-facing ACTION verb, only this now-deleted call site used them for the real fleet,
+// and the test suites (unit.test.mjs MB-04, live.test.mjs MB-02/04) still reuse "recover" as a
+// convenient plain goto for exercising arbiter preemption, unrelated to death handling.
 //
 // 2.122.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
 // furnaces/chests/shelter get built"): four changes.
@@ -7544,26 +7558,7 @@ bot.once("spawn", () => {
 // persistent bot.on("spawn", ...) listener is needed here rather than reusing that one (a
 // `.once` listener never fires again). hasSpawnedOnce distinguishes "the initial connection" (do
 // nothing extra) from "a real respawn after dying" (the only time this block should act).
-let deathPosition = null;
 let hasSpawnedOnce = false;
-let recovering = false;
-
-// Direct request, 2026-09-07 ("set a limit on the number of times a bot will try to recover its
-// gear from dying"): the `recovering` guard above only stops chasing the SAME lethal spot twice
-// in a row -- it does nothing for a run of deaths in quick succession at nearby spots. Real gap
-// found within minutes of shipping the first version of this cap (which reset on any recover()
-// call reporting ok=true): a hostile mob camping the base kept killing both bots again seconds
-// after each recovery, and recover() genuinely DID succeed every time -- she made it back and
-// picked items up, she just didn't survive standing there afterward. A cap keyed to the recover
-// action's own success never engaged at all. Counting real deaths by how close together they
-// land in time, instead, catches this: any death within RAPID_DEATH_WINDOW_MS of the last one
-// extends the same incident; a longer gap starts a fresh count. MAX_RECOVERY_ATTEMPTS is how
-// many deaths in one such incident she'll still try to recover from before just accepting the
-// loss and moving on -- which also means no longer walking back into whatever keeps killing her.
-let recoveryAttempts = 0;
-let lastDeathAt = 0;
-const MAX_RECOVERY_ATTEMPTS = parseInt(process.env.MC_MAX_RECOVERY_ATTEMPTS || "3", 10);
-const RAPID_DEATH_WINDOW_MS = 60_000;
 
 // A sighting older than this is too stale to blame for THIS death -- e.g. a zombie noticed a
 // minute ago that wandered off before something else (fall, drowning, a different mob she never
@@ -7572,28 +7567,11 @@ const DEATH_THREAT_ATTRIBUTION_MS = 10_000;
 
 bot.on("death", () => {
   const now = Date.now();
-  // bot.entity.position is still the death location at this point, before respawn repositions
-  // her -- same assumption deathPosition's own capture just below already relies on.
+  // bot.entity.position is still the death location at this point, before respawn repositions her.
   const killerGuess = (lastKnownThreat && now - lastKnownThreat.at <= DEATH_THREAT_ATTRIBUTION_MS)
     ? lastKnownThreat.name : "unknown";
   broadcastDeathAlert(bot.entity.position, killerGuess);
-
-  recoveryAttempts = (now - lastDeathAt <= RAPID_DEATH_WINDOW_MS) ? recoveryAttempts + 1 : 1;
-  lastDeathAt = now;
-
-  if (recovering) {
-    // Died again on the way to a previous death spot -- observed live tonight as an infinite
-    // drowning loop (the spot itself was underwater, so every recovery attempt was itself fatal,
-    // creating a fresh deathPosition each time and repeating every ~40-80s). recover()'s GoalNear
-    // has no hazard-awareness; the cheap, safe fix is not to chase the same lethal spot twice.
-    deathPosition = null;
-    console.log(`[${USERNAME}] died again heading back for her gear (${recoveryAttempts} deaths ` +
-      `in quick succession) -- giving up on that spot.`);
-    return;
-  }
-  deathPosition = bot.entity.position.clone();
-  console.log(`[${USERNAME}] died at ${deathPosition} -- likely killed by ${killerGuess} ` +
-    `(${recoveryAttempts} deaths in quick succession)`);
+  console.log(`[${USERNAME}] died -- likely killed by ${killerGuess}`);
 });
 
 bot.on("spawn", () => {
@@ -7606,81 +7584,18 @@ bot.on("spawn", () => {
     try {
       bot.chat(await narrateAction("ouch, I died! let me get myself back together."));
     } catch (err) {
-      // Caught live tonight: narrateAction's "muse" call returned 503 "Loading model" right after
-      // a respawn, and since this line was awaited before the goal-abandon/recover logic below,
-      // the outer .catch() swallowed the whole function -- a transient chat-flavor-text failure
-      // was silently skipping the actual gear recovery. Isolated so it can't do that again.
       console.error(`[${USERNAME}] death narration failed:`, err.message);
     }
-    // Vanilla drops everything at the death location and she respawns empty-handed -- whatever
-    // her standing goal assumed about her gear/inventory is now stale, so it doesn't make sense
-    // to just keep going as if nothing happened.
+    // Her standing goal's assumptions about where she is are now stale (death resets her position
+    // to spawn/bed) -- doesn't make sense to just keep going as if nothing happened. Direct
+    // request, 2026-10-28: with item drop on death turned off (keepInventory), gear is no longer
+    // lost on death, so there's nothing left to walk back for -- the old post-death "recover"
+    // march to the death position (and its rapid-death-streak cap) is gone.
     if (currentGoal) {
       await broadcastGoalState("abandoned", currentGoal.description);
       recordGoalOutcome(currentGoal.description, "gave up", "died");
       currentGoal = null;
       await clearGoal(PERSONA_NAME);
-    }
-    const recoverAt = deathPosition;
-    deathPosition = null;
-    if (recoverAt && AUTONOMY_ENABLED && recoveryAttempts > MAX_RECOVERY_ATTEMPTS) {
-      // Whatever's out there is still there -- recover() has no combat awareness of its own, so
-      // walking back for gear right now would almost certainly just be death #(recoveryAttempts+1)
-      // in the same streak. Skipping means she stops walking back into it; self-defense and the
-      // rest of the idle-tick checks (which recover() itself was blocking via busy/acting for its
-      // whole duration) get a real chance to run again on her next tick instead.
-      console.log(`[${USERNAME}] skipping gear recovery -- ${recoveryAttempts} deaths in quick ` +
-        `succession, accepting the loss for now.`);
-    } else if (recoverAt && AUTONOMY_ENABLED) {
-      // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
-      recovering = true;
-      try {
-        // Direct request, 2026-09-08 ("watch their behavior... look for misbehaviors"): a live
-        // 25-minute capture caught BOTH real deaths in the window (Mark, Luke -- each a
-        // creeper-plus-drowning combo) losing gear recovery outright, both to the exact same
-        // failure: "recovery: couldn't get back to where I died: The goal was changed before it
-        // could be completed!" Root cause (original diagnosis, pre-arbiter): checkSelfDefense/
-        // the oxygen- and health-emergency handlers called bot.pathfinder.setGoal(null) DIRECTLY
-        // the instant a new threat appeared, ahead of their own later performAction() call (the
-        // one that actually rotated the cancel token) -- recover()'s in-flight goto could reject
-        // from that direct setGoal(null) BEFORE the token caught up, so it couldn't tell "was
-        // legitimately interrupted" from "genuinely failed" and reported a real failure instead
-        // of a graceful cancellation. recover() was also a strict single shot with no retry --
-        // exactly the wrong combination for a death that happens amid an active emergency, which
-        // is precisely when recovery matters most and a fresh threat is most likely to still be
-        // around a few seconds later.
-        //
-        // Direct request, 2026-09-10 ("write up a plan for that single arbiter..." -> the
-        // approved coherence arbiter plan, Phase 3): the text-matching heuristic this comment
-        // used to describe (`result.text.includes("The goal was changed")`) is gone -- the
-        // arbiter's own token now carries a real `preempted` flag, set directly by whichever
-        // higher-priority requestControl() call actually interrupted this attempt, so there's no
-        // more guessing from English error text. Re-requests RECOVERY-tier control fresh on each
-        // retry (rather than once outside the loop) so a retry that follows a genuine preemption
-        // correctly re-establishes its own priority instead of running "loose."
-        const MAX_RECOVERY_RETRIES = 2;
-        let result;
-        for (let attempt = 0; attempt <= MAX_RECOVERY_RETRIES; attempt++) {
-          const handle = await arbiter.requestControl(bot, arbiter.OWNERS.RECOVERY);
-          if (!handle) {
-            console.log(`[${USERNAME}] recovery: yielded to something more urgent ` +
-                        `(${arbiter.currentOwner()})`);
-            break;
-          }
-          try {
-            result = await performAction(bot, { type: "recover", position: recoverAt }, USERNAME, handle);
-            console.log(`[${USERNAME}] recovery: ${result.text} (ok=${result.ok})`);
-            if (result.ok || !handle.token.preempted) break;
-          } finally {
-            handle.release();
-          }
-          await new Promise((resolve) => setTimeout(resolve, 3000));
-        }
-      } catch (err) {
-        console.error(`[${USERNAME}] recovery failed:`, err.message);
-      } finally {
-        recovering = false;
-      }
     }
   })().catch((err) => console.error(`[${USERNAME}] post-respawn handling failed:`, err.message));
 });
