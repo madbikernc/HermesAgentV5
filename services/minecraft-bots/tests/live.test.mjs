@@ -1,4 +1,50 @@
-// Version: 1.21.0
+// Version: 1.23.0
+//
+// 1.23.0 (2026-10-27, first real runs of 1.22.0's new scenarios, against the real server): three
+// real gaps found and fixed, all in the scenarios themselves, not the fix they test -- each only
+// surfaced by actually running against the real server, not by reading the code. The chest
+// scenario (also 1.22.0) needed no fix: chestObstructed()'s "lid" rule is a direct block-above
+// check, not a reachability simulation, so it worked first try, every time.
+//
+// Shelter: the new crowded-core scenario didn't fit the ~20x20 test arena -- a symmetric block
+// cube around an arena-centred home leaves no room for a wider site before hitting the glass
+// walls in every direction. Fixed by putting home off-centre so there's real open room on one
+// side (see the scenario's own comment for the exact geometry).
+//
+// Furnace, three attempts: (1) a single bedrock layer immediately around the furnace does not
+// block mineflayer's reach at all -- reach is straight-line, not path-following, and the bot
+// stood on the one-block cap and opened it fine three times. (2) Buried it deep instead (large
+// margin on every side), which created a WORSE bug: resetTester() spawns the tester at the
+// arena's own centre, which that large box also happened to enclose -- RCON's fill doesn't push
+// a standing player out of newly-solid blocks, so the bot ended up glitched, overlapping bedrock,
+// and "reach" from inside a glitched state proved nothing. Fixed the entombment (explicit
+// separation, tester teleported well clear first) -- but then, running as part of the full suite
+// rather than isolated, it STILL got through on attempts 2-3 after a real attempt-1 failure
+// ("Took too long to decide path to goal!"). Checked mineflayer-pathfinder's own source directly
+// rather than guess why: bedrock IS correctly excluded from digging (blocksCantBreak is built
+// from minecraft-data's diggable flag, which is false for bedrock, regardless of this fleet's
+// own additional hardness-based exclusions) -- so a dig-through-bedrock miscalculation is ruled
+// out, not just unconfirmed. The real cause is still unknown (plausibly some earlier scenario's
+// leftover structure -- resetTester()'s own clear only covers y+1..y+4, not every height a big
+// communal-shelter scenario might reach -- giving a real, undug walkable route near the burial
+// that isolation alone doesn't hit); not worth chasing further given (3) below sidesteps the
+// question entirely. (3) Lava instead, which this fleet's own movement code already treats as
+// unsafe/unwalkable terrain outright (see the `b.name !== "lava"` checks already elsewhere in
+// this file's own source), not a cost to weigh -- genuinely no path to find, fast and every time,
+// isolated or full-suite. Bumped the scenario's own attempt count from 3 to 5 too:
+// noteUtilityOutcome() resets the streak on any single success, so one flake anywhere in the run
+// would have silently passed before.
+//
+// Full suite, confirmed clean on a dedicated run after all three fixes: 34/34 scenarios passed
+// on dgx-spark against the live bot-sandbox server.
+//
+// 1.22.0 (2026-10-27, investigating "why don't furnaces/chests/shelter get built"): new scenarios
+// proving a furnace and a chest sealed/obstructed accumulate real failures until
+// isUtilityUsable() (actions.js 1.94.0) reports them broken -- the signal index.js 2.122.0's
+// countUsableNearHome() now checks instead of bare existence -- and a shelter site search that
+// finds a site farther out once the inner core is crowded. Written but NOT run against the real
+// server this pass (no live access from this environment) -- treat as unverified until a real
+// run confirms it.
 //
 // 1.21.0 (2026-10-22, direct follow-up, generalizing 1.20.0's own scenario): new scenario for
 // the unified detection path real bots now actually take -- shelterRoomsNear()/holesIn()
@@ -99,7 +145,7 @@ const ownMemoryRoot = !process.env.MC_MEMORY_ROOT;
 process.env.MC_MEMORY_ROOT ||= mkdtempSync(path.join(os.tmpdir(), "mbtest-memory-"));
 process.env.MC_RAG_DISABLED = "true";
 const { loadActionPlugins, performAction, loadPenLocation, countInPen, findBedSites, shelterPositions,
-  communalShelterPositions, communalDoorwayPosition } = await import("../actions.js");
+  communalShelterPositions, communalDoorwayPosition, isUtilityUsable, findShelterSite } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor, installEnchantsFix } = await import("../equipment.js");
 const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
@@ -585,6 +631,41 @@ scenario("Shelters: builds a 4x5 shelter from mixed blocks, seals it with a real
     `the bed landed inside the room, not the door's own row: ${JSON.stringify(local)}`);
 });
 
+scenario("Builder checklist: a crowded core still finds a shelter site farther out", async () => {
+  // 2026-10-27 (direct request, "allow the shelter search radius to go up to 48 blocks"):
+  // findShelterSite() (actions.js 1.94.0) used to search a fixed 4-block radius -- once the
+  // crafting table/furnace/chest/earlier shelters crowd that tight core, site-finding failed
+  // forever, correctly, given the radius it was allowed to search.
+  //
+  // First live run found this scenario's own design didn't fit the arena: the test platform is
+  // only ~20x20 (ARENA.r), too small to block radius-4's ENTIRE reachable footprint with a
+  // symmetric cube around an arena-centered home and still leave room for a wider site inside the
+  // walls (every direction runs into glass at about the same distance the block itself needed).
+  // Fixed by putting home off-centre (5 west of the arena's own centre) instead: the block cube
+  // still fully covers every cell a radius-4 search could reach (x -6..6, and z -6..9 -- the
+  // doorway's own "outside" cell makes the real footprint deeper in +z than -z, see
+  // findShelterSite's own header), but the arena now has far more open room on home's EAST side
+  // (14 blocks to the glass, not 10) than the block needs, same amount of open room as before on
+  // every other side.
+  const home = new Vec3(x - 5, y + 1, z);
+  const CORE_X = 6, CORE_Z_NEG = 6, CORE_Z_POS = 9; // the asymmetric footprint union, +1 margin
+  await rcon(`fill ${home.x - CORE_X} ${y - 1} ${home.z - CORE_Z_NEG} ${home.x + CORE_X} ${y + 6} ${home.z + CORE_Z_POS} minecraft:bedrock`);
+  await waitFor(() => bot.blockAt(home)?.boundingBox === "block", 5000, "the core to fill in");
+  // The fill also replaces the arena's own sea-lantern floor inside the core (y - 1 is below it);
+  // put that back along with the rest of the blocked air column, same pattern restoreFloor() uses.
+  scenarioCleanup.push(() => rcon(
+    `fill ${home.x - CORE_X} ${y - 1} ${home.z - CORE_Z_NEG} ${home.x + CORE_X} ${y + 6} ${home.z + CORE_Z_POS} minecraft:air`,
+    `fill ${x - r + 1} ${y} ${z - r + 1} ${x + r - 1} ${y} ${z + r - 1} minecraft:sea_lantern`,
+  ).catch(() => {}));
+
+  assert.equal(findShelterSite(bot, home, 4), null,
+    "default maxRadius=4 still fails -- same cost/behavior as before this fix");
+  const wider = findShelterSite(bot, home, 48);
+  assert(wider, "a wider search finds a site once allowed past the crowded core");
+  assert(wider.x - home.x > CORE_X,
+    `the found site is actually outside the blocked core, east of it: ${JSON.stringify(wider)}`);
+});
+
 scenario("Shelter integrity: a hole knocked in a built shelter gets repaired on its own", async () => {
   // Direct report, 2026-10-11 ("if a shelter gets damaged..., repairing it becomes a temporary
   // top priority"): nothing before this ever re-checked a shelter after the initial build.
@@ -722,6 +803,72 @@ async function placeChest(dx, dz, items) {
   await rcon(`setblock ${x + dx} ${y + 1} ${z + dz} minecraft:chest{Items:[${nbt}]}`);
   await waitFor(() => bot.blockAt(new Vec3(x + dx, y + 1, z + dz))?.name === "chest", 5000, "chest placed");
 }
+
+scenario("Builder checklist: a furnace sealed in solid blocks is marked unusable after real failures", async () => {
+  // 2026-10-27: the Builder checklist used to count a furnace as "done" forever the moment one
+  // existed near home, by bare existence -- never reachability. This proves the real fix: a
+  // furnace that genuinely can't be reached accumulates real failures until isUtilityUsable()
+  // reports it broken, the signal countUsableNearHome() (index.js) actually checks.
+  //
+  // First live run found a real gap in this scenario itself (not the fix): a single bedrock
+  // layer immediately around the furnace does NOT actually block mineflayer's reach -- the bot
+  // stood on top of the one-block cap and opened it fine three times (OUTCOME ok:true). Second
+  // run, with a large burial box instead, found a WORSE gap: resetTester() spawns the tester at
+  // the arena's own centre, which that box also happened to enclose -- RCON's fill doesn't push
+  // a standing player out of newly-solid blocks the way real block placement would, so the bot
+  // ended up glitched, overlapping bedrock. Fixed the entombment with real, deliberate separation
+  // (the burial sits entirely on one side of the arena; the tester is explicitly teleported well
+  // clear of it first) -- but a THIRD run, as part of the full suite rather than isolated, still
+  // got through: attempt 1 genuinely failed ("Took too long to decide path to goal!", a real
+  // noteUtilityOutcome(false)), but attempts 2 and 3 both succeeded, resetting the streak back to
+  // 0 each time. Bedrock is unbreakable, but nothing here confirms this fleet's own digCost
+  // model actually special-cases that (hardness -1) rather than scoring it as merely expensive --
+  // a slow dig-based "solution" the pathfinder sometimes finds given enough search time would
+  // explain exactly this: an occasional timeout, and otherwise eventual "success." Bedrock
+  // doesn't settle the question either way without digging into that cost model, which is out of
+  // scope here -- lava does, unambiguously: this fleet's own movement code already treats it as
+  // unsafe/unwalkable terrain (not a cost to weigh, see the `b.name !== "lava"` checks this
+  // codebase already has in multiple places), so there is no plausible path through it to find,
+  // slow or fast. The furnace now sits in a 1-block air pocket with lava filling every cell
+  // immediately around it, itself contained by an outer bedrock shell (stopping the lava from
+  // flowing anywhere a bot could approach from).
+  const pos = new Vec3(x + 5, y, z);
+  const testerSpot = new Vec3(x - 6, y + 1, z);
+  await rcon(`fill ${pos.x - 4} ${pos.y - 4} ${pos.z - 4} ${pos.x + 4} ${pos.y + 4} ${pos.z + 4} minecraft:bedrock`,
+    `fill ${pos.x - 3} ${pos.y - 3} ${pos.z - 3} ${pos.x + 3} ${pos.y + 3} ${pos.z + 3} minecraft:lava`,
+    `setblock ${pos.x} ${pos.y} ${pos.z} minecraft:furnace`,
+    `tp ${TESTER} ${testerSpot.x} ${testerSpot.y} ${testerSpot.z}`);
+  await waitFor(() => bot.blockAt(pos)?.name === "furnace" && bot.blockAt(pos.offset(1, 0, 0))?.name === "lava",
+    5000, "the furnace and its lava moat both registered");
+  await waitFor(() => bot.entity.position.distanceTo(testerSpot) < 2, 5000, "the tester clear of the burial, on the arena's other side");
+  scenarioCleanup.push(() => rcon(
+    `fill ${pos.x - 4} ${pos.y - 4} ${pos.z - 4} ${pos.x + 4} ${pos.y + 4} ${pos.z + 4} minecraft:air`,
+    `fill ${x - r + 1} ${y} ${z - r + 1} ${x + r - 1} ${y} ${z + r - 1} minecraft:sea_lantern`).catch(() => {}));
+  // 5 attempts, not 3 -- noteUtilityOutcome() resets the streak on any single success
+  // (correctly: a chest/furnace that works even once is not "broken"), so this scenario's own
+  // proof needs every attempt to fail, not just most of them. The margin over
+  // UTILITY_UNUSABLE_AFTER_FAILURES (3) is defense in depth against exactly the kind of one-off
+  // flake the bedrock version of this scenario turned out to have.
+  await rcon(`give ${TESTER} minecraft:raw_iron 5`, `give ${TESTER} minecraft:coal 5`);
+  await waitFor(() => held("raw_iron") >= 5 && held("coal") >= 5, 5000, "fuel and ore to smelt with");
+  for (let i = 0; i < 5; i++) await performAction(bot, { type: "smelt", item: "iron_ingot", count: 1 }, TESTER);
+  assert.equal(isUtilityUsable("furnace", pos), false, "five real attempts, all genuinely blocked by the lava moat, mark this furnace unusable");
+});
+
+scenario("Builder checklist: a chest sealed in solid blocks is marked unusable after real failures", async () => {
+  // 2026-10-27: same mechanism as the furnace scenario just above, for chests specifically --
+  // tryTakeFromThisChest()'s reach/open catch sites (actions.js 1.94.0), exercised here via
+  // "loot"'s targeted-withdrawal path (searchChestsFor -> tryTakeFromThisChest), now call
+  // noteUtilityOutcome() too.
+  await rcon(`setblock ${x + 3} ${y} ${z} minecraft:chest`,
+    `setblock ${x + 2} ${y} ${z} minecraft:bedrock`, `setblock ${x + 4} ${y} ${z} minecraft:bedrock`,
+    `setblock ${x + 3} ${y} ${z - 1} minecraft:bedrock`, `setblock ${x + 3} ${y} ${z + 1} minecraft:bedrock`,
+    `setblock ${x + 3} ${y + 1} ${z} minecraft:bedrock`);
+  await waitFor(() => bot.blockAt(new Vec3(x + 3, y, z))?.name === "chest", 5000, "the sealed chest");
+  const pos = new Vec3(x + 3, y, z);
+  for (let i = 0; i < 3; i++) await performAction(bot, { type: "loot", item: "cobblestone", count: 1 }, TESTER);
+  assert.equal(isUtilityUsable("chest", pos), false, "three real failures mark this exact chest unusable");
+});
 
 scenario("MB-17 chest: a mixed-species stack is withdrawn across types", async () => {
   await placeChest(3, 0, [["oak_log", 2], ["birch_log", 2]]);

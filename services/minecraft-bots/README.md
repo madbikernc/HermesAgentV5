@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 4.2.0
+**Version:** 4.3.0
 
 Mineflayer bot runtime for the Firmament's nine Minecraft bots. **What the bots do and why lives
 in `../../MINECRAFT_BOTS_DESIGN.md`** — this file covers only how to run and configure the
@@ -100,3 +100,8 @@ Everything has a working default; a unit file only sets what it overrides.
   `minecraft-common.md` affects self-proposal and directive generation too.
 - **A bot is just another player to mineflayer.** Bot identities are filtered out of the
   human-reply path; Mayor's directives are the one deliberate exception.
+- **`isUtilityUsable`'s failure-streak cache is in-memory only, per process.** A restarted bot
+  forgets every chest/furnace/table it had already proven broken and has to re-discover
+  unusability through a few more real attempts before `countUsableNearHome` excludes it again —
+  bounded by `UTILITY_UNUSABLE_AFTER_FAILURES`, same tradeoff `builderStallItem`/
+  `fleetHasIronTool` already make for comparably short-lived fleet state.

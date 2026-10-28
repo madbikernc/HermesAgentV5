@@ -1,4 +1,48 @@
-// Version: 2.121.0
+// Version: 2.122.0
+//
+// 2.122.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
+// furnaces/chests/shelter get built"): four changes.
+// (1) New countUsableNearHome() (wraps countNearHome()'s own previously-unused filterFn with
+// actions.js 1.94.0's new isUtilityUsable()) replaces the bare countNearHome() in
+// builderPriorityCandidates() AND builderPriorityItemSatisfied() for crafting_table/furnace/
+// chest -- BOTH call sites, deliberately kept in lockstep, since fixing only one would let them
+// diverge (the checklist saying "furnace still needed" while the very next tick's completion
+// check says "yes, done"). Root cause: bare block existence near home was treated as permanently
+// "done," even once real interaction proved a specific chest/furnace unreachable or unusable --
+// confirmed live, two real chests sitting there failing "No path to the goal!"/windowOpen
+// timeouts for a full day while the checklist considered chest storage finished. beehive is left
+// on the old countNearHome() check -- same underlying pattern, but not reported, not touched.
+// (2) findShelterNearHome() (backs hasShelterNearHome()/hasOwnShelterWithBed(), checked from
+// nextSurvivalPriority() on the hot fleet-wide tick path) now rings outward
+// (SHELTER_DETECTION_RINGS) up to BUILDER_PRIORITY_RADIUS, matching actions.js 1.94.0's
+// findShelterSite() widening (itself capped higher, at 48, per direct request) -- this is the
+// regression that widening ONLY the site-finder would have caused: a shelter genuinely built
+// beyond the old fixed 4-block window would have been invisible to this check, so shelterStep()
+// would report its own build ok:true (resetting consecutiveFailures) but done:false forever, a
+// silent infinite loop with no escape -- strictly worse than the bounded give-up/re-propose churn
+// that existed before any of this. shelterStep()'s own error text and findShelterSite() call site
+// updated to the new 48 cap.
+// (3) New RAG registration for buildable resources -- direct request, "all resources, including
+// buildable resources, should be registered to the RAG," the same writeMemoryNote() convention
+// noteNearbyResources() already uses for raw ore veins. runBuilderPlacement() (covers crafting_
+// table/furnace/chest/beehive for free, since all four dispatch through this one function) and
+// runShelterGoal() (genuinely new coverage -- shelter isn't in CRAFTED_OBJECT_NAMES and can't be,
+// it's a multi-block structure) each write a note on a real, freshly-completed placement. The
+// Builder checklist's OWN countUsableNearHome()/countNearHome() existence checks deliberately do
+// NOT consult this note -- bot.spawnPoint is the single world spawn, shared identically and in
+// real time by all 9 bots, so there is no cross-host visibility gap in the checklist's own
+// satisfaction logic to close, and doing so would reintroduce a "satisfied because something
+// exists somewhere on the server" false-done bug, just laundered through RAG instead of bare
+// existence. The note is for OTHER consumers: crafting_table/furnace already feed
+// findRememberedLocation()'s existing away-from-home fallback inside craft(); chest closes the
+// real known_chests.json per-host split (spark/spark2 each kept their own copy, confirmed by
+// diffing both); shelter has no existing reader yet, added anyway per the request.
+// (4) bedStep() -- direct request, "if exploring, and far away from a known bed listed in world
+// resources, they should try to build a new one." place_bed already supported an arbitrary
+// action.near (added for the communal shelter) but individual placement never used it, always
+// defaulting home. Now: if she's farther than BUILDER_PRIORITY_RADIUS from both bot.spawnPoint
+// AND the nearest findRememberedLocation("bed") hit, place_bed's near points at her own current
+// position instead of forcing a long walk home. runBedGoal() also registers the new bed via (3).
 //
 // 2.121.0 (2026-10-22, direct request, generalizing 2.120.0's own fix): checkShelterIntegrity()
 // and checkCommunalShelterIntegrity() merged back into one -- the operator's own next request
@@ -1661,7 +1705,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor, communalShelterPositions, communalDoorwayPosition, findCommunalShelterSite, isCommunalShelterMaterial, communalShelterMaterialCount } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor, communalShelterPositions, communalDoorwayPosition, findCommunalShelterSite, isCommunalShelterMaterial, communalShelterMaterialCount, isUtilityUsable, findRememberedLocation } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -3294,6 +3338,21 @@ function countNearHome(names, filterFn) {
   return positions.filter((pos) => filterFn(bot.blockAt(pos))).length;
 }
 
+// Real bug found live, 2026-10-27: crafting_table/furnace/chest used to count as "done" the
+// moment one existed anywhere near home (countNearHome's own bare existence scan) -- never
+// checked reachability or usability, and nothing ever re-opened the item once satisfied. Two
+// real chests sat failing "No path to the goal!"/windowOpen timeouts for a full day while the
+// checklist called chest storage done. isUtilityUsable() (actions.js) tracks real interaction
+// outcomes from the smelt/craft/loot/store call sites that already exist -- this just plugs that
+// into countNearHome's own existing (previously unused) filterFn parameter, the same way
+// bedsNearHome already uses it. Only ever called with ONE name at a time (crafting_table,
+// furnace, or chest individually) -- unlike countNearHome, which some callers use with a whole
+// family of names (e.g. every *_bed variant) where "usability" of a single type wouldn't mean
+// anything.
+function countUsableNearHome(names) {
+  return countNearHome(names, (block) => isUtilityUsable(names[0], block.position));
+}
+
 // Mirrors (does not import -- a deliberate small duplication of pure position math, not worth a
 // cross-module refactor for one caller) actions.js's own "build" case geometry: a 3x3 footprint,
 // three walls tall, one doorway, a roof, a floor. Anchored at bot.spawnPoint since
@@ -3344,27 +3403,39 @@ function hasHollowInterior(base) {
 // qualifying shelters to progress, and where to site a brand-new one when none exists yet --
 // both need a concrete shape to build towards, which repairing a shelter that already exists,
 // whatever shape it turned out to be, does not.
-function findShelterNearHome() {
-  if (!bot.spawnPoint) return null;
-  const center = bot.spawnPoint.floored();
-  // Horizontal only, not vertical: gohome's GoalNear(..., 3) tolerance is 3D, but Y-slop near a
-  // built-up home is usually just terrain-following, not meaningful horizontal wandering -- kept
-  // to one dimension deliberately, matching this codebase's "bounded, not unbounded" search
-  // philosophy rather than multiplying the already-real cost (81 candidate anchors x 30 blockAt
-  // calls each) by a third axis for a much smaller real-world benefit.
-  const SHELTER_SEARCH_RADIUS = 4; // gohome's own GoalNear(..., 3) tolerance, plus a 1-block margin
-  // 2026-09-26: also 2 blocks above/below spawn height -- a real shelter one step up a slope from
-  // spawn never counted, so the Builder was sent to build it again and again.
-  // hasHollowInterior() alone isn't enough to call something "shelter-shaped": it only checks the
-  // room's own 4 cells, nothing about walls ever having existed, so an ordinary open-air pocket
-  // (plausible near a cleared home site) would match it too. Only worth returning as a repair
-  // target once it's ALSO already mostly a real structure -- at least half its wall/roof/floor
-  // cells genuinely solid -- the same real/coincidental distinction the old 80% tolerance was
-  // trying to draw, just now gating "is this worth repairing" instead of "does this count as done."
-  const DAMAGED_SOLID_FLOOR = 0.5;
+// Horizontal only, not vertical: gohome's GoalNear(..., 3) tolerance is 3D, but Y-slop near a
+// built-up home is usually just terrain-following, not meaningful horizontal wandering -- kept
+// to one dimension deliberately, matching this codebase's "bounded, not unbounded" search
+// philosophy rather than multiplying the already-real cost (81 candidate anchors x 30 blockAt
+// calls each) by a third axis for a much smaller real-world benefit.
+// 2026-10-27: rings outward the same way findShelterSite() (actions.js) now does, capped at
+// BUILDER_PRIORITY_RADIUS rather than findShelterSite's own 48 -- this function backs
+// hasShelterNearHome()/hasOwnShelterWithBed(), called from nextSurvivalPriority() on the hot
+// fleet-wide tick path (not once per goal, cached, the way a site pick is), so it stays
+// consistent with its own Tier-2 sibling countQualifyingSheltersNearHome(), which already scans
+// the full BUILDER_PRIORITY_RADIUS. Real regression this closes: findShelterSite() widening alone
+// would let a shelter get built beyond the old fixed 4-block window while this function stayed
+// blind to it -- shelterStep() would then report the build itself ok:true (resetting
+// consecutiveFailures) but done:false forever, a silent infinite loop with no escape, worse than
+// the bounded give-up/re-propose churn that existed before any of this.
+const SHELTER_DETECTION_RINGS = [4, 8, 16, BUILDER_PRIORITY_RADIUS];
+
+// hasHollowInterior() alone isn't enough to call something "shelter-shaped": it only checks the
+// room's own 4 cells, nothing about walls ever having existed, so an ordinary open-air pocket
+// (plausible near a cleared home site) would match it too. Only worth returning as a repair
+// target once it's ALSO already mostly a real structure -- at least half its wall/roof/floor
+// cells genuinely solid -- the same real/coincidental distinction the old 80% tolerance was
+// trying to draw, just now gating "is this worth repairing" instead of "does this count as done."
+const DAMAGED_SOLID_FLOOR = 0.5;
+
+// trackDamaged is only ever true for the innermost ring: a half-built "repair this" candidate is
+// only meaningful right at home, not something picked up 16-24 blocks out purely because a wider
+// ring happened to scan past it (2026-09-26's own "also 2 blocks above/below spawn height" fix
+// was about terrain-following near home, not about finding distant rubble to repair).
+function scanShelterRing(center, radius, trackDamaged) {
   let damaged = null, damagedSolid = -1;
-  for (let dx = -SHELTER_SEARCH_RADIUS; dx <= SHELTER_SEARCH_RADIUS; dx++) {
-    for (let dz = -SHELTER_SEARCH_RADIUS; dz <= SHELTER_SEARCH_RADIUS; dz++) {
+  for (let dx = -radius; dx <= radius; dx++) {
+    for (let dz = -radius; dz <= radius; dz++) {
       for (let dy = -2; dy <= 2; dy++) {
         const base = center.offset(dx, dy, dz);
         if (!hasHollowInterior(base)) continue; // not shelter-shaped here at all
@@ -3375,7 +3446,7 @@ function findShelterNearHome() {
         // Keep the MOST complete candidate seen, not just the first -- a real damaged shelter
         // should outrank a coincidental half-empty pocket scanned earlier purely by iteration
         // order.
-        if (solid >= positions.length * DAMAGED_SOLID_FLOOR && solid > damagedSolid) {
+        if (trackDamaged && solid >= positions.length * DAMAGED_SOLID_FLOOR && solid > damagedSolid) {
           damaged = base;
           damagedSolid = solid;
         }
@@ -3383,6 +3454,25 @@ function findShelterNearHome() {
     }
   }
   return damaged ? { base: damaged, complete: false } : null;
+}
+
+function findShelterNearHome() {
+  if (!bot.spawnPoint) return null;
+  const center = bot.spawnPoint.floored();
+  // A damaged (incomplete) match from the innermost ring must NOT stop the search -- a real bug
+  // this exact fix would otherwise introduce: a half-built structure sitting right at home would
+  // make this return early as "found, but not complete," so a genuinely complete shelter built
+  // farther out (exactly the crowded-base scenario this widening exists for) would never even be
+  // looked for. Only a complete match short-circuits; a damaged one is remembered as a fallback
+  // and the search keeps widening, since a real shelter somewhere is always worth more than a
+  // repair candidate.
+  let damagedFallback = null;
+  for (const radius of SHELTER_DETECTION_RINGS) {
+    const found = scanShelterRing(center, radius, radius === SHELTER_DETECTION_RINGS[0]);
+    if (found?.complete) return found;
+    damagedFallback ??= found;
+  }
+  return damagedFallback;
 }
 
 function hasShelterNearHome() {
@@ -3638,13 +3728,13 @@ let builderStallCount = 0;
 // pick.
 function builderPriorityCandidates() {
   const candidates = [];
-  if (countNearHome(["crafting_table"]) < 1) {
+  if (countUsableNearHome(["crafting_table"]) < 1) {
     candidates.push({ name: "crafting_table", directive: "go home and place a crafting table there" });
   }
-  if (countNearHome(["furnace"]) < 1) {
+  if (countUsableNearHome(["furnace"]) < 1) {
     candidates.push({ name: "furnace", directive: "go home and place a furnace there" });
   }
-  if (countNearHome(["chest"]) < 1) {
+  if (countUsableNearHome(["chest"]) < 1) {
     candidates.push({ name: "chest", directive: "go home and place a chest there" });
   }
   // 2026-10-11: merged from two independent items ("beds": a bare count; "shelter":
@@ -3715,6 +3805,10 @@ function builderPriorityItemSatisfied(name) {
     case "crafting_table":
     case "furnace":
     case "chest":
+      // Must stay in lockstep with builderPriorityCandidates()'s own check just above, or the
+      // two diverge: a bot could see "furnace still needed" in the checklist while being told
+      // "yes, done" right after placing a 2nd furnace next to a broken 1st one.
+      return countUsableNearHome([name]) >= 1;
     case "beehive":
       return countNearHome([name]) >= 1;
     case "shelter_capacity":
@@ -4066,6 +4160,18 @@ async function runBuilderPlacement(goal, takeControl, getHandle, replaced) {
     bot.chat(await narrateAction(`goal complete: ${goal.description}.`));
     recordGoalOutcome(goal.description, "done", null);
     await broadcastGoalState("done", goal.description, item);
+    // 2026-10-27 (direct request: "all resources, including buildable resources, should be
+    // registered to the RAG"): same fleet-wide convention noteNearbyResources() already uses for
+    // raw ore veins, so crafting_table/furnace/chest/beehive built via the Builder checklist
+    // become discoverable the same way, closing the spark/spark2 split for chest specifically
+    // (known_chests.json is per-host; this note isn't). place_home's own result carries no
+    // position, and this placement is always "at home" anyway, so bot.spawnPoint is the real
+    // position here, not a stand-in.
+    if (bot.spawnPoint) {
+      writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a ${item} near ` +
+        `(${bot.spawnPoint.x}, ${bot.spawnPoint.y}, ${bot.spawnPoint.z}), as of ${new Date().toISOString()}.` })
+        .catch((err) => console.error(`[${USERNAME}] ${item} memory write failed:`, err.message));
+    }
     await retireGoal(goal);
     return;
   }
@@ -4455,7 +4561,21 @@ async function runToolGoal(goal, takeControl, getHandle, replaced) {
 
 async function bedStep(goal, handle) {
   if (bot.inventory.items().some((i) => i.name.endsWith("_bed"))) {
-    const placed = await performAction(bot, { type: "place_bed" }, USERNAME, handle);
+    // 2026-10-27 (direct request: "if exploring, and far away from a known bed listed in world
+    // resources, they should try to build a new one"): place_bed already supports an arbitrary
+    // action.near (added for the communal shelter) -- it was just never pointed anywhere but
+    // home for an individual bed. A bot who wandered far on an explore/gather goal shouldn't have
+    // to walk all the way back home just to place the bed she's already holding; build it where
+    // she is instead, once she's genuinely far from BOTH home and any remembered bed.
+    let near = null;
+    if (bot.spawnPoint && bot.entity.position.distanceTo(bot.spawnPoint) > BUILDER_PRIORITY_RADIUS) {
+      const remembered = await findRememberedLocation("bed").catch(() => null);
+      const rememberedIsFar = !remembered || bot.entity.position.distanceTo(remembered) > BUILDER_PRIORITY_RADIUS;
+      if (rememberedIsFar) near = bot.entity.position;
+    }
+    const placed = await performAction(bot, near
+      ? { type: "place_bed", near: { x: near.x, y: near.y, z: near.z } }
+      : { type: "place_bed" }, USERNAME, handle);
     return { ...placed, done: !!placed.bedAt, action: { type: "place_bed" } };
   }
   if (Math.max(0, ...Object.values(woolCounts(bot))) >= 3) {
@@ -4484,7 +4604,16 @@ async function runBedGoal(goal, takeControl, getHandle, replaced) {
   if (step.cancelled || replaced()) return;
   logStep(goal, `bed: ${step.text}`, step.ok, step.action);
   console.log(`[${USERNAME}] bed goal: ${step.text} (ok=${step.ok})`);
-  if (step.done) return completeGoal(goal, "placed a bed");
+  if (step.done) {
+    // 2026-10-27 (direct request: "all resources, including buildable resources, should be
+    // registered to the RAG"): same convention runBuilderPlacement()/runShelterGoal() now use.
+    if (step.bedAt) {
+      writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a bed near ` +
+        `(${step.bedAt.x}, ${step.bedAt.y}, ${step.bedAt.z}), as of ${new Date().toISOString()}.` })
+        .catch((err) => console.error(`[${USERNAME}] bed memory write failed:`, err.message));
+    }
+    return completeGoal(goal, "placed a bed");
+  }
   if (step.ok) {
     goal.consecutiveFailures = 0;
     await saveGoalIfCurrent(goal);
@@ -4524,8 +4653,8 @@ const SHELTER_WORDS = /\b(build(ing)?|mak(e|ing)|set(ting)? up|put(ting)? up|nee
 async function shelterStep(goal, handle) {
   if (hasShelterNearHome()) return { ok: true, text: "there's a shelter at home.", done: true };
   if (!bot.spawnPoint) return { ok: false, text: "don't know where home is yet." };
-  const site = goal.shelterAt ? new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z) : findShelterSite(bot, bot.spawnPoint);
-  if (!site) return { ok: false, text: "couldn't find a flat, clear 3x3 spot within 4 blocks of home." };
+  const site = goal.shelterAt ? new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z) : findShelterSite(bot, bot.spawnPoint, 48);
+  if (!site) return { ok: false, text: "couldn't find a flat, clear 3x3 spot within 48 blocks of home." };
   goal.shelterAt = { x: site.x, y: site.y, z: site.z };
   const needed = shelterPositions(site).filter((p) => bot.blockAt(p)?.boundingBox !== "block").length;
   const short = needed - shelterMaterialCount(bot);
@@ -4549,7 +4678,22 @@ async function runShelterGoal(goal, takeControl, getHandle, replaced) {
   if (step.cancelled || replaced()) return;
   logStep(goal, `shelter: ${step.text}`, step.ok, step.action);
   console.log(`[${USERNAME}] shelter goal: ${step.text} (ok=${step.ok})`);
-  if (step.done) return completeGoal(goal, "built a shelter at home");
+  if (step.done) {
+    // Only register a note on the tick that actually finished the build (step.built, carried
+    // through from performAction's "build" result) -- the OTHER way step.done gets set true,
+    // line 4566's early "there's a shelter at home" shortcut, can fire before goal.shelterAt was
+    // ever set this session, and isn't a new fact worth telling the rest of the fleet about.
+    // 2026-10-27 (direct request: "all resources, including buildable resources, should be
+    // registered to the RAG"): crafting_table/furnace/chest/beehive already get this via
+    // runBuilderPlacement() -- shelter had no equivalent (it's not in CRAFTED_OBJECT_NAMES, and
+    // can't be: it's a multi-block structure, not a single scannable block type).
+    if (step.built && goal.shelterAt) {
+      writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a shelter near ` +
+        `(${goal.shelterAt.x}, ${goal.shelterAt.y}, ${goal.shelterAt.z}), as of ${new Date().toISOString()}.` })
+        .catch((err) => console.error(`[${USERNAME}] shelter memory write failed:`, err.message));
+    }
+    return completeGoal(goal, "built a shelter at home");
+  }
   if (step.ok) {
     goal.consecutiveFailures = 0;
     await saveGoalIfCurrent(goal);

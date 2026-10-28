@@ -11,6 +11,11 @@ WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
 Environment=MC_BOT_USERNAME=Dale
 # spark2 has no RAG index or embedder: search/notes/skills go to spark's hermes-minecraft-rag (8105)
 Environment=MC_RAG_URL=http://10.129.1.15:8105
+# HOME_LIGHTING_MAINTAINER (index.js) defaults to "this bot's role is Builder" -- spark2 has no
+# Builder-role bot at all (Bob/Dale/Nell/Wade are Farmer/Herder/Artist/Explorer), so without this
+# override checkHomeLighting() never runs on this host (confirmed live: 0 attempts/bot-day).
+# Dale is as reasonable a pick as any of the four -- this isn't a load-bearing choice.
+Environment=MC_HOME_LIGHTING=true
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

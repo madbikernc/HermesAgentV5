@@ -1,4 +1,19 @@
-// Version: 1.34.0
+// Version: 1.35.0
+// 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
+// checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
+// furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
+// stay in lockstep for the same signal. Shelter: findShelterSite() finds a site farther out once
+// the old fixed-radius core is fully blocked, and findShelterNearHome() (the regression this fix
+// had to close in lockstep) now recognizes a shelter built just beyond the old 4-block window --
+// plus a second regression caught in review: ring-expansion must not stop on a merely-damaged
+// match from the innermost ring, or a half-built structure near home would hide a genuinely
+// complete shelter farther out.
+// RAG registration: runBuilderPlacement() and runShelterGoal() each write a note on a real
+// completion (stubbed in every farmGoalSrc()-based context that reaches their success path --
+// bedWorld()'s "sleep" tests needed a findRememberedLocation()/gotoRememberedSpot() stub too, for
+// the same reason). Beds: sleep falls back to a remembered bed when nothing is nearby, and
+// bedStep() builds on the spot instead of trekking home once she's far from both home and any
+// remembered bed.
 // 1.34.0 (2026-10-22): generalizes 1.33.0's checks for shelter.js 1.3.0's shelterRoomsNear()/
 // holesIn() and the unified index.js 2.121.0 checkShelterIntegrity() -- replaces the now-removed
 // checkCommunalShelterIntegrity() test. New coverage: a sealed room has zero holes and a real
@@ -173,7 +188,14 @@ function context(bot, extras = {}) {
     goals: { GoalNear: class {}, GoalFollow: class {} },
     bedHalves: s.bedHalves, chestHalves: s.chestHalves, wouldBlockAccess: s.wouldBlockAccess,
     findAccessObstructions: s.findAccessObstructions, isLivingSpaceWall: s.isLivingSpaceWall,
-    ACCESS_SCAN_RADIUS: shelterConst('ACCESS_SCAN_RADIUS'), ...extras });
+    ACCESS_SCAN_RADIUS: shelterConst('ACCESS_SCAN_RADIUS'),
+    // 2026-10-27: noteUtilityOutcome() (actions.js 1.94.0) is now called from several of the
+    // chest/furnace/crafting_table call sites extracted into a context() slice below -- a
+    // harmless no-op default here, same as equipBestWeapon/refreshGear above, so every existing
+    // test using this shared context keeps working without having to know about it; a test that
+    // actually cares passes its own via `extras`, which overrides this default.
+    noteUtilityOutcome: () => {},
+    ...extras });
 }
 
 // shelter.js / tunneling.js run as source in their own contexts, like every other module here:
@@ -1059,14 +1081,36 @@ await check('Resource-gathering override: TOOL_WORDS never collides with weaponS
 await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims the way the others do', async () => {
   const bedNames = []; let shelterCount = 0; let beehive = 0; let bred = false;
   let ironTools = false; let communalDone = false;
+  const usableUtility = { crafting_table: 1, furnace: 1, chest: 1 };
   const c = vm.createContext({ bot: { registry: { blocksByName: {} } },
     countNearHome: (names) => (names[0] === 'beehive' ? beehive : 0),
+    // 2026-10-27: crafting_table/furnace/chest now go through countUsableNearHome (real
+    // interaction outcomes, isUtilityUsable in actions.js), not bare countNearHome -- this slice
+    // doesn't include that function's own definition, so it's stubbed here same as every other
+    // cross-module function this context already injects.
+    countUsableNearHome: (names) => usableUtility[names[0]],
     countQualifyingSheltersNearHome: () => shelterCount, getAchievements: () => (bred ? ['bred:cow'] : []),
     fleetHasReachedIronTools: () => ironTools, communalShelterSatisfied: () => communalDone,
     communalShelterTargetBeds: () => 4,
     BOT_USERNAMES: new Set(['amy', 'babs', 'mark']) });
   vm.runInContext(between(index, 'function builderPriorityCandidates(', 'function nextBuilderPriority('), c);
   const names = () => c.builderPriorityCandidates().map((x) => x.name);
+  assert(!names().includes('crafting_table') && !names().includes('furnace') && !names().includes('chest'),
+    'all three usable -- none are candidates');
+  // Real bug found live, 2026-10-27: these used to be bare countNearHome() existence checks --
+  // once a block existed anywhere near home it counted as "done" forever, even after it was
+  // proven unreachable/unusable by real interaction failures. Now a demonstrably-broken one
+  // (isUtilityUsable says no) re-opens the item instead of staying silently "satisfied."
+  usableUtility.chest = 0;
+  assert(names().includes('chest'), 're-opens once the only known chest is unusable');
+  usableUtility.chest = 1;
+  assert(!names().includes('chest'), 'closes again once a usable one exists');
+  usableUtility.furnace = 0;
+  assert(names().includes('furnace'), 'same re-opening for furnace');
+  usableUtility.furnace = 1;
+  usableUtility.crafting_table = 0;
+  assert(names().includes('crafting_table'), 'same re-opening for crafting_table');
+  usableUtility.crafting_table = 1;
   assert(names().includes('shelter_capacity'), 'merged item present when short');
   assert(!names().includes('beds') && !names().includes('shelter'), 'the old separate items are gone');
   const capacityItem = c.builderPriorityCandidates().find((x) => x.name === 'shelter_capacity');
@@ -1082,6 +1126,26 @@ await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims t
   assert.match(communalItem.directive, /at least 4 beds/);
   communalDone = true;
   assert(!names().includes('communal_shelter'), 'already satisfied -- drops off the list');
+});
+
+await check('Tier 2: builderPriorityItemSatisfied stays in lockstep with builderPriorityCandidates for the same usability signal', async () => {
+  // Real bug risk flagged in review: builderPriorityCandidates() and builderPriorityItemSatisfied()
+  // both decide crafting_table/furnace/chest from the SAME isUtilityUsable-backed check -- if only
+  // one were fixed, a bot could see "furnace still needed" in the checklist while being told "yes,
+  // done" right after placing a 2nd furnace next to a broken 1st one. This proves they agree.
+  let usable = 0;
+  const c = vm.createContext({ bot: { registry: { blocksByName: {} } },
+    countNearHome: () => 0, countUsableNearHome: () => usable,
+    countQualifyingSheltersNearHome: () => 0, communalShelterSatisfied: () => false,
+    getAchievements: () => [], fleetHasReachedIronTools: () => false,
+    BOT_USERNAMES: new Set(['amy']) });
+  vm.runInContext(between(index, 'function builderPriorityCandidates(', 'function builderPriorityItemSatisfied('), c);
+  vm.runInContext(between(index, 'function builderPriorityItemSatisfied(', 'const SOLDIER_PATROL_RANGE'), c);
+  assert.equal(c.builderPriorityCandidates().some((x) => x.name === 'furnace'), true, 'unusable -- candidates lists it');
+  assert.equal(c.builderPriorityItemSatisfied('furnace'), false, 'unusable -- NOT satisfied, matching candidates');
+  usable = 1;
+  assert.equal(c.builderPriorityCandidates().some((x) => x.name === 'furnace'), false, 'usable -- candidates drops it');
+  assert.equal(c.builderPriorityItemSatisfied('furnace'), true, 'usable -- satisfied, matching candidates');
 });
 
 await check('Fairness: routine checks that lose their turn are counted', async () => {
@@ -1132,6 +1196,26 @@ await check('MB-05 a goal replaced during skill lookup gets no skill run and no 
   vm.runInContext('currentGoal = { description: "new", servedBySkill: false, log: [], steps: 0 }', c);
   resolveSkill({ name: 'skill', jsonPath: 'x.json', steps: [] }); await pending;
   assert.equal(ran, 0); assert.equal(oldGoal.servedBySkill, false); assert.equal(oldGoal.steps, 0);
+});
+
+await check('Builder placement: a successful crafting_table/furnace/chest/beehive placement registers a RAG note', async () => {
+  // 2026-10-27 (direct request: "all resources, including buildable resources, should be
+  // registered to the RAG"): runBuilderPlacement() is the one function Fix 1's own checklist
+  // dispatch uses for crafting_table/furnace/chest/beehive -- covers all four for free.
+  const bot = makeBot(); bot.chat = () => {}; bot.spawnPoint = { x: 5, y: 64, z: 5 };
+  const goal = { description: 'go home and place a chest there', builderPriorityItem: 'chest',
+    consecutiveFailures: 0, log: [], steps: 0 };
+  const notes = [];
+  const c = goalTickContext(bot, { currentGoal: goal,
+    performAction: async () => ({ ok: true, text: 'placed a chest at home.' }),
+    builderPriorityItemSatisfied: () => true,
+    broadcastGoalState: async () => {}, recordGoalOutcome() {}, releaseBuilderItem: async () => {},
+    narrateAction: async (t) => t,
+    writeMemoryNote: async (note) => { notes.push(note); } });
+  await c.runBuilderPlacement(goal, async () => true, () => ({ release() {} }), () => false);
+  assert.equal(notes.length, 1, 'one RAG note written on a successful placement');
+  assert.equal(notes[0].scope, 'world');
+  assert.match(notes[0].text, /Built a chest near \(5, 64, 5\)/);
 });
 
 await check('MB-05/MB-21 planning holds no control, and a goal replaced mid-plan is not acted on', async () => {
@@ -1426,7 +1510,7 @@ await check('Fight-or-flee: the mob that just hurt the bot is the threat, not me
 // Beds (2026-10-18): a fake world of bed blocks, with the real "sleep" action and no claim
 // plumbing at all. `occupied`: positions (either half) where bot.sleep() rejects as taken, same
 // way the real server does for a bed someone is actually in.
-function bedWorld({ standAt = new V3(0, 64, 0), occupied = [] } = {}) {
+function bedWorld({ standAt = new V3(0, 64, 0), occupied = [], rememberedBed = null } = {}) {
   const blocks = new Map();
   const key = (p) => `${p.x},${p.y},${p.z}`;
   const occupiedSet = new Set(occupied.map(key));
@@ -1455,7 +1539,15 @@ function bedWorld({ standAt = new V3(0, 64, 0), occupied = [] } = {}) {
     },
   });
   bot.pathfinder.goto = async () => {};
-  const c = context(bot, { Vec3: V3, SLEEP_TIMEOUT_MS: 1000 });
+  // 2026-10-27: "sleep" now falls back to findRememberedLocation()/gotoRememberedSpot() when
+  // nearbyBeds() comes up empty, same stub pattern mine/craft's own remembered-chest/table
+  // fallback tests already use elsewhere in this file. Defaults to "nothing remembered either"
+  // so every existing bedWorld() scenario (which already has real local beds, or deliberately
+  // none at all) behaves exactly as before; rememberedBed (optional) simulates a bed that only
+  // becomes locally visible after "travelling" there, same shape addBed() already builds.
+  const c = context(bot, { Vec3: V3, SLEEP_TIMEOUT_MS: 1000,
+    findRememberedLocation: async () => rememberedBed,
+    gotoRememberedSpot: async () => { if (rememberedBed) addBed(rememberedBed.x, rememberedBed.y, rememberedBed.z); } });
   vm.runInContext(between(actions, 'function bedNearHazard(', '\n// Direct request, 2026-09-09') +
     between(actions, '// A bed is two blocks;', '\n// Direct request, 2026-09-10') + timeoutFn + actionFn, c);
   return { bot, c, addBed, blocks, tried };
@@ -1499,6 +1591,16 @@ await check('Beds: no bed anywhere fails with the exact text checkSleep pattern-
   const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
   assert.equal(result.ok, false);
   assert.equal(result.text, "couldn't find a bed nearby.");
+});
+
+await check('Beds: nothing nearby falls back to a remembered bed, and travels to use it', async () => {
+  // 2026-10-27 (direct request: "seeking out a bed should not be limited to 'nearby'... if it's
+  // a known resource that can be reached, they should use it to sleep"): same local-then-
+  // remembered pattern mine/craft already use for crafting_table/furnace.
+  const w = bedWorld({ standAt: new V3(0, 64, 5), rememberedBed: { x: 100, y: 64, z: 0 } });
+  const result = await w.c.performAction(w.bot, { type: 'sleep' }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(w.tried, ['101,64,0'], 'the remembered bed, only visible after "travelling" there');
 });
 
 // Doors (2026-09-25): pathfinder's own getBlock() marks every door and gate unsafe and physical from
@@ -2178,13 +2280,60 @@ await check('Beds: a bed goal loots wool once, gets the rest from sheep, makes p
     broadcastGoalState: async (status) => { done.push(status); }, retireGoal: async () => {}, saveGoalIfCurrent: async () => {},
     logStep: () => {}, loadPenLocation: async () => null, LIVESTOCK: [], BREEDING_FOOD: {}, countInPen: () => 0, findPenSite: () => null,
     woolCounts: (b) => Object.fromEntries(b.inventory.items().filter((i) => i.name.endsWith('_wool')).map((i) => [i.name.slice(0, -5), i.count])),
-    bedItemFor: () => 'white_bed' });
+    bedItemFor: () => 'white_bed',
+    // 2026-10-27: runBedGoal now registers a RAG note on completion (writeMemoryNote,
+    // longterm.js) -- this slice starts after that import, so it has to be stubbed here same as
+    // every other cross-module function this context already injects.
+    writeMemoryNote: async () => {}, PERSONA_NAME: 'amy' });
   vm.runInContext(farmGoalSrc(), c);
   const goal = { description: 'make myself a bed and place it at home', createdAt: Date.now(), consecutiveFailures: 0 };
   for (let i = 0; i < 8 && !done.length; i++) await c.runBedGoal(goal, async () => true, () => ({ release() {} }), () => false);
   assert.deepEqual(calls, ['loot:wool', 'get_wool', 'craft:oak_planks', 'craft:white_bed', 'place_bed'],
     'no table nearby: 7 planks from her logs before the bed');
   assert.deepEqual(done, ['done']);
+});
+
+await check('Beds: a bed in hand builds at home when near, but on the spot when far from both home and any remembered bed', async () => {
+  // 2026-10-27 (direct request: "if exploring, and far away from a known bed listed in world
+  // resources, they should try to build a new one"): place_bed already supports an arbitrary
+  // action.near (added for the communal shelter) -- bedStep now points it at her own current
+  // position instead of forcing a long trip home, once she's genuinely far from both.
+  let lastAction = null;
+  const performAction = async (b, action) => { lastAction = action; return { ok: true, text: 'placed a bed.', bedAt: { x: 1, y: 64, z: 1 } }; };
+  const invBed = { items: () => [{ name: 'white_bed', count: 1 }] };
+  const makeCtx = (bot, findRememberedLocation) => {
+    const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Amy',
+      bot, performAction, woolCounts: () => ({}), BUILDER_PRIORITY_RADIUS: 24, findRememberedLocation });
+    vm.runInContext(farmGoalSrc(), c);
+    return c;
+  };
+  // Near home: default behaviour, unchanged -- no action.near at all, findRememberedLocation
+  // never even consulted.
+  const near = makeCtx({ inventory: invBed, spawnPoint: new V3(0, 64, 0), entity: { position: new V3(5, 64, 0) } },
+    async () => { throw new Error('should not be consulted when already near home'); });
+  await near.bedStep({}, {});
+  assert.equal(lastAction.type, 'place_bed');
+  assert.equal(lastAction.near, undefined, 'near home -- goes home as before, no explicit near');
+
+  // Far from home, and no remembered bed either: builds right where she is.
+  const far = makeCtx({ inventory: invBed, spawnPoint: new V3(0, 64, 0), entity: { position: new V3(100, 64, 0) } },
+    async () => null);
+  await far.bedStep({}, {});
+  // Field-by-field, not assert.deepEqual on the whole object: lastAction.near was built by code
+  // running inside a separate vm.Context (farmGoalSrc()'s own realm), so its object literal has
+  // that realm's Object.prototype, not this test file's -- deepStrictEqual (what the strict
+  // assert module's deepEqual actually is) fails on that cross-realm identity mismatch even
+  // though the own-enumerable values are identical and print identically.
+  assert.equal(lastAction.near.x, 100, 'far from everything -- builds where she is (x)');
+  assert.equal(lastAction.near.y, 64, 'far from everything -- builds where she is (y)');
+  assert.equal(lastAction.near.z, 0, 'far from everything -- builds where she is (z)');
+
+  // Far from home, but a remembered bed is close to her CURRENT position: the "far from
+  // everything" trigger doesn't fire, so the default (home) still applies.
+  const nearRemembered = makeCtx({ inventory: invBed, spawnPoint: new V3(0, 64, 0), entity: { position: new V3(100, 64, 0) } },
+    async () => ({ x: 105, y: 64, z: 0 }));
+  await nearRemembered.bedStep({}, {});
+  assert.equal(lastAction.near, undefined, 'a nearby remembered bed means she is not "far from everything" -- default applies');
 });
 
 await check('Beds: a night with no bed gives an idle bot a bed goal for the morning, and never replaces a goal', async () => {
@@ -2431,6 +2580,25 @@ await check('Shelters: the site is a flat, clear 4x5 within 4 blocks of home, ev
   assert.equal(c.findShelterSite(shelterWorld({ groundY: (x, z) => 63 + ((x + z) & 1) }), home), null, 'nowhere flat');
 });
 
+await check('Shelters: a crowded core still finds a site farther out once maxRadius allows it', async () => {
+  // 2026-10-27 (direct request, "allow the shelter search radius to go up to 48 blocks"): up to
+  // BOT_USERNAMES.size individual shelters need to fit somewhere near home -- once the crafting
+  // table/furnace/chest/earlier shelters crowd the old fixed 4-block core, site-finding used to
+  // fail forever. Blocks every column a radius-4 search could possibly reach (footprint offsets
+  // are dx-1..dx+2 in x, dz-1..dz+3 in z, for dx/dz in [-4,4] -- so x in [-5,6], z in [-5,7]) up
+  // through the shelter's own height, leaving everything farther out untouched.
+  const c = shelterFns();
+  const home = new V3(0, 64, 0);
+  const core = [];
+  for (let x = -5; x <= 6; x++) for (let z = -5; z <= 7; z++) for (let y = 64; y <= 67; y++) core.push(new V3(x, y, z));
+  const world = shelterWorld({ blocked: core });
+  assert.equal(c.findShelterSite(world, home), null,
+    'default maxRadius=4 still fails -- same cost/behavior as before this fix');
+  const wider = c.findShelterSite(world, home, 48);
+  assert(wider, 'a wider search finds a site once allowed past the crowded core');
+  assert(Math.max(Math.abs(wider.x), Math.abs(wider.z)) > 6, `the found site is actually outside the blocked core: ${wider}`);
+});
+
 await check('Shelters: shelter goals are recognised, and the shelter check finds one a block above spawn', async () => {
   const c = vm.createContext({ setInterval() {}, Date });
   vm.runInContext(farmGoalSrc(), c);
@@ -2466,7 +2634,12 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
   };
   const check = (bot) => {
     const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
-      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s) });
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s),
+      // 2026-10-27: findShelterNearHome() now rings outward up to BUILDER_PRIORITY_RADIUS (see
+      // its own header comment, index.js) -- the extracted slice starts AFTER that const's real
+      // declaration, so it has to be injected here, same as every other module-level const this
+      // slice already needs from outside it (SHELTER_ROOM above).
+      BUILDER_PRIORITY_RADIUS: 24 });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
       between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
     return h.hasShelterNearHome();
@@ -2482,7 +2655,12 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
   // bed in one of its own room cells.
   const ownShelterCheck = (bot) => {
     const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
-      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s) });
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s),
+      // 2026-10-27: findShelterNearHome() now rings outward up to BUILDER_PRIORITY_RADIUS (see
+      // its own header comment, index.js) -- the extracted slice starts AFTER that const's real
+      // declaration, so it has to be injected here, same as every other module-level const this
+      // slice already needs from outside it (SHELTER_ROOM above).
+      BUILDER_PRIORITY_RADIUS: 24 });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
       between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
     return h.hasOwnShelterWithBed();
@@ -2512,7 +2690,12 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
   // bare "no shelter," since checkShelterIntegrity() needs its base to send "build" back to.
   const findCheck = (bot) => {
     const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
-      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s) });
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s),
+      // 2026-10-27: findShelterNearHome() now rings outward up to BUILDER_PRIORITY_RADIUS (see
+      // its own header comment, index.js) -- the extracted slice starts AFTER that const's real
+      // declaration, so it has to be injected here, same as every other module-level const this
+      // slice already needs from outside it (SHELTER_ROOM above).
+      BUILDER_PRIORITY_RADIUS: 24 });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
       between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
     return h.findShelterNearHome();
@@ -2528,6 +2711,32 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
     old.push(new V3(dx, 68, dz));
   }
   assert.equal(check(shelterBot(old)), false, "a shelter that can't fit a bed isn't enough");
+
+  // 2026-10-27: findShelterNearHome() now rings outward up to BUILDER_PRIORITY_RADIUS, the same
+  // way findShelterSite() (actions.js) now does for siting a NEW shelter -- otherwise a shelter
+  // genuinely built beyond the old fixed 4-block window would be invisible to this check, and
+  // shelterStep() would report its own build ok:true but done:false forever (a silent infinite
+  // loop, confirmed worse than the bounded give-up/re-propose churn that existed before).
+  const base3 = new V3(10, 65, 0); // outside the old radius-4 window, inside the new 24 cap
+  const full3 = s.shelterPositions(base3), doorPos3 = s.doorwayPosition(base3);
+  assert.equal(check(shelterBot(full3, { doorAt: doorPos3 })), true,
+    'a complete shelter 10 blocks out is now recognised, not just one right at home');
+
+  // Real bug caught in review, 2026-10-27: the naive ring-expansion stopped as soon as ANY ring
+  // returned non-null -- but the innermost ring (radius 4) can return a non-null DAMAGED match
+  // (trackDamaged is only true there) well before a genuinely complete shelter farther out ever
+  // gets looked for. A half-built structure left near home (plausible in exactly the crowded-base
+  // scenario this whole fix targets) would have made hasShelterNearHome() report false even
+  // though a complete shelter demonstrably exists 10 blocks away. Combine the existing damaged
+  // (no-door) shelter at home with the existing complete one at base3 in one world: only a
+  // complete match may short-circuit the ring search, so this must still find and return it.
+  const damagedAndFarComplete = [...full2, ...full3];
+  assert.equal(check(shelterBot(damagedAndFarComplete, { doorAt: doorPos3 })), true,
+    'a damaged shelter at home must not hide a genuinely complete one farther out');
+  const farCompleteResult = findCheck(shelterBot(damagedAndFarComplete, { doorAt: doorPos3 }));
+  assert.equal(farCompleteResult.complete, true, 'the complete one farther out wins, not the near damaged one');
+  assert.deepEqual([farCompleteResult.base.x, farCompleteResult.base.y, farCompleteResult.base.z],
+    [base3.x, base3.y, base3.z], 'and it is specifically the far shelter\'s own base that comes back');
 
   // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1 -- "today's separate 'beds' and 'shelter'
   // items merge into one"): hasOwnShelterWithBed above only ever answers "does SHE have one";
@@ -2633,7 +2842,11 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
     logStep: () => {}, farmStatus: () => ({ ripe: 0, growing: 0 }), loadPenLocation: async () => null, LIVESTOCK: [],
     BREEDING_FOOD: {}, countInPen: () => 0, findPenSite: () => null, woolCounts: () => ({}), bedItemFor: () => 'white_bed',
     hasShelterNearHome: () => standing, findShelterSite: () => new V3(1, 64, 1), shelterPositions: s.shelterPositions,
-    shelterMaterialCount: (b) => b.inventory.items().filter((i) => /_(planks|log)$/.test(i.name)).reduce((n, i) => n + i.count, 0) });
+    shelterMaterialCount: (b) => b.inventory.items().filter((i) => /_(planks|log)$/.test(i.name)).reduce((n, i) => n + i.count, 0),
+    // 2026-10-27: runShelterGoal now registers a RAG note on completion (writeMemoryNote,
+    // longterm.js) -- stubbed here same as every other cross-module function this context
+    // already injects.
+    writeMemoryNote: async () => {}, PERSONA_NAME: 'amy' });
   vm.runInContext(farmGoalSrc(), c);
   const goal = { description: 'go home and build a small shelter there', createdAt: Date.now(), consecutiveFailures: 0 };
   for (let i = 0; i < 4 && !done.length; i++) await c.runShelterGoal(goal, async () => true, () => ({ release() {} }), () => false);

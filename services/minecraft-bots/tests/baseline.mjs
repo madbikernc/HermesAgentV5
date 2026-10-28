@@ -1,4 +1,4 @@
-// Version: 1.4.0
+// Version: 1.5.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -15,7 +15,9 @@
 // When a behavior fix lands, add the metric that proves it here (see tests/README.md), and after
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
-// Revision History: 1.4.0 | 2026-10-22 | unreachable_target_bailouts_per_bot_day (actions.js
+// Revision History: 1.5.0 | 2026-10-27 | smelt_successes_per_bot_day and
+//   shelter_site_failures_per_bot_day (Builder-checklist usability fix + shelter search radius fix).
+// 1.4.0 | 2026-10-22 | unreachable_target_bailouts_per_bot_day (actions.js
 //   1.92.0's noPath burst bailout for the attack action).
 // 1.0.0 | 2026-09-24 | Initial metrics from the 2026-09-23 fleet measurement.
 // 1.1.0 | 2026-09-24 | action_failure_rate (OUTCOME lines) and routine_skips_per_bot_day (ROUTINE_SKIPS).
@@ -183,6 +185,22 @@ const METRICS = {
     about: "torches hung while digging -- 0/day before the trail existed (2026-10-07)",
     better: "higher", tolerance: 0.5, floor: 0.5,
     value: (c, ctx) => perBotDay(c(/\] torch trail: lit /), ctx),
+  },
+  // 2026-10-27: Builder-checklist false-"done" fix (chest/furnace/crafting_table now go through
+  // real-interaction usability, not bare existence) and the shelter site-search radius fix
+  // (findShelterSite now rings outward past the old fixed 4-block core). smelt_successes was 0/day
+  // fleet-wide in a prior incident (2026-09-21) from the same "furnace marked usable forever"
+  // mechanism this fix targets; shelter_site_failures is the exact log line a crowded base emits
+  // once individual-shelter site-finding runs out of room within the old radius.
+  smelt_successes_per_bot_day: {
+    about: "smelt actions that actually produced output -- 0/day fleet-wide during the 2026-09-21 furnace incident",
+    better: "higher", tolerance: 0.5, floor: 0.2,
+    value: (c, ctx) => perBotDay(c(/\] OUTCOME \{"type":"smelt","ok":true/), ctx),
+  },
+  shelter_site_failures_per_bot_day: {
+    about: "findShelterSite() found nowhere to put a new individual shelter within its search radius",
+    better: "lower", tolerance: 0.5, floor: 1,
+    value: (c, ctx) => perBotDay(c(/couldn't find a flat, clear 3x3 spot within 48 blocks of home\./), ctx),
   },
 };
 

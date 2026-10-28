@@ -1,4 +1,32 @@
-// Version: 1.93.0
+// Version: 1.94.0
+//
+// 1.94.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
+// furnaces/chests/shelter get built"): four changes.
+// (1) New noteUtilityOutcome()/isUtilityUsable() -- real-interaction usability tracking (in-
+// memory, resets on restart) for crafting_table/furnace/chest, wired into the smelt/craft/loot/
+// store call sites that already produce the relevant reach/open/obstruction failures. Root cause
+// of the actual bug: index.js's builderPriorityCandidates()/builderPriorityItemSatisfied() used
+// to call countNearHome() -- bare block existence, never reachability -- so the Builder checklist
+// called chest/furnace storage "done" forever the moment one existed near home, even after real
+// chests sat failing "No path to the goal!"/windowOpen timeouts for a full day. This file only
+// supplies the tracking primitives and the call-site hooks; index.js's countUsableNearHome() is
+// what actually plugs them into the checklist.
+// (2) findShelterSite() takes a new maxRadius parameter (default 4, so any 2-arg caller/existing
+// unit test is unaffected) and rings outward (SHELTER_SITE_SEARCH_RINGS) instead of a single
+// fixed 4-block scan -- direct request, "allow the shelter search radius to go up to 48 blocks."
+// Up to BOT_USERNAMES.size individual shelters need room near home; the old fixed radius ran out
+// of space once the crafting table/furnace/chest/earlier shelters crowded that tight core, and
+// site-finding then failed forever, correctly, given the radius it was allowed to search. index.js
+// 2.122.0 has the matching findShelterNearHome() fix this absolutely needs alongside it -- see
+// that file's own header for why.
+// (3) findRememberedLocation() is now exported (index.js's bedStep() needs it for (4) below), and
+// the "sleep" action falls back to it when nearbyBeds() comes up empty, same local-then-remembered
+// pattern mine/craft already use for crafting_table/furnace -- direct request, "seeking out a bed
+// should not be limited to 'nearby'... if it's a known resource that can be reached, they should
+// use it to sleep."
+// (4) place_bed's existing action.near plumbing (added for the communal shelter) is now also used
+// by index.js's bedStep() to build on the spot when far from home -- no change needed in this
+// file beyond what already existed.
 //
 // 1.93.0 (2026-10-22, direct request, generalizing S42's fix): new "patch_shelter" case -- fills
 // a given list of hole positions (shelter.js's shelterRoomsNear()/holesIn() already found them
@@ -1596,7 +1624,7 @@ export function getResourceBlockNames(bot) {
 // reuses an existing convention rather than inventing a new structured schema.
 const MEMORY_POSITION_PATTERN = /near \((-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\)/;
 
-async function findRememberedLocation(resourceName) {
+export async function findRememberedLocation(resourceName) {
   const hits = await searchMemory(`${resourceName} location nearby`, { topK: 5 });
   for (const hit of hits) {
     // searchMemory is semantic/fuzzy -- a hit about an unrelated resource can still score close
@@ -2083,7 +2111,8 @@ async function searchChestsFor(bot, token, itemNames, wantCount) {
   for (const pos of positions) {
     if (token.cancelled) return null;
     const chestBlock = bot.blockAt(pos);
-    if (!chestBlock || chestObstructed(bot, chestBlock)) continue;
+    if (!chestBlock) continue;
+    if (chestObstructed(bot, chestBlock)) { noteUtilityOutcome("chest", chestBlock.position, false); continue; }
     const result = await tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount);
     if (result === "cancelled") return null;
     if (result) return result;
@@ -2111,7 +2140,8 @@ async function searchChestsFor(bot, token, itemNames, wantCount) {
     }
     if (token.cancelled) return null;
     const chestBlock = bot.blockAt(known.position);
-    if (!chestBlock || chestObstructed(bot, chestBlock)) continue;
+    if (!chestBlock) continue;
+    if (chestObstructed(bot, chestBlock)) { noteUtilityOutcome("chest", chestBlock.position, false); continue; }
     const result = await tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount);
     if (result === "cancelled") return null;
     if (result) return result;
@@ -2129,6 +2159,7 @@ async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount
       chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
       () => bot.pathfinder.setGoal(null));
   } catch {
+    noteUtilityOutcome("chest", chestBlock.position, false);
     return null; // couldn't reach this one -- try the next candidate
   } finally {
     if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
@@ -2139,6 +2170,7 @@ async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount
   try {
     chest = await bot.openChest(chestBlock);
     const contents = chest.containerItems();
+    noteUtilityOutcome("chest", chestBlock.position, true); // opened fine -- usable, even if empty
     // Real bug found live 2026-09-12 (direct report: "a chest with sticks already made is
     // ignored when they need sticks"). This used to require ONE slot to independently hold
     // >= wantCount -- but a real, common deposit pattern (multiple bots each banking a few via
@@ -2185,6 +2217,7 @@ async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount
     await recordChestSnapshot(chestBlock.position, chest.containerItems());
     return taken ? { name: firstName, count: taken } : null;
   } catch {
+    noteUtilityOutcome("chest", chestBlock.position, false);
     return null; // couldn't open this one -- try the next candidate
   } finally {
     try { await chest?.close(); } catch { /* already closed */ }
@@ -2703,20 +2736,34 @@ export function doorItemFor(bot) {
   return `${species}_door`;
 }
 
-// A flat, clear 4x5 footprint within 4 blocks of home (the range hasShelterNearHome() looks in):
-// solid ground under all twenty columns, four blocks of open air above each, no bed/door/chest in
-// the way, and a walkable cell outside the doorway so the room can be entered. Nearest home wins.
+// A flat, clear 4x5 footprint near home: solid ground under all twenty columns, four blocks of
+// open air above each, no bed/door/chest in the way, and a walkable cell outside the doorway so
+// the room can be entered. Nearest home wins within whichever radius actually finds a site.
 // 2026-10-11: oz/outside widened from the room's old 2x2 (dz 0-1, door at 2) to 2x3 (dz 0-2, door
 // at 3) -- see SHELTER_ROOM's own header comment for why the room grew.
-export function findShelterSite(bot, home) {
+// 2026-10-27 (direct request, "allow the shelter search radius to go up to 48 blocks"): up to
+// BOT_USERNAMES.size separate individual shelters need to fit somewhere near home, and the old
+// fixed 4-block search ran out of room the moment the crafting table/furnace/chest/earlier
+// shelters crowded that tight 9x9 core -- site-finding then failed forever, correctly, given the
+// radius it was allowed to search. Now rings outward (SHELTER_SITE_SEARCH_RINGS) and stops at the
+// first radius that finds ANY valid site, so the common case (a site right at home) costs exactly
+// what it always did; only a genuinely crowded base pays for the wider scan. maxRadius is a
+// parameter (default 4, preserving exact prior behaviour/cost for any 2-arg caller, including
+// existing unit tests) so callers that want the wider search opt in explicitly. This is a plain
+// nested-loop block scan, not a pathfinder search -- unrelated to README.md's "keep under 48"
+// pathfinder.searchRadius OOM caveat, which is about mineflayer-pathfinder's own A* search, a
+// completely different mechanism.
+const SHELTER_SITE_SEARCH_RINGS = [4, 8, 16, 32, 48];
+
+function findShelterSiteAtRadius(bot, home, radius) {
   const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
   const clear = (p) => {
     const b = bot.blockAt(p);
     return !!b && b.boundingBox !== "block" && b.name !== "water" && b.name !== "lava" && !isProtectedBlockName(b.name);
   };
   let best = null, bestDist = Infinity;
-  for (let dx = -4; dx <= 4; dx++) {
-    for (let dz = -4; dz <= 4; dz++) {
+  for (let dx = -radius; dx <= radius; dx++) {
+    for (let dz = -radius; dz <= radius; dz++) {
       for (let dy = -2; dy <= 2; dy++) {
         const base = new Vec3(hx + dx, hy + dy, hz + dz);
         const dist = Math.hypot(dx, dz) + Math.abs(dy) * 0.5;
@@ -2735,6 +2782,15 @@ export function findShelterSite(bot, home) {
     }
   }
   return best;
+}
+
+export function findShelterSite(bot, home, maxRadius = 4) {
+  for (const radius of SHELTER_SITE_SEARCH_RINGS) {
+    if (radius > maxRadius) break;
+    const found = findShelterSiteAtRadius(bot, home, radius);
+    if (found) return found;
+  }
+  return null;
 }
 
 // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a, sized per the operator's own
@@ -2916,6 +2972,37 @@ async function findKnownChestWithItem(bot, itemName, wantCount) {
     }
   }
   return best;
+}
+
+// Real bug found live, 2026-10-27: builderPriorityCandidates()/builderPriorityItemSatisfied()
+// (index.js) used to treat crafting_table/furnace/chest as "done" the moment one existed near
+// home, by bare bot.findBlocks() existence -- never reachability or usability, and nothing ever
+// re-checked it once satisfied. Two real chests sat there failing "No path to the goal!"/
+// "windowOpen did not fire" for a full day while the checklist called chest storage done. This
+// tracks REAL interaction outcomes (the catch sites smelt/craft/loot/store already have, not a
+// new speculative reachability probe) so index.js's countUsableNearHome() can exclude a position
+// once it's demonstrably broken. In-memory only, resets on restart -- same low-stakes tradeoff
+// fleetHasIronTool/builderStallItem (index.js) already make for comparably short-lived fleet
+// state; a restarted bot just re-discovers unusability through a few more real attempts, bounded
+// by UTILITY_UNUSABLE_AFTER_FAILURES same as everything else that leans on real-world feedback
+// here. Deliberately NOT persisted to a file: builderPriorityCandidates() must stay synchronous
+// (called directly by proposeOwnGoal(), used as nextBuilderPriority()'s default parameter, and
+// called synchronously by the existing unit test), so this can never become an async lookup.
+const UTILITY_UNUSABLE_AFTER_FAILURES = 3; // mirrors BUILDER_ITEM_STALL_LIMIT's "don't thrash on noise"
+const utilityStatus = new Map(); // "type,x,y,z" -> consecutive real-interaction failure count
+
+function utilityKey(type, position) {
+  return `${type},${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}`;
+}
+
+export function noteUtilityOutcome(type, position, ok) {
+  const key = utilityKey(type, position);
+  if (ok) utilityStatus.delete(key);
+  else utilityStatus.set(key, (utilityStatus.get(key) || 0) + 1);
+}
+
+export function isUtilityUsable(type, position) {
+  return (utilityStatus.get(utilityKey(type, position)) || 0) < UTILITY_UNUSABLE_AFTER_FAILURES;
 }
 
 // Direct request, 2026-10-18: bed claiming (the shared hermes-memory "minecraft-beds" agent_state
@@ -3525,11 +3612,16 @@ async function performActionAs(bot, action, speaker, token) {
             () => bot.pathfinder.setGoal(null));
         } catch (err) {
           if (token.cancelled) return ok("stopped on the way to a crafting table.");
+          noteUtilityOutcome("crafting_table", tableBlock.position, false);
           return fail(`couldn't reach a crafting table: ${err.message}`);
         } finally {
           if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) return ok("stopped on the way to a crafting table.");
+        // Reach success is the only clean usability signal here -- craftItem() can still fail
+        // right after this for reasons that have nothing to do with the table (missing
+        // ingredients), which must never be read as "this table is broken."
+        noteUtilityOutcome("crafting_table", tableBlock.position, true);
       }
 
       try {
@@ -3602,7 +3694,11 @@ async function performActionAs(bot, action, speaker, token) {
           if (token.cancelled) return ok("stopped on the way to a chest.");
           const chestBlock = bot.blockAt(pos);
           if (!chestBlock) continue;
-          if (chestObstructed(bot, chestBlock)) { sawObstruction = true; continue; }
+          if (chestObstructed(bot, chestBlock)) {
+            noteUtilityOutcome("chest", chestBlock.position, false);
+            sawObstruction = true;
+            continue;
+          }
           const result = await tryTakeFromThisChest(bot, token, chestBlock, wantedNames, action.count);
           if (result === "cancelled") return ok("stopped on the way to a chest.");
           if (result) {
@@ -3628,7 +3724,9 @@ async function performActionAs(bot, action, speaker, token) {
             await withTimeout(bot.pathfinder.goto(new goals.GoalNear(known.position.x,
               known.position.y, known.position.z, 3)), ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
             const chestBlock = bot.blockAt(known.position);
-            if (chestBlock && !chestObstructed(bot, chestBlock)) {
+            if (chestBlock && chestObstructed(bot, chestBlock)) {
+              noteUtilityOutcome("chest", chestBlock.position, false);
+            } else if (chestBlock) {
               const result = await tryTakeFromThisChest(bot, token, chestBlock, wantedNames, action.count);
               if (result === "cancelled") return ok("stopped on the way to a chest.");
               if (result) {
@@ -3656,13 +3754,18 @@ async function performActionAs(bot, action, speaker, token) {
         if (token.cancelled) return ok("stopped on the way to a chest.");
         const chestBlock = bot.blockAt(pos);
         if (!chestBlock) continue;
-        if (chestObstructed(bot, chestBlock)) { sawObstruction = true; continue; }
+        if (chestObstructed(bot, chestBlock)) {
+          noteUtilityOutcome("chest", chestBlock.position, false);
+          sawObstruction = true;
+          continue;
+        }
 
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
             chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
             () => bot.pathfinder.setGoal(null));
         } catch (err) {
+          noteUtilityOutcome("chest", chestBlock.position, false);
           if (token.cancelled) return ok("stopped on the way to a chest.");
           continue; // couldn't reach this one -- try the next candidate
         } finally {
@@ -3672,6 +3775,7 @@ async function performActionAs(bot, action, speaker, token) {
 
         try {
           const chest = await bot.openChest(chestBlock);
+          noteUtilityOutcome("chest", chestBlock.position, true);
           // Real bug found live (2026-09-06): Window.items() returns itemsRange(inventoryStart,
           // inventoryEnd) -- the PLAYER'S OWN inventory slots within the combined window, not the
           // container's. containerItems() (itemsRange(0, inventoryStart)) is the actual
@@ -3684,6 +3788,7 @@ async function performActionAs(bot, action, speaker, token) {
             ? `checked a chest -- has ${contents.map((i) => `${i.count} ${i.name}`).join(", ")}.`
             : "checked a chest, it's empty.");
         } catch (err) {
+          noteUtilityOutcome("chest", chestBlock.position, false);
           continue; // couldn't open this one (e.g. windowOpen timeout) -- try the next candidate
         }
       }
@@ -4091,7 +4196,20 @@ async function performActionAs(bot, action, speaker, token) {
       // (her own claimed bed, then unclaimed, then others' as a last resort). nearbyBeds() (above)
       // is now just every usable bed nearest-first; bot.sleep()'s own real "occupied" rejection is
       // what actually tells a free bed from a taken one, caught and skipped below same as always.
-      const candidates = nearbyBeds(bot, null);
+      let candidates = nearbyBeds(bot, null);
+      if (!candidates.length) {
+        // 2026-10-27 (direct request: "seeking out a bed should not be limited to 'nearby'...
+        // if it's a known resource that can be reached, they should use it to sleep"): same
+        // local-then-remembered pattern mine/craft already use for crafting_table/furnace -- a
+        // bed registered elsewhere on the server (runBedGoal's own writeMemoryNote, index.js) is
+        // exactly as worth a trip as a remembered resource vein. A stale/wrong note just falls
+        // through to the normal "couldn't find a bed nearby" failure below, no worse off.
+        const remembered = await findRememberedLocation("bed").catch(() => null);
+        if (remembered) {
+          await gotoRememberedSpot(bot, token, remembered);
+          candidates = nearbyBeds(bot, null);
+        }
+      }
       if (!candidates.length) return fail("couldn't find a bed nearby.");
 
       for (const pos of candidates) {
@@ -4190,6 +4308,7 @@ async function performActionAs(bot, action, speaker, token) {
         } catch (err) {
           if (token.cancelled) return ok("stopped on the way to a furnace.");
           console.log(`[smelt] couldn't reach furnace at ${furnaceBlock.position}: ${err.message}`);
+          noteUtilityOutcome("furnace", furnaceBlock.position, false);
           continue; // couldn't reach this furnace -- try the next candidate
         } finally {
           if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
@@ -4199,6 +4318,7 @@ async function performActionAs(bot, action, speaker, token) {
         let furnace;
         try {
           furnace = await bot.openFurnace(furnaceBlock);
+          noteUtilityOutcome("furnace", furnaceBlock.position, true);
           // Real gap found live (2026-09-07): the same 3 furnaces failed "destination full"
           // across several separate goal attempts -- logging what's actually sitting in each
           // slot on open, so a repeat is diagnosable (someone else's items? a stuck previous
@@ -4208,6 +4328,7 @@ async function performActionAs(bot, action, speaker, token) {
             `input=${slot(furnace.inputItem())} fuel=${slot(furnace.fuelItem())} output=${slot(furnace.outputItem())}`);
         } catch (err) {
           console.log(`[smelt] couldn't open furnace at ${furnaceBlock.position}: ${err.message}`);
+          noteUtilityOutcome("furnace", furnaceBlock.position, false);
           continue; // couldn't open this one -- try the next candidate
         }
 
@@ -5154,6 +5275,7 @@ async function performActionAs(bot, action, speaker, token) {
         // instead, neither of which said so. Logged for the same reason.
         if (chestObstructed(bot, chestBlock)) {
           console.log(`[store] skipping chest at ${chestBlock.position}: obstructed (blocked above).`);
+          noteUtilityOutcome("chest", chestBlock.position, false);
           continue;
         }
 
@@ -5164,6 +5286,7 @@ async function performActionAs(bot, action, speaker, token) {
         } catch (err) {
           if (token.cancelled) return ok("stopped on the way to a chest.");
           console.log(`[store] couldn't reach chest at ${chestBlock.position}: ${err.message}`);
+          noteUtilityOutcome("chest", chestBlock.position, false);
           continue; // couldn't reach this one -- try the next candidate
         } finally {
           if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
@@ -5172,6 +5295,7 @@ async function performActionAs(bot, action, speaker, token) {
 
         try {
           const chest = await bot.openChest(chestBlock);
+          noteUtilityOutcome("chest", chestBlock.position, true);
           await chest.deposit(itemDef.id, null, storeCount);
           // Direct request, 2026-09-13 ("remember what is in chests when someone opens it") --
           // a deposit is exactly as real a change to this chest's contents as a withdrawal.
@@ -5184,6 +5308,7 @@ async function performActionAs(bot, action, speaker, token) {
           // them" was undiagnosable from the log alone -- same lesson "sleep" already learned
           // once (2026-09-07) for its own multi-candidate loop, never applied here until now.
           console.log(`[store] couldn't deposit into chest at ${chestBlock.position}: ${err.message}`);
+          noteUtilityOutcome("chest", chestBlock.position, false);
           continue; // couldn't open/deposit into this one -- try the next candidate
         }
         return ok(`stored ${storeCount} ${action.item} in a chest.`);

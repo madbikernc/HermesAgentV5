@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.20.0
+**Version:** 2.21.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -168,14 +168,29 @@ queued action/goal. A CHAT reply may never promise a future action that isn't ac
   qualifying shelter is found nearby yet. A bot takes on "make myself a bed" for the morning when it
   finds no bed at night, or finds beds but none free while home has fewer beds than bots.
   `craft` makes and places a crafting table itself when none is within 32 blocks.
+  **"sleep" is not limited to a local scan** (direct request, 2026-10-27): when `nearbyBeds()`'s
+  own 32-block search comes up empty, it falls back to `findRememberedLocation("bed")` + a travel
+  hop, the same local-then-remembered pattern `mine`/`craft` already use for crafting_table/
+  furnace -- a bed registered elsewhere on the server is worth a trip, not just a failure.
+  `bedStep()` itself now also builds a brand-new bed **on the spot** rather than forcing a trip
+  home, once she's farther than `BUILDER_PRIORITY_RADIUS` from both `bot.spawnPoint` and the
+  nearest remembered bed (`place_bed`'s existing `action.near`, added for the communal shelter,
+  just never pointed anywhere but home for an individual bed before this).
 - **Shelter goals too** (the Builder's "build a small shelter", any self-proposed one). A shelter
   must fit a bed: 4x4 outside, a 2x2 room inside (a bed along one side, placed from the doorway,
   room to stand beside it) -- the old 3x3 with one cell inside no longer counts. A flat, clear
-  4x4 site within 4 blocks of home with a walkable approach to the doorway (`findShelterSite`), building blocks if short (planks from logs
-  she holds, else dirt), then `build` on that site. `build` mixes any plain building blocks (never
+  4x4 site with a walkable approach to the doorway (`findShelterSite`), building blocks if short
+  (planks from logs she holds, else dirt), then `build` on that site. **Site search now rings
+  outward instead of a fixed 4-block scan** (direct request, 2026-10-27: "allow the shelter search
+  radius to go up to 48 blocks") -- up to `BOT_USERNAMES.size` individual shelters need room near
+  home, and the old fixed radius ran out of space once the crafting table/furnace/chest/earlier
+  shelters crowded that tight core, so site-finding then failed forever, correctly, given the
+  radius it was allowed to search. `build` mixes any plain building blocks (never
   sand/gravel or functional blocks), builds with pathfinder scaffolding off (dirt and cobblestone are
   its defaults, and she pillared up inside her own shelter), and the goal is done only when
-  `hasShelterNearHome()` -- which now looks 2 blocks above and below spawn height -- sees it.
+  `hasShelterNearHome()` -- which now looks 2 blocks above and below spawn height, and rings
+  outward up to `BUILDER_PRIORITY_RADIUS` in lockstep with `findShelterSite`'s own wider search,
+  so a shelter built beyond the old 4-block window is still recognized -- sees it.
 
 **DONE is never accepted on the model's word.** Inventory and world state are re-checked
 (`builderPriorityItemSatisfied()` and friends); a rejected claim logs `REJECTED DONE` /
@@ -286,6 +301,23 @@ crafted object, plus a free `noteNearbyResources()` sweep after any mine/explore
 names come from the live block registry (every `_ore`/`_log`/`_stem`, plus `ancient_debris`),
 not a hand-picked list, along with crafted objects and village indicators (`bell`, `composter`).
 
+**That "placed crafted object" write only covers the generic freeform planner step handler** --
+direct request, 2026-10-27 ("all resources, including buildable resources, should be registered
+to the RAG"), confirmed live gap: `goalTick()` dispatches a Builder-checklist item straight to
+`runBuilderPlacement()`, and a shelter farmTask to `runShelterGoal()`, both well before the
+generic handler, so crafting_table/furnace/chest/beehive/shelter built via either dedicated runner
+never reached it. Both runners now write their own `writeMemoryNote` on a real completion -- same
+convention, same text format, same `minecraft` corpus. Closes the `known_chests.json` per-host
+split for chest specifically (spark and spark2 each keep their own copy, confirmed by diffing
+both); gives crafting_table/furnace a second, dedicated-runner source feeding the same
+`findRememberedLocation()` fallback `craft` already consults; and gives shelter its first RAG
+presence at all (not in `CRAFTED_OBJECT_NAMES` -- can't be, it's a multi-block structure, not a
+single block type -- so nothing reads it back yet, added for inventory, not a closed gap). The
+Builder checklist's own "is this near home" satisfaction logic deliberately does **not** consult
+this note: `bot.spawnPoint` is the single world spawn every bot already sees identically and in
+real time, so there is no visibility gap there to close, and doing so would reintroduce a
+"satisfied because it exists somewhere on the server" false-done bug, just laundered through RAG.
+
 ## 7. Skill library
 
 Voyager's idea without its architecture. A skill is **data, not code**:
@@ -312,7 +344,13 @@ means two different things, and the distinction is load-bearing:**
 - **Builder and Soldier are deterministic.** `nextBuilderPriority()` / `nextSoldierPriority()`
   check real world state and **override** freeform self-propose. Builder's ladder is crafting
   table → furnace → chest → beds (`BOT_USERNAMES.size`, self-scaling) → shelter → beehive → ranch, each
-  verified as a *placed block* near spawn rather than an inventory item. A stalled item is
+  verified as a *placed block* near spawn rather than an inventory item -- **and, for crafting
+  table/furnace/chest specifically, a *usable* one** (`countUsableNearHome()`, direct request
+  2026-10-27: a block that merely exists but has repeatedly failed a real open/reach attempt
+  (`isUtilityUsable()`, actions.js) no longer counts as "done," so the checklist re-proposes a
+  replacement instead of staying silently satisfied forever -- the root cause behind a day of
+  real chests failing "No path to the goal!" while the checklist still called chest storage
+  finished. `beehive` is unchanged, still bare existence. A stalled item is
   skipped after `BUILDER_ITEM_STALL_LIMIT` (3) cycles and revisited later. Soldier's ladder is
   weapon → nearby hostile (`SOLDIER_PATROL_RANGE` 32) → missing armor (at most every 30 min) →
   stand guard (a standing goal), and it **always** returns something, so a Soldier never reaches
