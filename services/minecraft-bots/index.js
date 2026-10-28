@@ -1,4 +1,4 @@
-// Version: 2.122.0
+// Version: 2.123.0
 //
 // 2.122.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
 // furnaces/chests/shelter get built"): four changes.
@@ -5293,9 +5293,33 @@ async function goalTick() {
   }
 }
 
-setInterval(() => {
-  goalTick().catch((err) => console.error(`[${USERNAME}] goalTick error:`, err.message));
-}, GOAL_TICK_MS);
+// Direct request, 2026-10-28 ("the 45 second per action timer is slowing things down a lot" /
+// "should the bots poll for a next action when a previous action concludes, rather than on a
+// timer?"): yes. A tick that actually ran a goal step (goal.steps moved) chains the next tick
+// GOAL_FOLLOWUP_MS after it ends, so a bot working a goal goes step to step instead of sitting
+// out the rest of a 45s window after a 3s log chop. The GOAL_TICK_MS interval stays as the
+// fallback for ticks that ran nothing (no control, night pause, no goal). The in-flight guard
+// keeps the chained tick and the interval tick from both planning at once -- before this, only
+// the arbiter kept overlapping ticks apart, and only at the point of moving the body.
+const GOAL_FOLLOWUP_MS = parseInt(process.env.MC_GOAL_FOLLOWUP_MS || "2000", 10);
+let goalTickInFlight = false;
+
+async function runGoalTick() {
+  if (goalTickInFlight) return;
+  goalTickInFlight = true;
+  const goal = currentGoal;
+  const stepsBefore = goal?.steps ?? 0;
+  try {
+    await goalTick();
+  } catch (err) {
+    console.error(`[${USERNAME}] goalTick error:`, err.message);
+  } finally {
+    goalTickInFlight = false;
+  }
+  if (goal && currentGoal === goal && goal.steps > stepsBefore) setTimeout(runGoalTick, GOAL_FOLLOWUP_MS);
+}
+
+setInterval(runGoalTick, GOAL_TICK_MS);
 
 // Mayor-only autonomous behavior, 2026-09-08 ("add another bot, Mayor, whose personality is to
 // be a leader and set goals for the others"). A no-op check (USERNAME !== MAYOR_USERNAME) makes

@@ -1,4 +1,4 @@
-// Version: 1.94.0
+// Version: 1.95.0
 //
 // 1.94.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
 // furnaces/chests/shelter get built"): four changes.
@@ -1961,6 +1961,45 @@ function withTimeout(promise, ms, onTimeout) {
   return Promise.race([promise.finally(() => clearTimeout(timer)), timeout]);
 }
 
+// Direct report, 2026-10-28 ("gathering wood is done in fits and starts -- not enough hacks at
+// the wood occur, she stops, the wood 'heals', she starts again"). Confirmed against
+// mineflayer-pathfinder's own source: while A* is still searching, goto() already walks the
+// partial path, and a partial path toward a log usually has a block to break on it (the trunk
+// itself, or leaves). With thinkTimeout at 1000ms (index.js, the OOM fix), a tree target's search
+// hits "Took to long to decide path to goal!" about a second in -- goto() rejects with that dig
+// mid-swing, collectBlock throws, and the next setGoal() aborts the dig (bot.stopDigging()), which
+// is the crack visibly healing. The whole mine step then failed and waited for the next goal tick.
+// Two fixes, both scoped to block collection only: a wider think window for these searches (the
+// 20ms tickTimeout still hands the event loop back between chunks), and on a timeout or no-path
+// rejection, let the in-flight dig finish before trying again from wherever she now stands.
+const COLLECT_THINK_TIMEOUT_MS = 3000;
+const COLLECT_PATH_RETRIES = 2;
+const COLLECT_DIG_SETTLE_MS = 10_000;
+
+async function collectBlocks(bot, token, blocks) {
+  const savedThink = bot.pathfinder.thinkTimeout;
+  bot.pathfinder.thinkTimeout = Math.max(savedThink, COLLECT_THINK_TIMEOUT_MS);
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await bot.collectBlock.collect(blocks, { ignoreNoPath: true });
+      } catch (err) {
+        if (token.cancelled || attempt >= COLLECT_PATH_RETRIES || (err.name !== "Timeout" && err.name !== "NoPath")) throw err;
+        const settleBy = Date.now() + COLLECT_DIG_SETTLE_MS;
+        while (bot.pathfinder.isMining() && Date.now() < settleBy && !token.cancelled) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (token.cancelled) throw err;
+        blocks = blocks.filter((b) => bot.blockAt(b.position)?.type === b.type);
+        if (!blocks.length) return;
+        console.log(`[${bot.username}] collect: ${err.message} -- retrying from here (${blocks.length} left)`);
+      }
+    }
+  } finally {
+    bot.pathfinder.thinkTimeout = savedThink;
+  }
+}
+
 // Common shallow crafting chains: the overwhelming majority of "craft X" requests that start
 // from raw gathered resources bottleneck on one of these two conversions. Deliberately narrow
 // and hard-coded, not a general recursive planner (see this file's own header on why building
@@ -3420,7 +3459,7 @@ async function performActionAs(bot, action, speaker, token) {
       }
 
       try {
-        await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
+        await withTimeout(collectBlocks(bot, token, blocks), ACTION_TIMEOUT_MS,
                            () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
       } catch (err) {
         if (token.cancelled) return ok("stopped mining early.");
@@ -3484,7 +3523,7 @@ async function performActionAs(bot, action, speaker, token) {
       }
 
       try {
-        await withTimeout(bot.collectBlock.collect(blocks, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
+        await withTimeout(collectBlocks(bot, token, blocks), ACTION_TIMEOUT_MS,
                            () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
       } catch (err) {
         if (token.cancelled) return ok("stopped exploring early.");

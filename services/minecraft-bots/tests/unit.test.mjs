@@ -1,4 +1,4 @@
-// Version: 1.35.0
+// Version: 1.36.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -384,7 +384,7 @@ await check('MB-05 an old goal action does not write into a replacement goal', a
     logStep: (goal, line) => { goal.log.push(line); goal.steps++; },
     goalPausedForNight: () => false, routineBlocked: () => false,
     saveGoal: async () => { saved++; }, clearGoal: async () => { cleared++; } });
-  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, 'async function retireGoal(', 'setInterval(() => {\n  goalTick()'), c);
+  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, 'async function retireGoal(', '// Direct request, 2026-10-28 ("the 45 second'), c);
   const pending = c.goalTick();
   while (!finish) await sleep(1);
   vm.runInContext('currentGoal = this.newGoal', Object.assign(c, { newGoal }));
@@ -1161,7 +1161,7 @@ await check('Fairness: routine checks that lose their turn are counted', async (
 // ---- 2026-09-25: acceptance checks from the review that had no test yet -----------------------
 const skillsSrc = skills;
 const router = await readFile(root + 'router.js', 'utf8');
-const goalTickSrc = () => between(index, 'async function retireGoal(', 'setInterval(() => {\n  goalTick()');
+const goalTickSrc = () => between(index, 'async function retireGoal(', '// Direct request, 2026-10-28 ("the 45 second');
 function goalTickContext(bot, extras) {
   const c = vm.createContext({ console: { log() {}, error() {} }, bot, arbiter, busy: false, Date, Promise,
     AUTONOMY_ENABLED: true, USERNAME: 'Amy', PERSONA_NAME: 'amy', MAX_CONSECUTIVE_FAILURES: 3,
@@ -3671,6 +3671,53 @@ await check('Torches: she tops up from coal she carries, falls back to a chest, 
 
   inv = [{ name: 'torch', count: 16 }];
   assert.equal(t.needsTorches(bot), false, 'a full pouch is left alone');
+});
+
+// 2026-10-28: wood gathered "in fits and starts" -- a path timeout mid-dig used to fail the whole
+// collect and abort the swing (the block heals). collectBlocks() lets the dig finish and retries.
+await check('Collect: a path timeout mid-dig lets the swing finish, then retries instead of failing', async () => {
+  const c = vm.createContext({ console: { log() {} }, setTimeout, Promise, Date });
+  vm.runInContext(between(actions, 'const COLLECT_THINK_TIMEOUT_MS', 'function simpleSourceFor('), c);
+  const log = { type: 5, position: new V3(1, 65, 1) };
+  let mining = true, attempts = 0, thinkSeen = 0;
+  const bot = { username: 'Babs', blockAt: () => ({ type: 5 }),
+    pathfinder: { thinkTimeout: 1000, isMining: () => mining },
+    collectBlock: { collect: async () => {
+      attempts++; thinkSeen = bot.pathfinder.thinkTimeout;
+      if (attempts === 1) {
+        setTimeout(() => { mining = false; }, 30);
+        throw Object.assign(new Error('Took to long to decide path to goal!'), { name: 'Timeout' });
+      }
+      assert.equal(mining, false, 'the retry waited for the in-flight dig instead of aborting it');
+    } } };
+  await c.collectBlocks(bot, { cancelled: false }, [log]);
+  assert.equal(attempts, 2, 'one timeout is retried, not reported as a failed mine');
+  assert(thinkSeen >= 3000, 'tree searches get a wider think window than the 1000ms default');
+  assert.equal(bot.pathfinder.thinkTimeout, 1000, 'the global think window is restored afterwards');
+
+  attempts = 0;
+  bot.collectBlock.collect = async () => { attempts++; throw new Error('digging aborted'); };
+  await assert.rejects(c.collectBlocks(bot, { cancelled: false }, [log]), /digging aborted/);
+  assert.equal(attempts, 1, 'a non-path error is not retried');
+});
+
+// 2026-10-28: "should the bots poll for a next action when a previous action concludes, rather
+// than on a timer?" -- a tick that ran a step chains the next one; an empty tick does not.
+await check('Goal loop: a finished step chains the next tick instead of waiting out the 45s timer', async () => {
+  const timers = [];
+  const goal = { steps: 0 };
+  let ran = 0, step = true;
+  const c = vm.createContext({ console: { error() {} }, USERNAME: 'Babs', process: { env: {} }, parseInt,
+    currentGoal: goal, setTimeout: (fn, ms) => timers.push(ms), setInterval: () => {},
+    goalTick: async () => { ran++; if (step) goal.steps++; } });
+  vm.runInContext('var currentGoal = this.currentGoal;' +
+    between(index, 'const GOAL_FOLLOWUP_MS', 'setInterval(runGoalTick'), c);
+  await c.runGoalTick();
+  assert.deepEqual([...timers], [2000], 'a step ran: the next tick is queued 2s out');
+  step = false;
+  await c.runGoalTick();
+  assert.equal(timers.length, 1, 'nothing ran (no control, night pause): fall back to the interval');
+  assert.equal(ran, 2);
 });
 
 console.log(`${passed} unit checks passed.`);

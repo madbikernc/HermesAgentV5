@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.21.0
+**Version:** 2.22.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -132,7 +132,9 @@ operator — human-facing only. In-game chat feeds the same pipeline as Matrix, 
 or GOAL — then either an in-character `muse` reply grounded in real live goal state, or a real
 queued action/goal. A CHAT reply may never promise a future action that isn't actually queued.
 
-**Goal loop** (`goalTick`, 45s). Retrieve a matching stored skill first; otherwise one
+**Goal loop** (`goalTick`). A tick that ran a step chains the next one 2s after it ends
+(`MC_GOAL_FOLLOWUP_MS`); the 45s interval (`MC_GOAL_TICK_MS`) is only the fallback for ticks that
+ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a matching stored skill first; otherwise one
 `planNextStep` call per tick emitting a single `ACTION <verb>` step. Steps run through the same
 `performAction()` a direct player command uses — never a parallel path.
 `MAX_CONSECUTIVE_FAILURES` is 3. A bot self-proposes a goal after `IDLE_BEFORE_SELF_GOAL_MS`

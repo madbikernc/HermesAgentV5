@@ -1,4 +1,8 @@
-// Version: 1.23.0
+// Version: 1.24.0
+//
+// 1.24.0 (2026-10-28, direct report: wood gathered "in fits and starts", the block healing between
+// swings): new scenario felling a 4-log trunk in one "mine" with the think window squeezed to 1ms,
+// so the path-timeout-mid-dig case collectBlocks() (actions.js 1.95.0) now survives is forced.
 //
 // 1.23.0 (2026-10-27, first real runs of 1.22.0's new scenarios, against the real server): three
 // real gaps found and fixed, all in the scenarios themselves, not the fix they test -- each only
@@ -877,6 +881,26 @@ scenario("MB-17 chest: a mixed-species stack is withdrawn across types", async (
   assert.match(result.text, /already in a chest/);
   assert.equal(logCount(), 4, "2 oak + 2 birch taken");
   assert.equal(bot.currentWindow, null, "chest closed afterwards");
+});
+
+// 2026-10-28 ("gathering wood is done in fits and starts... the wood 'heals'"): a path search
+// that times out mid-dig used to fail the whole mine and abort the swing. The base think window is
+// squeezed to 1ms here so every search toward the trunk times out -- the fixed collect must still
+// widen it, let any dig in flight finish, and bring the whole trunk home in ONE action.
+scenario("Wood: a whole trunk is felled in one mine action even when path searches time out", async () => {
+  await rcon(`fill ${x + 4} ${y + 1} ${z} ${x + 4} ${y + 4} ${z} minecraft:birch_log`,
+             `fill ${x + 3} ${y + 4} ${z - 1} ${x + 5} ${y + 4} ${z + 1} minecraft:birch_leaves[persistent=true] keep`);
+  await waitFor(() => bot.blockAt(new Vec3(x + 4, y + 4, z))?.name === "birch_log", 10_000, "trunk to appear");
+  const savedThink = bot.pathfinder.thinkTimeout;
+  bot.pathfinder.thinkTimeout = 1;
+  try {
+    const result = await performAction(bot, { type: "mine", block: "birch_log", count: 4 }, TESTER);
+    assert.equal(result.ok, true, `mine result: ${result.text}`);
+    assert.equal(bot.pathfinder.thinkTimeout, 1, "the squeezed window is restored after the collect");
+  } finally {
+    bot.pathfinder.thinkTimeout = savedThink;
+  }
+  await waitFor(() => logCount() >= 4, 10_000, "all four logs picked up");
 });
 
 scenario("MB-16 explore: a stocked chest doesn't satisfy scouting for a village", async () => {
