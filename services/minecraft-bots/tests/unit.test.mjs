@@ -1,4 +1,4 @@
-// Version: 1.36.0
+// Version: 1.37.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -2042,7 +2042,9 @@ await check('Enchants: the 1.21 component shape becomes [{ name, lvl }], so digg
 const bedFns = () => {
   const s = shelter();
   const c = vm.createContext({ Vec3: V3, Math, Object, shelterInteriorsNear: s.shelterInteriorsNear,
-    posKey: shelterConst('posKey') });
+    posKey: shelterConst('posKey'), isProtectedBlockName: (n) => n.endsWith('_bed') || n.endsWith('_door') });
+  // 2026-10-28: findBedSites' open() now asks isClearableCover() -- the real one, so a flower counts.
+  vm.runInContext(between(actions, 'const PLACEMENT_KEEP', 'export async function clearCellForPlacement'), c);
   vm.runInContext(between(actions, 'function woolCounts(', 'export const CROP_MAX_AGE'), c);
   return c;
 };
@@ -3718,6 +3720,40 @@ await check('Goal loop: a finished step chains the next tick instead of waiting 
   await c.runGoalTick();
   assert.equal(timers.length, 1, 'nothing ran (no control, night pause): fall back to the interval');
   assert.equal(ran, 2);
+});
+
+// 2026-10-28: shelters left unfinished because flowers (not replaceable, unlike grass) sat in wall
+// cells -- "Server refused to place dirt ... the block is still wildflowers", 20 times per cell.
+await check('Placement: a flower in the target cell is broken first; fluids, crops, fixtures and air are left alone', async () => {
+  const c = vm.createContext({ console: { error() {} }, setTimeout, clearTimeout, Promise,
+    isProtectedBlockName: (n) => n.endsWith('_door') || n.endsWith('_bed') });
+  vm.runInContext(timeoutFn, c); // withTimeout() through simpleSourceFor(): the placement helpers sit inside it
+  const cell = (name, boundingBox = 'empty', diggable = true) => ({ name, boundingBox, diggable });
+  const dug = [];
+  const world = { poppy: cell('wildflowers'), air: cell('air'), water: cell('water'), wheat: cell('wheat'),
+    door: cell('oak_door', 'block'), torch: cell('oak_door_like_open', 'empty', false), stone: cell('stone', 'block') };
+  const bot = { username: 'Babs', blockAt: (p) => world[p], dig: async (b) => { dug.push(b.name); }, stopDigging() {} };
+  for (const key of Object.keys(world)) await c.clearCellForPlacement(bot, key);
+  assert.deepEqual(dug, ['wildflowers'], 'only the ground cover is dug');
+  assert.equal(c.isClearableCover(cell('poppy')), true);
+  assert.equal(c.isClearableCover(cell('short_grass')), true, 'grass too -- harmless, it breaks instantly');
+});
+
+await check('Placement: every shelter, door, bed and fill placement clears its cell before placing', async () => {
+  const caseSrc = (name) => between(actions, `    case "${name}": {`, '\n    case "');
+  const before = (src, clear, place, what) =>
+    assert(src.indexOf(clear) >= 0 && src.indexOf(clear) < src.indexOf(place), what);
+  for (const name of ['build', 'build_communal_shelter', 'patch_shelter']) {
+    before(caseSrc(name), 'clearCellForPlacement(bot, pos)', 'bot.placeBlock(refBlock, face)', `${name}: walls`);
+  }
+  for (const name of ['build', 'build_communal_shelter']) {
+    before(caseSrc(name), 'clearCellForPlacement(bot, doorPos.offset(0, 1, 0))', 'bot.placeBlock(floorBelow', `${name}: both door cells`);
+  }
+  const bed = caseSrc('place_bed');
+  before(bed, 'clearCellForPlacement(bot, candidate.head)', 'bot.placeBlock(bot.blockAt(candidate.foot', 'place_bed: both bed cells');
+  before(caseSrc('place'), 'clearCellForPlacement(bot, referenceBlock.position', 'bot.placeBlock(referenceBlock', 'place');
+  assert.match(between(actions, 'export function findBedSites(', 'const solid'), /isClearableCover\(b\)/,
+    'a flowery room still offers bed sites');
 });
 
 console.log(`${passed} unit checks passed.`);

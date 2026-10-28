@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.22.0
+**Version:** 2.23.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -192,7 +192,11 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   its defaults, and she pillared up inside her own shelter), and the goal is done only when
   `hasShelterNearHome()` -- which now looks 2 blocks above and below spawn height, and rings
   outward up to `BUILDER_PRIORITY_RADIUS` in lockstep with `findShelterSite`'s own wider search,
-  so a shelter built beyond the old 4-block window is still recognized -- sees it.
+  so a shelter built beyond the old 4-block window is still recognized -- sees it. **Ground cover
+  is cleared, not built around** (2026-10-28): flowers aren't replaceable the way grass is, and the
+  server refused every wall, door and bed cell that held one. Every placement breaks a non-solid,
+  diggable block in its target cell first (`clearCellForPlacement`), leaving fluids, fire, crops
+  and protected fixtures alone; `findBedSites` treats that same cover as open.
 
 **DONE is never accepted on the model's word.** Inventory and world state are re-checked
 (`builderPriorityItemSatisfied()` and friends); a rejected claim logs `REJECTED DONE` /

@@ -1,4 +1,8 @@
-// Version: 1.24.0
+// Version: 1.25.0
+//
+// 1.25.0 (2026-10-28, direct report: shelters left unfinished by flowers): new scenario with poppies
+// on grass in two wall cells, the doorway and every room cell -- the shelter must still seal with a
+// door and the room still take a bed (clearCellForPlacement/isClearableCover, actions.js 1.96.0).
 //
 // 1.24.0 (2026-10-28, direct report: wood gathered "in fits and starts", the block healing between
 // swings): new scenario felling a 4-log trunk in one "mine" with the think window squeezed to 1ms,
@@ -633,6 +637,34 @@ scenario("Shelters: builds a 4x5 shelter from mixed blocks, seals it with a real
   const local = foot.minus(base);
   assert(local.y === 0 && local.x >= 0 && local.x <= 1 && local.z >= 0 && local.z <= 1,
     `the bed landed inside the room, not the door's own row: ${JSON.stringify(local)}`);
+});
+
+// 2026-10-28 (direct report: shelters left unfinished by ground cover). Poppies stand in two wall
+// cells, the doorway and every room cell, each on real grass: flowers are not replaceable, so
+// every one of those placements used to be refused. The shelter must still come out sealed with a
+// real door, and the flowery room must still take a bed.
+scenario("Shelters: flowers in the wall line, doorway and room are cleared, not built around", async () => {
+  await rcon(`give ${TESTER} minecraft:cobblestone 30`, `give ${TESTER} minecraft:dirt 30`, `give ${TESTER} minecraft:oak_planks 20`,
+             `give ${TESTER} minecraft:white_bed`);
+  await waitFor(() => held("cobblestone") >= 30 && held("dirt") >= 30 && held("oak_planks") >= 20 && held("white_bed") >= 1,
+    8000, "blocks, planks and a bed");
+  const base = new Vec3(x - 4, y + 1, z - 4);
+  const flowers = [[-1, 0], [2, 1], [0, 3], [0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]].map(([dx, dz]) => base.offset(dx, 0, dz));
+  await rcon(...flowers.flatMap((p) => [`setblock ${p.x} ${p.y - 1} ${p.z} minecraft:grass_block`,
+                                        `setblock ${p.x} ${p.y} ${p.z} minecraft:poppy`]));
+  await waitFor(() => flowers.every((p) => bot.blockAt(p)?.name === "poppy"), 10_000, "poppies on grass");
+  restoreFloor(); // the grass goes back to sea lantern afterwards
+  const result = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
+  assert.equal(result.built, true, result.text);
+  assert.equal(bot.blockAt(base.offset(-1, 0, 0))?.boundingBox, "block", "the flowered wall cell is filled");
+  assert.match(bot.blockAt(base.offset(0, 0, 3))?.name ?? "", /_door$/, "the flowered doorway got its door");
+
+  const worldSpawn = bot.spawnPoint;
+  bot.spawnPoint = base;
+  scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
+  const bedded = await performAction(bot, { type: "place_bed" }, TESTER);
+  assert.equal(bedded.ok, true, bedded.text);
+  assert.match(bot.blockAt(new Vec3(bedded.bedAt.x, bedded.bedAt.y, bedded.bedAt.z))?.name ?? "", /_bed$/, "a bed stands where the poppies were");
 });
 
 scenario("Builder checklist: a crowded core still finds a shelter site farther out", async () => {

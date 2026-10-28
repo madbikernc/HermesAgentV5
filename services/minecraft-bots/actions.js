@@ -1,4 +1,4 @@
-// Version: 1.95.0
+// Version: 1.96.0
 //
 // 1.94.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
 // furnaces/chests/shelter get built"): four changes.
@@ -1961,6 +1961,35 @@ function withTimeout(promise, ms, onTimeout) {
   return Promise.race([promise.finally(() => clearTimeout(timer)), timeout]);
 }
 
+// Direct report, 2026-10-28 ("she built many shelter structures, but all are incomplete because
+// of... ground cover like flowers"). Confirmed in Babs' journal: the same few cells refused 20
+// times each -- "Server refused to place dirt at (39, 71, -32): the block is still wildflowers"
+// (and poppy). Grass is replaceable, so the server lets a block go straight in over it; flowers
+// are not, and nothing ever cleared them. findShelterSite and place already count a non-solid
+// cell as open (findBedSites wanted pure air, so it now does the same via isClearableCover), so
+// the fix belongs at placement: break whatever
+// non-solid, diggable thing is standing in the target cell first. Air, fluids, protected fixtures
+// (doors, beds, chests...) and crops are left alone -- a crop is someone's farm, not ground cover.
+const PLACEMENT_KEEP = new Set(["water", "lava", "bubble_column", "fire", "soul_fire",
+  "wheat", "carrots", "potatoes", "beetroots"]); // the crops: CROP_MAX_AGE is declared further down
+
+export function isClearableCover(block) {
+  return !!block && block.boundingBox === "empty" && !block.name.endsWith("air") && !!block.diggable &&
+    !PLACEMENT_KEEP.has(block.name) && !isProtectedBlockName(block.name);
+}
+
+export async function clearCellForPlacement(bot, pos) {
+  const block = bot.blockAt(pos);
+  if (!isClearableCover(block)) return false;
+  try {
+    await withTimeout(bot.dig(block, true), 10_000, () => bot.stopDigging());
+    return true;
+  } catch (err) {
+    console.error(`[${bot.username}] couldn't clear the ${block.name} at ${pos}:`, err.message);
+    return false;
+  }
+}
+
 // Direct report, 2026-10-28 ("gathering wood is done in fits and starts -- not enough hacks at
 // the wood occur, she stops, the wood 'heals', she starts again"). Confirmed against
 // mineflayer-pathfinder's own source: while A* is still searching, goto() already walks the
@@ -2643,7 +2672,9 @@ export function findBedSite(bot, home) {
 // standing in the bed's two cells.
 export function findBedSites(bot, home) {
   const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
-  const open = (p) => { const b = bot.blockAt(p); return !!b && b.name === "air"; };
+  // 2026-10-28: a flower or grass tuft counts as open -- place_bed clears it first
+  // (clearCellForPlacement), and a meadow shelter room is full of them.
+  const open = (p) => { const b = bot.blockAt(p); return !!b && (b.name === "air" || isClearableCover(b)); };
   const solid = (p) => bot.blockAt(p)?.boundingBox === "block";
   const standable = (p) => solid(p.offset(0, -1, 0)) && open(p) && open(p.offset(0, 1, 0));
   const nearDoor = (p) => BED_DIRS.some(([dx, dz]) => {
@@ -4483,6 +4514,7 @@ async function performActionAs(bot, action, speaker, token) {
       }
 
       try {
+        await clearCellForPlacement(bot, referenceBlock.position.offset(0, 1, 0));
         await bot.placeBlock(referenceBlock, new Vec3(0, 1, 0));
       } catch (err) {
         return fail(`couldn't place the ${action.item}: ${err.message}`);
@@ -4718,6 +4750,7 @@ async function performActionAs(bot, action, speaker, token) {
           if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
         }
         if (token.cancelled) break;
+        await clearCellForPlacement(bot, pos); // a flower in the wall line refuses every placement
 
         let refBlock = null, face = null;
         for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
@@ -4761,6 +4794,8 @@ async function performActionAs(bot, action, speaker, token) {
               // where GoalNear(..., 4) left her standing (a diagonal vector can still round to
               // the wrong cardinal direction).
               await bot.lookAt(new Vec3(bot.entity.position.x, doorPos.y + 1, doorPos.z + 3), true);
+              await clearCellForPlacement(bot, doorPos);
+              await clearCellForPlacement(bot, doorPos.offset(0, 1, 0));
               await bot.placeBlock(floorBelow, new Vec3(0, 1, 0));
               doorPlaced = isDoorway(bot.blockAt(doorPos));
             }
@@ -4829,6 +4864,7 @@ async function performActionAs(bot, action, speaker, token) {
             if (!token.cancelled) bot.pathfinder.setGoal(null);
           }
           if (token.cancelled) break;
+          await clearCellForPlacement(bot, pos);
 
           let refBlock = null, face = null;
           for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
@@ -4918,6 +4954,7 @@ async function performActionAs(bot, action, speaker, token) {
           if (!token.cancelled) bot.pathfinder.setGoal(null);
         }
         if (token.cancelled) break;
+        await clearCellForPlacement(bot, pos);
 
         let refBlock = null, face = null;
         for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
@@ -4955,6 +4992,8 @@ async function performActionAs(bot, action, speaker, token) {
             if (!token.cancelled) {
               await bot.equip(doorItem, "hand");
               await bot.lookAt(new Vec3(bot.entity.position.x, doorPos.y + 1, doorPos.z + 3), true);
+              await clearCellForPlacement(bot, doorPos);
+              await clearCellForPlacement(bot, doorPos.offset(0, 1, 0));
               await bot.placeBlock(floorBelow, new Vec3(0, 1, 0));
               doorPlaced = isDoorway(bot.blockAt(doorPos));
             }
@@ -5029,6 +5068,7 @@ async function performActionAs(bot, action, speaker, token) {
         const current = bot.inventory.items().find((i) => i.name === item.name);
         if (!current) return false;
         try {
+          await clearCellForPlacement(bot, pos);
           await bot.equip(current, "hand");
           await bot.placeBlock(below, new Vec3(0, 1, 0));
           placed++;
@@ -5253,6 +5293,7 @@ async function performActionAs(bot, action, speaker, token) {
         const item = bot.inventory.items().find((i) => i.name === materialName);
         if (!item) break; // ran out mid-fill
         try {
+          await clearCellForPlacement(bot, pos);
           await bot.equip(item, "hand");
           await bot.placeBlock(below, new Vec3(0, 1, 0));
           placed++;
@@ -5891,6 +5932,8 @@ async function performActionAs(bot, action, speaker, token) {
         const bedNow = bot.inventory.items().find((i) => i.name.endsWith("_bed"));
         if (!bedNow) break;
         try {
+          await clearCellForPlacement(bot, candidate.foot);
+          await clearCellForPlacement(bot, candidate.head);
           await bot.equip(bedNow, "hand");
           await bot.placeBlock(bot.blockAt(candidate.foot.offset(0, -1, 0)), new Vec3(0, 1, 0));
         } catch (err) {
