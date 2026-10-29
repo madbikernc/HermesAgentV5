@@ -1,4 +1,4 @@
-// Version: 2.124.0
+// Version: 2.125.0
 //
 // 2.124.0 (2026-10-28) -- direct request: item drop on death is now off (keepInventory), so the
 // old post-death "walk back to where she died" march has nothing left to recover and is removed.
@@ -3432,7 +3432,31 @@ function hasHollowInterior(base) {
 // blind to it -- shelterStep() would then report the build itself ok:true (resetting
 // consecutiveFailures) but done:false forever, a silent infinite loop with no escape, worse than
 // the bounded give-up/re-propose churn that existed before any of this.
-const SHELTER_DETECTION_RINGS = [4, 8, 16, BUILDER_PRIORITY_RADIUS];
+// 2026-10-28 (direct report: "they completed a few shelter buildings, but don't seem to realize
+// they can place a bed"): that exact loop happened anyway -- capping detection at 24 while
+// findShelterSite() searched to 48 left Babs' three finished shelters (~50 blocks out, doors at
+// (41,70,-27), (21,70,-45), (39,71,-35)) invisible: 328 "the shelter is already standing" steps,
+// each ok:true, never done. A full 48-ring block scan is far too slow for this hot path, but a
+// COMPLETE shelter always has a door at doorwayPosition(base), so completeSheltersNearHome() finds
+// doors first (findBlocks, palette-filtered -- cheap) and checks only the shelter each one would
+// close, across findShelterSite's whole SHELTER_SITE_RADIUS. The ring scan stays only for the
+// innermost "damaged, worth repairing" candidate, which has no door to anchor on.
+const SHELTER_SITE_RADIUS = 48;
+
+function completeSheltersNearHome() {
+  if (!bot.spawnPoint) return [];
+  const center = bot.spawnPoint.floored();
+  // findBlocks' maxDistance is a sphere; the site search is a square, so reach its corners and
+  // trim back to the square below.
+  const doors = bot.findBlocks({ point: center, matching: (block) => isDoorway(block),
+    maxDistance: Math.ceil(SHELTER_SITE_RADIUS * Math.SQRT2) + 3, count: 128 });
+  return doors.map((door) => door.offset(0, 0, -3)).filter((base) =>
+    Math.abs(base.x - center.x) <= SHELTER_SITE_RADIUS && Math.abs(base.z - center.z) <= SHELTER_SITE_RADIUS &&
+    Math.abs(base.y - center.y) <= SHELTER_SITE_RADIUS && hasHollowInterior(base) &&
+    shelterGeometryPositions(base).every((pos) => bot.blockAt(pos)?.boundingBox === "block"));
+}
+
+const shelterHasBed = (base) => SHELTER_ROOM.some(([dx, dz]) => bot.isABed(bot.blockAt(base.offset(dx, 0, dz))));
 
 // hasHollowInterior() alone isn't enough to call something "shelter-shaped": it only checks the
 // room's own 4 cells, nothing about walls ever having existed, so an ordinary open-air pocket
@@ -3480,13 +3504,12 @@ function findShelterNearHome() {
   // looked for. Only a complete match short-circuits; a damaged one is remembered as a fallback
   // and the search keeps widening, since a real shelter somewhere is always worth more than a
   // repair candidate.
-  let damagedFallback = null;
-  for (const radius of SHELTER_DETECTION_RINGS) {
-    const found = scanShelterRing(center, radius, radius === SHELTER_DETECTION_RINGS[0]);
-    if (found?.complete) return found;
-    damagedFallback ??= found;
-  }
-  return damagedFallback;
+  // 2026-10-28: complete shelters come from completeSheltersNearHome() (nearest first) -- a bedded
+  // one wins over an empty one, so a bot with a bed already in one shelter isn't sent to another.
+  const complete = completeSheltersNearHome();
+  const best = complete.find(shelterHasBed) ?? complete[0];
+  if (best) return { base: best, complete: true };
+  return scanShelterRing(center, 4, true);
 }
 
 function hasShelterNearHome() {
@@ -3500,9 +3523,7 @@ function hasShelterNearHome() {
 // them. This is the real per-bot check: a complete shelter (same definition as hasShelterNearHome)
 // AND a bed actually standing in one of its own room cells.
 function hasOwnShelterWithBed() {
-  const found = findShelterNearHome();
-  if (!found?.complete) return false;
-  return SHELTER_ROOM.some(([dx, dz]) => bot.isABed(bot.blockAt(found.base.offset(dx, 0, dz))));
+  return completeSheltersNearHome().some(shelterHasBed);
 }
 
 // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1 -- "today's separate 'beds'
@@ -3694,10 +3715,73 @@ function nextSurvivalPriority() {
         "tier: check nearby chests, ask the fleet for spares, or gather materials and craft them.",
     };
   }
+  const upgrade = nextToolUpgrade();
+  if (upgrade && Date.now() >= toolUpgradeRetryAt) {
+    toolUpgradeRetryAt = Date.now() + TOOL_UPGRADE_RETRY_MS;
+    return { name: "tools", directive: `upgrade your tools: craft a ${upgrade.replace("_", " ")}.` };
+  }
+  if (shelterCellsToReface().length && Date.now() >= shelterUpgradeRetryAt) {
+    shelterUpgradeRetryAt = Date.now() + SHELTER_UPGRADE_RETRY_MS;
+    return { name: "shelter_upgrade", directive: "reinforce your home: swap some of its dirt and wood blocks for stone." };
+  }
   return null;
 }
 const SURVIVAL_ARMOR_RETRY_MS = 30 * 60_000;
 let survivalArmorRetryAt = 0;
+
+// Direct request, 2026-10-28 ("their goals should evolve in shelter quality, just like in tools
+// quality... when they have the capability to easily mine stone, tools should be upgraded to
+// stone; when they can smelt metal, tools should upgrade to metal; once they have safe shelter to
+// sleep in, they should gradually replace the earth shelter with stone"). Operator's calls: all
+// five tools, and shelters stop at stone (an iron-block shelter is ~630 ingots). The two lowest
+// Tier 1 items, each behind a retry timer like armor so an upgrade that's stuck (no iron found
+// yet) never crowds out everything below it.
+//
+// Tools: the target tier is what she can make now -- stone once she holds any pickaxe (stone is
+// then minable), iron once she holds a stone-or-better pickaxe (iron ore needs one) AND a usable
+// furnace stands near home. Golden tools rank with wooden: softer than stone, they last no time.
+const UPGRADE_TOOLS = ["pickaxe", "axe", "sword", "shovel", "hoe"];
+const TOOL_RANK = { wooden: 0, golden: 0, stone: 1, iron: 2, diamond: 3, netherite: 4 };
+const TOOL_UPGRADE_RETRY_MS = 20 * 60_000;
+let toolUpgradeRetryAt = 0;
+
+function bestToolRank(tool) {
+  let best = -1;
+  for (const item of bot.inventory.items()) {
+    const m = TOOL_NAME.exec(item.name);
+    if (m && m[2] === tool) best = Math.max(best, TOOL_RANK[m[1]]);
+  }
+  return best;
+}
+
+function toolTargetTier() {
+  const pickaxe = bestToolRank("pickaxe");
+  if (pickaxe < 0) return null; // no pickaxe at all: toolStep's own wooden one comes first
+  return pickaxe >= TOOL_RANK.stone && countUsableNearHome(["furnace"]) >= 1 ? "iron" : "stone";
+}
+
+function nextToolUpgrade() {
+  const tier = toolTargetTier();
+  if (!tier) return null;
+  const tool = UPGRADE_TOOLS.find((name) => bestToolRank(name) < TOOL_RANK[tier]);
+  return tool ? `${tier}_${tool}` : null;
+}
+
+// Shelter: the cells of her own bedded shelter (walls, roof, floor) that aren't stone-tier yet --
+// isCommunalShelterMaterial() is already the codebase's "stone or better building block" test.
+const SHELTER_UPGRADE_RETRY_MS = 20 * 60_000;
+const SHELTER_REFACE_BATCH = 8;
+let shelterUpgradeRetryAt = 0;
+
+function ownBeddedShelter() {
+  return completeSheltersNearHome().find(shelterHasBed) ?? null;
+}
+
+function shelterCellsToReface() {
+  const base = ownBeddedShelter();
+  if (!base) return [];
+  return shelterGeometryPositions(base).filter((pos) => !isCommunalShelterMaterial(bot.blockAt(pos)?.name ?? ""));
+}
 
 // Same hallucinated-DONE problem builderPriorityItemSatisfied() already guards against (a model
 // claiming success the instant an item exists in inventory, regardless of whether the real-world
@@ -3712,6 +3796,7 @@ function survivalPriorityItemSatisfied(name) {
     case "shelter": return hasOwnShelterWithBed();
     case "food": return hasFood();
     case "armor": return [5, 6, 7, 8].filter((slot) => bot.inventory.slots[slot]).length >= 4;
+    case "tools": return !nextToolUpgrade();
     default: return true;
   }
 }
@@ -4277,7 +4362,8 @@ async function completeGoal(goal, why, item = null) {
 const DEDICATED_RUNNER_MAX_CONSECUTIVE_FAILURES = 20;
 const DEDICATED_RUNNER_FARM_TASKS = new Set(["farm", "ranch", "bed", "shelter", "communal_shelter", "tool"]);
 function isDedicatedRunnerGoal(goal) {
-  return DEDICATED_RUNNER_FARM_TASKS.has(goal.farmTask) || goal.survivalPriorityItem === "weapon";
+  return DEDICATED_RUNNER_FARM_TASKS.has(goal.farmTask) ||
+    ["weapon", "tools", "shelter_upgrade"].includes(goal.survivalPriorityItem);
 }
 
 async function failGoalStep(goal, reason) {
@@ -4573,6 +4659,95 @@ async function runToolGoal(goal, takeControl, getHandle, replaced) {
   await failGoalStep(goal, step.text);
 }
 
+// Tier 1 "tools" (2026-10-28, see nextToolUpgrade()): one tool per goal, the first of
+// UPGRADE_TOOLS below the target tier. Material first (cobblestone mined as "stone"; iron as
+// ingots, smelting raw iron she holds before mining more ore), then planks for the sticks (one
+// 2-plank batch makes 4, enough for any single tool, +4 if she has to make the table), then craft.
+const TOOL_HEADS = { pickaxe: 3, axe: 3, sword: 2, shovel: 1, hoe: 2 };
+
+async function upgradeToolsStep(goal, handle) {
+  const item = nextToolUpgrade();
+  if (!item) return { ok: true, text: "my tools are as good as I can make them right now.", done: true };
+  const [tier, tool] = item.split("_");
+  const need = TOOL_HEADS[tool];
+  if (tier === "stone") {
+    const short = need - heldCount((n) => n === "cobblestone");
+    if (short > 0) {
+      return { ...(await performAction(bot, { type: "mine", block: "stone", count: short }, USERNAME, handle)),
+        action: { type: "mine", block: "stone" } };
+    }
+  } else {
+    const short = need - heldCount((n) => n === "iron_ingot");
+    if (short > 0) {
+      const raw = heldCount((n) => n === "raw_iron");
+      if (raw > 0) {
+        return { ...(await performAction(bot, { type: "smelt", item: "iron_ingot", count: Math.min(raw, short) }, USERNAME, handle)),
+          action: { type: "smelt", item: "iron_ingot" } };
+      }
+      return { ...(await performAction(bot, { type: "mine", block: "iron_ore", count: short }, USERNAME, handle)),
+        action: { type: "mine", block: "iron_ore" } };
+    }
+  }
+  const tableType = bot.registry.blocksByName.crafting_table;
+  const tableNear = heldCount((n) => n === "crafting_table") > 0 ||
+    (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
+  if (heldCount((n) => n === "stick") < 2) {
+    const gathering = await gatherPlanks(handle, 2 + (tableNear ? 0 : 4));
+    if (gathering) return gathering;
+  }
+  return { ...(await performAction(bot, { type: "craft", item, count: 1 }, USERNAME, handle)), action: { type: "craft", item } };
+}
+
+async function runUpgradeToolsGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  // One tool per goal: done once the tool it set out for exists (or nothing's left to upgrade).
+  goal.upgradeTarget ??= nextToolUpgrade();
+  const step = await upgradeToolsStep(goal, getHandle());
+  getHandle()?.release();
+  if (step.cancelled || replaced()) return;
+  logStep(goal, `tools: ${step.text}`, step.ok, step.action);
+  console.log(`[${USERNAME}] tool upgrade goal: ${step.text} (ok=${step.ok})`);
+  if (step.done || (goal.upgradeTarget && holdsItem(goal.upgradeTarget))) return completeGoal(goal, "upgraded a tool");
+  if (step.ok) {
+    goal.consecutiveFailures = 0;
+    await saveGoalIfCurrent(goal);
+    return;
+  }
+  await failGoalStep(goal, step.text);
+}
+
+// Tier 1 "shelter_upgrade" (2026-10-28, see shelterCellsToReface()): one batch of up to
+// SHELTER_REFACE_BATCH dirt/wood cells swapped for stone per goal -- "gradually", per the request,
+// and short enough that her shelter is never open for long. Cobblestone first (mined as "stone").
+async function shelterUpgradeStep(goal, handle) {
+  const cells = shelterCellsToReface();
+  if (!cells.length) return { ok: true, text: "my shelter is all stone already.", done: true };
+  const batch = cells.slice(0, SHELTER_REFACE_BATCH);
+  const short = batch.length - communalShelterMaterialCount(bot);
+  if (short > 0) {
+    return { ...(await performAction(bot, { type: "mine", block: "stone", count: short }, USERNAME, handle)),
+      action: { type: "mine", block: "stone" } };
+  }
+  const refaced = await performAction(bot, { type: "reface_shelter", cells: batch }, USERNAME, handle);
+  return { ...refaced, done: refaced.ok && refaced.refaced > 0, action: { type: "reface_shelter" } };
+}
+
+async function runShelterUpgradeGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  const step = await shelterUpgradeStep(goal, getHandle());
+  getHandle()?.release();
+  if (step.cancelled || replaced()) return;
+  logStep(goal, `shelter upgrade: ${step.text}`, step.ok, step.action);
+  console.log(`[${USERNAME}] shelter upgrade goal: ${step.text} (ok=${step.ok})`);
+  if (step.done) return completeGoal(goal, "reinforced the shelter with stone");
+  if (step.ok) {
+    goal.consecutiveFailures = 0;
+    await saveGoalIfCurrent(goal);
+    return;
+  }
+  await failGoalStep(goal, step.text);
+}
+
 async function bedStep(goal, handle) {
   if (bot.inventory.items().some((i) => i.name.endsWith("_bed"))) {
     // 2026-10-27 (direct request: "if exploring, and far away from a known bed listed in world
@@ -4583,7 +4758,7 @@ async function bedStep(goal, handle) {
     // she is instead, once she's genuinely far from BOTH home and any remembered bed.
     let near = null;
     if (bot.spawnPoint && bot.entity.position.distanceTo(bot.spawnPoint) > BUILDER_PRIORITY_RADIUS) {
-      const remembered = await findRememberedLocation("bed").catch(() => null);
+      const remembered = await findRememberedLocation("bed", bot.entity.position).catch(() => null);
       const rememberedIsFar = !remembered || bot.entity.position.distanceTo(remembered) > BUILDER_PRIORITY_RADIUS;
       if (rememberedIsFar) near = bot.entity.position;
     }
@@ -4664,11 +4839,23 @@ async function wantBed() {
 // COMMUNAL_SHELTER_WORDS already had to handle for its own directive text.
 const SHELTER_WORDS = /\b(build(ing)?|mak(e|ing)|set(ting)? up|put(ting)? up|need)\b[^.]*?\bshelter\b|\bshelter\b[^.]*?\b(build(ing)?|mak(e|ing)|set(ting)? up|put(ting)? up|need)\b/i;
 
+// 2026-10-28 (direct report: "they completed a few shelter buildings, but don't seem to realize
+// they can place a bed"): done used to mean "a complete structure exists" -- but the Tier 1 item
+// proposing this goal is hasOwnShelterWithBed(), so a finished, empty shelter completed the goal
+// and the very next proposal re-opened it, forever. Once the structure stands, the goal's second
+// phase puts a bed in it: place one she holds, else bedStep()'s own wool/craft acquisition (its own
+// place branch is unreachable here, same as communalShelterStep's use of it).
 async function shelterStep(goal, handle) {
-  if (hasShelterNearHome()) return { ok: true, text: "there's a shelter at home.", done: true };
+  const found = findShelterNearHome();
+  if (found?.complete) {
+    if (shelterHasBed(found.base)) return { ok: true, text: "my shelter has a bed in it.", done: true };
+    if (!bot.inventory.items().some((i) => i.name.endsWith("_bed"))) return bedStep(goal, handle);
+    const placed = await performAction(bot, { type: "place_bed", near: found.base }, USERNAME, handle);
+    return { ...placed, done: !!placed.bedAt && shelterHasBed(found.base), action: { type: "place_bed" } };
+  }
   if (!bot.spawnPoint) return { ok: false, text: "don't know where home is yet." };
-  const site = goal.shelterAt ? new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z) : findShelterSite(bot, bot.spawnPoint, 48);
-  if (!site) return { ok: false, text: "couldn't find a flat, clear 3x3 spot within 48 blocks of home." };
+  const site = goal.shelterAt ? new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z) : findShelterSite(bot, bot.spawnPoint, SHELTER_SITE_RADIUS);
+  if (!site) return { ok: false, text: `couldn't find a flat, clear 3x3 spot within ${SHELTER_SITE_RADIUS} blocks of home.` };
   goal.shelterAt = { x: site.x, y: site.y, z: site.z };
   const needed = shelterPositions(site).filter((p) => bot.blockAt(p)?.boundingBox !== "block").length;
   const short = needed - shelterMaterialCount(bot);
@@ -4681,8 +4868,15 @@ async function shelterStep(goal, handle) {
     return { ...(await performAction(bot, { type: "mine", block: "dirt", count: short }, USERNAME, handle)),
       action: { type: "mine", block: "dirt" } };
   }
+  // Never done here any more -- the next tick's bed phase (above) finishes the goal. A build that
+  // says it stands but that findShelterNearHome() still can't see is a failure, not a success:
+  // ok:true there is exactly what kept the 328-step loop from ever hitting the failure limit.
   const built = await performAction(bot, { type: "build", at: goal.shelterAt }, USERNAME, handle);
-  return { ...built, done: !!built.built && hasShelterNearHome(), action: { type: "build" } };
+  if (built.built && !findShelterNearHome()?.complete) {
+    return { ...built, ok: false, built: false, text: `${built.text} -- but it doesn't check out as a complete shelter.`,
+      action: { type: "build" } };
+  }
+  return { ...built, action: { type: "build" } };
 }
 
 async function runShelterGoal(goal, takeControl, getHandle, replaced) {
@@ -4692,21 +4886,25 @@ async function runShelterGoal(goal, takeControl, getHandle, replaced) {
   if (step.cancelled || replaced()) return;
   logStep(goal, `shelter: ${step.text}`, step.ok, step.action);
   console.log(`[${USERNAME}] shelter goal: ${step.text} (ok=${step.ok})`);
+  // Only register a note on the tick that actually finished the build (step.built, carried
+  // through from performAction's "build" result, and confirmed by shelterStep) -- not on the bed
+  // phase's ticks, which aren't a new fact worth telling the rest of the fleet about.
+  // 2026-10-27 (direct request: "all resources, including buildable resources, should be
+  // registered to the RAG"): crafting_table/furnace/chest/beehive already get this via
+  // runBuilderPlacement() -- shelter had no equivalent (it's not in CRAFTED_OBJECT_NAMES, and
+  // can't be: it's a multi-block structure, not a single scannable block type).
+  if (step.built && step.ok && goal.shelterAt) {
+    writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a shelter near ` +
+      `(${goal.shelterAt.x}, ${goal.shelterAt.y}, ${goal.shelterAt.z}), as of ${new Date().toISOString()}.` })
+      .catch((err) => console.error(`[${USERNAME}] shelter memory write failed:`, err.message));
+  }
   if (step.done) {
-    // Only register a note on the tick that actually finished the build (step.built, carried
-    // through from performAction's "build" result) -- the OTHER way step.done gets set true,
-    // line 4566's early "there's a shelter at home" shortcut, can fire before goal.shelterAt was
-    // ever set this session, and isn't a new fact worth telling the rest of the fleet about.
-    // 2026-10-27 (direct request: "all resources, including buildable resources, should be
-    // registered to the RAG"): crafting_table/furnace/chest/beehive already get this via
-    // runBuilderPlacement() -- shelter had no equivalent (it's not in CRAFTED_OBJECT_NAMES, and
-    // can't be: it's a multi-block structure, not a single scannable block type).
-    if (step.built && goal.shelterAt) {
-      writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a shelter near ` +
-        `(${goal.shelterAt.x}, ${goal.shelterAt.y}, ${goal.shelterAt.z}), as of ${new Date().toISOString()}.` })
-        .catch((err) => console.error(`[${USERNAME}] shelter memory write failed:`, err.message));
+    if (step.bedAt) {
+      writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a bed near ` +
+        `(${step.bedAt.x}, ${step.bedAt.y}, ${step.bedAt.z}), as of ${new Date().toISOString()}.` })
+        .catch((err) => console.error(`[${USERNAME}] bed memory write failed:`, err.message));
     }
-    return completeGoal(goal, "built a shelter at home");
+    return completeGoal(goal, "built a shelter with a bed in it");
   }
   if (step.ok) {
     goal.consecutiveFailures = 0;
@@ -4834,6 +5032,16 @@ async function goalTick() {
     // 2026-09-25: farm and ranch goals run their actions directly (see runFarmGoal), ahead of the
     // "already holding the target" shortcut and the stored-skill lookup, both of which let a farming
     // goal "finish" without farming.
+    // 2026-10-28: ahead of the text-matched farmTask routing -- "craft a stone pickaxe" would
+    // otherwise match TOOL_WORDS and go to toolStep, which is satisfied by ANY pickaxe.
+    if (goal.survivalPriorityItem === "tools") {
+      await runUpgradeToolsGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    if (goal.survivalPriorityItem === "shelter_upgrade") {
+      await runShelterUpgradeGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
     goal.farmTask ??= farmTaskFor(goal.description);
     if (goal.farmTask === "farm") {
       await runFarmGoal(goal, takeControl, () => handle, replaced);

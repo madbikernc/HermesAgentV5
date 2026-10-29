@@ -1,4 +1,10 @@
-// Version: 1.25.0
+// Version: 1.27.0
+//
+// 1.27.0 (2026-10-28, direct request: shelters evolve earth -> stone): new scenario -- 8 dirt cells of
+// a built shelter swapped for cobblestone by "reface_shelter" (actions.js 1.97.0), shelter left sealed.
+//
+// 1.26.0 (2026-10-28, direct report: finished shelters never got a bed): new scenario -- with no
+// sheep in the arena, 12 string she holds becomes 3 white wool (get_wool, actions.js 1.97.0).
 //
 // 1.25.0 (2026-10-28, direct report: shelters left unfinished by flowers): new scenario with poppies
 // on grass in two wall cells, the doorway and every room cell -- the shelter must still seal with a
@@ -558,6 +564,17 @@ scenario("get_wool: with no sheep anywhere, she wanders to look rather than fail
     "should say she looked, not fail instantly the way the old code did");
 });
 
+scenario("get_wool: string she holds is crafted into wool when no sheep are around", async () => {
+  // 2026-10-28 (direct report: shelters finished, never a bed): no sheep near home on this seed,
+  // 32+ "no sheep nearby" failures each for Babs and Dale, while Babs carried 45 string. Same
+  // sheep-free arena as the scenario above -- the old code can only fail here.
+  await rcon(`give ${TESTER} minecraft:string 12`);
+  await waitFor(() => held("string") >= 12, 8000, "string");
+  const result = await performAction(bot, { type: "get_wool", count: 3 }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  assert(held("white_wool") >= 3, `white wool held: ${held("white_wool")}`);
+});
+
 scenario("Beds: crafts \"bed\" as the colour of the wool she holds", async () => {
   // No crafting table anywhere, as in a fresh world: craft has to make and place one first.
   await rcon(`give ${TESTER} minecraft:red_wool 3`, `give ${TESTER} minecraft:oak_planks 7`);
@@ -665,6 +682,26 @@ scenario("Shelters: flowers in the wall line, doorway and room are cleared, not 
   const bedded = await performAction(bot, { type: "place_bed" }, TESTER);
   assert.equal(bedded.ok, true, bedded.text);
   assert.match(bot.blockAt(new Vec3(bedded.bedAt.x, bedded.bedAt.y, bedded.bedAt.z))?.name ?? "", /_bed$/, "a bed stands where the poppies were");
+});
+
+scenario("Shelters: a dirt shelter's blocks are swapped for stone and it stays sealed", async () => {
+  // Direct request, 2026-10-28 ("once they have safe shelter to sleep in, they should gradually
+  // replace the earth shelter with stone"): "reface_shelter" (actions.js 1.97.0) digs each given
+  // cell and refills it with stone before touching the next.
+  await rcon(`give ${TESTER} minecraft:dirt 64`, `give ${TESTER} minecraft:dirt 20`, `give ${TESTER} minecraft:oak_planks 12`);
+  await waitFor(() => held("dirt") >= 84 && held("oak_planks") >= 12, 8000, "dirt and planks");
+  const base = new Vec3(x - 4, y + 1, z - 4);
+  const built = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
+  assert.equal(built.built, true, built.text);
+  await rcon(`clear ${TESTER} minecraft:dirt`, `give ${TESTER} minecraft:cobblestone 8`);
+  await waitFor(() => held("cobblestone") >= 8 && held("dirt") === 0, 8000, "cobblestone only");
+  const cells = shelterPositions(base).filter((p) => bot.blockAt(p)?.name === "dirt").slice(0, 8);
+  assert.equal(cells.length, 8, "the shelter is dirt to start with");
+  const result = await performAction(bot, { type: "reface_shelter", cells: cells.map((p) => ({ x: p.x, y: p.y, z: p.z })) }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  const stone = cells.filter((p) => bot.blockAt(p)?.name === "cobblestone").length;
+  assert(stone >= 6, `cells now cobblestone: ${stone}/8 (${result.text})`);
+  assert(shelterPositions(base).every((p) => bot.blockAt(p)?.boundingBox === "block"), "no hole left behind");
 });
 
 scenario("Builder checklist: a crowded core still finds a shelter site farther out", async () => {

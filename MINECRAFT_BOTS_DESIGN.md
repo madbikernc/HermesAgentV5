@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.23.0
+**Version:** 2.24.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -158,8 +158,9 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
 - **Bed goals too** (the Builder's "set up more beds", any "craft a bed"): place a held bed with
   `place_bed` (two free, supported cells near home, next to existing beds, facing away from where
   she stands; checked it appeared), else `craft` "bed" in the colour she
-  holds 3 wool of, else wool from a chest (once), else `get_wool` (shear, or hunt a sheep and pick
-  up the drop); before crafting she gets the wood (3 planks, +4 if she must make the table: planks
+  holds 3 wool of, else wool from a chest (once), else `get_wool` (string she holds crafted into
+  white wool first, 4 string each -- spiders drop plenty and some seeds have no sheep near home --
+  then shear, or hunt a sheep and pick up the drop); before crafting she gets the wood (3 planks, +4 if she must make the table: planks
   from held logs, else the nearest tree). The server refuses a bed whose foot cell has someone in
   it, and the fleet crowds spawn, so `place_bed` skips occupied spots and tries up to 4 spots
   instead of retrying one. It prefers a spot under a roof (the shelter room, even when that sits on
@@ -174,7 +175,10 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   own 32-block search comes up empty, it falls back to `findRememberedLocation("bed")` + a travel
   hop, the same local-then-remembered pattern `mine`/`craft` already use for crafting_table/
   furnace -- a bed registered elsewhere on the server is worth a trip, not just a failure.
-  `bedStep()` itself now also builds a brand-new bed **on the spot** rather than forcing a trip
+  Every remembered-spot lookup (beds, tables, furnaces, ore) takes the **nearest** matching note,
+  not the search's first hit, and a spot she reaches and finds empty is forgotten for the rest of
+  that bot's run (`visitRememberedSpot`) -- otherwise one dead note wins every time (2026-10-28:
+  Babs and Dale walked to a gone bed every night). `bedStep()` itself now also builds a brand-new bed **on the spot** rather than forcing a trip
   home, once she's farther than `BUILDER_PRIORITY_RADIUS` from both `bot.spawnPoint` and the
   nearest remembered bed (`place_bed`'s existing `action.near`, added for the communal shelter,
   just never pointed anywhere but home for an individual bed before this).
@@ -189,14 +193,32 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   shelters crowded that tight core, so site-finding then failed forever, correctly, given the
   radius it was allowed to search. `build` mixes any plain building blocks (never
   sand/gravel or functional blocks), builds with pathfinder scaffolding off (dirt and cobblestone are
-  its defaults, and she pillared up inside her own shelter), and the goal is done only when
-  `hasShelterNearHome()` -- which now looks 2 blocks above and below spawn height, and rings
-  outward up to `BUILDER_PRIORITY_RADIUS` in lockstep with `findShelterSite`'s own wider search,
-  so a shelter built beyond the old 4-block window is still recognized -- sees it. **Ground cover
+  its defaults, and she pillared up inside her own shelter). **Done means a bed inside it**
+  (2026-10-28): once the structure is complete, the goal's second phase places a bed she holds in
+  the room, else gets one through `bedStep()`'s wool/craft sequence -- the Tier 1 item that proposes
+  this goal is "her own shelter with a bed in it", so an empty shelter used to finish the goal and
+  get re-proposed forever. Complete shelters are found by their doors (`completeSheltersNearHome`,
+  a cheap `findBlocks` for doors, then the shelter each one would close) across the same 48-block
+  square `findShelterSite` sites them in -- detection used to stop at 24, and Babs' three finished
+  shelters ~50 blocks out were invisible (328 "already standing" steps, each counted a success). A
+  build that reports standing but still isn't detected now counts as a failed step. **Ground cover
   is cleared, not built around** (2026-10-28): flowers aren't replaceable the way grass is, and the
   server refused every wall, door and bed cell that held one. Every placement breaks a non-solid,
   diggable block in its target cell first (`clearCellForPlacement`), leaving fluids, fire, crops
   and protected fixtures alone; `findBedSites` treats that same cover as open.
+- **Tools and shelters improve over time** (direct request, 2026-10-28). Two items at the bottom
+  of the Tier 1 survival ladder, after armor, each behind a 20-minute retry timer so one that's
+  stuck never crowds out the rest. **Tools**: every bot keeps a pickaxe, axe, sword, shovel and
+  hoe at the best tier it can make -- stone once it holds any pickaxe (stone is then minable),
+  iron once it holds a stone pickaxe and a usable furnace stands near home (golden ranks with
+  wooden). One tool per goal (`upgradeToolsStep`): cobblestone mined as "stone", or iron ingots
+  (raw iron she holds smelted first, else iron ore mined), sticks, then craft. Routed by its
+  `survivalPriorityItem` tag ahead of text routing, since "craft a stone pickaxe" would otherwise
+  match the plain any-pickaxe tool goal. **Shelters**: once her own shelter has a bed, its dirt
+  and wood cells are swapped for stone, 8 per goal (`shelterUpgradeStep` +
+  `reface_shelter`: dig one cell, refill it with a stone-tier block, then the next, so the shelter
+  is never open by more than one block). Stone is the last tier, by the operator's call -- an
+  iron-block shelter would be ~630 ingots.
 
 **DONE is never accepted on the model's word.** Inventory and world state are re-checked
 (`builderPriorityItemSatisfied()` and friends); a rejected claim logs `REJECTED DONE` /

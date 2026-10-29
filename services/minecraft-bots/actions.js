@@ -1,4 +1,4 @@
-// Version: 1.96.0
+// Version: 1.97.0
 //
 // 1.94.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
 // furnaces/chests/shelter get built"): four changes.
@@ -1624,17 +1624,45 @@ export function getResourceBlockNames(bot) {
 // reuses an existing convention rather than inventing a new structured schema.
 const MEMORY_POSITION_PATTERN = /near \((-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\)/;
 
-export async function findRememberedLocation(resourceName) {
-  const hits = await searchMemory(`${resourceName} location nearby`, { topK: 5 });
+// Direct report, 2026-10-28 ("why do they keep returning to 24/67/-88?"): every night Babs and
+// Dale walked to a remembered bed at (23, 68, -95) that no longer existed -- 97 failed sleeps in
+// 10 hours -- while a real, noted bed at (-6, 64, -56) sat unused. Two gaps: the FIRST semantic
+// hit won (search rank, not distance), and a spot found empty on arrival was never forgotten, so
+// the same dead note won again on the next try. Now the nearest live hit wins, and
+// visitRememberedSpot() below marks a spot stale once she's been there and still found nothing.
+// In-memory per bot (a restart re-checks each spot once) -- the RAG corpus has no delete.
+const staleRememberedSpots = new Set();
+const rememberedSpotKey = (resourceName, pos) => `${resourceName}@${pos.x},${pos.y},${pos.z}`;
+
+export async function findRememberedLocation(resourceName, from = null) {
+  const hits = await searchMemory(`${resourceName} location nearby`, { topK: 10 });
+  const spots = [];
   for (const hit of hits) {
     // searchMemory is semantic/fuzzy -- a hit about an unrelated resource can still score close
     // enough to come back, so a real substring check on the resource name is worth keeping on
     // top of whatever ranking the search itself already did.
     if (!hit.text || !hit.text.toLowerCase().includes(resourceName.toLowerCase())) continue;
     const match = hit.text.match(MEMORY_POSITION_PATTERN);
-    if (match) return new Vec3(Number(match[1]), Number(match[2]), Number(match[3]));
+    if (!match) continue;
+    const pos = new Vec3(Number(match[1]), Number(match[2]), Number(match[3]));
+    if (!staleRememberedSpots.has(rememberedSpotKey(resourceName, pos))) spots.push(pos);
   }
-  return null;
+  if (from) spots.sort((a, b) => a.distanceTo(from) - b.distanceTo(from));
+  return spots[0] ?? null;
+}
+
+// The local-scan-empty fallback every caller shares: walk to the nearest remembered spot, rescan
+// from there, and forget the spot if the rescan still comes up empty.
+async function visitRememberedSpot(bot, token, resourceName, rescan) {
+  const remembered = await findRememberedLocation(resourceName, bot.entity.position).catch(() => null);
+  if (!remembered) return [];
+  await gotoRememberedSpot(bot, token, remembered);
+  const found = rescan();
+  if (!found.length && !token.cancelled) {
+    staleRememberedSpots.add(rememberedSpotKey(resourceName, remembered));
+    console.log(`[${bot.username}] remembered ${resourceName} at ${remembered} isn't there any more -- forgetting it.`);
+  }
+  return found;
 }
 
 // One bounded hop toward a remembered position, same shape as wanderAndRetryFind's own per-hop
@@ -3439,13 +3467,7 @@ async function performActionAs(bot, action, speaker, token) {
       // when it hits, a direct trip instead of a directionless search. A stale/wrong note just
       // falls through to the exact same wander fallback that already existed, no worse off than
       // before this existed.
-      if (!positions.length) {
-        const remembered = await findRememberedLocation(action.block).catch(() => null);
-        if (remembered) {
-          await gotoRememberedSpot(bot, token, remembered);
-          positions = bot.findBlocks(findOptions);
-        }
-      }
+      if (!positions.length) positions = await visitRememberedSpot(bot, token, action.block, () => bot.findBlocks(findOptions));
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
       if (!positions.length) return fail(`couldn't find any ${action.block} nearby, even after looking around.`);
       // Direct request, 2026-10-07 ("recognize walls around living spaces... do not knock holes
@@ -3593,14 +3615,9 @@ async function performActionAs(bot, action, speaker, token) {
       const REUSABLE_UTILITY_BLOCKS = ["crafting_table", "furnace"];
       if (REUSABLE_UTILITY_BLOCKS.includes(action.item)) {
         const existingType = bot.registry.blocksByName[action.item];
-        let existing = existingType ? bot.findBlocks({ matching: existingType.id, maxDistance: 32, count: 1 }) : [];
-        if (!existing.length) {
-          const remembered = await findRememberedLocation(action.item).catch(() => null);
-          if (remembered) {
-            await gotoRememberedSpot(bot, token, remembered);
-            existing = existingType ? bot.findBlocks({ matching: existingType.id, maxDistance: 32, count: 1 }) : [];
-          }
-        }
+        const findExisting = () => existingType ? bot.findBlocks({ matching: existingType.id, maxDistance: 32, count: 1 }) : [];
+        let existing = findExisting();
+        if (!existing.length) existing = await visitRememberedSpot(bot, token, action.item, findExisting);
         if (existing.length) {
           return ok(`already have a ${action.item} nearby, no need to make another.`);
         }
@@ -3653,18 +3670,13 @@ async function performActionAs(bot, action, speaker, token) {
       let tableBlock = null;
       if (tableWouldHelp) {
         const tableType = bot.registry.blocksByName.crafting_table;
-        let positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
+        const findTables = () => tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
+        let positions = findTables();
         // Direct request, 2026-09-13 ("extend resource sharing memory and scouting to *any*
         // resource or crafted object"): same local-search-first-remembered-location-second
         // pattern "mine" already uses -- a crafting table someone else placed (or one this bot
         // saw earlier and wandered away from) is exactly as worth remembering as an iron vein.
-        if (!positions.length) {
-          const remembered = await findRememberedLocation("crafting_table").catch(() => null);
-          if (remembered) {
-            await gotoRememberedSpot(bot, token, remembered);
-            positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
-          }
-        }
+        if (!positions.length) positions = await visitRememberedSpot(bot, token, "crafting_table", findTables);
         if (!positions.length && action.item !== "crafting_table") {
           // 2026-09-26 (fresh world, live test): with no table anywhere yet, every table recipe --
           // a bed, a pickaxe, fences -- just failed. Make one (2x2, no table needed) and set it down.
@@ -4274,11 +4286,8 @@ async function performActionAs(bot, action, speaker, token) {
         // bed registered elsewhere on the server (runBedGoal's own writeMemoryNote, index.js) is
         // exactly as worth a trip as a remembered resource vein. A stale/wrong note just falls
         // through to the normal "couldn't find a bed nearby" failure below, no worse off.
-        const remembered = await findRememberedLocation("bed").catch(() => null);
-        if (remembered) {
-          await gotoRememberedSpot(bot, token, remembered);
-          candidates = nearbyBeds(bot, null);
-        }
+        // 2026-10-28: ...and is forgotten, so the next attempt tries the next-nearest bed instead.
+        candidates = await visitRememberedSpot(bot, token, "bed", () => nearbyBeds(bot, null));
       }
       if (!candidates.length) return fail("couldn't find a bed nearby.");
 
@@ -4893,6 +4902,77 @@ async function performActionAs(bot, action, speaker, token) {
       if (!placed && left) return fail(`couldn't patch any of the shelter (${left} hole(s) still open).`);
       return { ...(left === 0 ? ok(`patched the shelter (${placed} hole(s) filled).`)
         : fail(`patched part of the shelter: ${placed} filled, ${left} hole(s) still open.`)), built: left === 0 };
+    }
+
+    case "reface_shelter": {
+      // Direct request, 2026-10-28 ("once they have safe shelter to sleep in, they should
+      // gradually replace the earth shelter with stone"): each given wall/roof/floor cell that
+      // isn't stone-tier is dug out and immediately refilled with a stone-tier block
+      // (isCommunalShelterMaterial), one cell at a time, so the shelter is never open by more
+      // than one block. Same no-scaffolding movements as "patch_shelter". A floor cell she is
+      // standing on is skipped -- digging it would drop her into the hole.
+      const cells = (action.cells || []).map((p) => new Vec3(p.x, p.y, p.z));
+      const stone = () => bot.inventory.items().filter((i) => isCommunalShelterMaterial(i.name)).sort((a, b) => b.count - a.count)[0];
+      if (!stone()) return fail("don't have any stone to reinforce the shelter with.");
+
+      const sharedMovements = bot.pathfinder.movements;
+      const buildMovements = Object.assign(Object.create(Object.getPrototypeOf(sharedMovements)), sharedMovements);
+      buildMovements.scafoldingBlocks = [];
+      buildMovements.allow1by1towers = false;
+      buildMovements.canDig = false; // never tunnel through her own walls to reach a cell
+      bot.pathfinder.setMovements(buildMovements);
+
+      let refaced = 0;
+      try {
+        for (const pos of cells) {
+          if (token.cancelled) break;
+          const current = bot.blockAt(pos);
+          if (!current || isCommunalShelterMaterial(current.name) || current.boundingBox !== "block") continue;
+          const item = stone();
+          if (!item) break;
+          try {
+            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
+              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+          } catch {
+            if (token.cancelled) break;
+            continue;
+          } finally {
+            if (!token.cancelled) bot.pathfinder.setGoal(null);
+          }
+          if (token.cancelled) break;
+          if (bot.entity.position.floored().offset(0, -1, 0).equals(pos)) continue;
+          try {
+            await withTimeout(bot.dig(current, true), 10_000, () => bot.stopDigging());
+          } catch (err) {
+            console.error(`reface_shelter: couldn't dig ${current.name} at ${pos}:`, err.message);
+            continue;
+          }
+          let refBlock = null, face = null;
+          for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
+            const neighbor = bot.blockAt(pos.offset(dx, dy, dz));
+            if (neighbor?.boundingBox === "block") { refBlock = neighbor; face = new Vec3(-dx, -dy, -dz); break; }
+          }
+          try {
+            if (!refBlock) throw new Error("no solid neighbour to place against");
+            await bot.equip(item, "hand");
+            await bot.placeBlock(refBlock, face);
+            refaced++;
+          } catch (err) {
+            // The hole she just dug must not stay open: put back whatever plain block she has.
+            console.error(`reface_shelter: placement failed at ${pos}:`, err.message);
+            const fallback = bot.inventory.items().find((i) => isShelterMaterial(i.name));
+            if (refBlock && fallback) {
+              try { await bot.equip(fallback, "hand"); await bot.placeBlock(refBlock, face); } catch { /* checkShelterIntegrity patches it */ }
+            }
+          }
+        }
+      } finally {
+        if (bot.pathfinder.movements === buildMovements) bot.pathfinder.setMovements(sharedMovements);
+      }
+      await refreshGear(bot);
+      if (token.cancelled) return { ...ok(`stopped reinforcing the shelter (${refaced} block(s) swapped for stone).`), refaced };
+      if (!refaced) return { ...fail("couldn't swap any of the shelter's blocks for stone."), refaced };
+      return { ...ok(`reinforced the shelter: ${refaced} block(s) swapped for stone.`), refaced };
     }
 
     case "build_communal_shelter": {
@@ -5852,6 +5932,18 @@ async function performActionAs(bot, action, speaker, token) {
       const want = action.count ?? 3;
       const best = () => Math.max(0, ...Object.values(woolCounts(bot)));
       const startedWith = best();
+      // 2026-10-28 (direct report: shelters finished, never a bed): no sheep anywhere near home on
+      // this seed -- Babs and Dale failed "no sheep nearby" 32+ times each -- while Babs carried 45
+      // string from the spiders she fights every night. Four string craft one white wool (2x2, no
+      // table), so string she already holds comes before a long, often fruitless sheep hunt.
+      const whiteShort = want - (woolCounts(bot).white ?? 0);
+      const string = bot.inventory.items().filter((i) => i.name === "string").reduce((n, i) => n + i.count, 0);
+      if (best() < want && string >= whiteShort * 4) {
+        const crafted = await performActionAs(bot, { type: "craft", item: "white_wool", count: whiteShort }, speaker, token);
+        if (token.cancelled) return ok("stopped gathering wool.");
+        if (best() >= want) return ok(`crafted wool from string: now have ${best()} of one colour.`);
+        console.log(`[${bot.username}] get_wool: crafting wool from string didn't work: ${crafted.text}`);
+      }
       for (let tries = 0; tries < 6 && best() < want && !token.cancelled; tries++) {
         let sheep = Object.values(bot.entities)
           .filter((e) => e.name === "sheep" && e.position.distanceTo(bot.entity.position) <= 32)
