@@ -1,4 +1,4 @@
-// Version: 1.27.0
+// Version: 1.28.0
 //
 // 1.27.0 (2026-10-28, direct request: shelters evolve earth -> stone): new scenario -- 8 dirt cells of
 // a built shelter swapped for cobblestone by "reface_shelter" (actions.js 1.97.0), shelter left sealed.
@@ -682,6 +682,26 @@ scenario("Shelters: flowers in the wall line, doorway and room are cleared, not 
   const bedded = await performAction(bot, { type: "place_bed" }, TESTER);
   assert.equal(bedded.ok, true, bedded.text);
   assert.match(bot.blockAt(new Vec3(bedded.bedAt.x, bedded.bedAt.y, bedded.bedAt.z))?.name ?? "", /_bed$/, "a bed stands where the poppies were");
+});
+
+// 2026-10-28 (direct report: "there are no doors or beds, but she built two"): with no planks,
+// "build" puts up every wall and comes back "no door yet". The shelter goal (index.js 2.126.0) now
+// gets door planks first and, if a shell is left anyway, goes back to it instead of siting a new
+// one -- which only works if "build" on a standing shell just adds the door. That is what this
+// checks in-world; the goal-side logic itself is in unit.test.mjs.
+scenario("Shelters: a doorless shell is finished by building on it again once she has planks", async () => {
+  await rcon(`give ${TESTER} minecraft:dirt 64`, `give ${TESTER} minecraft:dirt 10`);
+  await waitFor(() => held("dirt") >= 74, 8000, "dirt only");
+  const base = new Vec3(x - 4, y + 1, z - 4);
+  const shell = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
+  assert.equal(shell.built, false, shell.text);
+  assert.match(shell.text, /no door yet/, "no planks: a shell with no door");
+  assert(shelterPositions(base).every((p) => bot.blockAt(p)?.boundingBox === "block"), "every wall, roof and floor block is up");
+  await rcon(`give ${TESTER} minecraft:oak_planks 10`);
+  await waitFor(() => held("oak_planks") >= 10, 8000, "planks for a door (and a table)");
+  const finished = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
+  assert.equal(finished.built, true, finished.text);
+  assert.match(bot.blockAt(base.offset(0, 0, 3))?.name ?? "", /_door$/, "the same shell now has its door");
 });
 
 scenario("Shelters: a dirt shelter's blocks are swapped for stone and it stays sealed", async () => {

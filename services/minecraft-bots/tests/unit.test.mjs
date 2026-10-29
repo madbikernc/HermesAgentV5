@@ -1,4 +1,4 @@
-// Version: 1.38.0
+// Version: 1.39.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -2826,8 +2826,10 @@ await check('Shelter goal: a finished shelter gets a bed put in it; a build nobo
   // returned ok:true, 328 times, never tripping the failure limit.
   const calls = [];
   const c = vm.createContext({ Vec3: V3, USERNAME: 'Babs', SHELTER_SITE_RADIUS: 48, console,
-    bot: { spawnPoint: new V3(0, 64, 0), inventory: { items: () => c.held } },
+    bot: { spawnPoint: new V3(0, 64, 0), inventory: { items: () => c.held }, blockAt: () => null },
     held: [], found: null, bedded: false, buildResult: null,
+    // The door check (2026-10-28) is its own test below -- here the doorway already has one.
+    isDoorway: () => true, doorwayPosition: (b) => b.offset(0, 0, 3), unfinishedShelterNearHome: () => null,
     findShelterNearHome: () => c.found, shelterHasBed: () => c.bedded,
     bedStep: async () => ({ ok: true, text: 'got wool.', action: { type: 'get_wool' } }),
     findShelterSite: () => new V3(41, 65, -30), shelterPositions: () => [], shelterMaterialCount: () => 0,
@@ -2854,6 +2856,79 @@ await check('Shelter goal: a finished shelter gets a bed put in it; a build nobo
   step = await c.shelterStep({ shelterAt: { x: 41, y: 65, z: -30 } }, null);
   assert.equal(step.ok, false, 'built but undetectable is a failure, so the goal can give up');
   assert.equal(step.built, false, 'and no "Built a shelter" note for something nobody can find');
+});
+
+await check('Shelters: a doorless shell near home is found again, not abandoned for a new site', async () => {
+  // 2026-10-28 (direct report: "there are no doors or beds, but she built two"): a shell with no
+  // door is invisible to the door-anchored complete-shelter search, so each new shelter goal
+  // built another one.
+  const s = shelterFns();
+  const shellBot = (cells, solidExtra = []) => {
+    const solid = new Set([...cells, ...solidExtra].map((p) => `${p.x},${p.y},${p.z}`));
+    return { spawnPoint: new V3(0, 64, 0), isABed: () => false, findBlocks: () => [],
+      blockAt: (p) => ({ name: 'x', boundingBox: p.y <= 64 || solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' }) };
+  };
+  const find = (bot) => {
+    const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24 });
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+    return h.unfinishedShelterNearHome();
+  };
+  const far = new V3(41, 65, -30), near = new V3(10, 65, 0);
+  const farShell = s.shelterPositions(far), nearShell = s.shelterPositions(near);
+  assert.equal(find(shellBot([])), null, 'open ground is not a shell');
+  assert.equal(JSON.stringify(find(shellBot(farShell))), JSON.stringify(far), 'a doorless shell 41/30 blocks out is found');
+  assert.equal(JSON.stringify(find(shellBot([...farShell, ...nearShell]))), JSON.stringify(near), 'the nearest of two shells wins');
+  assert.equal(JSON.stringify(find(shellBot(farShell.slice(5)))), JSON.stringify(far), 'a few blocks short still counts -- the build fills them');
+  assert.equal(find(shellBot(farShell.slice(20))), null, 'a third of it missing is not a shell');
+  const door = s.doorwayPosition(far);
+  assert.equal(find(shellBot(farShell, [door, door.offset(0, 1, 0)])), null, 'a solid block where the door goes is a closed box, not her shell');
+});
+
+await check('Shelter goal: a door is secured before the walls, and an unfinished shell is reused', async () => {
+  // 2026-10-28: "build" crafted its door first but swallowed the failure -- with no planks Babs
+  // put up all 60 wall blocks, then "no door yet" in ~5ms a tick until the goal gave up 40s later.
+  const calls = [];
+  const c = vm.createContext({ Vec3: V3, USERNAME: 'Babs', SHELTER_SITE_RADIUS: 48, console,
+    bot: { spawnPoint: new V3(0, 64, 0), inventory: { items: () => c.held }, blockAt: () => null,
+      registry: { blocksByName: { crafting_table: { id: 1 } } }, findBlocks: () => (c.tableNear ? [new V3(0, 64, 0)] : []) },
+    held: [], tableNear: false, shell: null, siteCalls: 0, materials: 0,
+    isDoorway: () => false, doorwayPosition: (b) => b.offset(0, 0, 3), heldCount: (fn) => c.held.filter((i) => fn(i.name)).reduce((n, i) => n + i.count, 0),
+    findShelterNearHome: () => null, unfinishedShelterNearHome: () => c.shell,
+    findShelterSite: () => { c.siteCalls++; return new V3(5, 65, 5); },
+    shelterPositions: () => Array.from({ length: 60 }, (_, i) => new V3(i, 100, 0)), shelterMaterialCount: () => c.materials,
+    gatherPlanks: async (_handle, count) => {
+      calls.push({ type: 'gatherPlanks', count });
+      return c.held.filter((i) => i.name.endsWith('_planks')).reduce((n, i) => n + i.count, 0) >= count ? null
+        : { ok: true, text: 'gathered wood.', action: { type: 'mine', block: 'oak_log' } };
+    },
+    performAction: async (_bot, action) => { calls.push(action); return { ok: true, text: action.type }; } });
+  vm.runInContext(between(index, 'async function shelterStep(', 'async function runShelterGoal('), c);
+
+  let goal = {};
+  let step = await c.shelterStep(goal, null);
+  assert.equal(calls.at(-1).type, 'gatherPlanks', 'no door and no planks: wood first');
+  assert.equal(calls.at(-1).count, 10, '6 planks for the door, 4 for a table since none is around');
+  assert.ok(!calls.some((a) => a.type === 'build'), 'and no walls go up yet');
+  c.tableNear = true; calls.length = 0;
+  await c.shelterStep(goal, null);
+  assert.equal(calls.at(-1).count, 6, 'a table nearby: just the door\'s 6');
+
+  // 60 wall blocks needed, 60 materials held, 6 of them the door's planks: still 6 short.
+  c.held = [{ name: 'oak_planks', count: 6 }]; c.materials = 60; calls.length = 0;
+  await c.shelterStep(goal, null);
+  assert.equal(calls.at(-1).type, 'mine', 'the door\'s planks are not counted as wall blocks');
+  assert.equal(calls.at(-1).count, 6);
+  c.materials = 66; calls.length = 0;
+  await c.shelterStep(goal, null);
+  assert.equal(calls.at(-1).type, 'build', 'door planks plus a full set of walls: build');
+
+  c.shell = new V3(41, 65, -30); c.siteCalls = 0;
+  goal = {};
+  await c.shelterStep(goal, null);
+  assert.equal(JSON.stringify(goal.shelterAt), JSON.stringify({ x: 41, y: 65, z: -30 }), 'a new shelter goal picks up her unfinished shell');
+  assert.equal(c.siteCalls, 0, 'instead of siting a fresh one');
 });
 
 await check('Remembered spots: the nearest one wins, and one found empty on arrival is forgotten', async () => {
@@ -3041,7 +3116,8 @@ await check('Dedicated runners get a much longer failure leash than the freeform
 await check('Shelters: a shelter goal gets materials (planks from her logs), builds on its site, then puts her bed in it', async () => {
   // 2026-10-28: done is "a bed in the finished shelter" now, not just "it stands" -- see the
   // "Shelter goal: a finished shelter gets a bed" check above.
-  const inv = [{ name: 'oak_log', count: 3 }, { name: 'white_bed', count: 1 }];
+  // A door already held: the door-planks check (2026-10-28) has its own test above.
+  const inv = [{ name: 'oak_log', count: 3 }, { name: 'white_bed', count: 1 }, { name: 'oak_door', count: 1 }];
   let standing = false, bedded = false; const calls = []; const done = [];
   const performAction = async (b, action) => {
     calls.push(action.type + (action.item ? `:${action.item}` : '') + (action.block ? `:${action.block}` : ''));
@@ -3063,6 +3139,7 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
     BREEDING_FOOD: {}, countInPen: () => 0, findPenSite: () => null, woolCounts: () => ({}), bedItemFor: () => 'white_bed',
     findShelterNearHome: () => (standing ? { base: new V3(1, 64, 1), complete: true } : null), shelterHasBed: () => bedded,
     findShelterSite: () => new V3(1, 64, 1), shelterPositions: s.shelterPositions,
+    unfinishedShelterNearHome: () => null, isDoorway: () => false, doorwayPosition: s.doorwayPosition,
     shelterMaterialCount: (b) => b.inventory.items().filter((i) => /_(planks|log)$/.test(i.name)).reduce((n, i) => n + i.count, 0),
     // 2026-10-27: runShelterGoal now registers a RAG note on completion (writeMemoryNote,
     // longterm.js) -- stubbed here same as every other cross-module function this context

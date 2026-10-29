@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.25.0
+**Version:** 2.26.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -201,7 +201,14 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   a cheap `findBlocks` for doors, then the shelter each one would close) across the same 48-block
   square `findShelterSite` sites them in -- detection used to stop at 24, and Babs' three finished
   shelters ~50 blocks out were invisible (328 "already standing" steps, each counted a success). A
-  build that reports standing but still isn't detected now counts as a failed step. **Ground cover
+  build that reports standing but still isn't detected now counts as a failed step. **The door comes
+  first, and an unfinished shell is finished, not abandoned** (2026-10-28): `build` crafts its door
+  before the walls but never reported that craft failing, so with no planks Babs put up all 60
+  blocks, came back "no door yet" in ~5ms a tick, and gave up 40 seconds later; the next shelter
+  goal, seeing no door to anchor on, sited and built a second shell. `shelterStep` now gathers a
+  door's 6 planks (plus 4 for a table if none is near) before building and holds them back from
+  the wall count, and a new shelter goal first looks for a doorless shell near home
+  (`unfinishedShelterNearHome`, at most 8 blocks missing) and builds on that. **Ground cover
   is cleared, not built around** (2026-10-28): flowers aren't replaceable the way grass is, and the
   server refused every wall, door and bed cell that held one. Every placement breaks a non-solid,
   diggable block in its target cell first (`clearCellForPlacement`), leaving fluids, fire, crops

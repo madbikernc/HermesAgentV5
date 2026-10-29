@@ -1,4 +1,4 @@
-// Version: 2.125.0
+// Version: 2.126.0
 //
 // 2.124.0 (2026-10-28) -- direct request: item drop on death is now off (keepInventory), so the
 // old post-death "walk back to where she died" march has nothing left to recover and is removed.
@@ -3516,6 +3516,39 @@ function hasShelterNearHome() {
   return findShelterNearHome()?.complete === true;
 }
 
+// 2026-10-28 (direct report: "there are no doors or beds, but she built two"): a shell with all
+// its walls/roof/floor but no door is invisible to completeSheltersNearHome() (it anchors on the
+// door), so once a shelter goal gave up, the next one picked a fresh site and built a second
+// shell. Nearest shell within SHELTER_SITE_RADIUS whose doorway is still open (or holds a door)
+// and is missing at most UNFINISHED_SHELL_MAX_MISSING blocks -- the build fills those. Only run
+// once per shelter goal (shelterStep caches its pick in goal.shelterAt), never on the hot tick
+// path; the missing-count bail keeps open air to a handful of block lookups per base.
+const UNFINISHED_SHELL_MAX_MISSING = 8;
+
+function unfinishedShelterNearHome() {
+  if (!bot.spawnPoint) return null;
+  const center = bot.spawnPoint.floored();
+  let best = null, bestDist = Infinity;
+  for (let dx = -SHELTER_SITE_RADIUS; dx <= SHELTER_SITE_RADIUS; dx++) {
+    for (let dz = -SHELTER_SITE_RADIUS; dz <= SHELTER_SITE_RADIUS; dz++) {
+      for (let dy = -2; dy <= 2; dy++) {
+        const dist = Math.hypot(dx, dz) + Math.abs(dy) * 0.5;
+        if (dist >= bestDist) continue;
+        const base = center.offset(dx, dy, dz);
+        if (!hasHollowInterior(base)) continue;
+        const door = bot.blockAt(doorwayPosition(base));
+        if (door?.boundingBox === "block" && !isDoorway(door)) continue;
+        let missing = 0;
+        for (const pos of shelterGeometryPositions(base)) {
+          if (bot.blockAt(pos)?.boundingBox !== "block" && ++missing > UNFINISHED_SHELL_MAX_MISSING) break;
+        }
+        if (missing <= UNFINISHED_SHELL_MAX_MISSING) { best = base; bestDist = dist; }
+      }
+    }
+  }
+  return best;
+}
+
 // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 1 item 2): "her own qualifying shelter,
 // with a bed in it" is a materially stronger claim than hasShelterNearHome() and the fleet's own
 // bed count checked separately -- confirmed live, the two are fully independent, so the fleet can
@@ -4854,11 +4887,28 @@ async function shelterStep(goal, handle) {
     return { ...placed, done: !!placed.bedAt && shelterHasBed(found.base), action: { type: "place_bed" } };
   }
   if (!bot.spawnPoint) return { ok: false, text: "don't know where home is yet." };
-  const site = goal.shelterAt ? new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z) : findShelterSite(bot, bot.spawnPoint, SHELTER_SITE_RADIUS);
+  const site = goal.shelterAt ? new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z)
+    : (unfinishedShelterNearHome() ?? findShelterSite(bot, bot.spawnPoint, SHELTER_SITE_RADIUS));
   if (!site) return { ok: false, text: `couldn't find a flat, clear 3x3 spot within ${SHELTER_SITE_RADIUS} blocks of home.` };
   goal.shelterAt = { x: site.x, y: site.y, z: site.z };
+  // 2026-10-28: the door before the walls. "build" crafts its door first but never reports that
+  // the craft failed, so with no planks it put up every wall, came back "no door yet" in ~5ms
+  // per tick, and burned through the 20-failure limit in 40 seconds. A door is 6 planks, plus 4
+  // for the crafting table if none is around -- and those planks are held back from the wall
+  // count below, or the walls would spend them (planks are shelter material too).
+  const needsDoor = !isDoorway(bot.blockAt(doorwayPosition(site))) &&
+    !bot.inventory.items().some((i) => i.name.endsWith("_door"));
+  let doorPlanks = 0;
+  if (needsDoor) {
+    const tableType = bot.registry.blocksByName.crafting_table;
+    const tableNear = heldCount((n) => n === "crafting_table") > 0 ||
+      (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
+    doorPlanks = 6 + (tableNear ? 0 : 4);
+    const gathering = await gatherPlanks(handle, doorPlanks);
+    if (gathering) return gathering;
+  }
   const needed = shelterPositions(site).filter((p) => bot.blockAt(p)?.boundingBox !== "block").length;
-  const short = needed - shelterMaterialCount(bot);
+  const short = needed - (shelterMaterialCount(bot) - doorPlanks);
   if (short > 0) {
     const log = bot.inventory.items().find((i) => /_(log|stem)$/.test(i.name));
     if (log) {
