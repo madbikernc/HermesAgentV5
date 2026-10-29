@@ -5,4 +5,9 @@ After=network.target hermes-broker.service
 [Service]
 Type=oneshot
 User=pmoney
+# Exit code 2 means "report built fine, fleet is Critical" (hermes-fleet-health.py's
+# CRITICAL_EXIT_CODE) -- not a failure of this job. Without this, systemd marks the unit
+# failed on every Critical day, which hermes-node-health.py's own "Failed units" check then
+# picks back up on the next run, keeping the fleet Critical indefinitely.
+SuccessExitStatus=2
 ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-fleet-health.py

@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.7.0
+# Version: 1.7.1
+#
+# 1.7.1 (2026-10-28) — real self-reinforcing false-Critical loop found live: main() exited 1 on
+# a Critical report, which systemd marks a failed unit; hermes-node-health.py's "Failed units
+# (system)" check then picks that failed unit back up on Sintra's *next* report, keeping
+# fleet_status Critical indefinitely even after the original cause clears -- same shape as the
+# loop already fixed once in 1.1.0, just through systemd unit state instead of _parse_report's rc
+# handling. Moved the Critical-report exit code to CRITICAL_EXIT_CODE (2), leaving 1 reserved for
+# the script actually crashing, and declared 2 a SuccessExitStatus on hermes-fleet-health.service
+# so systemd stops conflating "the report says Critical" with "this job failed to run."
 #
 # 1.7.0 (2026-10-27) — S45, fleetops-ui's new "System status and health" tab: this report was
 # previously only ever emailed, so there was nothing for a UI running elsewhere to read. main()
@@ -114,6 +123,11 @@ EMAIL_TO_NAME = "Fleet Notifications"
 # report. Same directory family as hermes-fleetops-ui.py's own USAGE_DB default.
 FLEET_HEALTH_SNAPSHOT_PATH = os.environ.get(
     "FLEET_HEALTH_SNAPSHOT_PATH", str(Path.home() / ".hermes" / "state" / "fleet-health" / "last-report.json"))
+
+# Reserved separately from exit code 1 (Python's own default on an uncaught exception) so a
+# Critical *report* -- the aggregator ran fine, the fleet itself is unhealthy -- never looks like
+# this script failing to run. hermes-fleet-health.service declares this a SuccessExitStatus.
+CRITICAL_EXIT_CODE = 2
 
 TARGETS = [
     {"label": "Sintra", "kind": "local-identity", "user": "sintra", "hermes_home": "/home/sintra/.hermes",
@@ -389,7 +403,7 @@ def main():
 
     if args.format == "json":
         print(json.dumps(fleet, indent=2))
-        sys.exit(0 if fleet["fleet_status"] != "Critical" else 1)
+        sys.exit(0 if fleet["fleet_status"] != "Critical" else CRITICAL_EXIT_CODE)
 
     text = render_text(fleet)
     print(text)
@@ -399,7 +413,7 @@ def main():
         sent = send_email(subject, text)
         print(f"\nEmail {'sent' if sent else 'FAILED to send'} to {EMAIL_TO}")
 
-    sys.exit(0 if fleet["fleet_status"] != "Critical" else 1)
+    sys.exit(0 if fleet["fleet_status"] != "Critical" else CRITICAL_EXIT_CODE)
 
 
 if __name__ == "__main__":

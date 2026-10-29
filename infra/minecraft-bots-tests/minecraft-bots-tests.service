@@ -13,4 +13,8 @@ WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
 Environment=MB_TEST_SUITE=all
 Environment=MB_TEST_REPORT_DIR=/mnt/hermes-data/minecraft-memory/test-reports
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/tests/run.sh ${MB_TEST_SUITE}
-TimeoutStartSec=30min
+# Bumped from 30min: the 2026-10-28 06:00 run was still in the live phase (hadn't even reached
+# baseline) when systemd killed it at the 30min mark -- the live suite alone has grown past the
+# old budget as more scenarios were added. No exact timing for a full successful run yet; this is
+# a conservative doubling, not a measured figure.
+TimeoutStartSec=60min
