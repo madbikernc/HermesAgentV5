@@ -1,4 +1,4 @@
-// Version: 1.41.0
+// Version: 1.42.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -2958,6 +2958,50 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
   await c.shelterStep(goal, null);
   assert.equal(calls.at(-1).type, 'craft');
   assert.equal(calls.at(-1).count, 8, 'as many planks as two logs make, not all 58 missing');
+});
+
+await check('Inventory: full with no chest at home, she makes and places one; only rotten flesh is ever dropped', async () => {
+  // 2026-10-30: Babs at 36/36 slots with no chest anywhere -- store failed, crafted bed planks had
+  // no slot, mining logs failed. Operator's call: build a chest; drop rotten flesh only to bootstrap.
+  const calls = [], tossed = [];
+  const c = vm.createContext({ USERNAME: 'Babs', INVENTORY_MAIN_HOTBAR_SLOTS: 36, inv: [],
+    bot: { inventory: { items: () => c.inv }, toss: async (type, meta, count) => { tossed.push([type, count]); } },
+    heldCount: (test) => c.inv.filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
+    gatherPlanks: async (_h, count) => (c.inv.some((i) => i.name === 'birch_planks' && i.count >= count) ? null
+      : { ok: true, text: 'mined a log.', action: { type: 'mine' } }),
+    performAction: async (_b, action) => { calls.push(action); return { ok: true, text: action.type }; } });
+  vm.runInContext(between(index, 'async function makeHomeChest(', 'async function checkInventoryFull('), c);
+  const filler = (n) => Array.from({ length: n }, (_, k) => ({ name: `junk${k}`, count: 1 }));
+
+  c.inv = [...filler(33), { name: 'rotten_flesh', type: 900, count: 64 }, { name: 'rotten_flesh', type: 900, count: 7 },
+    { name: 'spruce_planks', count: 2 }];
+  let r = await c.makeHomeChest(null);
+  assert.deepEqual(tossed, [[900, 64], [900, 7]], 'every rotten flesh stack, nothing else');
+  assert.equal(calls.length, 0, 'no other action that step');
+  assert.match(r.text, /dropped 71 rotten flesh/);
+
+  tossed.length = 0;
+  c.inv = [...filler(35), { name: 'bone', count: 34 }];
+  r = await c.makeHomeChest(null);
+  assert.equal(r.ok, false, 'full, no wood, no rotten flesh: nothing dropped');
+  assert.equal(tossed.length, 0);
+
+  c.inv = [...filler(35), { name: 'rotten_flesh', type: 900, count: 9 }, { name: 'oak_log', count: 1 }];
+  r = await c.makeHomeChest(null);
+  assert.equal(tossed.length, 0, 'full but holding a log: no drop, she makes planks from it');
+  assert.equal(r.action.type, 'mine', 'gatherPlanks is asked for the 8 planks');
+
+  c.inv = [...filler(10), { name: 'birch_planks', count: 8 }];
+  await c.makeHomeChest(null);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { type: 'craft', item: 'chest', count: 1 }, '8 planks of one wood: craft the chest');
+
+  c.inv = [...filler(10), { name: 'chest', count: 1 }];
+  await c.makeHomeChest(null);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { type: 'place_home', item: 'chest' }, 'holding a chest: put it down at home');
+
+  const full = between(index, 'async function checkInventoryFull(', 'setInterval(');
+  assert.match(full, /countUsableNearHome\(\["chest"\]\) < 1[\s\S]*makeHomeChest\(handle\)/,
+    'the full-inventory check makes a chest when there is no usable one at home');
 });
 
 await check('Craft: a count is items wanted, not recipe runs', async () => {

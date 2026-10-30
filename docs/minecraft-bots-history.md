@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.27.0
+**Version:** 1.28.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -110,6 +110,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.26.0 | 2026-10-28 | Direct report: Babs built two shelters with no door or bed. `build`'s door craft failed silently (no planks), the goal re-ran the build ~5ms a tick to its 20-failure limit, and the next goal could not see the doorless shell and built another. `shelterStep` (index.js 2.126.0) now gathers door planks first and reserves them from the wall count; new `unfinishedShelterNearHome()` resumes a doorless shell. |
 | 2.27.0 | 2026-10-29 | Babs finished her shell with a door, then failed 14,738 bed crafts overnight: 1 jungle + 1 spruce + 1 birch plank counted as "3 planks". `gatherPlanks` (index.js 2.127.0) counts planks per species and caps plank crafts at what her logs make; `craftItem` (actions.js 1.98.0) converts an item count to recipe runs (it passed items as runs); a carried crafting table is placed instead of crafting another (she had 11); torch crafts scale to coal held. |
 | 2.28.0 | 2026-10-30 | Direct report: Babs still had no shelter with a bed. She crafted two beds and placed them "near" her finished shelter, but both landed in other covered spots nearby, so the shelter stayed bedless. That shelter later stopped checking out as complete and she built a new shell. The new shell then sat at "0 still missing, no door yet" all night because `doorItemFor` picked the first plank stack (2 spruce) over 6 birch. Now `doorItemFor` (actions.js 1.99.0) uses the most-held species, `place_bed` takes `cells`, and `shelterStep` (index.js 2.128.0) passes the room's 6 cells. |
+| 2.29.0 | 2026-10-30 | After 836be43 Babs put her door on (04:22), then stalled with all 36 slots full and no chest near home: crafted bed planks had no slot to land in, and log mining failed ("no defined chest locations"). `checkInventoryFull` (index.js 2.129.0) now runs `makeHomeChest` when no usable chest is near home: 8 planks of one wood, craft a chest, `place_home`. Operator's call: drop only rotten flesh, and only with no free slot and no wood. |
 
 ## services/minecraft-bots/README.md
 
@@ -221,3 +222,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.25.0 | 2026-10-28 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.26.0 row (door planks before walls, unfinished shells resumed). |
 | 1.26.0 | 2026-10-29 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.27.0 row (per-species planks, craft counts as items, carried table placed). |
 | 1.27.0 | 2026-10-30 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.28.0 row (door from the most-held wood, shelter bed restricted to its room). |
+| 1.28.0 | 2026-10-30 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.29.0 row (a full inventory with no chest at home makes one). |

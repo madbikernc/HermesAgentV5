@@ -1,4 +1,4 @@
-// Version: 1.30.0
+// Version: 1.31.0
 //
 // 1.27.0 (2026-10-28, direct request: shelters evolve earth -> stone): new scenario -- 8 dirt cells of
 // a built shelter swapped for cobblestone by "reface_shelter" (actions.js 1.97.0), shelter left sealed.
@@ -721,6 +721,28 @@ scenario("Shelters: a doorless shell is finished by building on it again once sh
   const finished = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
   assert.equal(finished.built, true, finished.text);
   assert.match(bot.blockAt(base.offset(0, 0, 3))?.name ?? "", /_door$/, "the same shell now has its door");
+});
+
+// 2026-10-30: a full inventory with no chest at home makes one (index.js 2.129.0's makeHomeChest):
+// 8 planks of one wood -- here beside a stray stack of another -- a chest crafted with a carried
+// table, then put down at home.
+scenario("Inventory: a chest is crafted from one wood's planks and put down at home", async () => {
+  await rcon(`give ${TESTER} minecraft:spruce_planks 2`, `give ${TESTER} minecraft:birch_planks 8`,
+             `give ${TESTER} minecraft:crafting_table`);
+  await waitFor(() => held("spruce_planks") >= 2 && held("birch_planks") >= 8 && held("crafting_table") >= 1, 8000,
+    "planks of two woods and a table");
+  const crafted = await performAction(bot, { type: "craft", item: "chest", count: 1 }, TESTER);
+  assert.equal(crafted.ok, true, crafted.text);
+  assert.equal(held("chest"), 1, "one chest");
+  assert.equal(held("spruce_planks"), 2, "the stray spruce is untouched");
+  const home = new Vec3(x + 3, y + 1, z + 3);
+  const worldSpawn = bot.spawnPoint;
+  bot.spawnPoint = home;
+  scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
+  const placed = await performAction(bot, { type: "place_home", item: "chest" }, TESTER);
+  assert.equal(placed.ok, true, placed.text);
+  const chest = bot.findBlocks({ matching: (b) => b.name === "chest", point: home, maxDistance: 4, count: 1 });
+  assert.equal(chest.length, 1, "a chest stands at home");
 });
 
 scenario("Shelters: a dirt shelter's blocks are swapped for stone and it stays sealed", async () => {

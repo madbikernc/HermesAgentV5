@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.28.0
+**Version:** 2.29.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -220,7 +220,12 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   species she holds the most planks of. Before that, her two beds placed "near" her finished shelter
   landed in other covered spots nearby, which `findBedSites`' shelter-interior preference had tagged,
   so the shelter stayed bedless. `place_bed` now takes `cells`, and `shelterStep` passes the room's
-  6 cells: a bed goes there or the step fails.
+  6 cells: a bed goes there or the step fails. **A full inventory with no chest at home makes one**
+  (2026-10-30): with the door on, Babs had all 36 slots full and no chest anywhere, so storing
+  failed, the bed's planks had no slot to land in, and log mining failed. `checkInventoryFull` now
+  runs `makeHomeChest` when no usable chest is near home. Each check does one step: gather 8 planks
+  of one wood, craft a chest, then `place_home`. Operator's call: nothing is dropped except rotten
+  flesh, and only when she has no free slot and no wood (she can't pick up a log without a slot).
   **Ground cover
   is cleared, not built around** (2026-10-28): flowers aren't replaceable the way grass is, and the
   server refused every wall, door and bed cell that held one. Every placement breaks a non-solid,

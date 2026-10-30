@@ -1,4 +1,4 @@
-// Version: 2.128.0
+// Version: 2.129.0
 //
 // 2.124.0 (2026-10-28) -- direct request: item drop on death is now off (keepInventory), so the
 // old post-death "walk back to where she died" march has nothing left to recover and is removed.
@@ -6913,10 +6913,48 @@ async function storeSurplusNearHome(reason) {
   }
 }
 
+// 2026-10-30 (direct report: Babs "still can't make a shelter with a bed"): all 36 slots full and
+// no chest near home -- every store failed, the bed's planks were crafted with nowhere to land, and
+// mining logs failed outright. Operator's call: she makes a chest and puts it down at home, one
+// step per check. The only thing ever dropped is rotten flesh, and only when she has no free slot
+// and no wood to make the chest from (she can't pick up a log without a slot).
+async function makeHomeChest(handle) {
+  if (heldCount((n) => n === "chest") > 0) {
+    return performAction(bot, { type: "place_home", item: "chest" }, USERNAME, handle);
+  }
+  const items = bot.inventory.items();
+  const hasWood = items.some((i) => /_(log|stem)$/.test(i.name) ||
+    (i.name.endsWith("_planks") && heldCount((n) => n === i.name) >= 8));
+  if (items.length >= INVENTORY_MAIN_HOTBAR_SLOTS && !hasWood) {
+    const flesh = items.filter((i) => i.name === "rotten_flesh");
+    if (!flesh.length) return { ok: false, text: "inventory full, no chest, no wood, and nothing I'd drop." };
+    let dropped = 0;
+    for (const stack of flesh) {
+      await bot.toss(stack.type, null, stack.count);
+      dropped += stack.count;
+    }
+    return { ok: true, text: `dropped ${dropped} rotten flesh to make room for wood for a chest.` };
+  }
+  const gathering = await gatherPlanks(handle, 8);
+  if (gathering) return gathering;
+  return performAction(bot, { type: "craft", item: "chest", count: 1 }, USERNAME, handle);
+}
+
 async function checkInventoryFull() {
   if (!AUTONOMY_ENABLED || routineBlocked("checkInventoryFull") || bot.isSleeping) return;
   const emptySlots = INVENTORY_MAIN_HOTBAR_SLOTS - bot.inventory.items().length;
   if (emptySlots > INVENTORY_FULL_SLOTS) return;
+  if (bot.spawnPoint && countUsableNearHome(["chest"]) < 1) {
+    const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+    if (!handle) return;
+    try {
+      const result = await makeHomeChest(handle);
+      console.log(`[${USERNAME}] inventory full, no chest at home: ${result.text} (ok=${result.ok})`);
+    } finally {
+      handle.release();
+    }
+    return;
+  }
   await storeSurplusValuables("inventory management");
 }
 
