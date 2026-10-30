@@ -1,4 +1,4 @@
-// Version: 1.40.0
+// Version: 1.41.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -2421,6 +2421,9 @@ await check('Shelters: any mix of plain building blocks; never sand, gravel, val
     'the doorway sits at the lower door cell, excluded from the generic fill above');
   assert.equal(c.doorItemFor({ inventory: { items: () => [{ name: 'spruce_planks', count: 4 }] } }), 'spruce_door');
   assert.equal(c.doorItemFor({ inventory: { items: () => [] } }), 'oak_door', 'no planks held -- defaults to oak');
+  // 2026-10-30: Babs held 2 spruce (first slot) beside 6 birch -- "spruce_door" failed all night.
+  assert.equal(c.doorItemFor({ inventory: { items: () => [{ name: 'spruce_planks', count: 2 }, { name: 'dirt', count: 9 },
+    { name: 'birch_planks', count: 6 }, { name: 'oak_planks', count: 1 }] } }), 'birch_door', 'the wood she has the most planks of');
   const build = actions.slice(actions.indexOf('case "build": {'), actions.indexOf('case "build_pen": {'));
   assert.match(build, /buildMovements\.scafoldingBlocks = \[\];/, 'no scaffolding: she pillared up inside her own shelter');
   assert.match(build, /buildMovements\.allow1by1towers = false;/);
@@ -2840,6 +2843,7 @@ await check('Shelter goal: a finished shelter gets a bed put in it; a build nobo
   // returned ok:true, 328 times, never tripping the failure limit.
   const calls = [];
   const c = vm.createContext({ Vec3: V3, USERNAME: 'Babs', SHELTER_SITE_RADIUS: 48, console,
+    SHELTER_ROOM: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]],
     bot: { spawnPoint: new V3(0, 64, 0), inventory: { items: () => c.held }, blockAt: () => null },
     held: [], found: null, bedded: false, buildResult: null,
     // The door check (2026-10-28) is its own test below -- here the doorway already has one.
@@ -2862,6 +2866,10 @@ await check('Shelter goal: a finished shelter gets a bed put in it; a build nobo
   step = await c.shelterStep({}, null);
   assert.equal(calls.at(-1).type, 'place_bed');
   assert.equal(calls.at(-1).near, c.found.base, 'a held bed goes into that shelter');
+  // 2026-10-30: two of Babs' beds placed "near" her shelter landed in other covered spots.
+  assert.deepEqual(calls.at(-1).cells.map(({ x, z }) => [x - 41, z + 30]), [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]],
+    "and only into that shelter's own room cells");
+  assert(calls.at(-1).cells.every((p) => p.y === 65), "at the room's floor level");
   assert.equal(step.done, true, 'and that finishes the goal');
   assert.equal((await c.shelterStep({}, null)).done, true, 'a bedded shelter is done straight away');
 
@@ -3182,7 +3190,8 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
     // 2026-10-27: runShelterGoal now registers a RAG note on completion (writeMemoryNote,
     // longterm.js) -- stubbed here same as every other cross-module function this context
     // already injects.
-    writeMemoryNote: async () => {}, PERSONA_NAME: 'amy', SHELTER_SITE_RADIUS: 48 });
+    writeMemoryNote: async () => {}, PERSONA_NAME: 'amy', SHELTER_SITE_RADIUS: 48,
+    SHELTER_ROOM: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]] });
   vm.runInContext(farmGoalSrc(), c);
   const goal = { description: 'go home and build a small shelter there', createdAt: Date.now(), consecutiveFailures: 0 };
   for (let i = 0; i < 4 && !done.length; i++) await c.runShelterGoal(goal, async () => true, () => ({ release() {} }), () => false);
@@ -3209,7 +3218,7 @@ await check('Beds: a spot with a bot standing in it is skipped, and a refused sp
   // shelter's own runner passes its site), same shape as "store"'s own -- unset, she still goes
   // "home" exactly as before.
   assert.match(place, /action\.near \? new Vec3\(action\.near\.x, action\.near\.y, action\.near\.z\) : null/);
-  assert.match(place, /findBedSites\(bot, target \?\? bot\.spawnPoint \?\? bot\.entity\.position\)/,
+  assert.match(place, /findBedSites\(bot, target \?\? bot\.spawnPoint \?\? bot\.entity\.position, within\)/,
     'the target, when given, is what findBedSites actually searches around');
 });
 
@@ -3230,6 +3239,30 @@ await check('Beds: the first choice is a spot under a roof -- the shelter room, 
     'foot (0,1) and head (0,2) of the room, standing at (0,0) to place it');
   const atSpawn = c.findBedSites(bot, base)[0]; // spawn inside the shelter, as at the fleet's home
   assert.deepEqual([atSpawn.foot.x, atSpawn.foot.z], [5, 6], 'the room is still used when it sits on spawn');
+});
+
+await check('Beds: given the room cells, a bed goes in that room even when another covered space counts as a shelter', async () => {
+  // 2026-10-30: Babs' shelter goal placed two beds "near" her shelter; both landed in some other
+  // covered space nearby that shelterInteriorsNear tagged, so her room stayed bedless.
+  const c = bedFns();
+  vm.runInContext(between(actions, 'function cellOccupied(', 'export function findBedSite('), c);
+  const s = shelterFns();
+  const base = new V3(5, 64, 5);
+  const walls = new Set(s.shelterPositions(base).map((p) => `${p.x},${p.y},${p.z}`));
+  const bot = { entity: {}, entities: {}, isABed: () => false, findBlocks: () => [],
+    blockAt: (p) => (p.y < 64 || walls.has(`${p.x},${p.y},${p.z}`) ? { name: 'cobblestone', boundingBox: 'block' }
+      : { name: 'air', boundingBox: 'empty' }) };
+  c.shelterInteriorsNear = () => new Set(['0,64,-3', '0,64,-4']); // somewhere else, out in the open
+  const elsewhere = c.findBedSites(bot, base)[0];
+  assert.deepEqual([elsewhere.foot.x, elsewhere.foot.z], [0, -3], 'without the cells, the other space wins');
+  const room = new Set([[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]].map(([dx, dz]) => `${base.x + dx},${base.y},${base.z + dz}`));
+  const sites = c.findBedSites(bot, base, room);
+  assert(sites.length > 0, 'the room has a spot');
+  assert(sites.every((site) => room.has(`${site.foot.x},${site.foot.y},${site.foot.z}`) &&
+    room.has(`${site.head.x},${site.head.y},${site.head.z}`)), 'every spot offered is inside the room');
+  const place = actions.slice(actions.indexOf('case "place_bed": {'), actions.indexOf('case "shear": {'));
+  assert.match(place, /findBedSites\(bot, target \?\? bot\.spawnPoint \?\? bot\.entity\.position, within\)/,
+    'place_bed passes its cells through');
 });
 
 await check('Beds: always placed inside an existing shelter when one has room, else falls back as before', async () => {

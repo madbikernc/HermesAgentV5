@@ -1,4 +1,4 @@
-// Version: 1.29.0
+// Version: 1.30.0
 //
 // 1.27.0 (2026-10-28, direct request: shelters evolve earth -> stone): new scenario -- 8 dirt cells of
 // a built shelter swapped for cobblestone by "reface_shelter" (actions.js 1.97.0), shelter left sealed.
@@ -659,15 +659,16 @@ scenario("Shelters: builds a 4x5 shelter from mixed blocks, seals it with a real
   assert.match(doorBlock?.name ?? "", /_door$/, "a real door seals the doorway, not an open gap");
   assert(held("cobblestone") < 26 && held("dirt") < 26, "both kinds of block were used");
 
-  const worldSpawn = bot.spawnPoint;
-  bot.spawnPoint = base;
-  scenarioCleanup.push(() => { bot.spawnPoint = worldSpawn; });
-  const bedded = await performAction(bot, { type: "place_bed" }, TESTER);
+  // 2026-10-30: the call the shelter goal makes (index.js 2.128.0) -- near the shelter, and only
+  // in its own room cells, with home left where it is.
+  const cells = room.map(({ x: cx, y: cy, z: cz }) => ({ x: cx, y: cy, z: cz }));
+  const bedded = await performAction(bot, { type: "place_bed", near: { x: base.x, y: base.y, z: base.z }, cells }, TESTER);
   assert.equal(bedded.ok, true, bedded.text);
   const foot = new Vec3(bedded.bedAt.x, bedded.bedAt.y, bedded.bedAt.z);
   const local = foot.minus(base);
   assert(local.y === 0 && local.x >= 0 && local.x <= 1 && local.z >= 0 && local.z <= 1,
     `the bed landed inside the room, not the door's own row: ${JSON.stringify(local)}`);
+  assert(room.some((cell) => bot.isABed(bot.blockAt(cell)) && !cell.equals(foot)), "its head is in the room too");
 });
 
 // 2026-10-28 (direct report: shelters left unfinished by ground cover). Poppies stand in two wall
@@ -711,8 +712,12 @@ scenario("Shelters: a doorless shell is finished by building on it again once sh
   assert.equal(shell.built, false, shell.text);
   assert.match(shell.text, /no door yet/, "no planks: a shell with no door");
   assert(shelterPositions(base).every((p) => bot.blockAt(p)?.boundingBox === "block"), "every wall, roof and floor block is up");
-  await rcon(`give ${TESTER} minecraft:oak_planks 10`);
-  await waitFor(() => held("oak_planks") >= 10, 8000, "planks for a door (and a table)");
+  // 2026-10-30: a stray stack of another wood first, as Babs held -- the door is the wood she has
+  // 6+ of, not whichever stack comes first.
+  await rcon(`give ${TESTER} minecraft:spruce_planks 2`);
+  await waitFor(() => held("spruce_planks") >= 2, 8000, "a stray stack of spruce first");
+  await rcon(`give ${TESTER} minecraft:birch_planks 10`);
+  await waitFor(() => held("birch_planks") >= 10, 8000, "planks for a door (and a table)");
   const finished = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
   assert.equal(finished.built, true, finished.text);
   assert.match(bot.blockAt(base.offset(0, 0, 3))?.name ?? "", /_door$/, "the same shell now has its door");

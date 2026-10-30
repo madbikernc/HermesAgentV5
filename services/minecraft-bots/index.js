@@ -1,4 +1,4 @@
-// Version: 2.127.0
+// Version: 2.128.0
 //
 // 2.124.0 (2026-10-28) -- direct request: item drop on death is now off (keepInventory), so the
 // old post-death "walk back to where she died" march has nothing left to recover and is removed.
@@ -4889,7 +4889,10 @@ async function shelterStep(goal, handle) {
   if (found?.complete) {
     if (shelterHasBed(found.base)) return { ok: true, text: "my shelter has a bed in it.", done: true };
     if (!bot.inventory.items().some((i) => i.name.endsWith("_bed"))) return bedStep(goal, handle);
-    const placed = await performAction(bot, { type: "place_bed", near: found.base }, USERNAME, handle);
+    // 2026-10-30: in the room itself, not just near it -- two beds "near" Babs' shelter landed
+    // in other covered spots nearby, and each one sent her off for wool for another.
+    const cells = SHELTER_ROOM.map(([dx, dz]) => found.base.offset(dx, 0, dz)).map(({ x, y, z }) => ({ x, y, z }));
+    const placed = await performAction(bot, { type: "place_bed", near: found.base, cells }, USERNAME, handle);
     return { ...placed, done: !!placed.bedAt && shelterHasBed(found.base), action: { type: "place_bed" } };
   }
   if (!bot.spawnPoint) return { ok: false, text: "don't know where home is yet." };

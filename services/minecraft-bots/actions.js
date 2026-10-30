@@ -1,4 +1,4 @@
-// Version: 1.98.0
+// Version: 1.99.0
 //
 // 1.94.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
 // furnaces/chests/shelter get built"): four changes.
@@ -2701,8 +2701,10 @@ export function findBedSite(bot, home) {
 }
 
 // Every usable spot, best first (next to existing beds, else nearest home), none with anything
-// standing in the bed's two cells.
-export function findBedSites(bot, home) {
+// standing in the bed's two cells. `within` (a Set of posKeys, optional): only spots whose foot
+// and head are both in it -- checked before the shelter preference below, which otherwise can
+// pick some other covered space over the room the caller means.
+export function findBedSites(bot, home, within = null) {
   const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
   // 2026-10-28: a flower or grass tuft counts as open -- place_bed clears it first
   // (clearCellForPlacement), and a meadow shelter room is full of them.
@@ -2741,6 +2743,7 @@ export function findBedSites(bot, home) {
           if (!standable(head) || !standable(stand) || nearDoor(foot) || nearDoor(head)) continue;
           if (chokepoint(foot) || chokepoint(head)) continue; // never block a doorway or a corridor
           if (cellOccupied(bot, foot) || cellOccupied(bot, head)) continue;
+          if (within && !(within.has(posKey(foot)) && within.has(posKey(head)))) continue;
           // Under a roof (a shelter's room) beats anywhere in the open (2026-09-27).
           const covered = solid(foot.offset(0, 3, 0)) && solid(head.offset(0, 3, 0));
           if (nearSpawn && !covered) continue;
@@ -2832,9 +2835,16 @@ export function shelterPositions(base) {
 // oak. A door needs a table (6 planks in a 2x3 shape -- 3 rows exceeds the personal 2x2 grid), but
 // that's craftItem's own concern (via the fixed tableWouldHelp check, actions.js 1.83.1), not this
 // function's.
+// 2026-10-30: the wood she holds the most planks of, not the first stack -- a door is 6 planks of
+// one wood, and Babs' first stack was 2 spruce beside 6 birch, so "craft spruce_door" failed (and
+// "build" said nothing about it) every tick all night.
 export function doorItemFor(bot) {
-  const planks = bot.inventory.items().find((i) => i.name.endsWith("_planks"));
-  const species = planks ? planks.name.replace(/_planks$/, "") : "oak";
+  const counts = {};
+  for (const i of bot.inventory.items()) {
+    if (i.name.endsWith("_planks")) counts[i.name] = (counts[i.name] || 0) + i.count;
+  }
+  const [planks] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] ?? [];
+  const species = planks ? planks.replace(/_planks$/, "") : "oak";
   return `${species}_door`;
 }
 
@@ -5986,6 +5996,10 @@ async function performActionAs(bot, action, speaker, token) {
       // for the communal room doesn't end up scattered wherever findBedSites' generic "nearest
       // covered spot near home" scoring happens to prefer.
       const target = action.near ? new Vec3(action.near.x, action.near.y, action.near.z) : null;
+      // 2026-10-30: action.cells, optional -- the bed must stand in these cells (a shelter goal
+      // passes its own room). Babs placed two beds "near" her shelter that landed elsewhere
+      // nearby, so her shelter stayed bedless and she went for wool for a third.
+      const within = action.cells ? new Set(action.cells.map(posKey)) : null;
       const home = target
         ? await (async () => {
             try {
@@ -6012,7 +6026,7 @@ async function performActionAs(bot, action, speaker, token) {
         // each re-read the world, and a spot that is blocked now may not be on the next pass
         // (someone moves a chest, another bot clears the way) -- unlike a spot the SERVER
         // refused, which is what `tried` is for.
-        const candidate = findBedSites(bot, target ?? bot.spawnPoint ?? bot.entity.position)
+        const candidate = findBedSites(bot, target ?? bot.spawnPoint ?? bot.entity.position, within)
           .find((c) => !tried.some((t) => t.equals(c.foot)) &&
             !wouldBlockAccess(bot, c.foot) && !wouldBlockAccess(bot, c.head) &&
             !isRecentlyRefusedBedSpot(c.foot));
@@ -6047,6 +6061,7 @@ async function performActionAs(bot, action, speaker, token) {
       if (token.cancelled) return ok("stopped placing the bed.");
       if (!site) {
         return fail(tried.length ? `the server refused the bed at ${tried.length} spot(s) near home (${tried.join(", ")}).`
+          : within ? "couldn't find room for a bed inside the shelter's own room."
           : "couldn't find two free, flat blocks in a row near home for a bed.");
       }
       return { ...ok(`placed a ${bedItem.name} at home.`), bedAt: { x: site.foot.x, y: site.foot.y, z: site.foot.z } };

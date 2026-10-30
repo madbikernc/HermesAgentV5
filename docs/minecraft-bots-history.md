@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.26.0
+**Version:** 1.27.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -109,6 +109,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.25.0 | 2026-10-28 | Direct request: re-init the world, wipe the bots' memories, start only Babs. `reinit-world` on dgx-spark (new seed `6974543737104603417`, previous world `firmament-bots.bak-20261028213712`); with every bot stopped, both hosts' `world/`, `bots/`, `achievements/`, `builder-claims/`, `beds/` and spark's `mayor-curriculum.json` tarred to `fresh-start-backup-20261028213807.tar.gz` then removed; 3794 `mc-*` turns (and their `vec_turns` rows, via the rag venv) plus the `minecraft-beds`/`minecraft-builder-claims` agent_state rows exported to `fresh-start-backup-20261028213807-memory.json` then deleted; `minecraft` corpus reindexed (2165 stale sources pruned, now empty); the four gamerules re-applied and confirmed by RCON. Only Babs started; the other eight stay stopped. |
 | 2.26.0 | 2026-10-28 | Direct report: Babs built two shelters with no door or bed. `build`'s door craft failed silently (no planks), the goal re-ran the build ~5ms a tick to its 20-failure limit, and the next goal could not see the doorless shell and built another. `shelterStep` (index.js 2.126.0) now gathers door planks first and reserves them from the wall count; new `unfinishedShelterNearHome()` resumes a doorless shell. |
 | 2.27.0 | 2026-10-29 | Babs finished her shell with a door, then failed 14,738 bed crafts overnight: 1 jungle + 1 spruce + 1 birch plank counted as "3 planks". `gatherPlanks` (index.js 2.127.0) counts planks per species and caps plank crafts at what her logs make; `craftItem` (actions.js 1.98.0) converts an item count to recipe runs (it passed items as runs); a carried crafting table is placed instead of crafting another (she had 11); torch crafts scale to coal held. |
+| 2.28.0 | 2026-10-30 | Direct report: Babs still had no shelter with a bed. She crafted two beds and placed them "near" her finished shelter, but both landed in other covered spots nearby, so the shelter stayed bedless. That shelter later stopped checking out as complete and she built a new shell. The new shell then sat at "0 still missing, no door yet" all night because `doorItemFor` picked the first plank stack (2 spruce) over 6 birch. Now `doorItemFor` (actions.js 1.99.0) uses the most-held species, `place_bed` takes `cells`, and `shelterStep` (index.js 2.128.0) passes the room's 6 cells. |
 
 ## services/minecraft-bots/README.md
 
@@ -219,3 +220,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.24.0 | 2026-10-28 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.25.0 row (world reinit and bot-memory wipe). |
 | 1.25.0 | 2026-10-28 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.26.0 row (door planks before walls, unfinished shells resumed). |
 | 1.26.0 | 2026-10-29 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.27.0 row (per-species planks, craft counts as items, carried table placed). |
+| 1.27.0 | 2026-10-30 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.28.0 row (door from the most-held wood, shelter bed restricted to its room). |

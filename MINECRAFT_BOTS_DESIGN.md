@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.27.0
+**Version:** 2.28.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -214,6 +214,13 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   plank crafts are capped at what her logs make, `craftItem` turns an item count into recipe runs
   (it used to pass the count to `bot.craft()` as runs, asking for 4x the planks/torches and 3x the
   fences), and a table recipe with no table nearby places one she carries before crafting another.
+  **The door is the wood she has most of, and the shelter's bed goes in its room** (2026-10-30):
+  `doorItemFor` took the first plank stack (2 spruce beside 6 birch), so every door craft failed
+  silently and Babs' new shell sat at "0 still missing, no door yet" all night. It now picks the
+  species she holds the most planks of. Before that, her two beds placed "near" her finished shelter
+  landed in other covered spots nearby, which `findBedSites`' shelter-interior preference had tagged,
+  so the shelter stayed bedless. `place_bed` now takes `cells`, and `shelterStep` passes the room's
+  6 cells: a bed goes there or the step fails.
   **Ground cover
   is cleared, not built around** (2026-10-28): flowers aren't replaceable the way grass is, and the
   server refused every wall, door and bed cell that held one. Every placement breaks a non-solid,
