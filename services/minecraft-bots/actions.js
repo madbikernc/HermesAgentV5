@@ -1,4 +1,4 @@
-// Version: 1.97.0
+// Version: 1.98.0
 //
 // 1.94.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
 // furnaces/chests/shelter get built"): four changes.
@@ -2147,7 +2147,11 @@ async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
   if (!recipes.length) {
     throw new Error(`don't have the ingredients${tableBlock ? "" : " (might need a crafting table)"}`);
   }
-  await bot.craft(recipes[0], count, tableBlock ?? undefined);
+  // `count` is items wanted, which is how recipesFor() read it just above -- but bot.craft()'s
+  // count is how many times to run the recipe. Passing it straight through (until 2026-10-29)
+  // asked for 4x the planks, 3x the fences, 4x the torches: "craft 30 planks" with 8 logs passed
+  // the recipesFor check and then failed on the 9th craft, every tick, all afternoon.
+  await bot.craft(recipes[0], Math.ceil(count / recipes[0].result.count), tableBlock ?? undefined);
 }
 
 // Extracted from "loot" (2026-09-06's own real find, see 1.5.0's history) so "store" (2026-09-07,
@@ -3680,7 +3684,11 @@ async function performActionAs(bot, action, speaker, token) {
         if (!positions.length && action.item !== "crafting_table") {
           // 2026-09-26 (fresh world, live test): with no table anywhere yet, every table recipe --
           // a bed, a pickaxe, fences -- just failed. Make one (2x2, no table needed) and set it down.
-          const made = await performActionAs(bot, { type: "craft", item: "crafting_table", count: 1 }, speaker, token);
+          // 2026-10-29: one she already carries goes down first -- Babs had 11 in her pocket, each
+          // made from planks the bed she was crafting then didn't have.
+          const carried = bot.inventory.items().some((i) => i.name === "crafting_table");
+          const made = carried ? { ok: true }
+            : await performActionAs(bot, { type: "craft", item: "crafting_table", count: 1 }, speaker, token);
           if (made.ok && !token.cancelled) {
             const placed = await performActionAs(bot, { type: "place", item: "crafting_table" }, speaker, token);
             if (placed.ok) positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];

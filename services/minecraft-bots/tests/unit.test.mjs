@@ -1,4 +1,4 @@
-// Version: 1.39.0
+// Version: 1.40.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -960,6 +960,20 @@ await check('Resource-gathering override: gatherPlanks crafts from a held log, e
   assert.equal(crafted.action.type, 'craft');
   assert.equal(crafted.action.item, 'spruce_planks');
   assert.deepEqual({ ...calls.at(-1) }, { type: 'craft', item: 'spruce_planks', count: 7 });
+
+  // 2026-10-29: Babs' real pocket -- one plank each of three woods, two dark oak logs. A bed needs
+  // three planks of ONE wood, so that is not "3 planks" (14,738 failed bed crafts overnight).
+  calls = [];
+  bot.inventory.items = () => [{ name: 'jungle_planks', count: 1 }, { name: 'spruce_planks', count: 1 },
+    { name: 'birch_planks', count: 1 }, { name: 'dark_oak_log', count: 2 }];
+  const mixed = await c.gatherPlanks({}, 3);
+  assert.notEqual(mixed, null, 'three planks of three different woods are not three planks');
+  assert.equal(calls.at(-1).item, 'dark_oak_planks', 'her logs become planks of one wood');
+  assert.equal(calls.at(-1).count, 3);
+  calls = [];
+  bot.inventory.items = () => [{ name: 'dark_oak_log', count: 2 }];
+  await c.gatherPlanks({}, 10);
+  assert.equal(calls.at(-1).count, 8, 'never more planks than her logs make -- that failed the whole craft');
 
   calls = [];
   bot.inventory.items = () => [];
@@ -2929,6 +2943,30 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
   await c.shelterStep(goal, null);
   assert.equal(JSON.stringify(goal.shelterAt), JSON.stringify({ x: 41, y: 65, z: -30 }), 'a new shelter goal picks up her unfinished shell');
   assert.equal(c.siteCalls, 0, 'instead of siting a fresh one');
+
+  // 2026-10-29: wall planks from logs asked for every missing block's worth ("craft 60
+  // dark_oak_planks" with 2 logs) and failed the craft every tick.
+  c.held = [{ name: 'oak_door', count: 1 }, { name: 'dark_oak_log', count: 2 }]; c.materials = 2; calls.length = 0;
+  await c.shelterStep(goal, null);
+  assert.equal(calls.at(-1).type, 'craft');
+  assert.equal(calls.at(-1).count, 8, 'as many planks as two logs make, not all 58 missing');
+});
+
+await check('Craft: a count is items wanted, not recipe runs', async () => {
+  // 2026-10-29: craftItem passed its count straight to bot.craft(), which runs the recipe that
+  // many times -- "craft 30 planks" needed 30 logs, and failed with 8.
+  const runs = [];
+  const c = vm.createContext({
+    bot: { registry: { itemsByName: { oak_planks: { id: 1 }, white_bed: { id: 2 }, torch: { id: 3 } } },
+      recipesFor: (id) => [{ result: { count: id === 1 ? 4 : id === 3 ? 4 : 1 } }],
+      craft: async (_recipe, count) => { runs.push(count); } },
+    recipeInputs: () => null, simpleSourceFor: () => null });
+  vm.runInContext(between(actions, 'async function craftItem(', 'function chestObstructed('), c);
+  await c.craftItem(c.bot, 'oak_planks', 3, null);
+  await c.craftItem(c.bot, 'oak_planks', 30, null);
+  await c.craftItem(c.bot, 'white_bed', 1, null);
+  await c.craftItem(c.bot, 'torch', 16, null);
+  assert.equal(JSON.stringify(runs), JSON.stringify([1, 8, 1, 4]), '3 planks is one log, 30 is eight, one bed is one, 16 torches is four');
 });
 
 await check('Remembered spots: the nearest one wins, and one found empty on arrival is forgotten', async () => {
@@ -3951,11 +3989,13 @@ await check('Torches: she tops up from coal she carries, falls back to a chest, 
     USERNAME: 'Babs', AUTONOMY_ENABLED: true, routineBlocked: () => false,
     arbiter: { OWNERS: { ROUTINE: 1 }, requestControl: async () => ({ release() {} }) },
     needsTorches: t.needsTorches, torchCount: t.torchCount, TORCH_CARRY_MIN: vm.runInContext('TORCH_CARRY_MIN', t),
+    heldCount: (test) => inv.filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
     performAction: async (b, a) => { calls.push(a); return reply; } });
   vm.runInContext(between(index, 'const TORCH_SUPPLY_CHECK_MS', 'setInterval(() => {\n  checkTorchSupply'), c);
 
   await c.checkTorchSupply();
   assert.deepEqual(calls.map((a) => `${a.type}:${a.item}`), ['craft:torch'], 'coal and a log on hand: make them');
+  assert.equal(calls[0].count, 16, 'four coal: 16 torches (a craft count is items wanted, 2026-10-29)');
 
   inv = [{ name: 'torch', count: 2 }]; // no coal, no wood
   await c.checkTorchSupply();

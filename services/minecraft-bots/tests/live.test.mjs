@@ -1,4 +1,4 @@
-// Version: 1.28.0
+// Version: 1.29.0
 //
 // 1.27.0 (2026-10-28, direct request: shelters evolve earth -> stone): new scenario -- 8 dirt cells of
 // a built shelter swapped for cobblestone by "reface_shelter" (actions.js 1.97.0), shelter left sealed.
@@ -345,6 +345,20 @@ scenario("MB-08 place_home walks to the spawn point and places the item there", 
   assert.equal(result.ok, true, `place_home result: ${result.text}`);
   const placed = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table.id, point: new Vec3(home.x, home.y, home.z), maxDistance: 4 });
   assert(placed, "a crafting table stands within 4 blocks of home");
+});
+
+// 2026-10-29: a craft count is items wanted -- it used to be passed to bot.craft() as recipe runs,
+// so "3 planks" needed 3 logs and "a bed" with mixed-wood planks never happened.
+scenario("Craft: 3 planks from a single log, then a bed from those planks and 3 wool", async () => {
+  await rcon(`give ${TESTER} minecraft:dark_oak_log 1`, `give ${TESTER} minecraft:white_wool 3`,
+             `give ${TESTER} minecraft:jungle_planks 1`, `give ${TESTER} minecraft:spruce_planks 1`, `give ${TESTER} minecraft:crafting_table`);
+  await waitFor(() => held("dark_oak_log") >= 1 && held("white_wool") >= 3 && held("crafting_table") >= 1, 8000, "a log, wool, odd planks, a table");
+  const planks = await performAction(bot, { type: "craft", item: "dark_oak_planks", count: 3 }, TESTER);
+  assert.equal(planks.ok, true, planks.text);
+  assert.equal(held("dark_oak_planks"), 4, "one log, one run of the recipe, four planks");
+  const bed = await performAction(bot, { type: "craft", item: "white_bed", count: 1 }, TESTER);
+  assert.equal(bed.ok, true, bed.text);
+  assert.equal(held("white_bed"), 1);
 });
 
 scenario("Craft: a table-needing recipe is detected even with the wrong materials in hand, so she uses the real table standing nearby", async () => {
@@ -1098,7 +1112,7 @@ scenario("Torches: she makes some from coal, then trails them down a dark tunnel
   // itself -- shaped recipes, planks into the stick a torch needs -- is pinned by a unit check.
   let made = null;
   for (let attempt = 0; attempt < 3 && !needsTorchesSatisfied(); attempt++) {
-    made = await performAction(bot, { type: "craft", item: "torch", count: 4 }, TESTER);
+    made = await performAction(bot, { type: "craft", item: "torch", count: 16 }, TESTER);
     if (!made.ok) await sleep(1500);
   }
   function needsTorchesSatisfied() { return torchCount(bot) >= TORCH_CARRY_MIN; }

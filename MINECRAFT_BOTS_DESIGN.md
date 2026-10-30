@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.26.0
+**Version:** 2.27.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -208,7 +208,13 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   goal, seeing no door to anchor on, sited and built a second shell. `shelterStep` now gathers a
   door's 6 planks (plus 4 for a table if none is near) before building and holds them back from
   the wall count, and a new shelter goal first looks for a doorless shell near home
-  (`unfinishedShelterNearHome`, at most 8 blocks missing) and builds on that. **Ground cover
+  (`unfinishedShelterNearHome`, at most 8 blocks missing) and builds on that. **Planks are counted
+  per wood, and a craft count is items** (2026-10-29): `gatherPlanks` only counts planks of one
+  species (every plank recipe is single-species; three odd planks failed 14,738 bed crafts),
+  plank crafts are capped at what her logs make, `craftItem` turns an item count into recipe runs
+  (it used to pass the count to `bot.craft()` as runs, asking for 4x the planks/torches and 3x the
+  fences), and a table recipe with no table nearby places one she carries before crafting another.
+  **Ground cover
   is cleared, not built around** (2026-10-28): flowers aren't replaceable the way grass is, and the
   server refused every wall, door and bed cell that held one. Every placement breaks a non-solid,
   diggable block in its target cell first (`clearCellForPlacement`), leaving fluids, fire, crops

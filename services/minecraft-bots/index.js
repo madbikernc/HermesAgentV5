@@ -1,4 +1,4 @@
-// Version: 2.126.0
+// Version: 2.127.0
 //
 // 2.124.0 (2026-10-28) -- direct request: item drop on death is now off (keepInventory), so the
 // old post-death "walk back to where she died" march has nothing left to recover and is removed.
@@ -4565,19 +4565,25 @@ const BED_GOAL = "make myself a bed and place it at home";
 // the exact same reason a bed does) reuses it instead of becoming a second copy. Returns null
 // once she already holds `count` planks (the caller proceeds); otherwise the in-progress
 // gathering step.
+// 2026-10-29: planks of ONE wood, not planks in total -- every plank recipe (bed, door, sticks,
+// table) is one species per craft, so Babs' 1 jungle + 1 spruce + 1 birch read as "3 planks, go
+// ahead" and the bed craft failed "don't have the ingredients" 14,738 times overnight, with two
+// dark oak logs in her pocket that would have made the planks.
 async function gatherPlanks(handle, count) {
-  const planks = heldCount((n) => n.endsWith("_planks"));
-  if (planks >= count) return null;
-  const short = count - planks;
+  const planksOf = (wood) => heldCount((n) => n === `${wood}_planks`);
+  const woods = bot.inventory.items().filter((i) => i.name.endsWith("_planks")).map((i) => i.name.replace(/_planks$/, ""));
+  if (woods.some((wood) => planksOf(wood) >= count)) return null;
   const log = bot.inventory.items().find((i) => /_(log|stem)$/.test(i.name));
   if (log) {
-    const item = `${log.name.replace(/^stripped_/, "").replace(/_(log|stem)$/, "")}_planks`;
-    return { ...(await performAction(bot, { type: "craft", item, count: short }, USERNAME, handle)), action: { type: "craft", item } };
+    const wood = log.name.replace(/^stripped_/, "").replace(/_(log|stem)$/, "");
+    const item = `${wood}_planks`;
+    const want = Math.min(count - planksOf(wood), 4 * heldCount((n) => n === log.name));
+    return { ...(await performAction(bot, { type: "craft", item, count: want }, USERNAME, handle)), action: { type: "craft", item } };
   }
   const tree = bot.findBlocks({ matching: (b) => /_log$/.test(b.name) && !b.name.startsWith("stripped_"), maxDistance: 32, count: 1 })[0];
   if (!tree) return { ok: false, text: "need wood and there's no tree nearby." };
   const block = bot.blockAt(tree).name;
-  return { ...(await performAction(bot, { type: "mine", block, count: Math.ceil(short / 4) }, USERNAME, handle)), action: { type: "mine", block } };
+  return { ...(await performAction(bot, { type: "mine", block, count: Math.ceil(count / 4) }, USERNAME, handle)), action: { type: "mine", block } };
 }
 
 // Direct request, 2026-10-12 (root-caused from a real, confirmed live regression: Luke/Mark's own
@@ -4912,8 +4918,10 @@ async function shelterStep(goal, handle) {
   if (short > 0) {
     const log = bot.inventory.items().find((i) => /_(log|stem)$/.test(i.name));
     if (log) {
+      // Only as many planks as her logs make: asking for more failed the whole craft every tick.
       const item = `${log.name.replace(/^stripped_/, "").replace(/_(log|stem)$/, "")}_planks`;
-      return { ...(await performAction(bot, { type: "craft", item, count: short }, USERNAME, handle)), action: { type: "craft", item } };
+      const count = Math.min(short, 4 * heldCount((n) => n === log.name));
+      return { ...(await performAction(bot, { type: "craft", item, count }, USERNAME, handle)), action: { type: "craft", item } };
     }
     return { ...(await performAction(bot, { type: "mine", block: "dirt", count: short }, USERNAME, handle)),
       action: { type: "mine", block: "dirt" } };
@@ -7103,7 +7111,7 @@ async function lightHomeOnce() {
             `${lootResult.text}), and no fuel+wood on hand to craft one -- skipping for now.`);
           return false;
         }
-        const craftResult = await performAction(bot, { type: "craft", item: "torch", count: 4 }, USERNAME, handle);
+        const craftResult = await performAction(bot, { type: "craft", item: "torch", count: torchBatch() }, USERNAME, handle);
         console.log(`[${USERNAME}] home lighting: crafted torches first -- ${craftResult.text} (ok=${craftResult.ok})`);
         if (!craftResult.ok) return !!craftResult.cancelled;
       }
@@ -7203,6 +7211,10 @@ const TORCH_SUPPLY_CHECK_MS = parseInt(process.env.MC_TORCH_SUPPLY_CHECK_MS || "
 const TORCH_SUPPLY_BACKOFF_MS = 10 * 60_000;
 let torchSupplyBlockedUntil = 0;
 
+// Up to 16 torches, but never more than her coal makes (4 per piece): craft counts are items
+// wanted (actions.js 1.98.0), and asking for more than she can afford fails the whole craft.
+const torchBatch = () => 4 * Math.max(1, Math.min(4, heldCount((n) => n === "coal" || n === "charcoal")));
+
 async function checkTorchSupply() {
   if (!AUTONOMY_ENABLED || routineBlocked("checkTorchSupply") || bot.isSleeping || !bot.entity) return;
   if (Date.now() < torchSupplyBlockedUntil || !needsTorches(bot)) return;
@@ -7215,7 +7227,7 @@ async function checkTorchSupply() {
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
-    const action = fuel && wood ? { type: "craft", item: "torch", count: 4 }
+    const action = fuel && wood ? { type: "craft", item: "torch", count: torchBatch() }
       : { type: "loot", item: "torch", count: TORCH_CARRY_MIN };
     const result = await performAction(bot, action, USERNAME, handle);
     console.log(`[${USERNAME}] torch supply: ${action.type} -- ${result.text} ` +
