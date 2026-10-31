@@ -1,4 +1,4 @@
-// Version: 1.5.0
+// Version: 1.6.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -15,7 +15,10 @@
 // When a behavior fix lands, add the metric that proves it here (see tests/README.md), and after
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
-// Revision History: 1.5.0 | 2026-10-27 | smelt_successes_per_bot_day and
+// Revision History: 1.6.0 | 2026-10-30 | bed_placements_per_bot_day, absent_give_attempts_per_bot_day
+//   hunts_that_fed_per_bot_day and farm_supply_failures_per_bot_day (wrong-way shelter door,
+//   bus-history replay, hunting when starving, the food goal no longer run as a farm).
+// 1.5.0 | 2026-10-27 | smelt_successes_per_bot_day and
 //   shelter_site_failures_per_bot_day (Builder-checklist usability fix + shelter search radius fix).
 // 1.4.0 | 2026-10-22 | unreachable_target_bailouts_per_bot_day (actions.js
 //   1.92.0's noPath burst bailout for the attack action).
@@ -201,6 +204,29 @@ const METRICS = {
     about: "findShelterSite() found nowhere to put a new individual shelter within its search radius",
     better: "lower", tolerance: 0.5, floor: 1,
     value: (c, ctx) => perBotDay(c(/couldn't find a flat, clear 3x3 spot within 48 blocks of home\./), ctx),
+  },
+  // 2026-10-30: a shelter door facing the wrong way kept Babs out of her own room (every bed
+  // placement timed out), replayed bus history had her answering offline bots' item requests, and
+  // starving with empty chests she had nothing left to try.
+  bed_placements_per_bot_day: {
+    about: "beds actually placed -- Babs placed none in a day behind a wrong-way shelter door",
+    better: "higher", tolerance: 0.5, floor: 0.2,
+    value: (c, ctx) => perBotDay(c(/\] OUTCOME \{"type":"place_bed","ok":true/), ctx),
+  },
+  absent_give_attempts_per_bot_day: {
+    about: "gives to a bot not in sight -- mostly stale requests replayed from the bus after a restart",
+    better: "lower", tolerance: 0.5, floor: 2,
+    value: (c, ctx) => perBotDay(c(/\] give result: I can't see \w+ nearby\./), ctx),
+  },
+  hunts_that_fed_per_bot_day: {
+    about: "hunts that brought back food -- 0/day before starving bots could hunt (2026-10-30)",
+    better: "higher", tolerance: 0.5, floor: 0.2,
+    value: (c, ctx) => perBotDay(c(/\] OUTCOME \{"type":"hunt","ok":true/), ctx),
+  },
+  farm_supply_failures_per_bot_day: {
+    about: "farm goals that couldn't get their hoe/seeds -- Babs ran ~90/hour when her food goal was routed as a farm (2026-10-30)",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/\] farm goal: needed \w+ -- .*\(ok=false\)/), ctx),
   },
 };
 

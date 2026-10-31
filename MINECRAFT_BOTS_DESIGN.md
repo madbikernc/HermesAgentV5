@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.29.0
+**Version:** 2.30.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -123,8 +123,10 @@ Python client has mineflayer's maturity.
 | `memory.js` / `buzz.js` / `matrix.js` / `persona.js` / `router.js` | Thin clients, one job each |
 
 **Channels.** Buzz agent `mc-<persona>`, topics `minecraft` and `minecraft-coordination` —
-bot-to-bot only. Matrix room `!2rXcMwykUS2yVNTLGw:spark`, one shared room for every bot and the
-operator — human-facing only. In-game chat feeds the same pipeline as Matrix, tagged by source.
+bot-to-bot only. A (re)started bot starts reading each topic at its newest message (`newestSeq`
+pages through the topic without delivering anything), never at the start of its history. Matrix room `!2rXcMwykUS2yVNTLGw:spark`, one
+shared room for every bot and the operator — human-facing only. In-game chat feeds the same
+pipeline as Matrix, tagged by source.
 
 ## 4. Control flow
 
@@ -191,7 +193,10 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   radius to go up to 48 blocks") -- up to `BOT_USERNAMES.size` individual shelters need room near
   home, and the old fixed radius ran out of space once the crafting table/furnace/chest/earlier
   shelters crowded that tight core, so site-finding then failed forever, correctly, given the
-  radius it was allowed to search. `build` mixes any plain building blocks (never
+  radius it was allowed to search. The door faces through the doorway (north or south,
+  `isShelterDoor`): it is placed looking straight out, without `placeBlock`'s own turn to the
+  floor block, and a door already there facing the wrong way does not make the shelter complete
+  -- `build` digs it out, picks it up and places it again. `build` mixes any plain building blocks (never
   sand/gravel or functional blocks), builds with pathfinder scaffolding off (dirt and cobblestone are
   its defaults, and she pillared up inside her own shelter). **Done means a bed inside it**
   (2026-10-28): once the structure is complete, the goal's second phase places a bed she holds in
@@ -275,8 +280,15 @@ ordering.
 inventory full, inventory insurance, surplus banking, give-requests, saplings, area lighting,
 home lighting, terrain repair, stuck detection, self-defense, sleeping-threat, ripe crops (harvest
 and replant ripe crops within reach of home, never start a farm). With nothing to eat, hunger
-fetches food from a chest (`loot` "food"), then fishes; a failed fetch backs off 5 min instead of
-failing `eat` every 15 s. Hunger escalates to HUNGER_CRITICAL at food ≤ 6. Home lighting runs on one
+fetches food from a chest (`loot` "food"); at food ≤ 6 with none in any chest it hunts (`hunt`:
+cows, pigs, sheep, rabbits within 32 blocks, never a species' last two nearby), and with nothing
+to hunt eats rotten flesh as a last resort; then fishes. A failed fetch backs off 5 min instead of
+failing `eat` every 15 s. Hunger escalates to HUNGER_CRITICAL at food ≤ 6. The Tier 1 food goal
+has its own runner (`foodStep`: hunt, else a ripe crop), routed ahead of the text-matched farm
+routing, which its "harvest a ripe crop" wording would otherwise send to the farm runner and its
+hoe. Self-defense ignores a
+spider in daylight unless it just hurt her. A weapon goal crafts its sword at a table she carries,
+set down beside her (`craft`'s `here`), not at one she has to walk to. Home lighting runs on one
 maintainer (the Builder, or `MC_HOME_LIGHTING`) with exponential backoff. Every check that loses
 its turn to other work is counted and logged as `ROUTINE_SKIPS` every 10 minutes.
 

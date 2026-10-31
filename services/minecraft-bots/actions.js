@@ -1,4 +1,4 @@
-// Version: 1.99.0
+// Version: 1.100.0
 //
 // 1.94.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
 // furnaces/chests/shelter get built"): four changes.
@@ -1289,6 +1289,9 @@ export const FOOD_NAMES = [
   // here with no cooking recipe either -- the food loop never closed. (Raw chicken omitted: poison.)
   "cod", "salmon", "beef", "porkchop", "mutton", "rabbit",
 ];
+// What "hunt" goes after: each drops a raw meat in FOOD_NAMES. Chickens are left out (raw chicken
+// is poison, so it isn't food here).
+export const HUNTABLE_ANIMALS = new Set(["cow", "mooshroom", "pig", "sheep", "rabbit"]);
 
 // Suffix-matched, same convention as equipment.js -- what's worth pulling out of a chest.
 // Food/blocks/misc items are left behind; this is specifically about gearing up.
@@ -2812,6 +2815,14 @@ export const SHELTER_ROOM = [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]];
 // adjacent to the door), and the new row right at the door is free to be her stand-cell -- nearDoor
 // only rules out a bed's own foot/head, never the cell she's merely standing in to place it.
 export function doorwayPosition(base) { return base.offset(0, 0, 3); }
+// 2026-10-30: the doorway is in the room's +z wall, so the way through runs north-south and its
+// door must face north or south. Babs' door at (-221, 64, -92) faced west: closed, it left the
+// way through open; opened, it swung across it, so the pathfinder could never get into the room
+// and every bed placement there timed out.
+export function isShelterDoor(block) {
+  const facing = block?.getProperties?.().facing;
+  return isDoorway(block) && (facing === "north" || facing === "south");
+}
 export function shelterPositions(base) {
   const walls = [];
   for (let dx = -1; dx <= 2; dx++) {
@@ -3686,6 +3697,15 @@ async function performActionAs(bot, action, speaker, token) {
         const tableType = bot.registry.blocksByName.crafting_table;
         const findTables = () => tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
         let positions = findTables();
+        // 2026-10-30: action.here -- an urgent craft (a weapon, with mobs about) puts a carried table
+        // down beside her instead of walking up to 32 blocks to one. Babs' wooden sword was
+        // cancelled ten times in a row on the walk to a table, each time by a mob she had to flee.
+        if (action.here && bot.inventory.items().some((i) => i.name === "crafting_table") &&
+            !positions.some((p) => p.distanceTo(bot.entity.position) <= 4)) {
+          const placed = await performActionAs(bot, { type: "place", item: "crafting_table" }, speaker, token);
+          if (token.cancelled) return ok("stopped setting down a crafting table.");
+          if (placed.ok) positions = findTables(); // nearest first: the one she just put down
+        }
         // Direct request, 2026-09-13 ("extend resource sharing memory and scouting to *any*
         // resource or crafted object"): same local-search-first-remembered-location-second
         // pattern "mine" already uses -- a crafting table someone else placed (or one this bot
@@ -4108,8 +4128,11 @@ async function performActionAs(bot, action, speaker, token) {
       // this file).
       // Review MB-15: best-first by FOOD_NAMES order (cooked before raw), golden apples saved for last
       // -- not whatever inventory slot happens to come first.
-      const eatRank = (name) => (name.includes("golden_apple") ? 1000 : 0) + FOOD_NAMES.indexOf(name);
-      const foodItem = bot.inventory.items().filter((i) => FOOD_NAMES.includes(i.name))
+      // 2026-10-30: action.lastResort also allows rotten flesh -- starving with nothing else, its 4
+      // food points beat its chance of Hunger.
+      const edible = (name) => FOOD_NAMES.includes(name) || (action.lastResort && name === "rotten_flesh");
+      const eatRank = (name) => (name === "rotten_flesh" ? 2000 : 0) + (name.includes("golden_apple") ? 1000 : 0) + FOOD_NAMES.indexOf(name);
+      const foodItem = bot.inventory.items().filter((i) => edible(i.name))
         .sort((a, b) => eatRank(a.name) - eatRank(b.name))[0];
       if (!foodItem) return fail("don't have anything to eat.");
       try {
@@ -4121,6 +4144,31 @@ async function performActionAs(bot, action, speaker, token) {
         if (!token.cancelled) await refreshGear(bot); // consume() leaves the food item held -- get a real weapon back
       }
       return ok(`ate some ${foodItem.name}.`);
+    }
+
+    case "hunt": {
+      // 2026-10-30: Babs sat at food 0 for hours -- every chest near home empty of food, no rod --
+      // with nothing left to try. Raw beef/pork/mutton/rabbit are already edible (FOOD_NAMES).
+      // A species' last two nearby are left alone: they're someone's breeding pair, or will be.
+      const near = (e) => e.position.distanceTo(bot.entity.position) <= 32;
+      const herd = (name) => Object.values(bot.entities).filter((e) => e.name === name && near(e)).length;
+      const prey = () => Object.values(bot.entities)
+        .filter((e) => HUNTABLE_ANIMALS.has(e.name) && near(e) && herd(e.name) > 2)
+        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+      const food = () => bot.inventory.items().filter((i) => FOOD_NAMES.includes(i.name)).reduce((n, i) => n + i.count, 0);
+      const before = food();
+      let sawPrey = false;
+      for (let tries = 0; tries < 3 && food() === before && !token.cancelled; tries++) {
+        const animal = prey();
+        if (!animal) break;
+        sawPrey = true;
+        const got = await performActionAs(bot, { type: "attack", target: animal }, speaker, token);
+        if (token.cancelled) return ok("stopped hunting.");
+        if (!got.ok) continue;
+        await collectDrops(bot, token, [bot.entity.position.clone()], 6000);
+      }
+      if (food() > before) return ok(`hunted: now carrying ${food()} food.`);
+      return fail(sawPrey ? "hunted, but came away with no food." : "no animals to spare nearby to hunt.");
     }
 
     case "fish": {
@@ -4741,8 +4789,30 @@ async function performActionAs(bot, action, speaker, token) {
       // way through" it instead of the cells actually in front of/behind it, so every one of
       // those walls refused to place. (No door held -> craft one; needs a table, which
       // craftItem's own fixed tableWouldHelp check, 1.83.1, already handles finding/making.)
+      // 2026-10-30: correction to (2) -- a door's facing is the way SHE faces as it goes down, not
+      // anything about its neighbours; see the placement below. A door already set in the doorway
+      // the wrong way round comes out first, and goes back in the right way.
       const doorPos = doorwayPosition(base);
-      let doorAlready = isDoorway(bot.blockAt(doorPos));
+      let doorAlready = isShelterDoor(bot.blockAt(doorPos));
+      if (!doorAlready && isDoorway(bot.blockAt(doorPos)) && !token.cancelled) {
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(doorPos.x, doorPos.y, doorPos.z, 3)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+          if (!token.cancelled) await bot.dig(bot.blockAt(doorPos));
+          // Pick the door back up, for the placement below -- its item entity shows up a moment
+          // after dig() resolves, and collectDrops() gives up at once if there's nothing yet.
+          const dropDeadline = Date.now() + 2000;
+          while (Date.now() < dropDeadline && !token.cancelled &&
+                 !Object.values(bot.entities).some((e) => e.name === "item" && e.position.distanceTo(doorPos) <= 2)) {
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          if (!token.cancelled) await collectDrops(bot, token, [doorPos], 6000);
+        } catch (err) {
+          console.error(`build: couldn't take out the wrong-way door at ${doorPos}:`, err.message);
+        } finally {
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+        }
+      }
       if (!doorAlready && !token.cancelled && !bot.inventory.items().some((i) => i.name.endsWith("_door"))) {
         await performActionAs(bot, { type: "craft", item: doorItemFor(bot), count: 1 }, speaker, token);
       }
@@ -4819,12 +4889,19 @@ async function performActionAs(bot, action, speaker, token) {
               // Facing straight out through the doorway (away from the room, +z) -- her OWN x,
               // not doorPos's, so the look vector has zero x component regardless of exactly
               // where GoalNear(..., 4) left her standing (a diagonal vector can still round to
-              // the wrong cardinal direction).
-              await bot.lookAt(new Vec3(bot.entity.position.x, doorPos.y + 1, doorPos.z + 3), true);
+              // the wrong cardinal direction). 2026-10-30: a point +z of HER, not of the door --
+              // GoalNear can leave her farther out than doorPos.z + 3, and looking back at that
+              // point faced her north.
               await clearCellForPlacement(bot, doorPos);
               await clearCellForPlacement(bot, doorPos.offset(0, 1, 0));
-              await bot.placeBlock(floorBelow, new Vec3(0, 1, 0));
-              doorPlaced = isDoorway(bot.blockAt(doorPos));
+              await bot.lookAt(bot.entity.position.offset(0, bot.entity.height, 5), true);
+              // The look only reaches the server on the next physics tick; placed before that, the
+              // door took her old facing (west, from inside the room, in the live test).
+              await bot.waitForTicks(2);
+              // placeBlock turns her to look at the floor block first, undoing the look above --
+              // the door then faced wherever she stood relative to it. forceLook "ignore" keeps it.
+              await bot._placeBlockWithOptions(floorBelow, new Vec3(0, 1, 0), { swingArm: "right", forceLook: "ignore" });
+              doorPlaced = isShelterDoor(bot.blockAt(doorPos));
             }
           } catch (err) {
             console.error(`build: door placement failed at ${doorPos}:`, err.message);
@@ -5089,10 +5166,13 @@ async function performActionAs(bot, action, speaker, token) {
               ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
             if (!token.cancelled) {
               await bot.equip(doorItem, "hand");
-              await bot.lookAt(new Vec3(bot.entity.position.x, doorPos.y + 1, doorPos.z + 3), true);
+              // Same facing fix as "build"'s door (2026-10-30): look +z of her, then place
+              // without placeBlock's own look at the floor.
               await clearCellForPlacement(bot, doorPos);
               await clearCellForPlacement(bot, doorPos.offset(0, 1, 0));
-              await bot.placeBlock(floorBelow, new Vec3(0, 1, 0));
+              await bot.lookAt(bot.entity.position.offset(0, bot.entity.height, 5), true);
+              await bot.waitForTicks(2); // the look reaches the server a tick later (see "build")
+              await bot._placeBlockWithOptions(floorBelow, new Vec3(0, 1, 0), { swingArm: "right", forceLook: "ignore" });
               doorPlaced = isDoorway(bot.blockAt(doorPos));
             }
           } catch (err) {
@@ -6018,6 +6098,7 @@ async function performActionAs(bot, action, speaker, token) {
       // Up to 4 spots, best first: a refusal (someone stepped into it, a stale view) moves on to the
       // next instead of retrying the same one. A bed that appeared despite an error still counts.
       const tried = [];
+      const unreachable = []; // in `tried` too, but never offered to the server
       let site = null;
       for (let attempt = 0; attempt < 4 && !token.cancelled && !site; attempt++) {
         // 2026-10-07: a bed is two solid blocks, so it impedes access exactly like any other
@@ -6037,6 +6118,7 @@ async function performActionAs(bot, action, speaker, token) {
             ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
         } catch {
           if (token.cancelled) return ok("stopped on the way to the bed spot.");
+          unreachable.push(candidate.foot);
           continue; // unreachable -- next spot
         } finally {
           if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
@@ -6060,7 +6142,11 @@ async function performActionAs(bot, action, speaker, token) {
       await refreshGear(bot);
       if (token.cancelled) return ok("stopped placing the bed.");
       if (!site) {
-        return fail(tried.length ? `the server refused the bed at ${tried.length} spot(s) near home (${tried.join(", ")}).`
+        // 2026-10-30: two 90s path timeouts read "the server refused the bed" for hours, with no
+        // refusal ever logged -- the real problem (a door the pathfinder couldn't get through) hid.
+        const refused = tried.filter((t) => !unreachable.includes(t));
+        return fail(refused.length ? `the server refused the bed at ${refused.length} spot(s) near home (${refused.join(", ")}).`
+          : tried.length ? `couldn't reach where she'd stand to place the bed at ${tried.length} spot(s) (${tried.join(", ")}).`
           : within ? "couldn't find room for a bed inside the shelter's own room."
           : "couldn't find two free, flat blocks in a row near home for a bed.");
       }

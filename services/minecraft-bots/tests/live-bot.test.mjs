@@ -1,4 +1,4 @@
-// Version: 1.1.2
+// Version: 1.1.3
 //
 // Full-bot live tests: runs a REAL bot process (index.js, as "MBProbe") against the bot-sandbox
 // server and drives it the way a player would -- whispers from the MBTester bot, restarts, injected
@@ -310,6 +310,9 @@ scenario("Fight-or-flee: at critical health the probe flees two mobs but fights 
     `{NoAI:1b,PersistenceRequired:1b,Health:1000f,attributes:[{id:"minecraft:max_health",base:1000}],Tags:["mbtest"]}`;
   // Each check gets a fresh probe: a flee/fight against a 1000-HP mob can hold the emergency
   // tier for a long time, and a second critical hit would be ignored while it's in flight.
+  // 2026-10-30: killed in cleanup, pass or fail -- these 1000-HP no-AI husks outlive the scenario
+  // otherwise, and the next run's stuck-rescue probe fled one away from home.
+  scenarioCleanup.push(() => rcon(`kill @e[tag=mbtest]`));
   const critical = async (count) => {
     if (probe) await probe.stop();
     await bootProbe(newRoot());
@@ -325,7 +328,6 @@ scenario("Fight-or-flee: at critical health the probe flees two mobs but fights 
   };
   assert.equal(await critical(2), "flee", "outnumbered at critical health");
   assert.equal(await critical(1), "attack", "one melee mob at critical health");
-  await rcon(`kill @e[tag=mbtest]`);
 });
 
 // ---- runner -------------------------------------------------------------------------------------

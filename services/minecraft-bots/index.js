@@ -1,4 +1,4 @@
-// Version: 2.129.0
+// Version: 2.130.0
 //
 // 2.124.0 (2026-10-28) -- direct request: item drop on death is now off (keepInventory), so the
 // old post-death "walk back to where she died" march has nothing left to recover and is removed.
@@ -1719,7 +1719,7 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor, communalShelterPositions, communalDoorwayPosition, findCommunalShelterSite, isCommunalShelterMaterial, communalShelterMaterialCount, isUtilityUsable, findRememberedLocation } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, isShelterDoor, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor, communalShelterPositions, communalDoorwayPosition, findCommunalShelterSite, isCommunalShelterMaterial, communalShelterMaterialCount, isUtilityUsable, findRememberedLocation } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
@@ -3448,7 +3448,9 @@ function completeSheltersNearHome() {
   const center = bot.spawnPoint.floored();
   // findBlocks' maxDistance is a sphere; the site search is a square, so reach its corners and
   // trim back to the square below.
-  const doors = bot.findBlocks({ point: center, matching: (block) => isDoorway(block),
+  // 2026-10-30: isShelterDoor, not isDoorway -- a door set the wrong way round blocks the way in,
+  // so that shelter isn't complete; unfinishedShelterNearHome() hands it to "build", which resets it.
+  const doors = bot.findBlocks({ point: center, matching: (block) => isShelterDoor(block),
     maxDistance: Math.ceil(SHELTER_SITE_RADIUS * Math.SQRT2) + 3, count: 128 });
   return doors.map((door) => door.offset(0, 0, -3)).filter((base) =>
     Math.abs(base.x - center.x) <= SHELTER_SITE_RADIUS && Math.abs(base.z - center.z) <= SHELTER_SITE_RADIUS &&
@@ -3479,7 +3481,7 @@ function scanShelterRing(center, radius, trackDamaged) {
         if (!hasHollowInterior(base)) continue; // not shelter-shaped here at all
         const positions = shelterGeometryPositions(base);
         const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
-        const hasDoor = isDoorway(bot.blockAt(doorwayPosition(base)));
+        const hasDoor = isShelterDoor(bot.blockAt(doorwayPosition(base)));
         if (solid === positions.length && hasDoor) return { base, complete: true };
         // Keep the MOST complete candidate seen, not just the first -- a real damaged shelter
         // should outrank a coincidental half-empty pocket scanned earlier purely by iteration
@@ -3588,7 +3590,7 @@ function countQualifyingSheltersNearHome() {
         if (positions.some((pos) => claimed.has(key(pos)))) continue;
         const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
         if (solid !== positions.length) continue;
-        if (!isDoorway(bot.blockAt(doorwayPosition(base)))) continue;
+        if (!isShelterDoor(bot.blockAt(doorwayPosition(base)))) continue;
         const bedCells = SHELTER_ROOM.map(([rx, rz]) => base.offset(rx, 0, rz));
         if (!bedCells.some((p) => bot.isABed(bot.blockAt(p)))) continue;
         count++;
@@ -4396,7 +4398,7 @@ const DEDICATED_RUNNER_MAX_CONSECUTIVE_FAILURES = 20;
 const DEDICATED_RUNNER_FARM_TASKS = new Set(["farm", "ranch", "bed", "shelter", "communal_shelter", "tool"]);
 function isDedicatedRunnerGoal(goal) {
   return DEDICATED_RUNNER_FARM_TASKS.has(goal.farmTask) ||
-    ["weapon", "tools", "shelter_upgrade"].includes(goal.survivalPriorityItem);
+    ["weapon", "tools", "shelter_upgrade", "food"].includes(goal.survivalPriorityItem);
 }
 
 async function failGoalStep(goal, reason) {
@@ -4627,7 +4629,9 @@ async function weaponStep(goal, handle) {
   // the crafting table herself too.
   const gathering = await gatherPlanks(handle, 4 + (tableNear ? 0 : 4));
   if (gathering) return gathering;
-  return { ...(await performAction(bot, { type: "craft", item: "wooden_sword", count: 1 }, USERNAME, handle)),
+  // here: a table she carries goes down beside her, rather than a walk to one with mobs about
+  // (2026-10-30: ten crafts in a row cancelled on that walk).
+  return { ...(await performAction(bot, { type: "craft", item: "wooden_sword", count: 1, here: true }, USERNAME, handle)),
     action: { type: "craft", item: "wooden_sword" } };
 }
 
@@ -4752,6 +4756,30 @@ async function runUpgradeToolsGoal(goal, takeControl, getHandle, replaced) {
     await saveGoalIfCurrent(goal);
     return;
   }
+  await failGoalStep(goal, step.text);
+}
+
+// Tier 1 "food" (2026-10-30): its directive says "harvest a ripe crop", which FARM_WORDS matched,
+// so it ran as a farm goal -- and a farm goal with no hoe and no planks only ever fails. Babs
+// looped harvest/loot hoe/craft hoe every ten seconds for hours, starving, the goal re-proposed
+// each time it gave up. Food is what's wanted, not a farm: hunt, else take a ripe crop.
+async function foodStep(handle) {
+  if (hasFood()) return { ok: true, text: "I have food.", done: true };
+  const hunted = await performAction(bot, { type: "hunt" }, USERNAME, handle);
+  if (hunted.ok || hunted.cancelled) return { ...hunted, action: { type: "hunt" } };
+  const harvested = await performAction(bot, { type: "harvest", onlyRipe: true }, USERNAME, handle);
+  if (harvested.cancelled || hasFood()) return { ...harvested, ok: true, action: { type: "harvest" } };
+  return { ok: false, text: `${hunted.text} ${harvested.text}`, action: { type: "harvest" } };
+}
+
+async function runFoodGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  const step = await foodStep(getHandle());
+  getHandle()?.release();
+  if (step.cancelled || replaced()) return;
+  logStep(goal, `food: ${step.text}`, step.ok, step.action);
+  console.log(`[${USERNAME}] food goal: ${step.text} (ok=${step.ok})`);
+  if (hasFood()) return completeGoal(goal, "got food");
   await failGoalStep(goal, step.text);
 }
 
@@ -5101,6 +5129,12 @@ async function goalTick() {
     }
     if (goal.survivalPriorityItem === "shelter_upgrade") {
       await runShelterUpgradeGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    // 2026-10-30: ahead of farmTask too -- the food directive's "harvest a ripe crop" matches
+    // FARM_WORDS (see foodStep).
+    if (goal.survivalPriorityItem === "food") {
+      await runFoodGoal(goal, takeControl, () => handle, replaced);
       return;
     }
     goal.farmTask ??= farmTaskFor(goal.description);
@@ -6432,12 +6466,23 @@ bot.prependListener("health", () => {
   lastHealthSeen = bot.health;
 });
 
+// 2026-10-30: a spider in daylight leaves you alone unless you hit it (vanilla). Counting one as a
+// threat sent weaponless Babs fleeing again and again from the table her sword needed. One that
+// just hurt her is still lastAttacker, below, and still answered.
+const DAY_NEUTRAL_MOBS = new Set(["spider"]);
+
 function pickThreat(range) {
   if (lastAttacker && Date.now() - lastAttacker.at <= ATTACKER_MEMORY_MS && bot.entity) {
     const attacker = bot.entities[lastAttacker.id];
     if (attacker && attacker.position.distanceTo(bot.entity.position) <= range) return attacker;
   }
-  return nearestHostile(bot, range);
+  const threat = nearestHostile(bot, range);
+  if (threat && DAY_NEUTRAL_MOBS.has(threat.name) && bot.time?.isDay) {
+    const here = bot.entity.position;
+    return bot.nearestEntity((e) => HOSTILE_MOBS.has(e.name) && !DAY_NEUTRAL_MOBS.has(e.name) &&
+      e.position.distanceTo(here) <= range);
+  }
+  return threat;
 }
 
 async function checkSelfDefense() {
@@ -6592,8 +6637,8 @@ async function checkHunger() {
   if (!AUTONOMY_ENABLED || bot.isSleeping) return;
   if (bot.food >= HUNGER_THRESHOLD) return;
   const canFetch = Date.now() >= foodFetchBlockedUntil;
-  if (!hasFood() && !hasRod() && !canFetch) return;
   const critical = bot.food <= CRITICAL_FOOD_LEVEL;
+  if (!hasFood() && !hasRod() && !canFetch && !(critical && heldCount((n) => n === "rotten_flesh") > 0)) return;
   if (!critical && routineBlocked("checkHunger")) return;
 
   const handle = await arbiter.requestControl(bot,
@@ -6604,10 +6649,20 @@ async function checkHunger() {
       const fetched = await performAction(bot, { type: "loot", item: "food", count: FOOD_FETCH_COUNT }, USERNAME, handle);
       console.log(`[${USERNAME}] hunger: nothing to eat, fetching food -- ${fetched.text} (ok=${fetched.ok})`);
       if (fetched.cancelled) return;
-      if (!fetched.ok) foodFetchBlockedUntil = Date.now() + FOOD_FETCH_BACKOFF_MS;
+      // 2026-10-30: no food in any chest and starving -- hunt. Babs sat at food 0 for hours,
+      // retrying the empty chests every five minutes. Only when critical: a herd isn't spent on
+      // a snack.
+      if (!hasFood() && critical) {
+        const hunted = await performAction(bot, { type: "hunt" }, USERNAME, handle);
+        console.log(`[${USERNAME}] hunger: no food in chests, hunting -- ${hunted.text} (ok=${hunted.ok})`);
+        if (hunted.cancelled) return;
+      }
+      if (!hasFood()) foodFetchBlockedUntil = Date.now() + FOOD_FETCH_BACKOFF_MS;
     }
-    if (hasFood()) {
-      const result = await performAction(bot, { type: "eat" }, USERNAME, handle);
+    // Starving with no real food after all that: rotten flesh, if she has any.
+    const lastResort = !hasFood() && critical && heldCount((n) => n === "rotten_flesh") > 0;
+    if (hasFood() || lastResort) {
+      const result = await performAction(bot, { type: "eat", lastResort }, USERNAME, handle);
       if (result.ok) {
         console.log(`[${USERNAME}] hunger: ${result.text} (food was ${bot.food})`);
         return;

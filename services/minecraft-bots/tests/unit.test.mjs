@@ -1,4 +1,4 @@
-// Version: 1.42.0
+// Version: 1.43.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -1784,25 +1784,34 @@ await check('Food: loot "food" asks chests for every edible item; "seeds" for an
   assert.match(actions, /const wantedNames = group \|\| gearCategoryNames\(bot, action\.item\);/);
 });
 
-function hungerWorld({ food = 10, items = [], lootGives = null } = {}) {
+function hungerWorld({ food = 10, items = [], lootGives = null, huntGives = null } = {}) {
   const inv = [...items];
   const calls = [];
   const bot = { food, isSleeping: false, inventory: { items: () => inv } };
   const performAction = async (b, action) => {
-    calls.push(action.type + (action.item ? `:${action.item}` : ''));
+    calls.push(action.type + (action.item ? `:${action.item}` : '') + (action.lastResort ? ':lastResort' : ''));
+    if (action.type === 'hunt') {
+      if (!huntGives) return { ok: false, text: 'no animals to spare nearby to hunt.' };
+      inv.push({ name: huntGives, count: 2 });
+      return { ok: true, text: 'hunted.' };
+    }
+    if (action.type === 'eat' && action.lastResort && inv.some((it) => it.name === 'rotten_flesh')) {
+      return { ok: true, text: 'ate some rotten_flesh.' };
+    }
     if (action.type === 'loot') {
       if (!lootGives) return { ok: false, text: 'checked nearby chests, no food in any of them.' };
       inv.push({ name: lootGives, count: 8 });
       return { ok: true, text: `found 8 ${lootGives} in a chest.` };
     }
     if (action.type === 'eat') {
-      const i = inv.findIndex((it) => ['bread', 'carrot'].includes(it.name));
+      const i = inv.findIndex((it) => ['bread', 'carrot', 'beef'].includes(it.name));
       return i < 0 ? { ok: false, text: "don't have anything to eat." } : { ok: true, text: `ate some ${inv[i].name}.` };
     }
     return { ok: true, text: 'fished.' };
   };
   const c = vm.createContext({ bot, performAction, console: { log() {}, error() {} }, Date, USERNAME: 'Amy',
-    AUTONOMY_ENABLED: true, HUNGER_THRESHOLD: 18, CRITICAL_FOOD_LEVEL: 6, FOOD_NAMES: ['bread', 'carrot'],
+    AUTONOMY_ENABLED: true, HUNGER_THRESHOLD: 18, CRITICAL_FOOD_LEVEL: 6, FOOD_NAMES: ['bread', 'carrot', 'beef'],
+    heldCount: (test) => inv.filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
     routineBlocked: () => false, arbiter: { OWNERS: { ROUTINE: 1, HUNGER_CRITICAL: 2 }, requestControl: async () => ({ release() {} }) } });
   vm.runInContext(between(index, 'const FOOD_FETCH_COUNT', 'setInterval(() => {'), c);
   return { c, calls, inv };
@@ -1823,6 +1832,80 @@ await check('Food: a failed fetch backs off instead of failing "eat" every 15 se
   const fisher = hungerWorld({ items: [{ name: 'fishing_rod', count: 1 }] });
   await fisher.c.checkHunger();
   assert.deepEqual(fisher.calls, ['loot:food', 'fish'], 'a rod is still the fallback');
+});
+
+await check('Food: starving with no food in any chest, she hunts; with nothing to hunt, rotten flesh', async () => {
+  // 2026-10-30: Babs sat at food 0 for hours, retrying the same empty chests every five minutes.
+  const hunter = hungerWorld({ food: 0, huntGives: 'beef' });
+  await hunter.c.checkHunger();
+  assert.deepEqual(hunter.calls, ['loot:food', 'hunt', 'eat'], 'empty chests: hunt, then eat what she caught');
+  const peckish = hungerWorld({ food: 12, huntGives: 'beef' });
+  await peckish.c.checkHunger();
+  assert.deepEqual(peckish.calls, ['loot:food'], 'not critical: no herd spent on a snack');
+  const flesh = hungerWorld({ food: 2, items: [{ name: 'rotten_flesh', count: 3 }] });
+  await flesh.c.checkHunger();
+  assert.deepEqual(flesh.calls, ['loot:food', 'hunt', 'eat:lastResort'], 'nothing to hunt: rotten flesh, as a last resort');
+  await flesh.c.checkHunger();
+  assert.deepEqual(flesh.calls.slice(3), ['eat:lastResort'], 'while the fetch backs off, still the rotten flesh');
+});
+
+await check('Hunt: goes for a spare animal -- never a species\' last two nearby, never a chicken -- and collects the meat', async () => {
+  const inv = [];
+  const at = (x) => new V3(x, 64, 0);
+  const entities = { 1: { name: 'cow', position: at(2) }, 2: { name: 'cow', position: at(3) },
+    3: { name: 'chicken', position: at(1) }, 4: { name: 'pig', position: at(9) }, 5: { name: 'pig', position: at(10) },
+    6: { name: 'pig', position: at(11) } };
+  const attacked = [];
+  const c = vm.createContext({ Object, bot: { entity: { position: Object.assign(at(0), { clone() { return this; } }) }, entities, inventory: { items: () => inv } },
+    FOOD_NAMES: ['porkchop', 'beef'], HUNTABLE_ANIMALS: new Set(['cow', 'pig', 'sheep']),
+    ok: (text) => ({ ok: true, text }), fail: (text) => ({ ok: false, text }),
+    performActionAs: async (_b, action) => { attacked.push(action.target.name); return { ok: true }; },
+    collectDrops: async () => { inv.push({ name: 'porkchop', count: 1 }); } });
+  const hunt = between(actions, '    case "hunt": {', '\n    case "');
+  vm.runInContext(`async function run(action, token, speaker = "test") { switch (action.type) {${hunt}} }`, c);
+  let r = await c.run({ type: 'hunt' }, { cancelled: false });
+  assert.deepEqual(attacked, ['pig'], 'the nearest spare: one of three pigs, not the two cows or the chicken');
+  assert.equal(r.ok, true);
+  delete entities[4]; delete entities[5]; inv.length = 0; attacked.length = 0;
+  r = await c.run({ type: 'hunt' }, { cancelled: false });
+  assert.deepEqual(attacked, [], 'a pair and a lone pig left: nothing to spare');
+  assert.equal(r.ok, false);
+});
+
+await check('Self-defense: a spider in daylight is no threat unless it just hit her', async () => {
+  // 2026-10-30: weaponless Babs fled daytime spiders again and again, each time cancelling the
+  // craft of the sword she needed.
+  const { EventEmitter } = await import('node:events');
+  const bot = new EventEmitter();
+  const at = (d) => ({ d, distanceTo() { return this.d; } });
+  const spider = { id: 1, name: 'spider', position: at(3) };
+  const zombie = { id: 2, name: 'zombie', position: at(10) };
+  let mobs = [spider];
+  Object.assign(bot, { health: 20, time: { isDay: true }, entity: { position: {} },
+    entities: { 1: spider, 2: zombie },
+    nearestEntity: (pred) => mobs.filter(pred).sort((a, b) => a.position.d - b.position.d)[0] ?? null });
+  const c = vm.createContext({ bot, Date, HOSTILE_MOBS: new Set(['spider', 'zombie']),
+    nearestHostile: () => mobs.slice().sort((a, b) => a.position.d - b.position.d)[0] ?? null });
+  vm.runInContext(between(index, 'const RANGED_MOBS', 'async function checkSelfDefense('), c);
+  assert.equal(c.pickThreat(12), null, 'a lone daytime spider is left alone');
+  mobs = [spider, zombie];
+  assert.equal(c.pickThreat(12), zombie, 'a zombie beyond it is still the threat');
+  bot.time.isDay = false;
+  assert.equal(c.pickThreat(12), spider, 'at night the spider is hostile again');
+  bot.time.isDay = true; mobs = [spider];
+  spider.position.d = 2; bot.health = 17; bot.emit('health');
+  assert.equal(c.pickThreat(12), spider, 'one that just bit her is answered, day or not');
+});
+
+await check('Craft: an urgent craft ("here") puts a carried table down beside her instead of walking to a far one', async () => {
+  // 2026-10-30: ten wooden-sword crafts in a row cancelled on the walk to a table.
+  const src = between(actions, '    case "craft": {', '\n    case "');
+  assert.match(src, /action\.here && bot\.inventory\.items\(\)\.some\(\(i\) => i\.name === "crafting_table"\) &&\s*!positions\.some\(\(p\) => p\.distanceTo\(bot\.entity\.position\) <= 4\)\)/,
+    'a carried table and none within 4 blocks');
+  assert(src.indexOf('action.here') < src.indexOf('bot.pathfinder.goto(new goals.GoalNear(tableBlock.position.x'),
+    'decided before any walk to a table');
+  assert.match(between(index, 'async function weaponStep(', 'async function runWeaponGoal('),
+    /type: "craft", item: "wooden_sword", count: 1, here: true/, 'the weapon goal crafts here');
 });
 
 const farmGoalSrc = () => between(index, 'const FARM_WORDS', 'async function goalTick(');
@@ -2088,8 +2171,10 @@ await check('Beds: "bed" is crafted in the colour she has 3 wool of, white when 
   assert.match(actions, /if \(action\.item === "bed" \|\| action\.item === "beds"\) action = \{ \.\.\.action, item: bedItemFor\(bot\) \};/);
   assert.match(actions, /const group = action\.item === "wool"/, 'loot "wool" takes any colour');
   const craftCase = actions.slice(actions.indexOf('case "craft": {'), actions.indexOf('case "loot": {') > actions.indexOf('case "craft": {') ? actions.indexOf('case "loot": {') : undefined);
-  const [makeTable, placeTable, giveUp] = ['{ type: "craft", item: "crafting_table", count: 1 }', '{ type: "place", item: "crafting_table" }', 'need a crafting table nearby for']
-    .map((t) => craftCase.indexOf(t));
+  // Searched from the make step: "here" (2026-10-30) places a carried table earlier in the case too.
+  const makeTable = craftCase.indexOf('{ type: "craft", item: "crafting_table", count: 1 }');
+  const placeTable = craftCase.indexOf('{ type: "place", item: "crafting_table" }', makeTable);
+  const giveUp = craftCase.indexOf('need a crafting table nearby for');
   assert(makeTable > 0 && makeTable < placeTable && placeTable < giveUp, 'no table around: make one and set it down before giving up');
 });
 
@@ -2460,7 +2545,7 @@ await check('Communal shelter: stone-or-better material, parameterized geometry,
   // the two real bugs (plank starvation, wrong door facing) this order exists to avoid repeating.
   const doorCraftIdx = communalBuild.indexOf('type: "craft", item: doorItemFor(bot)');
   const wallLoopIdx = communalBuild.indexOf('for (const pos of buildOrder)');
-  const doorPlaceIdx = communalBuild.indexOf('await bot.placeBlock(floorBelow');
+  const doorPlaceIdx = communalBuild.indexOf('await bot._placeBlockWithOptions(floorBelow');
   assert(doorCraftIdx > 0 && doorCraftIdx < wallLoopIdx && wallLoopIdx < doorPlaceIdx,
     'door item crafted before the wall loop, door itself placed after it');
 });
@@ -2491,13 +2576,13 @@ await check('Communal shelter: structure completeness and bed-count verification
     const beds = new Set((bedCells || []).map(key));
     return { spawnPoint: base, isABed: (b) => b?.name === 'white_bed',
       blockAt: (p) => (beds.has(key(p)) ? { name: 'white_bed', boundingBox: 'block' }
-        : doors.has(key(p)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower' }) }
+        : doors.has(key(p)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower', facing: 'south' }) }
         : { name: 'x', boundingBox: solid.has(key(p)) ? 'block' : 'empty' }) };
   };
   const check2 = (bot) => {
     const h = vm.createContext({ bot, Math, BOT_USERNAMES: new Set(['amy']), BUILDER_PRIORITY_RADIUS: 6,
       communalShelterPositions: s.communalShelterPositions, communalDoorwayPosition: s.communalDoorwayPosition });
-    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
       between(index, 'const TOOL_NAME', 'function nextSurvivalPriority('), h);
     return h;
   };
@@ -2532,11 +2617,11 @@ await check('findCommunalShelterNearHome finds a damaged communal shelter as a r
     const solid = new Set(positions.map(key));
     const doors = new Set(doorAt ? [key(doorAt)] : []);
     const mockBot = { spawnPoint: base, isABed: () => false,
-      blockAt: (p) => (doors.has(key(p)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower' }) }
+      blockAt: (p) => (doors.has(key(p)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower', facing: 'south' }) }
         : { name: 'x', boundingBox: solid.has(key(p)) ? 'block' : 'empty' }) };
     const h = vm.createContext({ bot: mockBot, Math, BOT_USERNAMES: new Set(['amy']), BUILDER_PRIORITY_RADIUS: 6,
       communalShelterPositions: s.communalShelterPositions, communalDoorwayPosition: s.communalDoorwayPosition });
-    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
       between(index, 'const TOOL_NAME', 'function nextSurvivalPriority('), h);
     return h.findCommunalShelterNearHome();
   };
@@ -2671,7 +2756,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
     const solid = new Set(cells.map((p) => `${p.x},${p.y},${p.z}`));
     const doors = [].concat(doorAt ?? []), beds = [].concat(bedAt ?? [], bedsAt);
     const blockAt = (p) => (beds.some((b) => p.equals(b)) ? { name: 'white_bed', boundingBox: 'block' }
-      : doors.some((d) => p.equals(d)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower' }) }
+      : doors.some((d) => p.equals(d)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower', facing: 'south' }) }
       : { name: 'x', boundingBox: p.y <= 64 || solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' });
     return { spawnPoint: new V3(0, 64, 0), isABed: (b) => b.name === 'white_bed', blockAt, findBlocks: doorFinder(doors, blockAt) };
   };
@@ -2683,7 +2768,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
       // declaration, so it has to be injected here, same as every other module-level const this
       // slice already needs from outside it (SHELTER_ROOM above).
       BUILDER_PRIORITY_RADIUS: 24 });
-    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
       between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
     return h.hasShelterNearHome();
   };
@@ -2704,7 +2789,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
       // declaration, so it has to be injected here, same as every other module-level const this
       // slice already needs from outside it (SHELTER_ROOM above).
       BUILDER_PRIORITY_RADIUS: 24 });
-    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
       between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
     return h.hasOwnShelterWithBed();
   };
@@ -2739,7 +2824,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
       // declaration, so it has to be injected here, same as every other module-level const this
       // slice already needs from outside it (SHELTER_ROOM above).
       BUILDER_PRIORITY_RADIUS: 24 });
-    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
       between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
     return h.findShelterNearHome();
   };
@@ -2812,7 +2897,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
       if (sh.bedAt) beds.add(k(sh.bedAt));
     }
     const blockAt = (p) => (beds.has(k(p)) ? { name: 'white_bed', boundingBox: 'block' }
-      : doors.has(k(p)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower' }) }
+      : doors.has(k(p)) ? { name: 'oak_door', boundingBox: 'empty', getProperties: () => ({ half: 'lower', facing: 'south' }) }
       : { name: 'x', boundingBox: p.y <= 64 || solid.has(k(p)) ? 'block' : 'empty' });
     return { spawnPoint, isABed: (b) => b.name === 'white_bed', blockAt,
       findBlocks: doorFinder(shelters.map((sh) => sh.doorAt).filter(Boolean), blockAt) };
@@ -2820,7 +2905,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
   const count = (bot) => {
     const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
       SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24 });
-    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
       between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
     return h.countQualifyingSheltersNearHome();
   };
@@ -2893,7 +2978,7 @@ await check('Shelters: a doorless shell near home is found again, not abandoned 
   const find = (bot) => {
     const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
       SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24 });
-    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
       between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
     return h.unfinishedShelterNearHome();
   };
@@ -3129,6 +3214,39 @@ await check('Tool upgrades: the step gets the material, smelts raw iron before m
     'routed before farmTaskFor -- "craft a stone pickaxe" would otherwise match TOOL_WORDS');
 });
 
+await check('Food goal: hunts, else takes a ripe crop -- never runs as a farm goal needing a hoe', async () => {
+  // 2026-10-30, Babs live: the food directive says "harvest a ripe crop", FARM_WORDS matched it,
+  // and the farm runner looped harvest/loot hoe/craft hoe every ten seconds for hours.
+  let food = false;
+  let outcomes = {};
+  const actions_ = [];
+  const c = vm.createContext({ bot: {}, USERNAME: 'Babs', hasFood: () => food,
+    performAction: async (_b, action) => {
+      actions_.push(action.type + (action.onlyRipe ? ':ripe' : ''));
+      const r = outcomes[action.type] ?? { ok: false, text: 'nothing.' };
+      if (r.ok) food = true;
+      return r;
+    } });
+  vm.runInContext(between(index, 'async function foodStep(', 'async function runFoodGoal('), c);
+  outcomes = { hunt: { ok: true, text: 'hunted: now carrying 2 food.' } };
+  assert.equal((await c.foodStep(null)).ok, true);
+  assert.deepEqual(actions_, ['hunt'], 'a successful hunt is enough');
+  food = false; actions_.length = 0;
+  outcomes = { hunt: { ok: false, text: 'no animals to spare nearby to hunt.' }, harvest: { ok: true, text: 'harvested 3 carrots.' } };
+  assert.equal((await c.foodStep(null)).ok, true);
+  assert.deepEqual(actions_, ['hunt', 'harvest:ripe'], 'no prey: a ripe crop, without starting a farm');
+  food = false; actions_.length = 0; outcomes = {};
+  const failed = await c.foodStep(null);
+  assert.equal(failed.ok, false);
+  assert.ok(!actions_.some((a) => /craft|loot/.test(a)), 'never goes after a hoe');
+  food = true; actions_.length = 0;
+  assert.equal((await c.foodStep(null)).done, true);
+  assert.deepEqual(actions_, [], 'already holding food: done');
+  assert.match(between(index, 'goal.standing === "guard"', 'goal.farmTask === "farm"'),
+    /survivalPriorityItem === "food"[\s\S]*goal\.farmTask \?\?= farmTaskFor/,
+    'routed before farmTaskFor -- "harvest a ripe crop" would otherwise match FARM_WORDS');
+});
+
 await check('Shelter upgrade: dirt and wood cells are dug out and refilled with stone, one at a time', async () => {
   // Direct request, 2026-10-28: "gradually replace the earth shelter with stone".
   const key = (p) => `${p.x},${p.y},${p.z}`;
@@ -3194,13 +3312,13 @@ await check('Dedicated runners get a much longer failure leash than the freeform
   assert.equal(retired, true, 'a plain freeform-planner goal still gives up at 3, unchanged');
 
   retired = false;
-  const foodGoal = { consecutiveFailures: 0, description: 'food', survivalPriorityItem: 'food' };
-  await c.failGoalStep(foodGoal, 'bad plan');
-  await c.failGoalStep(foodGoal, 'bad plan');
+  const armorGoal = { consecutiveFailures: 0, description: 'armor', survivalPriorityItem: 'armor' };
+  await c.failGoalStep(armorGoal, 'bad plan');
+  await c.failGoalStep(armorGoal, 'bad plan');
   assert.equal(retired, false);
-  await c.failGoalStep(foodGoal, 'bad plan'); // the 3rd
+  await c.failGoalStep(armorGoal, 'bad plan'); // the 3rd
   assert.equal(retired, true,
-    'food/armor are Tier 1 tagged but have no dedicated runner yet -- still the freeform 3-failure limit');
+    'armor is Tier 1 tagged but has no dedicated runner yet -- still the freeform 3-failure limit');
 });
 
 await check('Shelters: a shelter goal gets materials (planks from her logs), builds on its site, then puts her bed in it', async () => {
@@ -4160,13 +4278,103 @@ await check('Placement: every shelter, door, bed and fill placement clears its c
     before(caseSrc(name), 'clearCellForPlacement(bot, pos)', 'bot.placeBlock(refBlock, face)', `${name}: walls`);
   }
   for (const name of ['build', 'build_communal_shelter']) {
-    before(caseSrc(name), 'clearCellForPlacement(bot, doorPos.offset(0, 1, 0))', 'bot.placeBlock(floorBelow', `${name}: both door cells`);
+    before(caseSrc(name), 'clearCellForPlacement(bot, doorPos.offset(0, 1, 0))', 'bot._placeBlockWithOptions(floorBelow', `${name}: both door cells`);
   }
   const bed = caseSrc('place_bed');
   before(bed, 'clearCellForPlacement(bot, candidate.head)', 'bot.placeBlock(bot.blockAt(candidate.foot', 'place_bed: both bed cells');
   before(caseSrc('place'), 'clearCellForPlacement(bot, referenceBlock.position', 'bot.placeBlock(referenceBlock', 'place');
   assert.match(between(actions, 'export function findBedSites(', 'const solid'), /isClearableCover\(b\)/,
     'a flowery room still offers bed sites');
+});
+
+await check('Doors: a shelter door faces through its doorway; a wrong-way one is no door, and build resets it', async () => {
+  // 2026-10-30: Babs' door at (-221, 64, -92) faced west in a south wall. Opening it swung it across
+  // the way in, so every bed placement in the room timed out on the path there.
+  const s = shelterFns();
+  const door = (facing) => ({ name: 'birch_door', getProperties: () => ({ half: 'lower', facing }) });
+  const h = vm.createContext({});
+  vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+    between(actions, 'export function isShelterDoor(', 'export function shelterPositions('), h);
+  assert.equal(h.isShelterDoor(door('south')), true);
+  assert.equal(h.isShelterDoor(door('north')), true);
+  assert.equal(h.isShelterDoor(door('west')), false, 'Babs\' door');
+  assert.equal(h.isShelterDoor(door('east')), false);
+
+  // The complete-shelter search no longer counts a shelter whose door is set the wrong way round.
+  const base = new V3(0, 65, 0), doorPos = s.doorwayPosition(base);
+  const solid = new Set(s.shelterPositions(base).map((p) => `${p.x},${p.y},${p.z}`));
+  const complete = (facing) => {
+    const blockAt = (p) => (p.equals(doorPos) ? { ...door(facing), boundingBox: 'empty' }
+      : { name: 'x', boundingBox: p.y <= 64 || solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' });
+    const bot = { spawnPoint: new V3(0, 64, 0), isABed: () => false, blockAt,
+      findBlocks: ({ matching }) => (matching(blockAt(doorPos)) ? [doorPos] : []) };
+    const c = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24 });
+    vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
+      between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
+      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), c);
+    return { complete: c.hasShelterNearHome(), unfinished: c.unfinishedShelterNearHome() };
+  };
+  assert.equal(complete('south').complete, true, 'door facing out: complete');
+  const west = complete('west');
+  assert.equal(west.complete, false, 'door facing west: not complete');
+  assert.equal(JSON.stringify(west.unfinished), JSON.stringify(base), 'so the shelter goal hands it to "build"');
+
+  // "build" takes a wrong-way door out before anything else, and places without placeBlock's own look.
+  const build = between(actions, '    case "build": {', '\n    case "');
+  assert.match(build, /let doorAlready = isShelterDoor\(bot\.blockAt\(doorPos\)\)/);
+  assert(build.indexOf('await bot.dig(bot.blockAt(doorPos))') >= 0 &&
+    build.indexOf('await bot.dig(bot.blockAt(doorPos))') < build.indexOf('type: "craft", item: doorItemFor(bot)'),
+    'the wrong-way door comes out before a new one would be crafted');
+  for (const name of ['build', 'build_communal_shelter']) {
+    const src = between(actions, `    case "${name}": {`, '\n    case "');
+    assert.match(src, /bot\._placeBlockWithOptions\(floorBelow, new Vec3\(0, 1, 0\), \{ swingArm: "right", forceLook: "ignore" \}\)/,
+      `${name}: the door keeps the look set just before it`);
+    assert.match(src, /bot\.lookAt\(bot\.entity\.position\.offset\(0, bot\.entity\.height, 5\), true\);\s*(\/\/.*\n\s*)*await bot\.waitForTicks\(2\);/,
+      `${name}: +z of her, and the look sent before the door goes down`);
+    assert(!/bot\.placeBlock\(floorBelow/.test(src), `${name}: never placeBlock for the door`);
+  }
+});
+
+await check('place_bed: a bed spot she couldn\'t reach is reported as unreachable, not as a server refusal', async () => {
+  const bed = between(actions, '    case "place_bed": {', '\n    case "');
+  assert.match(bed, /unreachable\.push\(candidate\.foot\);\s*continue;/, 'an unreachable spot is recorded as such');
+  assert.match(bed, /const refused = tried\.filter\(\(t\) => !unreachable\.includes\(t\)\);/);
+  assert.match(bed, /refused\.length \? `the server refused the bed/, 'only real refusals say "refused"');
+  assert.match(bed, /couldn't reach where she'd stand to place the bed/);
+});
+
+await check('Buzz: a (re)started bot starts reading at the newest message, never replaying the topic\'s history', async () => {
+  // 2026-10-30: two hours after a restart Babs was still "hearing" offline bots' goals and deaths.
+  // A poll returns the oldest 50 after `since`; the cursor started at the last of the first page.
+  const history = Array.from({ length: 450 }, (_, k) => ({ seq: k + 1, from_agent: 'mc-amy', body: '{}' }));
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  // A bus with the poll route only (like live-bot's fake: GET /messages is a 404), oldest first, `limit` up to 200.
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    asked.push(u.pathname + u.search);
+    if (u.pathname !== '/messages/poll') return { ok: false, status: 404, text: async () => '{}' };
+    const since = Number(u.searchParams.get('since') ?? 0);
+    const limit = Math.min(Number(u.searchParams.get('limit') ?? 50), 200);
+    const messages = history.filter((m) => m.seq > since).slice(0, limit);
+    return { ok: true, json: async () => ({ messages }) };
+  };
+  let timer = null;
+  try {
+    const buzz = await import(pathToFileURL(root + 'buzz.js').href + '?t=' + Date.now());
+    const heard = [];
+    timer = buzz.watchTopic({ topic: 'minecraft-coordination', selfAgent: 'mc-babs', intervalMs: 5, onMessage: (m) => heard.push(m.seq) });
+    await sleep(60);
+    assert.deepEqual(heard, [], 'none of the 450 old messages is replayed (more than one page of history)');
+    history.push({ seq: 451, from_agent: 'mc-amy', body: '{}' }, { seq: 452, from_agent: 'mc-babs', body: '{}' });
+    await sleep(40);
+    assert.deepEqual(heard, [451], 'a message sent after the start is heard; her own is not');
+    assert(asked.every((a) => a.startsWith('/messages/poll?')), 'only the poll route, which every deployed bus has');
+  } finally {
+    clearInterval(timer);
+    globalThis.fetch = realFetch;
+  }
 });
 
 console.log(`${passed} unit checks passed.`);

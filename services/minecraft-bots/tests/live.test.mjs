@@ -1,4 +1,4 @@
-// Version: 1.31.0
+// Version: 1.32.0
 //
 // 1.27.0 (2026-10-28, direct request: shelters evolve earth -> stone): new scenario -- 8 dirt cells of
 // a built shelter swapped for cobblestone by "reface_shelter" (actions.js 1.97.0), shelter left sealed.
@@ -721,6 +721,43 @@ scenario("Shelters: a doorless shell is finished by building on it again once sh
   const finished = await performAction(bot, { type: "build", at: { x: base.x, y: base.y, z: base.z } }, TESTER);
   assert.equal(finished.built, true, finished.text);
   assert.match(bot.blockAt(base.offset(0, 0, 3))?.name ?? "", /_door$/, "the same shell now has its door");
+  // 2026-10-30: and facing through the doorway -- placed from inside the room it came out facing west.
+  const facing = bot.blockAt(base.offset(0, 0, 3))?.getProperties().facing;
+  assert(facing === "north" || facing === "south", `the door faces through the doorway: ${facing}`);
+});
+
+// 2026-10-30: Babs' door faced west in the shelter's south wall -- opened, it swung across the way
+// in, and every bed placement in the room timed out on the path. "build" (actions.js 1.100.0) takes
+// a wrong-way door out and puts it back facing through the doorway; the room then takes a bed.
+scenario("Shelters: a wrong-way door is reset to face through the doorway, and the room takes a bed", async () => {
+  await rcon(`give ${TESTER} minecraft:dirt 64`, `give ${TESTER} minecraft:dirt 10`, `give ${TESTER} minecraft:white_bed`);
+  await waitFor(() => held("dirt") >= 74 && held("white_bed") >= 1, 8000, "dirt and a bed");
+  const base = new Vec3(x - 4, y + 1, z - 4);
+  const at = { x: base.x, y: base.y, z: base.z };
+  const shell = await performAction(bot, { type: "build", at }, TESTER);
+  assert.match(shell.text, /no door yet/, "a shell to set the door in");
+  const door = base.offset(0, 0, 3);
+  await rcon(`setblock ${door.x} ${door.y} ${door.z} minecraft:birch_door[facing=west,half=lower]`,
+             `setblock ${door.x} ${door.y + 1} ${door.z} minecraft:birch_door[facing=west,half=upper]`);
+  await waitFor(() => bot.blockAt(door)?.getProperties().facing === "west", 8000, "a west-facing door in the south wall");
+  const fixed = await performAction(bot, { type: "build", at }, TESTER);
+  assert.equal(fixed.built, true, fixed.text);
+  const facing = bot.blockAt(door)?.getProperties().facing;
+  assert(facing === "north" || facing === "south", `the door now faces through the doorway: ${facing}`);
+  const cells = [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]].map(([dx, dz]) => ({ x: base.x + dx, y: base.y, z: base.z + dz }));
+  const bedded = await performAction(bot, { type: "place_bed", near: at, cells }, TESTER);
+  assert.equal(bedded.ok, true, `she gets into the room to place the bed: ${bedded.text}`);
+});
+
+// 2026-10-30: starving with no food in any chest, she hunts (index.js 2.130.0's checkHunger). Three
+// cows: one to spare beyond a breeding pair.
+scenario("Hunger: a hunt brings back meat from a spare animal", async () => {
+  scenarioCleanup.push(() => rcon(`kill @e[type=minecraft:cow,x=${x - r},y=${y},z=${z - r},dx=${2 * r},dy=6,dz=${2 * r}]`).catch(() => {}));
+  await rcon(...[0, 1, 2].map((k) => `summon minecraft:cow ${x + 4 + k} ${y + 1} ${z + 4}`));
+  await waitFor(() => Object.values(bot.entities).filter((e) => e.name === "cow").length >= 3, 10_000, "three cows");
+  const hunted = await performAction(bot, { type: "hunt" }, TESTER);
+  assert.equal(hunted.ok, true, hunted.text);
+  assert(held("beef") >= 1, "raw beef in hand");
 });
 
 // 2026-10-30: a full inventory with no chest at home makes one (index.js 2.129.0's makeHomeChest):
