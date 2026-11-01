@@ -1,4 +1,6 @@
-// Version: 1.32.0
+// Version: 1.33.0
+//
+// 1.33.0 (2026-11-01): new scenario -- a hunt takes a spare chicken, and raw chicken is food.
 //
 // 1.27.0 (2026-10-28, direct request: shelters evolve earth -> stone): new scenario -- 8 dirt cells of
 // a built shelter swapped for cobblestone by "reface_shelter" (actions.js 1.97.0), shelter left sealed.
@@ -758,6 +760,17 @@ scenario("Hunger: a hunt brings back meat from a spare animal", async () => {
   const hunted = await performAction(bot, { type: "hunt" }, TESTER);
   assert.equal(hunted.ok, true, hunted.text);
   assert(held("beef") >= 1, "raw beef in hand");
+});
+
+// 2026-11-01: chickens are prey and raw chicken is food (actions.js 1.101.0) -- Babs and Amy went a
+// day at food 0 near home with 15 chickens and no other spare animal within 64 blocks.
+scenario("Hunger: a hunt takes a spare chicken, and its raw meat is food", async () => {
+  scenarioCleanup.push(() => rcon(`kill @e[type=minecraft:chicken,x=${x - r},y=${y},z=${z - r},dx=${2 * r},dy=6,dz=${2 * r}]`).catch(() => {}));
+  await rcon(...[0, 1, 2].map((k) => `summon minecraft:chicken ${x + 4 + k} ${y + 1} ${z + 4}`));
+  await waitFor(() => Object.values(bot.entities).filter((e) => e.name === "chicken").length >= 3, 10_000, "three chickens");
+  const hunted = await performAction(bot, { type: "hunt" }, TESTER);
+  assert.equal(hunted.ok, true, hunted.text);
+  assert(held("chicken") >= 1, "raw chicken in hand");
 });
 
 // 2026-10-30: a full inventory with no chest at home makes one (index.js 2.129.0's makeHomeChest):

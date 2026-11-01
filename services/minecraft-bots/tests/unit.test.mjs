@@ -1,4 +1,4 @@
-// Version: 1.43.0
+// Version: 1.44.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -1849,7 +1849,7 @@ await check('Food: starving with no food in any chest, she hunts; with nothing t
   assert.deepEqual(flesh.calls.slice(3), ['eat:lastResort'], 'while the fetch backs off, still the rotten flesh');
 });
 
-await check('Hunt: goes for a spare animal -- never a species\' last two nearby, never a chicken -- and collects the meat', async () => {
+await check('Hunt: goes for a spare animal -- never a species\' last two nearby -- and collects the meat', async () => {
   const inv = [];
   const at = (x) => new V3(x, 64, 0);
   const entities = { 1: { name: 'cow', position: at(2) }, 2: { name: 'cow', position: at(3) },
@@ -1857,19 +1857,43 @@ await check('Hunt: goes for a spare animal -- never a species\' last two nearby,
     6: { name: 'pig', position: at(11) } };
   const attacked = [];
   const c = vm.createContext({ Object, bot: { entity: { position: Object.assign(at(0), { clone() { return this; } }) }, entities, inventory: { items: () => inv } },
-    FOOD_NAMES: ['porkchop', 'beef'], HUNTABLE_ANIMALS: new Set(['cow', 'pig', 'sheep']),
+    FOOD_NAMES: ['porkchop', 'beef'], HUNTABLE_ANIMALS: new Set(['cow', 'pig', 'sheep']), HUNT_RANGE: 64,
     ok: (text) => ({ ok: true, text }), fail: (text) => ({ ok: false, text }),
     performActionAs: async (_b, action) => { attacked.push(action.target.name); return { ok: true }; },
     collectDrops: async () => { inv.push({ name: 'porkchop', count: 1 }); } });
   const hunt = between(actions, '    case "hunt": {', '\n    case "');
   vm.runInContext(`async function run(action, token, speaker = "test") { switch (action.type) {${hunt}} }`, c);
   let r = await c.run({ type: 'hunt' }, { cancelled: false });
-  assert.deepEqual(attacked, ['pig'], 'the nearest spare: one of three pigs, not the two cows or the chicken');
+  assert.deepEqual(attacked, ['pig'], 'the nearest spare: one of three pigs, not the two cows or the (here unlisted) chicken');
   assert.equal(r.ok, true);
   delete entities[4]; delete entities[5]; inv.length = 0; attacked.length = 0;
   r = await c.run({ type: 'hunt' }, { cancelled: false });
   assert.deepEqual(attacked, [], 'a pair and a lone pig left: nothing to spare');
   assert.equal(r.ok, false);
+});
+
+await check('Hunt: chickens within 64 blocks are prey, and raw chicken is food, eaten last', async () => {
+  // 2026-11-01, Babs and Amy live: at food 0 for a day, no spare cow/pig/sheep within 64 blocks of
+  // home, none of anything within 32 -- and 15 chickens within 64.
+  const consts = vm.createContext({});
+  vm.runInContext(between(actions, 'export const FOOD_NAMES = [', '// Suffix-matched').replace(/export /g, '') +
+    ';this.FOOD_NAMES = FOOD_NAMES; this.HUNTABLE_ANIMALS = HUNTABLE_ANIMALS; this.HUNT_RANGE = HUNT_RANGE;', consts);
+  assert.equal(consts.FOOD_NAMES.at(-1), 'chicken', 'raw chicken counts as food, ranked after everything else');
+  const inv = [];
+  const at = (x) => new V3(x, 64, 0);
+  const entities = { 1: { name: 'chicken', position: at(50) }, 2: { name: 'chicken', position: at(52) },
+    3: { name: 'chicken', position: at(55) }, 4: { name: 'cow', position: at(40) } };
+  const attacked = [];
+  const c = vm.createContext({ Object, bot: { entity: { position: Object.assign(at(0), { clone() { return this; } }) }, entities, inventory: { items: () => inv } },
+    FOOD_NAMES: consts.FOOD_NAMES, HUNTABLE_ANIMALS: consts.HUNTABLE_ANIMALS, HUNT_RANGE: consts.HUNT_RANGE,
+    ok: (text) => ({ ok: true, text }), fail: (text) => ({ ok: false, text }),
+    performActionAs: async (_b, action) => { attacked.push(action.target.name); return { ok: true }; },
+    collectDrops: async () => { inv.push({ name: 'chicken', count: 1 }); } });
+  const hunt = between(actions, '    case "hunt": {', '\n    case "');
+  vm.runInContext(`async function run(action, token, speaker = "test") { switch (action.type) {${hunt}} }`, c);
+  const r = await c.run({ type: 'hunt' }, { cancelled: false });
+  assert.deepEqual(attacked, ['chicken'], 'a chicken 50 blocks out, not the lone cow');
+  assert.equal(r.ok, true, 'and the raw chicken it dropped counts as food');
 });
 
 await check('Self-defense: a spider in daylight is no threat unless it just hit her', async () => {
@@ -3245,6 +3269,21 @@ await check('Food goal: hunts, else takes a ripe crop -- never runs as a farm go
   assert.match(between(index, 'goal.standing === "guard"', 'goal.farmTask === "farm"'),
     /survivalPriorityItem === "food"[\s\S]*goal\.farmTask \?\?= farmTaskFor/,
     'routed before farmTaskFor -- "harvest a ripe crop" would otherwise match FARM_WORDS');
+  // 2026-11-01: a step that found nothing used to be retried every 2s goal tick.
+  let now = 1_000_000;
+  const failures = [];
+  const g = vm.createContext({ bot: {}, USERNAME: 'Babs', hasFood: () => false, logStep() {}, console: { log() {} },
+    Date: { now: () => now }, failGoalStep: async (_g, why) => failures.push(why),
+    completeGoal: async () => {}, performAction: async () => ({ ok: false, text: 'nothing.' }) });
+  vm.runInContext(between(index, 'async function foodStep(', '// Tier 1 "shelter_upgrade"'), g);
+  const goal = {};
+  const run = () => g.runFoodGoal(goal, async () => true, () => null, () => false);
+  await run();
+  assert.equal(failures.length, 1);
+  now += 2_000; await run();
+  assert.equal(failures.length, 1, 'the next tick, 2s later, waits');
+  now += 30_000; await run();
+  assert.equal(failures.length, 2, '30s on, she tries again');
 });
 
 await check('Shelter upgrade: dirt and wood cells are dug out and refilled with stone, one at a time', async () => {

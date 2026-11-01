@@ -1,4 +1,6 @@
-// Version: 2.130.0
+// Version: 2.131.0
+//
+// 2.131.0 (2026-11-01): a food-goal step that finds nothing waits 30s before the next (FOOD_RETRY_MS).
 //
 // 2.124.0 (2026-10-28) -- direct request: item drop on death is now off (keepInventory), so the
 // old post-death "walk back to where she died" march has nothing left to recover and is removed.
@@ -4772,7 +4774,13 @@ async function foodStep(handle) {
   return { ok: false, text: `${hunted.text} ${harvested.text}`, action: { type: "harvest" } };
 }
 
+// 2026-11-01: a step that finds nothing fails in under 100ms, and goal ticks come every 2s -- Babs
+// and Amy each ran ~500 food steps an hour, re-proposing the goal every 40s. Nothing to hunt now
+// usually means nothing to hunt for a while.
+const FOOD_RETRY_MS = 30_000;
+
 async function runFoodGoal(goal, takeControl, getHandle, replaced) {
+  if (Date.now() < (goal.foodRetryAt ?? 0)) return;
   if (replaced() || !(await takeControl())) return;
   const step = await foodStep(getHandle());
   getHandle()?.release();
@@ -4780,6 +4788,7 @@ async function runFoodGoal(goal, takeControl, getHandle, replaced) {
   logStep(goal, `food: ${step.text}`, step.ok, step.action);
   console.log(`[${USERNAME}] food goal: ${step.text} (ok=${step.ok})`);
   if (hasFood()) return completeGoal(goal, "got food");
+  goal.foodRetryAt = Date.now() + FOOD_RETRY_MS;
   await failGoalStep(goal, step.text);
 }
 

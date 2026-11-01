@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.30.0
+**Version:** 2.31.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -281,10 +281,10 @@ inventory full, inventory insurance, surplus banking, give-requests, saplings, a
 home lighting, terrain repair, stuck detection, self-defense, sleeping-threat, ripe crops (harvest
 and replant ripe crops within reach of home, never start a farm). With nothing to eat, hunger
 fetches food from a chest (`loot` "food"); at food ≤ 6 with none in any chest it hunts (`hunt`:
-cows, pigs, sheep, rabbits within 32 blocks, never a species' last two nearby), and with nothing
+cows, pigs, sheep, rabbits, chickens within 64 blocks; raw chicken is food, eaten last; never a species' last two nearby), and with nothing
 to hunt eats rotten flesh as a last resort; then fishes. A failed fetch backs off 5 min instead of
 failing `eat` every 15 s. Hunger escalates to HUNGER_CRITICAL at food ≤ 6. The Tier 1 food goal
-has its own runner (`foodStep`: hunt, else a ripe crop), routed ahead of the text-matched farm
+has its own runner (`foodStep`: hunt, else a ripe crop; a step that finds nothing waits 30 s), routed ahead of the text-matched farm
 routing, which its "harvest a ripe crop" wording would otherwise send to the farm runner and its
 hoe. Self-defense ignores a
 spider in daylight unless it just hurt her. A weapon goal crafts its sword at a table she carries,

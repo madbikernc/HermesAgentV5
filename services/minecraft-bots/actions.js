@@ -1,4 +1,6 @@
-// Version: 1.100.0
+// Version: 1.101.0
+//
+// 1.101.0 (2026-11-01): hunt reaches 64 blocks and takes chickens; raw chicken is food, ranked last.
 //
 // 1.94.0 (2026-10-27, direct requests over several follow-ups, investigating "why don't
 // furnaces/chests/shelter get built"): four changes.
@@ -1286,12 +1288,16 @@ export const FOOD_NAMES = [
   "beetroot_soup", "dried_kelp",
   // Review MB-15, 2026-09-24: raw catches/drops safe to eat uncooked, listed LAST so "eat" prefers
   // anything cooked. Fishing is checkHunger's fallback, and raw cod/salmon used to be inedible
-  // here with no cooking recipe either -- the food loop never closed. (Raw chicken omitted: poison.)
-  "cod", "salmon", "beef", "porkchop", "mutton", "rabbit",
+  // here with no cooking recipe either -- the food loop never closed.
+  // 2026-11-01: raw chicken too, dead last -- its poison is a 30% chance of a brief Hunger effect,
+  // a fraction of a food point, and leaving it out left Babs and Amy at food 0 for a day with 15
+  // chickens and no other spare animal within 64 blocks of home.
+  "cod", "salmon", "beef", "porkchop", "mutton", "rabbit", "chicken",
 ];
-// What "hunt" goes after: each drops a raw meat in FOOD_NAMES. Chickens are left out (raw chicken
-// is poison, so it isn't food here).
-export const HUNTABLE_ANIMALS = new Set(["cow", "mooshroom", "pig", "sheep", "rabbit"]);
+// What "hunt" goes after: each drops a raw meat in FOOD_NAMES.
+export const HUNTABLE_ANIMALS = new Set(["cow", "mooshroom", "pig", "sheep", "rabbit", "chicken"]);
+// 32 found nothing around home on 2026-11-01; 64 found 15 chickens.
+const HUNT_RANGE = 64;
 
 // Suffix-matched, same convention as equipment.js -- what's worth pulling out of a chest.
 // Food/blocks/misc items are left behind; this is specifically about gearing up.
@@ -4150,7 +4156,7 @@ async function performActionAs(bot, action, speaker, token) {
       // 2026-10-30: Babs sat at food 0 for hours -- every chest near home empty of food, no rod --
       // with nothing left to try. Raw beef/pork/mutton/rabbit are already edible (FOOD_NAMES).
       // A species' last two nearby are left alone: they're someone's breeding pair, or will be.
-      const near = (e) => e.position.distanceTo(bot.entity.position) <= 32;
+      const near = (e) => e.position.distanceTo(bot.entity.position) <= HUNT_RANGE;
       const herd = (name) => Object.values(bot.entities).filter((e) => e.name === name && near(e)).length;
       const prey = () => Object.values(bot.entities)
         .filter((e) => HUNTABLE_ANIMALS.has(e.name) && near(e) && herd(e.name) > 2)
@@ -4168,7 +4174,7 @@ async function performActionAs(bot, action, speaker, token) {
         await collectDrops(bot, token, [bot.entity.position.clone()], 6000);
       }
       if (food() > before) return ok(`hunted: now carrying ${food()} food.`);
-      return fail(sawPrey ? "hunted, but came away with no food." : "no animals to spare nearby to hunt.");
+      return fail(sawPrey ? "hunted, but came away with no food." : `no animals to spare within ${HUNT_RANGE} blocks to hunt.`);
     }
 
     case "fish": {
