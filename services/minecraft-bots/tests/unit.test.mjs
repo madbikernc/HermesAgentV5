@@ -1,4 +1,4 @@
-// Version: 1.44.0
+// Version: 1.45.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -1948,12 +1948,15 @@ await check('Farm goals: farming and ranching goals are recognised; iron farms a
   assert.equal(t('mine iron and smelt it'), null);
 });
 
-function farmGoalWorld(results, status = { ripe: 0, growing: 0 }) {
+function farmGoalWorld(results, status = { ripe: 0, growing: 0 }, inv = [], blocks = []) {
   const calls = [], done = [], retired = [];
   const performAction = async (b, action) => { calls.push({ ...action }); return results.shift() ?? { ok: false, text: 'nothing' }; };
   const world = { status };
   const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Babs', MAX_CONSECUTIVE_FAILURES: 3,
-    bot: { chat() {}, inventory: { items: () => [] }, entities: {} }, Vec3: V3, performAction,
+    bot: { chat() {}, inventory: { items: () => inv }, entities: {}, registry: { blocksByName: {} },
+      findBlocks: ({ matching }) => blocks.filter((b) => typeof matching !== 'function' || matching(b)).map((b) => b.position),
+      blockAt: (pos) => blocks.find((b) => b.position === pos) },
+    Vec3: V3, performAction,
     farmStatus: () => world.status, narrateAction: async (t) => t, recordGoalOutcome() {},
     broadcastGoalState: async (status, d, item) => { done.push([status, item]); },
     retireGoal: async (g) => { retired.push(g); }, saveGoalIfCurrent: async () => {},
@@ -1986,10 +1989,33 @@ await check('Farm goals: a missing hoe is fetched (loot, then craft) and the har
     { ok: false, text: 'no hoe in any chest' },
     { ok: true, text: 'crafted 1 wooden_hoe.' },
     { ok: true, text: 'started a farm plot', planted: 4, plot: { x: 1, y: 64, z: 1 } },
-  ]);
+  ], undefined, [{ name: 'oak_planks', count: 8 }]);
   await w.tick();
   assert.deepEqual(w.calls.map((a) => a.type + (a.item ? `:${a.item}` : '')), ['harvest', 'loot:wooden_hoe', 'craft:wooden_hoe', 'harvest']);
   assert.deepEqual(w.goal.farmPlot, { x: 1, y: 64, z: 1 });
+});
+
+await check('Farm goals: with empty chests, the hoe\'s planks come from a tree and the seeds from grass', async () => {
+  // 2026-11-01: a chest was the only source of either, and every chest near home was empty.
+  const tree = { name: 'oak_log', position: new V3(5, 64, 5) };
+  const w = farmGoalWorld([
+    { ok: false, text: "don't have a hoe", missing: 'hoe' },
+    { ok: false, text: 'no hoe in any chest' },
+    { ok: true, text: 'mined 2 oak_log.' },
+    { ok: false, text: "don't have a hoe", missing: 'hoe' },
+  ], undefined, [], [tree]);
+  await w.tick();
+  assert.deepEqual(w.calls.map((a) => a.type + (a.item ? `:${a.item}` : '') + (a.block ? `:${a.block}` : '')),
+    ['harvest', 'loot:wooden_hoe', 'mine:oak_log', 'harvest'], 'no planks and no logs: a tree');
+  assert.equal(w.goal.consecutiveFailures, 0, 'a supply step that worked is progress, not a failure');
+  const seeds = farmGoalWorld([
+    { ok: false, text: "don't have any seeds", missing: 'seeds' },
+    { ok: false, text: 'no seeds in any chest' },
+    { ok: true, text: 'gathered 3 wheat seeds from the grass.' },
+    { ok: true, text: 'started a farm plot', planted: 3, plot: { x: 1, y: 64, z: 1 } },
+  ]);
+  await seeds.tick();
+  assert.deepEqual(seeds.calls.map((a) => a.type), ['harvest', 'loot', 'gather_seeds', 'harvest']);
 });
 
 await check('Farm goals: holding a crop, or a DONE claim, never finishes one -- only a harvest', async () => {
@@ -2003,7 +2029,7 @@ await check('Farm goals: holding a crop, or a DONE claim, never finishes one -- 
 });
 
 await check('Ranch goals: fences and gate crafted from the wood she has, pen built on a site, pair penned, bred', async () => {
-  const inv = [{ name: 'birch_log', count: 8 }];
+  const inv = [{ name: 'birch_planks', count: 64 }];
   let pen = null; const cows = [];
   const calls = [];
   const performAction = async (b, action) => {
@@ -2017,7 +2043,7 @@ await check('Ranch goals: fences and gate crafted from the wood she has, pen bui
   };
   const done = [];
   const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Amy', MAX_CONSECUTIVE_FAILURES: 3,
-    bot: { chat() {}, spawnPoint: new V3(0, 64, 0), inventory: { items: () => inv },
+    bot: { chat() {}, spawnPoint: new V3(0, 64, 0), inventory: { items: () => inv }, registry: { blocksByName: {} }, findBlocks: () => [],
       entities: { 1: { name: 'cow', position: new V3(30, 64, 30) }, 2: { name: 'cow', position: new V3(31, 64, 30) } } },
     Vec3: V3, performAction, farmStatus: () => ({ ripe: 0, growing: 0 }), narrateAction: async (t) => t, recordGoalOutcome() {},
     broadcastGoalState: async (status) => { done.push(status); }, retireGoal: async () => {}, saveGoalIfCurrent: async () => {},
@@ -3244,7 +3270,8 @@ await check('Food goal: hunts, else takes a ripe crop -- never runs as a farm go
   let food = false;
   let outcomes = {};
   const actions_ = [];
-  const c = vm.createContext({ bot: {}, USERNAME: 'Babs', hasFood: () => food,
+  const covered = { BOT_ROLES: { bob: { primary: { name: 'Farmer' } }, dale: { primary: { name: 'Herder' } } } };
+  const c = vm.createContext({ bot: { players: { Bob: {}, Dale: {} } }, USERNAME: 'Babs', hasFood: () => food, heldCount: () => 0, ...covered,
     performAction: async (_b, action) => {
       actions_.push(action.type + (action.onlyRipe ? ':ripe' : ''));
       const r = outcomes[action.type] ?? { ok: false, text: 'nothing.' };
@@ -3272,7 +3299,8 @@ await check('Food goal: hunts, else takes a ripe crop -- never runs as a farm go
   // 2026-11-01: a step that found nothing used to be retried every 2s goal tick.
   let now = 1_000_000;
   const failures = [];
-  const g = vm.createContext({ bot: {}, USERNAME: 'Babs', hasFood: () => false, logStep() {}, console: { log() {} },
+  const g = vm.createContext({ bot: { players: { Bob: {}, Dale: {} } }, USERNAME: 'Babs', hasFood: () => false, heldCount: () => 0, ...covered,
+    logStep() {}, console: { log() {} },
     Date: { now: () => now }, failGoalStep: async (_g, why) => failures.push(why),
     completeGoal: async () => {}, performAction: async () => ({ ok: false, text: 'nothing.' }) });
   vm.runInContext(between(index, 'async function foodStep(', '// Tier 1 "shelter_upgrade"'), g);
@@ -3284,6 +3312,87 @@ await check('Food goal: hunts, else takes a ripe crop -- never runs as a farm go
   assert.equal(failures.length, 1, 'the next tick, 2s later, waits');
   now += 30_000; await run();
   assert.equal(failures.length, 2, '30s on, she tries again');
+});
+
+await check('Stand-ins: with no Farmer in the game the food goal becomes a farm goal; no Herder, a ranch goal', async () => {
+  // Direct request, 2026-11-01: "there are farmer and rancher roles. they should be universal at
+  // need, when no bot with that role is in game."
+  let now = 10_000_000;
+  const roster = { bob: { primary: { name: 'Farmer' } }, dale: { primary: { name: 'Herder' } }, babs: { primary: { name: 'Miner' } } };
+  const started = [];
+  const players = { Babs: {} };
+  const c = vm.createContext({ bot: { players }, USERNAME: 'Babs', BOT_ROLES: roster, Date: { now: () => now },
+    hasFood: () => false, heldCount: () => 0, logStep() {}, console: { log() {} }, recordGoalOutcome() {},
+    performAction: async () => ({ ok: false, text: 'nothing.' }), failGoalStep: async () => { throw new Error('should hand off'); },
+    completeGoal: async () => {}, retireGoal: async () => {}, saveGoal: async () => {}, PERSONA_NAME: 'babs',
+    newGoal: ({ description }) => ({ description }), broadcastGoalState: async (_s, d) => started.push(d) });
+  vm.runInContext(between(index, 'async function foodStep(', '// Tier 1 "shelter_upgrade"'), c);
+  assert.equal(c.standInRole(), 'farm', 'Bob and Dale both offline: farm first');
+  players.Bob = {};
+  assert.equal(c.standInRole(), 'ranch', 'Bob online, Dale not: ranch');
+  players.Dale = {};
+  assert.equal(c.standInRole(), null, 'both roles covered: no stand-in');
+  delete players.Bob; delete players.Dale;
+  vm.runInContext(`standInGaveUpAt.farm = ${now - 60_000}`, c); // a script-level const, not a context property
+  assert.equal(c.standInRole(), 'ranch', 'a farm stand-in that just gave up: ranch has a turn');
+  now += 31 * 60_000;
+  assert.equal(c.standInRole(), 'farm', 'and half an hour on, farming again');
+  await c.runFoodGoal({ description: 'food' }, async () => true, () => null, () => false);
+  const goal = vm.runInContext('currentGoal', c);
+  assert.equal(goal.farmTask, 'farm');
+  assert.equal(goal.standIn, true);
+  assert.match(started[0], /no Farmer is in the game/);
+  assert.match(between(index, 'const DEDICATED_RUNNER_FARM_TASKS', 'function isDedicatedRunnerGoal'), /"farm"/);
+  assert.match(between(index, 'async function failGoalStep(', 'recordGoalOutcome(goal.description, "gave up"'),
+    /if \(goal\.standIn\) standInGaveUpAt\[goal\.farmTask\] = Date\.now\(\)/, 'a stand-in that gives up is noted');
+});
+
+await check('Food goal: wheat she holds becomes bread', async () => {
+  const calls = [];
+  const c = vm.createContext({ bot: { players: {} }, USERNAME: 'Babs', BOT_ROLES: {}, hasFood: () => false, heldCount: () => 7,
+    performAction: async (_b, action) => { calls.push(action); return { ok: true, text: 'crafted 2 bread.' }; } });
+  vm.runInContext(between(index, 'async function foodStep(', 'async function runFoodGoal('), c);
+  const r = await c.foodStep(null);
+  assert.equal(r.ok, true);
+  assert.deepEqual(calls.map((a) => `${a.type}:${a.item}:${a.count}`), ['craft:bread:2'], '7 wheat: 2 bread');
+});
+
+await check('gather_seeds: breaks grass near her and picks up the seeds that drop', async () => {
+  const inv = [];
+  const grass = [new V3(2, 64, 0), new V3(3, 64, 0), new V3(4, 64, 0)];
+  const world = new Map(grass.map((p) => [p.toString(), { type: 7, name: 'short_grass' }]));
+  const dug = [];
+  const c = vm.createContext({ bot: { inventory: { items: () => inv }, registry: { blocksByName: { short_grass: { id: 7 } } },
+      findBlocks: () => grass, blockAt: (p) => world.get(p.toString()) ?? { type: 0, name: 'air' },
+      pathfinder: { goto: async () => {}, setGoal() {} }, dig: async (b) => { dug.push(b); }, stopDigging() {}, waitForTicks: async () => {} },
+    goals: { GoalNear: class {} }, withTimeout: (p) => p, ACTION_TIMEOUT_MS: 1000, SEED_GRASS: ['short_grass', 'grass'],
+    GATHER_SEEDS_MAX_DIGS: 64, ok: (text) => ({ ok: true, text }), fail: (text) => ({ ok: false, text }),
+    collectDrops: async () => { inv.push({ name: 'wheat_seeds', count: 1 }); } });
+  const src = between(actions, '    case "gather_seeds": {', '\n    case "');
+  vm.runInContext(`async function run(action, token) { switch (action.type) {${src}} }`, c);
+  const r = await c.run({ type: 'gather_seeds', count: 1 }, { cancelled: false });
+  assert.equal(dug.length, 3, 'all three grass blocks broken');
+  assert.equal(r.ok, true, r.text);
+  inv.length = 0;
+  const none = vm.createContext({ ...c, bot: { ...c.bot, findBlocks: () => [] } });
+  vm.runInContext(`async function run(action, token) { switch (action.type) {${src}} }`, none);
+  assert.equal((await none.run({ type: 'gather_seeds' }, { cancelled: false })).ok, false, 'no grass: fails');
+});
+
+await check('Ranch goals: chicken feed comes from grass when no chest has any', async () => {
+  const calls = [];
+  const pen = { center: new V3(20, 64, 20), gate: new V3(20, 64, 22) };
+  const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Amy', MAX_CONSECUTIVE_FAILURES: 3,
+    bot: { chat() {}, spawnPoint: new V3(0, 64, 0), inventory: { items: () => [] }, registry: { blocksByName: {} }, findBlocks: () => [],
+      entities: { 1: { name: 'chicken', position: new V3(21, 64, 20) }, 2: { name: 'chicken', position: new V3(22, 64, 20) } } },
+    Vec3: V3, performAction: async (_b, action) => { calls.push(action.type + (action.item ? `:${action.item}` : '')); return { ok: false, text: 'none' }; },
+    farmStatus: () => ({ ripe: 0, growing: 0 }), narrateAction: async (t) => t, recordGoalOutcome() {},
+    broadcastGoalState: async () => {}, retireGoal: async () => {}, saveGoalIfCurrent: async () => {},
+    logStep: () => {}, loadPenLocation: async () => pen, LIVESTOCK: ['chicken'], BREEDING_FOOD: { chicken: ['wheat_seeds'] },
+    countInPen: () => 0, findPenSite: () => null });
+  vm.runInContext(farmGoalSrc(), c);
+  await c.ranchStep({}, null);
+  assert.deepEqual(calls, ['loot:wheat_seeds', 'gather_seeds']);
 });
 
 await check('Shelter upgrade: dirt and wood cells are dug out and refilled with stone, one at a time', async () => {

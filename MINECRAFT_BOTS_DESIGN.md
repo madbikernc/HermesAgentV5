@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.31.0
+**Version:** 2.32.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -425,6 +425,14 @@ means two different things, and the distinction is load-bearing:**
   ladders, and inventing one would produce a list that looks authoritative but was never decided.
 
 Leader has no list — its activity *is* `proposeDirectiveForOthers()` / `arbitrateGoalConflict()`.
+
+**Farmer and Herder are universal at need** (direct request, 2026-11-01). A hungry bot whose food
+goal finds nothing to hunt or harvest stands in for a missing role — `roleInGame()` reads
+`bot.players` against `BOT_ROLES`, herself included. No Farmer in the game: the food goal becomes a
+farm goal; no Herder: a ranch goal, tried once a farm stand-in has given up in the last 30 min (or
+the Farmer is in). Both runners gather their own supplies when the chests are empty: planks from her
+logs or a tree (`gatherPlanks`) for the hoe, fences and gate, and wheat seeds from grass
+(`gather_seeds`) for planting and for chickens. Wheat she holds becomes bread in the food goal.
 
 **Soldiers are carved out of general work.** `SOLDIER_DIRECTIVE_NOTE` restricts both Mayor's and
 Mark's directives to gear and combat, matching `nextSoldierPriority()`'s own scope so assigned

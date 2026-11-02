@@ -1,4 +1,7 @@
-// Version: 1.101.0
+// Version: 1.102.0
+//
+// 1.102.0 (2026-11-01): new "gather_seeds" -- break grass for wheat seeds, so a stand-in farmer or
+// herder isn't stuck on an empty chest.
 //
 // 1.101.0 (2026-11-01): hunt reaches 64 blocks and takes chickens; raw chicken is food, ranked last.
 //
@@ -2531,6 +2534,9 @@ async function savePenLocation(center, gate) {
 // 2026-09-25 farming/ranching. loot's item can name a group: "food" (a hungry bot with nothing to eat
 // fetches some -- index.js checkHunger) or "seeds" (anything harvest can plant).
 export const SEED_NAMES = ["wheat_seeds", "carrot", "potato", "beetroot_seeds"];
+// What "gather_seeds" breaks: each drops wheat seeds about one time in eight.
+const SEED_GRASS = ["short_grass", "grass", "tall_grass", "fern", "large_fern"];
+const GATHER_SEEDS_MAX_DIGS = 64;
 const LOOT_GROUPS = { food: FOOD_NAMES, seeds: SEED_NAMES };
 
 // Verified achievements -- recorded by the action that actually did the thing (harvest picked a ripe
@@ -4175,6 +4181,53 @@ async function performActionAs(bot, action, speaker, token) {
       }
       if (food() > before) return ok(`hunted: now carrying ${food()} food.`);
       return fail(sawPrey ? "hunted, but came away with no food." : `no animals to spare within ${HUNT_RANGE} blocks to hunt.`);
+    }
+
+    case "gather_seeds": {
+      // 2026-11-01: a bot standing in for a missing Farmer or Herder could only get seeds from a
+      // chest, and every chest was empty. Grass and ferns drop wheat seeds about one time in eight.
+      const want = action.count ?? 8;
+      const seeds = () => bot.inventory.items().filter((i) => i.name === "wheat_seeds").reduce((n, i) => n + i.count, 0);
+      const start = seeds();
+      const grassIds = SEED_GRASS.map((name) => bot.registry.blocksByName[name]?.id).filter((id) => id !== undefined);
+      const spots = bot.findBlocks({ matching: grassIds, maxDistance: 32, count: GATHER_SEEDS_MAX_DIGS });
+      if (!spots.length) return fail("no grass nearby to gather seeds from.");
+      let broken = 0;
+      let dug = [];
+      for (const pos of spots) {
+        if (token.cancelled || seeds() - start >= want) break;
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
+            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+        } catch {
+          continue;
+        } finally {
+          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+        }
+        if (token.cancelled) break;
+        const block = bot.blockAt(pos);
+        if (!block || !grassIds.includes(block.type)) continue;
+        try {
+          await withTimeout(bot.dig(block), ACTION_TIMEOUT_MS, () => bot.stopDigging());
+        } catch {
+          continue;
+        }
+        broken++;
+        dug.push(pos);
+        if (dug.length >= 6) {
+          await bot.waitForTicks(4); // the drop lands a few ticks after the block breaks
+          await collectDrops(bot, token, dug, 5000);
+          dug = [];
+        }
+      }
+      if (dug.length && !token.cancelled) {
+        await bot.waitForTicks(4);
+        await collectDrops(bot, token, dug, 5000);
+      }
+      if (token.cancelled) return ok("stopped gathering seeds.");
+      const gained = seeds() - start;
+      if (gained > 0) return ok(`gathered ${gained} wheat seeds from the grass (now carrying ${seeds()}).`);
+      return fail(broken ? `broke ${broken} grass, and no seeds dropped.` : "couldn't reach any of the grass nearby.");
     }
 
     case "fish": {

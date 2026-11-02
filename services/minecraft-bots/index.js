@@ -1,4 +1,8 @@
-// Version: 2.131.0
+// Version: 2.132.0
+//
+// 2.132.0 (2026-11-01, direct request): with no Farmer or Herder in the game, a hungry bot with
+// nothing to hunt stands in -- the food goal becomes a farm goal (or a ranch goal once a farm
+// stand-in has given up), and both now gather their own planks and seeds. Wheat becomes bread.
 //
 // 2.131.0 (2026-11-01): a food-goal step that finds nothing waits 30s before the next (FOOD_RETRY_MS).
 //
@@ -4408,6 +4412,7 @@ async function failGoalStep(goal, reason) {
   const limit = isDedicatedRunnerGoal(goal) ? DEDICATED_RUNNER_MAX_CONSECUTIVE_FAILURES : MAX_CONSECUTIVE_FAILURES;
   if (goal.consecutiveFailures >= limit) {
     console.log(`[${USERNAME}] giving up on goal after ${goal.consecutiveFailures} failures: ${goal.description}`);
+    if (goal.standIn) standInGaveUpAt[goal.farmTask] = Date.now();
     recordGoalOutcome(goal.description, "gave up", reason);
     await broadcastGoalState("abandoned", goal.description);
     await retireGoal(goal);
@@ -4424,13 +4429,22 @@ const FARM_GIVE_UP_MS = 90 * 60_000; // crops that haven't ripened in 90 min won
 let lastHarvestAt = 0;
 const CROP_ITEM = { wheat: "wheat", carrots: "carrot", potatoes: "potato", beetroots: "beetroot" };
 
+// 2026-11-01: a chest was the only source of either, so with empty chests a farm never started.
+// A wooden hoe is 2 planks and 2 sticks (2 more planks), 4 more for a table; seeds come from grass.
 async function fetchFarmSupply(missing, handle) {
   if (missing === "hoe") {
     const looted = await performAction(bot, { type: "loot", item: "wooden_hoe", count: 1 }, USERNAME, handle); // any hoe
     if (looted.ok || looted.cancelled) return { ...looted, type: "loot" };
-    return { ...(await performAction(bot, { type: "craft", item: "wooden_hoe", count: 1 }, USERNAME, handle)), type: "craft" };
+    const tableType = bot.registry.blocksByName.crafting_table;
+    const tableNear = heldCount((n) => n === "crafting_table") > 0 ||
+      (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
+    const gathering = await gatherPlanks(handle, 4 + (tableNear ? 0 : 4));
+    if (gathering) return { ...gathering, type: gathering.action?.type ?? "craft" };
+    return { ...(await performAction(bot, { type: "craft", item: "wooden_hoe", count: 1, here: true }, USERNAME, handle)), type: "craft" };
   }
-  return { ...(await performAction(bot, { type: "loot", item: "seeds", count: 16 }, USERNAME, handle)), type: "loot" };
+  const looted = await performAction(bot, { type: "loot", item: "seeds", count: 16 }, USERNAME, handle);
+  if (looted.ok || looted.cancelled) return { ...looted, type: "loot" };
+  return { ...(await performAction(bot, { type: "gather_seeds", count: 8 }, USERNAME, handle)), type: "gather_seeds" };
 }
 
 async function runFarmGoal(goal, takeControl, getHandle, replaced) {
@@ -4461,6 +4475,12 @@ async function runFarmGoal(goal, takeControl, getHandle, replaced) {
     logStep(goal, `farm supply (${result.missing}): ${supply.text}`, supply.ok, { type: supply.type });
     console.log(`[${USERNAME}] farm goal: needed ${result.missing} -- ${supply.text} (ok=${supply.ok})`);
     if (supply.ok && !replaced()) result = await performAction(bot, harvestAction, USERNAME, getHandle());
+    if (supply.ok && !result.ok && !result.cancelled && result.missing && !replaced()) {
+      getHandle()?.release();
+      goal.consecutiveFailures = 0;
+      await saveGoalIfCurrent(goal);
+      return;
+    }
   }
   getHandle()?.release();
   if (result.cancelled || replaced()) return;
@@ -4502,15 +4522,22 @@ function pickRanchSpecies(pen) {
 async function ranchStep(goal, handle) {
   const pen = await loadPenLocation();
   if (!pen) {
-    const wood = woodKind();
     const fences = heldCount((n) => n.endsWith("_fence") && !n.endsWith("_fence_gate"));
+    // 2026-11-01: planks first -- a fence craft is 4 planks and 2 sticks (1 more plank) for 3 fences.
+    const tableType = bot.registry.blocksByName.crafting_table;
+    const tableNear = heldCount((n) => n === "crafting_table") > 0 ||
+      (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
     if (fences < RANCH_PEN_FENCES) {
-      const item = `${wood}_fence`;
+      const gathering = await gatherPlanks(handle, 5 * Math.ceil((RANCH_PEN_FENCES - fences) / 3) + (tableNear ? 0 : 4));
+      if (gathering) return gathering;
+      const item = `${woodKind()}_fence`;
       return { ...(await performAction(bot, { type: "craft", item, count: RANCH_PEN_FENCES - fences }, USERNAME, handle)),
         action: { type: "craft", item } };
     }
     if (!heldCount((n) => n.endsWith("_fence_gate"))) {
-      const item = `${wood}_fence_gate`;
+      const gathering = await gatherPlanks(handle, 4 + (tableNear ? 0 : 4));
+      if (gathering) return gathering;
+      const item = `${woodKind()}_fence_gate`;
       return { ...(await performAction(bot, { type: "craft", item, count: 1 }, USERNAME, handle)), action: { type: "craft", item } };
     }
     const site = bot.spawnPoint && findPenSite(bot, bot.spawnPoint);
@@ -4525,6 +4552,9 @@ async function ranchStep(goal, handle) {
     for (const item of foods) {
       const got = await performAction(bot, { type: "loot", item, count: 8 }, USERNAME, handle);
       if (got.ok || got.cancelled) return { ...got, action: { type: "loot", item } };
+    }
+    if (foods.includes("wheat_seeds")) {
+      return { ...(await performAction(bot, { type: "gather_seeds", count: 8 }, USERNAME, handle)), action: { type: "gather_seeds" } };
     }
     return { ok: false, text: `need ${foods[0]} to lure and breed ${species}s, and no chest has any.` };
   }
@@ -4765,13 +4795,55 @@ async function runUpgradeToolsGoal(goal, takeControl, getHandle, replaced) {
 // so it ran as a farm goal -- and a farm goal with no hoe and no planks only ever fails. Babs
 // looped harvest/loot hoe/craft hoe every ten seconds for hours, starving, the goal re-proposed
 // each time it gave up. Food is what's wanted, not a farm: hunt, else take a ripe crop.
+// 2026-11-01: wheat isn't food until it's bread. And with nothing to hunt or harvest, she stands in
+// for a missing Farmer or Herder (see standInRole).
 async function foodStep(handle) {
   if (hasFood()) return { ok: true, text: "I have food.", done: true };
+  const wheat = heldCount((n) => n === "wheat");
+  if (wheat >= 3) {
+    return { ...(await performAction(bot, { type: "craft", item: "bread", count: Math.floor(wheat / 3), here: true }, USERNAME, handle)),
+      action: { type: "craft", item: "bread" } };
+  }
   const hunted = await performAction(bot, { type: "hunt" }, USERNAME, handle);
   if (hunted.ok || hunted.cancelled) return { ...hunted, action: { type: "hunt" } };
   const harvested = await performAction(bot, { type: "harvest", onlyRipe: true }, USERNAME, handle);
   if (harvested.cancelled || hasFood()) return { ...harvested, ok: true, action: { type: "harvest" } };
-  return { ok: false, text: `${hunted.text} ${harvested.text}`, action: { type: "harvest" } };
+  return { ok: false, text: `${hunted.text} ${harvested.text}`, action: { type: "harvest" }, standIn: standInRole() };
+}
+
+// Direct request, 2026-11-01: "there are farmer and rancher roles. they should be universal at
+// need, when no bot with that role is in game." Babs and Amy hunted out the chickens near home
+// with Bob (Farmer) and Dale (Herder) offline and nobody growing or breeding anything. A role is
+// covered while a bot holding it as her primary is logged in -- this bot included.
+function roleInGame(roleName) {
+  const online = new Set(Object.keys(bot.players ?? {}).map((name) => name.toLowerCase()));
+  return Object.entries(BOT_ROLES).some(([persona, roles]) => roles.primary?.name === roleName && online.has(persona));
+}
+
+// Farming first: seeds come from grass and a plot from open ground near home. A ranch needs a pen
+// and two animals of a kind, so it waits until a farm stand-in has recently given up.
+const STAND_IN_GOALS = {
+  farm: { role: "Farmer", description: "no Farmer is in the game -- start a farm near home: till ground, plant seeds, and bring back food from it" },
+  ranch: { role: "Herder", description: "no Herder is in the game -- breed livestock near home for food: build a pen and breed a pair" },
+};
+const STAND_IN_RETRY_MS = 30 * 60_000;
+const standInGaveUpAt = { farm: 0, ranch: 0 };
+
+function standInRole() {
+  return Object.keys(STAND_IN_GOALS).find((task) => !roleInGame(STAND_IN_GOALS[task].role) &&
+    Date.now() - standInGaveUpAt[task] >= STAND_IN_RETRY_MS) ?? null;
+}
+
+async function startStandInGoal(foodGoal, task) {
+  const { description } = STAND_IN_GOALS[task];
+  console.log(`[${USERNAME}] food goal: nothing to hunt or harvest -- standing in: ${description}`);
+  recordGoalOutcome(foodGoal.description, "handed off", description);
+  await retireGoal(foodGoal);
+  currentGoal = newGoal({ description, source: "self" });
+  currentGoal.farmTask = task;
+  currentGoal.standIn = true;
+  await saveGoal(PERSONA_NAME, currentGoal);
+  await broadcastGoalState("active", description);
 }
 
 // 2026-11-01: a step that finds nothing fails in under 100ms, and goal ticks come every 2s -- Babs
@@ -4788,6 +4860,7 @@ async function runFoodGoal(goal, takeControl, getHandle, replaced) {
   logStep(goal, `food: ${step.text}`, step.ok, step.action);
   console.log(`[${USERNAME}] food goal: ${step.text} (ok=${step.ok})`);
   if (hasFood()) return completeGoal(goal, "got food");
+  if (step.standIn) return startStandInGoal(goal, step.standIn);
   goal.foodRetryAt = Date.now() + FOOD_RETRY_MS;
   await failGoalStep(goal, step.text);
 }

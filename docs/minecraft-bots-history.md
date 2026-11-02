@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.30.0
+**Version:** 1.31.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -113,6 +113,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.29.0 | 2026-10-30 | After 836be43 Babs put her door on (04:22), then stalled with all 36 slots full and no chest near home: crafted bed planks had no slot to land in, and log mining failed ("no defined chest locations"). `checkInventoryFull` (index.js 2.129.0) now runs `makeHomeChest` when no usable chest is near home: 8 planks of one wood, craft a chest, `place_home`. Operator's call: drop only rotten flesh, and only with no free slot and no wood. |
 | 2.30.0 | 2026-10-30 | Babs, with door and chest in place, still placed no bed: every attempt timed out on the path into the room. Her door faced west in the south wall, because `placeBlock` turns to the floor block and undid `build`'s look, so the pathfinder's opened door blocked the way. `isShelterDoor` (actions.js 1.100.0) requires north/south; a wrong-way door doesn't count as complete and `build` digs and re-places it; `place_bed` no longer reports path timeouts as server refusals. `buzz.js` 1.0.1 starts at the newest message; it had been replaying topic history 50 messages per tick, so she answered offline bots' requests. Also `hunt` and a rotten-flesh last resort when starving, daytime spiders ignored unless they hit her, and a weapon crafted at a carried table (index.js 2.130.0). The bed did go in at 21:40 under the old code; then the Tier 1 food goal looped for hours as a farm goal ("harvest a ripe crop" matched FARM_WORDS): harvest, loot hoe, craft hoe without planks, every ten seconds, given up and re-proposed each time 20 failures piled up. It now has its own runner, `foodStep`. |
 | 2.31.0 | 2026-11-01 | A day after `a658720`, Babs and a newly started Amy were both at food 0 (health 6 and 9), each running ~500 failed food-goal steps an hour: `hunt` saw no spare animal within 32 blocks. RCON counted none of anything within 32 of home; within 64, 2 cows, 1 pig, 2 sheep (all spared as pairs) and 15 chickens, which `hunt` skipped. `hunt` now reaches 64 blocks and takes chickens, raw chicken is food ranked last (actions.js 1.101.0), and a food step that finds nothing waits 30 s before the next (index.js 2.131.0). |
+| 2.32.0 | 2026-11-01 | Direct request: "there are farmer and rancher roles. they should be universal at need, when no bot with that role is in game." By evening Babs and Amy had hunted the chickens near home from 15 down to 3, with Bob (Farmer) and Dale (Herder) offline and nobody growing or breeding anything. The food goal now stands in for a missing role (`roleInGame`, `standInRole`, index.js 2.132.0): a farm goal with no Farmer in the game, a ranch goal with no Herder once a farm stand-in has given up. The farm runner's hoe gets planks from logs or a tree, seeds come from grass (`gather_seeds`, actions.js 1.102.0), the ranch gathers planks for its fences and grass seeds for chickens, and wheat becomes bread. |
 
 ## services/minecraft-bots/README.md
 
@@ -227,3 +228,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.28.0 | 2026-10-30 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.29.0 row (a full inventory with no chest at home makes one). |
 | 1.29.0 | 2026-10-30 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.30.0 row (wrong-way shelter door, bus-history replay, hunting, daytime spiders, weapon at a carried table, food goal's own runner). |
 | 1.30.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.31.0 row (hunt range and chickens, food-goal retry wait). |
+| 1.31.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.32.0 row (stand-in Farmer/Herder, gather_seeds, bread). |

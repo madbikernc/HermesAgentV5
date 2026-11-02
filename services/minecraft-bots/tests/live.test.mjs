@@ -1,4 +1,6 @@
-// Version: 1.33.0
+// Version: 1.34.0
+//
+// 1.34.0 (2026-11-01): new scenario -- seeds gathered by breaking grass.
 //
 // 1.33.0 (2026-11-01): new scenario -- a hunt takes a spare chicken, and raw chicken is food.
 //
@@ -483,6 +485,18 @@ scenario("Food: loot \"food\" takes food out of a chest", async () => {
   const result = await performAction(bot, { type: "loot", item: "food", count: 8 }, TESTER);
   assert.equal(result.ok, true, result.text);
   await waitFor(() => held("bread") > 0, 5000, "bread in inventory");
+});
+
+// 2026-11-01: a stand-in Farmer or Herder with empty chests gets seeds from grass ("gather_seeds",
+// actions.js 1.102.0). 49 tufts: wheat seeds drop one time in eight, so none at all is ~1 in 700.
+scenario("Farming: seeds are gathered by breaking grass", async () => {
+  restoreFloor();
+  await rcon(`fill ${x + 1} ${y} ${z - 7} ${x + 7} ${y} ${z - 1} minecraft:grass_block`,
+    `fill ${x + 1} ${y + 1} ${z - 7} ${x + 7} ${y + 1} ${z - 1} minecraft:short_grass`);
+  await waitFor(() => bot.blockAt(new Vec3(x + 4, y + 1, z - 4))?.name === "short_grass", 8000, "grass laid");
+  const result = await performAction(bot, { type: "gather_seeds", count: 1 }, TESTER);
+  assert.equal(result.ok, true, result.text);
+  assert(held("wheat_seeds") >= 1, `wheat seeds in hand: ${result.text}`);
 });
 
 scenario("Farming: starts a plot by water -- clears grass, tills, plants, and checks each took", async () => {
