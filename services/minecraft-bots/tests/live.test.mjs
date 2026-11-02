@@ -1,4 +1,8 @@
-// Version: 1.34.0
+// Version: 1.36.0
+//
+// 1.36.0 (2026-11-01): new scenario -- a pen fence is never dug through, even as the only way out.
+//
+// 1.35.0 (2026-11-01): new scenario -- a wooden hoe from birch planks with a birch log in hand.
 //
 // 1.34.0 (2026-11-01): new scenario -- seeds gathered by breaking grass.
 //
@@ -485,6 +489,50 @@ scenario("Food: loot \"food\" takes food out of a chest", async () => {
   const result = await performAction(bot, { type: "loot", item: "food", count: 8 }, TESTER);
   assert.equal(result.ok, true, result.text);
   await waitFor(() => held("bread") > 0, 5000, "bread in inventory");
+});
+
+// Direct report, 2026-11-01: "they are destroying the fence in the pen" -- Amy, netherite axe in
+// hand, cut through two of Babs' pen fences; the pen stood hard against the shelters, so the way
+// round was walled off. Here the pen fills a corridor between bedrock walls, its gate on the side
+// away from where she's going: the only way there is through a fence, and she must not take it
+// (actions.js 1.102.2). A walk the open way round is no test -- in an open arena the old code
+// walked to the gate too.
+scenario("Pens: a fence is never dug through, even when it's the only way out", async () => {
+  const ring = [];
+  for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+    if (Math.abs(dx) === 2 || Math.abs(dz) === 2) ring.push([dx, dz]);
+  }
+  await rcon(`fill ${x - r + 1} ${y + 1} ${z - 3} ${x + r - 1} ${y + 4} ${z - 3} minecraft:bedrock`,
+    `fill ${x - r + 1} ${y + 1} ${z + 3} ${x + r - 1} ${y + 4} ${z + 3} minecraft:bedrock`,
+    ...ring.filter(([dx, dz]) => !(dx === 2 && dz === 0)).map(([dx, dz]) => `setblock ${x + dx} ${y + 1} ${z + dz} minecraft:birch_fence`),
+    `setblock ${x + 2} ${y + 1} ${z} minecraft:birch_fence_gate[facing=east]`,
+    `give ${TESTER} minecraft:netherite_axe`);
+  await waitFor(() => bot.blockAt(new Vec3(x + 2, y + 1, z))?.name === "birch_fence_gate" && held("netherite_axe") === 1,
+    8000, "pen laid, axe in hand");
+  await bot.equip(bot.inventory.items().find((i) => i.name === "netherite_axe"), "hand");
+  const movements = new SwimMovements(bot);
+  movements.canOpenDoors = true;
+  movements.digCost = 15; // index.js's own setting
+  for (const block of bot.registry.blocksArray) {
+    if (isProtectedBlockName(block.name)) movements.blocksCantBreak.add(block.id);
+  }
+  const previous = bot.pathfinder.movements;
+  bot.pathfinder.setMovements(movements);
+  scenarioCleanup.push(() => bot.pathfinder.setMovements(previous));
+  await withTimeoutMs(bot.pathfinder.goto(new goals.GoalBlock(x - 6, y + 1, z)), 30_000, () => bot.pathfinder.setGoal(null))
+    .catch(() => {}); // no way there without breaking the pen: not getting there is the right answer
+  const broken = ring.filter(([dx, dz]) => !/fence/.test(bot.blockAt(new Vec3(x + dx, y + 1, z + dz))?.name ?? ""));
+  assert.deepEqual(broken, [], `fences dug out: ${JSON.stringify(broken)}`);
+});
+
+// 2026-11-01, Babs live: 4 birch planks and a birch log in hand, and "craft wooden_hoe" failed --
+// any log counted as a source of cherry planks, the hoe's first recipe variant (actions.js 1.102.1).
+scenario("Crafting: a wooden hoe from birch planks, with a birch log also in hand", async () => {
+  await rcon(`give ${TESTER} minecraft:birch_planks 4`, `give ${TESTER} minecraft:birch_log 1`, `give ${TESTER} minecraft:crafting_table`);
+  await waitFor(() => held("birch_planks") >= 4 && held("birch_log") >= 1 && held("crafting_table") >= 1, 8000, "planks, log and table");
+  const crafted = await performAction(bot, { type: "craft", item: "wooden_hoe", count: 1, here: true }, TESTER);
+  assert.equal(crafted.ok, true, crafted.text);
+  assert.equal(held("wooden_hoe"), 1, "a hoe in hand");
 });
 
 // 2026-11-01: a stand-in Farmer or Herder with empty chests gets seeds from grass ("gather_seeds",

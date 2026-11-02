@@ -1,4 +1,4 @@
-// Version: 1.45.0
+// Version: 1.46.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -4183,7 +4183,7 @@ await check('Craft: the auto-chain works for shaped recipes too, so coal + plank
     registry: { itemsByName: Object.fromEntries(Object.entries(ITEM).map(([n, id]) => [n, { id }])), items: byId },
     inventory: {
       items: () => Object.entries(inv).filter(([, c]) => c > 0).map(([name, count]) => ({ name, count })),
-      count: (name) => inv[name] ?? 0,
+      count: (id) => inv[byId[id]?.name] ?? 0, // mineflayer's count() takes an item id, not a name
     },
     // Affordable right now only: what recipesFor really does.
     recipesFor: (id, _m, count, _t) => {
@@ -4210,6 +4210,66 @@ await check('Craft: the auto-chain works for shaped recipes too, so coal + plank
   await c.craftItem(bot, 'torch', 1, null);
   assert.deepEqual(crafted, ['stick', 'torch'], 'the stick was chained first, from her planks');
   assert(inv.torch >= 4, `she ended up with torches: ${inv.torch}`);
+});
+
+await check('Craft: a wooden hoe from birch planks -- the chain counts by item id, and a birch log makes no cherry planks', async () => {
+  // 2026-11-01, Babs live: 4 birch planks and a birch log, "craft wooden_hoe" failed. The hoe has a
+  // recipe per plank species, cherry first. The chain read count(name), always 0, so each variant
+  // made more sticks; and any log counted as the source of cherry planks.
+  const ITEM = { cherry_planks: 1, birch_planks: 2, birch_log: 3, cherry_log: 4, stick: 5, wooden_hoe: 6 };
+  const byId = Object.fromEntries(Object.entries(ITEM).map(([name, id]) => [id, { name, id }]));
+  const inv = { birch_planks: 4, birch_log: 1, stick: 0, wooden_hoe: 0, cherry_planks: 0 };
+  const crafted = [];
+  const recipe = (out, n, ins) => ({ result: { id: ITEM[out], count: n },
+    delta: [...ins.map(([name, c]) => ({ id: ITEM[name], count: -c })), { id: ITEM[out], count: n }] });
+  const RECIPES = {
+    wooden_hoe: [recipe('wooden_hoe', 1, [['cherry_planks', 2], ['stick', 2]]), recipe('wooden_hoe', 1, [['birch_planks', 2], ['stick', 2]])],
+    stick: [recipe('stick', 4, [['birch_planks', 2]])],
+    cherry_planks: [recipe('cherry_planks', 4, [['cherry_log', 1]])],
+    birch_planks: [recipe('birch_planks', 4, [['birch_log', 1]])],
+  };
+  const affordable = (r) => r.delta.filter((d) => d.count < 0).every((d) => (inv[byId[d.id].name] ?? 0) >= -d.count);
+  const bot = {
+    registry: { itemsByName: Object.fromEntries(Object.entries(ITEM).map(([n, id]) => [n, { id }])), items: byId },
+    inventory: { items: () => Object.entries(inv).filter(([, c]) => c > 0).map(([name, count]) => ({ name, count })),
+      count: (id) => inv[byId[id]?.name] ?? 0 },
+    recipesFor: (id) => (RECIPES[byId[id].name] ?? []).filter(affordable),
+    recipesAll: (id) => RECIPES[byId[id].name] ?? [],
+    craft: async (r, times) => {
+      for (const d of r.delta) inv[byId[d.id].name] = (inv[byId[d.id].name] ?? 0) + d.count * (times || 1);
+      crafted.push(byId[r.result.id].name);
+    },
+  };
+  const c = vm.createContext({ bot, console: { log() {}, error() {} } });
+  vm.runInContext(between(actions, 'function simpleSourceFor(', '// Extracted from "loot"'), c);
+  await c.craftItem(bot, 'wooden_hoe', 1, { name: 'crafting_table' });
+  assert.deepEqual(crafted, ['stick', 'wooden_hoe'], 'one batch of sticks, then the hoe');
+  assert.equal(inv.wooden_hoe, 1);
+  assert.equal(inv.birch_log, 1, 'her log untouched');
+});
+
+await check('Protected blocks: a pen fence is never dug through, like its gate', async () => {
+  // Direct report, 2026-11-01: "they are destroying the fence in the pen".
+  const c = vm.createContext({});
+  vm.runInContext(between(actions, 'const PROTECTED_BLOCK_NAMES = [', '// Direct request, 2026-09-07 ("what other logic').replace(/export /g, ''), c);
+  for (const name of ['birch_fence', 'oak_fence', 'nether_brick_fence', 'birch_fence_gate', 'oak_door', 'chest'])
+    assert.equal(c.isProtectedBlockName(name), true, name);
+  for (const name of ['birch_planks', 'stone', 'dirt']) assert.equal(c.isProtectedBlockName(name), false, name);
+});
+
+await check("Crafting: a plank type comes only from its own wood's log", async () => {
+  // 2026-11-01, Babs live: one birch log and 4 birch planks, "craft wooden_hoe" failed "don't have
+  // the ingredients" -- the hoe's first recipe variant is cherry_planks, any log counted as its
+  // source, and the cherry-planks sub-craft threw before the birch recipe was ever tried.
+  const items = [{ name: 'birch_log', count: 1 }, { name: 'birch_planks', count: 4 }];
+  const c = vm.createContext({});
+  vm.runInContext(between(actions, 'function simpleSourceFor(', '// Real bug found live 2026-10-07'), c);
+  const bot = { inventory: { items: () => items } };
+  assert.equal(c.simpleSourceFor(bot, 'cherry_planks'), undefined, 'a birch log is no source of cherry planks');
+  assert.equal(c.simpleSourceFor(bot, 'birch_planks')?.name, 'birch_log');
+  items.push({ name: 'stripped_crimson_stem', count: 1 });
+  assert.equal(c.simpleSourceFor(bot, 'crimson_planks')?.name, 'stripped_crimson_stem');
+  assert.equal(c.simpleSourceFor(bot, 'stick')?.name, 'birch_planks', 'any planks still make sticks');
 });
 
 // Tunnelling torches (2026-10-07).

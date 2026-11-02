@@ -1,4 +1,8 @@
-// Version: 1.102.0
+// Version: 1.102.2
+//
+// 1.102.2 (2026-11-01): fences are protected from digging, like their gate.
+// 1.102.1 (2026-11-01): craftItem's chain counts what she holds by item id (it read 0 by name)
+// and stops at the first affordable variant; simpleSourceFor matches planks to their own log.
 //
 // 1.102.0 (2026-11-01): new "gather_seeds" -- break grass for wheat seeds, so a stand-in farmer or
 // herder isn't stuck on an empty chest.
@@ -1541,10 +1545,14 @@ const PROTECTED_BLOCK_NAMES = [
 // (the exact set canOpenDoors' own check cares about) -- fence gates included since build_pen/
 // herd_to_pen already open/close them deliberately via activateBlock, a different operation from
 // digging, so protecting them from auto-dig doesn't conflict with that.
+// 2026-11-01 (direct report, "they are destroying the fence in the pen"): plain fences too. The
+// gate was protected, the 23 fences around it weren't, and the pathfinder dug through one rather
+// than walk round to the gate it opens anyway (movements' `openable`).
 export function isProtectedBlockName(name) {
   return PROTECTED_BLOCK_NAMES.includes(name) || (name?.endsWith("_bed") ?? false) ||
     (name?.endsWith("_shulker_box") ?? false) || (name?.endsWith("_door") ?? false) ||
-    (name?.endsWith("_trapdoor") ?? false) || (name?.endsWith("_fence_gate") ?? false);
+    (name?.endsWith("_trapdoor") ?? false) || (name?.endsWith("_fence_gate") ?? false) ||
+    (name?.endsWith("_fence") ?? false);
 }
 
 // Direct request, 2026-09-07 ("what other logic enhancements are available" -> "explore/
@@ -2078,8 +2086,13 @@ function simpleSourceFor(bot, itemName) {
   if (itemName === "stick" || itemName === "crafting_table") {
     return bot.inventory.items().find((i) => i.name.endsWith("_planks"));
   }
+  // 2026-11-01: only that wood's own log. Any log used to count, and the hoe's recipes start at
+  // cherry_planks: Babs, holding one birch log and 4 birch planks, tried cherry planks from her
+  // birch log, that sub-craft threw, and "craft wooden_hoe" failed with the planks for it in hand.
   if (itemName.endsWith("_planks")) {
-    return bot.inventory.items().find((i) => i.name.endsWith("_log") || i.name.endsWith("_stem"));
+    const wood = itemName.replace(/_planks$/, "");
+    const sources = [`${wood}_log`, `${wood}_stem`, `stripped_${wood}_log`, `stripped_${wood}_stem`];
+    return bot.inventory.items().find((i) => sources.includes(i.name));
   }
   return null;
 }
@@ -2144,15 +2157,19 @@ async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
       // original here only looked at `ingredients` and so skipped every shaped one as well.)
       const inputs = recipeInputs(recipe);
       if (!inputs) continue;
+      // 2026-11-01: count() takes an item id. Given the name it always read 0, so with a recipe per
+      // plank species (a wooden hoe has 12) every variant made more sticks, until Babs' 4 birch
+      // planks were 16 sticks and no hoe. And once one variant is affordable, stop.
       for (const ing of inputs) {
         const ingName = bot.registry.items[ing.id]?.name;
         if (!ingName) continue;
-        const have = bot.inventory.count(ingName, null);
+        const have = bot.inventory.count(ing.id, null);
         if (have >= ing.count) continue;
         if (simpleSourceFor(bot, ingName)) {
           await craftItem(bot, ingName, ing.count - have, tableBlock, depth + 1);
         }
       }
+      if (bot.recipesFor(itemDef.id, null, count, tableBlock ?? null).length) break;
     }
     recipes = bot.recipesFor(itemDef.id, null, count, tableBlock ?? null);
   }

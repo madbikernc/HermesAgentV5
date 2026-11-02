@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.32.0
+**Version:** 2.33.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -433,6 +433,8 @@ farm goal; no Herder: a ranch goal, tried once a farm stand-in has given up in t
 the Farmer is in). Both runners gather their own supplies when the chests are empty: planks from her
 logs or a tree (`gatherPlanks`) for the hoe, fences and gate, and wheat seeds from grass
 (`gather_seeds`) for planting and for chickens. Wheat she holds becomes bread in the food goal.
+Plain fences are protected from the pathfinder's auto-dig like their gates (`isProtectedBlockName`):
+Amy cut through two fences of Babs' new pen, which stood against the shelters with no way round.
 
 **Soldiers are carved out of general work.** `SOLDIER_DIRECTIVE_NOTE` restricts both Mayor's and
 Mark's directives to gear and combat, matching `nextSoldierPriority()`'s own scope so assigned
