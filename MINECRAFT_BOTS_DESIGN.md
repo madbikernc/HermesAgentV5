@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.33.0
+**Version:** 2.34.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -231,6 +231,11 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   runs `makeHomeChest` when no usable chest is near home. Each check does one step: gather 8 planks
   of one wood, craft a chest, then `place_home`. Operator's call: nothing is dropped except rotten
   flesh, and only when she has no free slot and no wood (she can't pick up a log without a slot).
+  **Furniture is not wall** (2026-11-02, direct report: "they keep enclosing themselves inside a
+  residence with un-necessary blocks"): the integrity check's `holesIn` called any room cell with
+  4 solid sides a breach, and a bed counted as one, so the floor cells in a corner beside a bed
+  were patched shut. Beds, chests and doors no longer count, a cell that keeps one usable is never
+  a hole, and `patch_shelter` asks `wouldBlockAccess` like every other placer.
   **Ground cover
   is cleared, not built around** (2026-10-28): flowers aren't replaceable the way grass is, and the
   server refused every wall, door and bed cell that held one. Every placement breaks a non-solid,

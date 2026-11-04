@@ -1,4 +1,4 @@
-// Version: 1.8.0
+// Version: 1.9.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -15,7 +15,8 @@
 // When a behavior fix lands, add the metric that proves it here (see tests/README.md), and after
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
-// Revision History: 1.8.0 | 2026-11-01 | farms_planted_per_bot_day (stand-in Farmer/Herder).
+// Revision History: 1.9.0 | 2026-11-02 | access_clears_per_bot_day (patch_shelter vs clear_access).
+// 1.8.0 | 2026-11-01 | farms_planted_per_bot_day (stand-in Farmer/Herder).
 // 1.7.0 | 2026-11-01 | failed_food_steps_per_bot_day (hunt range/chickens, food-goal retry wait).
 // 1.6.0 | 2026-10-30 | bed_placements_per_bot_day, absent_give_attempts_per_bot_day
 //   hunts_that_fed_per_bot_day and farm_supply_failures_per_bot_day (wrong-way shelter door,
@@ -239,6 +240,11 @@ const METRICS = {
     about: "farm plots started -- 0 on 2026-11-01 with Bob (Farmer) offline and nobody standing in",
     better: "higher", tolerance: 0.5, floor: 0.2,
     value: (c, ctx) => perBotDay(c(/\] farm goal: started a farm plot/), ctx),
+  },
+  access_clears_per_bot_day: {
+    about: "blocks dug out of a door/bed/chest's way -- ~176/bot-day on 2026-11-01, patch_shelter refilling a doorway that clear_access then cleared",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/\] access check: cleared \d+ block/), ctx),
   },
 };
 

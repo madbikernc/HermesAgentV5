@@ -1,5 +1,6 @@
-// Version: 1.102.2
+// Version: 1.102.3
 //
+// 1.102.3 (2026-11-02): "patch_shelter" skips a hole that wouldBlockAccess refuses.
 // 1.102.2 (2026-11-01): fences are protected from digging, like their gate.
 // 1.102.1 (2026-11-01): craftItem's chain counts what she holds by item id (it read 0 by name)
 // and stops at the first affordable variant; simpleSourceFor matches planks to their own log.
@@ -5013,7 +5014,9 @@ async function performActionAs(bot, action, speaker, token) {
       // "build"/"build_communal_shelter" above, this never computes its own position list. Door-
       // free by construction: holesIn() excludes every doorway cell, so there is never a door to
       // craft or place here, only the plain wall/floor/roof blocks a hole actually needs.
-      const holes = (action.holes || []).map((p) => new Vec3(p.x, p.y, p.z));
+      // 2026-11-02: never fill a cell that keeps a door, bed or chest usable -- every other placer
+      // already asks; this one didn't, and clear_access then dug the block straight back out.
+      const holes = (action.holes || []).map((p) => new Vec3(p.x, p.y, p.z)).filter((pos) => !wouldBlockAccess(bot, pos));
       const missing = () => holes.filter((pos) => bot.blockAt(pos)?.boundingBox !== "block");
       const needed = missing();
       if (!needed.length) return { ...ok("no holes left to patch."), built: true };

@@ -1,4 +1,9 @@
-// Version: 1.3.2
+// Version: 1.3.3
+//
+// 1.3.3 (2026-11-02, direct report: "they keep enclosing themselves inside a residence with
+// un-necessary blocks"): holesIn() counted a bed, chest or door as solid, so a floor cell in a
+// corner beside a bed read as a breach and was walled in. Fixtures no longer count, and a cell
+// that keeps a fixture reachable is never a hole.
 //
 // 1.3.2 (2026-10-22): documents a real, named limitation found live -- holesIn() cannot find a
 // hole exactly at a corner (see HOLE_MIN_SOLID_NEIGHBOURS' own updated comment). No code change;
@@ -557,9 +562,14 @@ export const HOLE_MIN_SOLID_NEIGHBOURS = 4; // of 6 face-neighbours -- a thin ga
 // left as a named limitation rather than a guessed fix for a narrower, less common case than the
 // one this generalization was actually asked to solve.
 
+// A bed, chest or door is furniture, not shell: counted as solid, the floor cell in a corner
+// beside a bed had 4 solid sides and was filled in (live, 2026-11-02).
 function solidFaceNeighbourCount(bot, cell) {
   let n = 0;
-  for (const [dx, dy, dz] of STEPS_6) if (solid(bot, cell.offset(dx, dy, dz))) n++;
+  for (const [dx, dy, dz] of STEPS_6) {
+    const pos = cell.offset(dx, dy, dz);
+    if (solid(bot, pos) && !fixtureKind(bot.blockAt(pos)?.name)) n++;
+  }
   return n;
 }
 
@@ -589,6 +599,7 @@ export function holesIn(bot, inside) {
   if (width < MIN_SHELTER_ROOM_SPAN || depth < MIN_SHELTER_ROOM_SPAN) return holes;
   for (const key of inside) {
     const cell = fromKey(key);
+    if (fixtureBlockedBy(bot, cell)) continue; // a door's way through, or a bed's last way up to
     if (solidFaceNeighbourCount(bot, cell) >= HOLE_MIN_SOLID_NEIGHBOURS) holes.add(key);
   }
   return holes;

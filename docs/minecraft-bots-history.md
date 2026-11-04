@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.32.0
+**Version:** 1.33.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -228,6 +228,8 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.27.0 | 2026-10-30 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.28.0 row (door from the most-held wood, shelter bed restricted to its room). |
 | 1.28.0 | 2026-10-30 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.29.0 row (a full inventory with no chest at home makes one). |
 | 1.29.0 | 2026-10-30 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.30.0 row (wrong-way shelter door, bus-history replay, hunting, daytime spiders, weapon at a carried table, food goal's own runner). |
+| 2.34.0 | 2026-11-02 | Direct report, "they keep enclosing themselves inside a residence with un-necessary blocks, usually wood". A probe of the live rooms near home found the two holes the integrity check kept reporting in the small shelter by the door, (-223, 64, -94) and (-223, 64, -97), were real floor cells in the corners beside its bed: `holesIn` counted the bed as solid, giving 4 solid sides, so `patch_shelter` (which never asked `wouldBlockAccess`) filled them with whatever it held most of, usually planks. It also filled the cell inside the door, which `clear_access` dug back out every couple of minutes. Beds, chests and doors no longer count as solid, a cell that keeps a fixture usable is never a hole (shelter.js 1.3.3), and `patch_shelter` skips any cell `wouldBlockAccess` refuses (actions.js 1.102.3). |
 | 1.30.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.31.0 row (hunt range and chickens, food-goal retry wait). |
 | 1.31.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.32.0 row (stand-in Farmer/Herder, gather_seeds, bread). |
 | 1.32.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.33.0 row (craft chain counted by name, pen fences dug through). |
+| 1.33.0 | 2026-11-02 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.34.0 row (furniture counted as wall, doorway patched shut). |

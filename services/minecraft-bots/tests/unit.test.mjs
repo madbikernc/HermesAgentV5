@@ -1,4 +1,4 @@
-// Version: 1.46.0
+// Version: 1.47.0
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -3993,6 +3993,51 @@ await check('Shelter rooms (general): a larger shelter, a shape neither fixed ge
   const damaged = c.shelterRoomsNear(w.bot, new V3(-1, 64, 0), 12);
   assert.equal(damaged.length, 1, 'still one room, now damaged');
   assert(damaged[0].holes.has(`2,65,${size}`), `the hole in the far wall of a 5x5 room is found: ${[...damaged[0].holes]}`);
+});
+
+await check('Shelter rooms (general): the floor cell in a corner beside a bed is room, not a hole', async () => {
+  // Direct report, 2026-11-02: "they keep enclosing themselves inside a residence with
+  // un-necessary blocks". Live, the corner cells beside a shelter's bed read as holes -- floor,
+  // two walls and the bed made 4 solid sides -- and patch_shelter filled them in.
+  const c = shelter();
+  const w = blockWorld();
+  const size = 5;
+  for (let dx = -1; dx <= size; dx++) {
+    for (let dz = -1; dz <= size; dz++) {
+      const edge = dx === -1 || dx === size || dz === -1 || dz === size;
+      w.place([dx, 63, dz], 'oak_planks');
+      w.place([dx, 68, dz], 'oak_planks');
+      if (!edge) continue;
+      for (let dy = 64; dy <= 67; dy++) {
+        if (dx === -1 && dz === 0 && dy <= 65) continue;
+        w.place([dx, dy, dz], 'oak_planks');
+      }
+    }
+  }
+  w.door([-1, 64, 0], 'oak_door', 'west');
+  w.bed([3, 64, 4]); // head (3,64,4), foot (3,64,3): the corner cell (4,64,4) sits beside its head
+  const [found] = c.shelterRoomsNear(w.bot, new V3(-1, 64, 0), 12);
+  assert(found.inside.has('4,64,4'), 'the corner cell is part of the room');
+  assert.equal(found.holes.size, 0, `an intact room with a bed has no holes: ${[...found.holes]}`);
+});
+
+await check('Shelter patch: never fills a door\'s way through, even when handed it as a hole', async () => {
+  // Live, 2026-11-02: a plank kept reappearing in the cell inside a shelter door, and
+  // clear_access kept digging it back out. Every other placer asks wouldBlockAccess first.
+  const w = blockWorld();
+  w.door([0, 64, 1]); // facing north: (0,64,0) and (0,64,2) are its way through
+  w.bot.inventory.items = () => [{ name: 'cobblestone', count: 64 }];
+  w.bot.equip = async () => {};
+  w.bot.pathfinder.goto = async () => {};
+  w.bot.pathfinder.setMovements = () => {};
+  const placed = [];
+  w.bot.placeBlock = async (ref, face) => placed.push(ref.position.offset(face.x, face.y, face.z).toString());
+  const c = context(w.bot, { Vec3: V3, attemptBoatCrossing: async () => false,
+    shelterMaterialCount: () => 64, isShelterMaterial: () => true,
+    clearCellForPlacement: async () => {}, refreshGear: async () => {} });
+  vm.runInContext(timeoutFn + actionFn, c);
+  await c.performAction(w.bot, { type: 'patch_shelter', holes: [{ x: 0, y: 64, z: 0 }] }, 'test');
+  assert.deepEqual(placed, [], 'the doorway stays open');
 });
 
 await check('Access: "place" takes another side rather than blocking a door, and says so when every side would', async () => {

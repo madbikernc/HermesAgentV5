@@ -1,4 +1,7 @@
-// Version: 1.36.0
+// Version: 1.37.0
+//
+// 1.37.0 (2026-11-02): new scenario -- a bed in a shelter corner is no hole, and patch_shelter
+// never fills a doorway.
 //
 // 1.36.0 (2026-11-01): new scenario -- a pen fence is never dug through, even as the only way out.
 //
@@ -489,6 +492,32 @@ scenario("Food: loot \"food\" takes food out of a chest", async () => {
   const result = await performAction(bot, { type: "loot", item: "food", count: 8 }, TESTER);
   assert.equal(result.ok, true, result.text);
   await waitFor(() => held("bread") > 0, 5000, "bread in inventory");
+});
+
+// Direct report, 2026-11-02: "they keep enclosing themselves inside a residence with un-necessary
+// blocks, usually wood". Live, the floor cells in a corner beside a shelter's bed read as holes
+// (the bed counted as a wall) and patch_shelter filled them; it also filled the cell inside the
+// door, which clear_access then dug back out. A planked 5x5 room, bed in a corner: no holes, and
+// handed the door's inside cell anyway, patch_shelter leaves it open (shelter.js 1.3.3,
+// actions.js 1.102.3).
+scenario("Shelter rooms: a bed in the corner is no hole, and patch_shelter never fills a doorway", async () => {
+  const ox = x + 3, oz = z - 2; // interior ox..ox+4, oz..oz+4, y+2..y+3
+  await rcon(`fill ${ox - 1} ${y + 1} ${oz - 1} ${ox + 5} ${y + 4} ${oz + 5} minecraft:oak_planks hollow`,
+    `setblock ${ox - 1} ${y + 2} ${oz} minecraft:oak_door[facing=west,half=lower]`,
+    `setblock ${ox - 1} ${y + 3} ${oz} minecraft:oak_door[facing=west,half=upper]`,
+    `setblock ${ox + 3} ${y + 2} ${oz + 4} minecraft:white_bed[facing=south,part=head]`,
+    `setblock ${ox + 3} ${y + 2} ${oz + 3} minecraft:white_bed[facing=south,part=foot]`,
+    `give ${TESTER} minecraft:cobblestone 8`);
+  const doorPos = new Vec3(ox - 1, y + 2, oz);
+  const inside = new Vec3(ox, y + 2, oz);
+  const corner = new Vec3(ox + 4, y + 2, oz + 4);
+  const myRoom = () => shelterRoomsNear(bot, doorPos, 12).find((room) => room.inside.has(`${corner.x},${corner.y},${corner.z}`));
+  await waitFor(() => bot.blockAt(corner.offset(-1, 0, 0))?.name === "white_bed" && held("cobblestone") >= 8 && myRoom(),
+    8000, "room built, bed in its corner");
+  assert.deepEqual([...myRoom().holes], [], "an intact room with a bed in its corner has no holes");
+
+  const patched = await performAction(bot, { type: "patch_shelter", holes: [{ x: inside.x, y: inside.y, z: inside.z }] }, TESTER);
+  assert.equal(bot.blockAt(inside)?.name, "air", `the cell inside the door stays open: ${patched.text}`);
 });
 
 // Direct report, 2026-11-01: "they are destroying the fence in the pen" -- Amy, netherite axe in
