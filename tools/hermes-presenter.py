@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.7.0
+# Version: 1.7.1
+#
+# 1.7.1 (2026-11-04) — comment-only: STYLE_MODEL's note ruled out `muse` as "confirmed abliterated
+# live". Since S44 (2026-10-27) muse is NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning, stock, on
+# spark-2; it stays ruled out for the cross-node hop, not for its weights. dispatch is labelled
+# with its live quant (UD-Q4_K_M). Default unchanged.
 #
 # 1.7.0 (2026-10-13) — direct operator request: STYLE_SYSTEM_PROMPT now also requires the fleet's
 # STE100-lite language register (STYLE_GUIDE.md) -- short declarative sentences, one idea per
@@ -254,11 +259,12 @@
 #                        to pure passthrough without a code change)
 #   STYLE_MODEL         default "dispatch" — role name sent as `model`; stock weights only (target
 #                        §12.1: "Presenter | Stock | Outbound only; no benefit"). Not `super`
-#                        (confirmed abliterated live: Huihui-GLM-4.7-Flash-abliterated) or `muse`
-#                        (confirmed abliterated live). `dispatch` is the only always-resident,
-#                        confirmed-stock role (Qwen3.6-35B-A3B, never abliterated per S6) — the
-#                        cross-node hop and wrong-shape model size ruled out `omni` (also stock,
-#                        but on spark-2). Accepted tradeoff, operator confirmed: styling calls
+#                        (confirmed abliterated live: Huihui-GLM-4.7-Flash-abliterated). `dispatch`
+#                        is the only always-resident, confirmed-stock role on this node
+#                        (Qwen3.6-35B-A3B-UD-Q4_K_M, never abliterated per S6) — `muse`
+#                        (Nemotron-3-Nano-Omni-30B-A3B-Reasoning, stock since S44) and `omni`
+#                        (Nemotron-3.5-Bolt-74B-A9B, stock) are both on spark-2, ruled out by the
+#                        cross-node hop. Accepted tradeoff, operator confirmed: styling calls
 #                        share dispatch's own inference queue, the one backend target §6.1 argues
 #                        for keeping response-formatting away from — acceptable here since styling
 #                        calls are low-volume (only fire on a chat reply actually being delivered).

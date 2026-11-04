@@ -1,5 +1,5 @@
 [Unit]
-Description=llama.cpp server - Qwen3-Embedding-0.6B (HomeD13 bulk-ingestion embedding, Phase 30c)
+Description=llama.cpp server - Qwen3-Embedding-8B-Q8_0 (HomeD13 bulk-ingestion embedding, Phase 30c)
 After=network.target
 
 [Service]

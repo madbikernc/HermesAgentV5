@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Version: 2.0.0
+# Version: 2.0.1
+#
+# 2.0.1 (2026-11-04) — comment-only: the core-warning note said llama-super is "on-demand by
+# design, inactive is its normal resting state". super is always-resident since Stage 12; it is
+# still left out of the warning loop because it isn't a persona core. Loop unchanged.
 #
 # 2.0.0 (HermesAgentV4): retargeted from spark's Weaver/Muse to spark-2's Coder/Muse
 # (IMPLEMENTATION_PLAN.md §1, §2c, §4d) — found 2026-08-21 in the same sweep that caught
@@ -103,8 +107,8 @@ fi
 # Node-agnostic: warn only about whichever persona core actually exists on this
 # host. `systemctl cat` fails cleanly for a unit that was never installed
 # here, so this stays silent about the other node's core entirely. Also never
-# warns about llama-super — it's on-demand by design (§4a), being inactive is
-# its normal resting state, not something worth flagging.
+# warns about llama-super — it isn't a persona core (it's the shared escalation
+# tier, always-resident since Stage 12), so its state is out of scope here.
 for core in llama-sintra-core.service llama-nano.service llama-amy-core.service; do
   if systemctl cat "$core" >/dev/null 2>&1 && ! systemctl is-active --quiet "$core"; then
     log "WARNING: $core is not active — this script never stops it, so if it's down that's unrelated to this run"

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.18.0
+# Version: 2.18.1
+#
+# 2.18.1 (2026-11-04) — label-only: every MODEL_SWAP_RECOMMENDATIONS row's `role` still described
+# the pre-S44 state ("coder2 ... retired, but still resident, zero traffic", "... live production
+# traffic") and the table header called each incumbent "live". All four findings were acted on in
+# S44 (2026-10-27), checked against each node's running llama-server 2026-11-04: coder2, omni and
+# muse now run the candidate; log-analyst is registered but its backend has never started on spark
+# (not enough free memory for the wake worker's threshold). Each `role` now says so; the header
+# reads "incumbent at the time (score)". No data or rendering change.
 #
 # 2.18.0 (2026-10-27) — S46: render_backlog() gets an "auto-deferred" badge, next to the existing
 # "★ recommended" one, on a `deferred` row whose turn payload has `auto_deferred: true`
@@ -1623,7 +1631,7 @@ REC_SEVERITY_COLOR = {"critical": "var(--bad)", "high": "var(--bad)",
 # are confirmed to drift from their own service descriptions.
 MODEL_SWAP_RECOMMENDATIONS = [
     {
-        "role": "coder2 / dualcoder-review (retired 2026-10-20, but still resident, zero traffic)",
+        "role": "coder2 / dualcoder-review — deployed S44 (2026-10-27), coder2 now runs the candidate",
         "suite": "fleet_dualcoder_precision",
         "candidate": "GLM-4.7-Flash-Q4_K_M",
         "candidate_score": "1.000 (6/6) — recall 3/3, precision 3/3",
@@ -1634,7 +1642,8 @@ MODEL_SWAP_RECOMMENDATIONS = [
         "date": "2026-10-24/25",
     },
     {
-        "role": "super's log-analyst duty (live production traffic)",
+        "role": "super's log-analyst duty — new log-analyst role registered S44 (2026-10-27); backend "
+                "never yet started on spark (insufficient free memory to wake), hermes-logs still on super",
         "suite": "fleet_log_analyst",
         "candidate": "NousResearch Hermes-4.3-36B-Q4_K_M",
         "candidate_score": "accuracy 0.750 (9/12), fact-extraction 0.960",
@@ -1645,7 +1654,7 @@ MODEL_SWAP_RECOMMENDATIONS = [
         "date": "2026-10-25",
     },
     {
-        "role": "omni's vision-judge duty (live production traffic)",
+        "role": "omni's vision-judge duty — deployed S44 (2026-10-27), omni now runs the candidate",
         "suite": "fleet_vision_judge",
         "candidate": "NVIDIA-Nemotron-3.5-Bolt-74B-A9B",
         "candidate_score": "precision 0.897, recall 0.963, false_fail_rate 0.037",
@@ -1657,7 +1666,8 @@ MODEL_SWAP_RECOMMENDATIONS = [
         "date": "2026-10-25",
     },
     {
-        "role": "muse's persona/override-resistance duty (live production traffic)",
+        "role": "muse's persona/override-resistance duty — deployed S44 (2026-10-27), muse now runs "
+                "the candidate (text-only load)",
         "suite": "fleet_muse_contract",
         "candidate": "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning",
         "candidate_score": "0.963 (26/27) — override 8/9",
@@ -1691,7 +1701,7 @@ def render_swap_recommendations():
             f'live role, before acting on any row here; this fleet\'s role assignments are '
             f'confirmed to drift from their own service descriptions.')
     return (f'<p class="note">{note}</p>' + table(
-        ["role", "suite", "candidate (score)", "live incumbent (score)", "caveat", "found"],
+        ["role", "suite", "candidate (score)", "incumbent at the time (score)", "caveat", "found"],
         rows))
 
 

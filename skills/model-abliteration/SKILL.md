@@ -1,7 +1,7 @@
 ---
 name: model-abliteration
 description: "Remove refusal behavior from a stock open-weight model using heretic, without disturbing either persona's own fast-core service. Use when a newly-scanned model (see hermes-model-scan) has no acceptable pre-abliterated build available."
-version: 2.0.1
+version: 2.0.2
 author: HermesAgentV5
 license: MIT
 platforms: [linux]
@@ -14,7 +14,7 @@ prerequisites:
 
 # Model Abliteration
 
-**Version:** 2.0.0
+**Version:** 2.0.2
 
 Produces a new, permanently uncensored set of weights from a stock open-weight model via `heretic`
 (directional ablation with an automated layer/weight search — see
@@ -43,10 +43,12 @@ the compute time (~20-30 min on comparable hardware for a small model, longer fo
 what's already free (check `free -h`'s own output, which the script prints before and after stopping
 anything). **Never** stops either persona's own fast-core service (`llama-sintra-core.service`/
 `llama-nano.service` on `spark`, `llama-amy-core.service` on `spark-2`) under any circumstance, and
-never touches `spark`'s backbone (`nano`, the on-demand `super`, the broker, the router, Continuwuity)
+never touches `spark`'s backbone (`dispatch`, `super`, the broker, the router, Continuwuity)
 at all — that's the point of retargeting this to spark-2 specifically. Runs `heretic` in the
 foreground, and restarts whatever it stopped when `heretic` exits, on success, failure, or interrupt
 alike.
+
+**As of 2026-11-04 `--free-omni` frees nothing:** `llama-amy-vision.service` is no longer running on `spark-2`, and the live `omni` backend is `llama-omni.service` (Nemotron-3.5-Bolt), which the script doesn't stop. Stopping `llama-muse.service` also takes the Minecraft bots' in-character chat offline for the duration.
 
 `heretic` ends with its own interactive menu — save locally, push to the Hub, chat-test, or run
 standard benchmarks. **Always use the chat-test or benchmark option before treating the result as
@@ -77,3 +79,4 @@ the template for wiring a result in as a new backend if it's worth promoting.
 |---|---|---|
 | 2.0.1 | 2026-08-30 | HermesAgentV5 consolidation: author: field and in-body usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
 | 2.0.0 | 2026-08-21 | Ported from `HermesAgentRedo` 1.1.0, retargeted from spark's Weaver/Muse to spark-2's Coder/Muse (`IMPLEMENTATION_PLAN.md` §4d) — found in the same honest-delegation sweep that caught `hermes-fabrication-guard.sh`'s stale role names, not by the original migration audit. `--free-vision` renamed `--free-omni`. |
+| 2.0.2 | 2026-11-04 | Flagged that `--free-omni` stops `llama-amy-vision.service`, which no longer runs (live `omni` is `llama-omni.service`), so it frees nothing; noted stopping `muse` takes bot chat offline; `spark`'s backbone list says `dispatch` instead of retired `nano`. Body version line aligned with frontmatter. |

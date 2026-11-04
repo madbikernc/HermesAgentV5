@@ -1,7 +1,7 @@
 ---
 name: model-benchmark
 description: "Score a live fleet backend or an unpromoted candidate model (a fresh heretic/fine-tune output, a bake-off contender) against five industry-standard suites — MMLU-Pro, GPQA Diamond, IFEval, BFCL, SWE-bench Verified — and compare the result against that model's own prior runs. Use before promoting a candidate to a real resident backend, or to check whether a fleet role's current backend is still the right choice."
-version: 3.0.1
+version: 3.0.2
 author: HermesAgentV5
 license: MIT
 platforms: [linux]
@@ -14,7 +14,7 @@ prerequisites:
 
 # Model Benchmark
 
-**Version:** 3.0.0
+**Version:** 3.0.2
 
 Runs `lm-eval-harness` (MMLU-Pro, GPQA Diamond, IFEval), BFCL, and SWE-bench Verified against a
 backend, records the result to shared history, and prints how it compares to that same model's most
@@ -41,12 +41,12 @@ Don't use this for a quick sanity check that a model didn't break entirely — a
 
 ## How to use it
 
-**Benchmarking a live fleet backend** (`nano`/`super`/`coder`/`muse`/`omni`) — read-only against
+**Benchmarking a live fleet backend** (`super`/`coder`/`coder2`/`muse`/`omni`/`dispatch`; `nano` is retired) — read-only against
 `hermes-router`, no service disruption, safe to run any time:
 
 ```bash
 ~/HermesAgentV5/tools/hermes-benchmark-model.sh --role coder \
-  --model-id unsloth/Qwen3-Coder-Next-GGUF
+  --model-id huihui-ai/Qwen3.8-27B-abliterated
 ```
 
 **Benchmarking an unpromoted candidate** (a `.gguf` not currently wired into any role) — spins up a
@@ -72,15 +72,16 @@ IFEval/SWE-bench) for a quick smoke test before committing to a full run:
 
 ```bash
 ~/HermesAgentV5/tools/hermes-benchmark-model.sh --role muse \
-  --model-id huihui-ai/Qwen3.6-35B-A3B-abliterated --suites mmlu_pro,ifeval --limit 25
+  --model-id nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning --suites mmlu_pro,ifeval --limit 25
 ```
 
 **BFCL needs two extra flags, always** — it can't go through `hermes-router` (see README §3 for
 why), so it needs the role's own `llama-server` port directly, plus a registry-matched model name:
 
 ```bash
-~/HermesAgentV5/tools/hermes-benchmark-model.sh --role coder --model-id unsloth/Qwen3-Coder-Next-GGUF \
-  --suites bfcl --bfcl-endpoint http://127.0.0.1:8093/v1 \
+# On spark-2, where coder's llama-server lives (8093 on spark is the reranker):
+~/HermesAgentV5/tools/hermes-benchmark-model.sh --role coder --model-id huihui-ai/Qwen3.8-27B-abliterated \
+  --suites bfcl --bfcl-endpoint http://127.0.0.1:8094/v1 \
   --bfcl-model-name Qwen/Qwen3-30B-A3B-Instruct-2507-FC --bfcl-test-category simple_python
 ```
 
@@ -99,12 +100,13 @@ since you're calling in from `HomeD13`:
 
 ```bash
 # From HomeD13:
-~/HermesAgentV5/tools/hermes-benchmark-model.sh --role nano --model-id <label> \
-  --endpoint http://10.129.1.15:8088/v1 --suites swebench --limit 5
+~/HermesAgentV5/tools/hermes-benchmark-model.sh --role super --model-id <label> \
+  --endpoint http://10.129.1.15:8095/v1 --suites swebench --limit 5
 ```
 
-Only `nano`/`super` (on `spark`, ports 8088/8095) are currently firewalled to allow `HomeD13`
-through — `coder`/`muse`/`omni` (on `spark-2`) aren't yet, and would need the same treatment
+Only `spark`'s ports 8088/8095 were firewalled to allow `HomeD13` through (2026-08-24); 8088 was
+`nano`'s, which is retired, so `super` on 8095 is the only live target there today. `spark-2`'s
+roles (`coder`/`coder2`/`muse`/`omni`) aren't opened yet, and would need the same treatment
 (`infra/model-benchmark/README.md` §4) before this works for them too.
 
 ## Comparing against history
@@ -153,3 +155,4 @@ recorded from either node's own `hermes-benchmark-model.sh` shows up in either n
 | 1.0.0 | 2026-08-24 | Initial version, written alongside `tools/hermes-benchmark-model.sh`, `tools/hermes-benchmark-model.py`, `tools/hermes-benchmark-compare.py`, and `tools/hermes_benchmark_common.py` — direct request for a repeatable, comparable way to score fleet backends and bake-off candidates against five industry-standard suites. |
 | 2.0.0 | 2026-08-24 | Live verification pass on `spark`: MMLU-Pro/GPQA-Diamond/IFEval/BFCL all confirmed working end-to-end against real backends. BFCL's usage section rewritten around the real mechanism (direct `llama-server` port, `--bfcl-endpoint`/`--bfcl-model-name`/`--bfcl-test-category`, no exact registry match for this fleet's checkpoints) — replaces a guessed invocation that didn't exist. `swebench` removed from the default `--suites` set and Rules updated — confirmed blocked on this hardware (no x86_64 Docker emulation), not merely untested. Major bump — the BFCL usage section is a reversal of prior guidance, not just an addition. |
 | 3.0.0 | 2026-08-24 | Added a SWE-bench-on-`HomeD13` usage section, direct request — `HomeD13` is `x86_64`, so it doesn't hit the aarch64 Docker-emulation blocker at all. Real end-to-end run verified: firewall rule opened (`spark` → `HomeD13` for `nano`/`super`'s ports), a real `nano` bind gap fixed (was `127.0.0.1`-only), two real code bugs found and fixed (wrong HF dataset org, too-short generation timeout). Rules updated to reflect SWE-bench works from `HomeD13` specifically, not that it's universally blocked. Major bump — reverses the prior "confirmed blocked" framing into a real working path. |
+| 3.0.2 | 2026-11-04 | Examples corrected to the live fleet: retired `nano`/8088 replaced with `super`/8095, the BFCL example's endpoint fixed (8093 is `spark`'s reranker; `coder` is 8094 on `spark-2`), model ids updated to `coder`'s and `muse`'s real checkpoints, role list gains `coder2`/`dispatch`. Body version line aligned with frontmatter. |

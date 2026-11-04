@@ -1,6 +1,6 @@
 # model-benchmark — recreate checklist
 
-**Version:** 3.1.1
+**Version:** 3.1.2
 
 One-time install of the evaluation stack used to score a fleet backend (or an unpromoted
 candidate — a fresh `heretic`/fine-tune output, a bake-off contender) against five industry-
@@ -98,11 +98,11 @@ guessed wrong about that. The real mechanism, confirmed with a genuine end-to-en
 - **Must talk directly to the role's own `llama-server` port, never `hermes-router`'s `:8080`.**
   BFCL's local-inference handler calls `/v1/completions`, which `hermes-router` doesn't implement
   (only `/v1/chat/completions`); and it sends its `--model` registry name as the outgoing `"model"`
-  field, which `hermes-router` rejects (it only accepts its five role names: `nano`/`super`/`coder`/
-  `muse`/`omni`). `llama-server` itself accepts any string in `"model"` — confirmed live — so
+  field, which `hermes-router` rejects (it only accepts its own role names — as of 2026-11-04
+  `super`/`dispatch`/`log-analyst`/`coder`/`coder2`/`muse`/`omni`; `nano` was retired in S13). `llama-server` itself accepts any string in `"model"` — confirmed live — so
   pointing straight at the role's own port sidesteps both problems. Per-role ports are in
-  `IMPLEMENTATION_PLAN.md` §4a/§4b and `tools/hermes-router.py`'s own `ROLES` table (e.g. `nano` is
-  `127.0.0.1:8088` on `spark`).
+  `IMPLEMENTATION_PLAN.md` §4a/§4b and `tools/hermes-router.py`'s own `ROLES` table (e.g. `super` is
+  `127.0.0.1:8095` on `spark`; `infra/hermes-router/README.md` has the live table).
 - **`--model` must be a name from `bfcl models`** (e.g. `Qwen/Qwen3-4B-Instruct-2507-FC`,
   `Qwen/Qwen3-30B-A3B-Instruct-2507-FC`) — it drives BFCL's prompt-formatting and tool-call-schema
   logic, not just a label. **None of this fleet's actual checkpoints have an exact registry entry**
@@ -191,12 +191,13 @@ pip install swebench datasets
   raises it directly, not wrapped in `urllib.error.URLError` — so hitting it would have crashed the
   whole run instead of just skipping one instance and moving on. Fixed.
 
-**Real invocation** (from `HomeD13`, against `nano` on `spark`):
+**Real invocation** (from `HomeD13`; originally run against `nano` on `spark`, since retired — point
+it at a live role's port instead, e.g. `super` on `:8095`, which HomeD13's ufw rule below also covers):
 
 ```bash
 cd ~/HermesAgentV5 && source /opt/benchmark-venv/bin/activate
-python3 tools/hermes-benchmark-model.py --role nano --model-id <label> \
-  --endpoint http://10.129.1.15:8088/v1 --suites swebench --limit 1
+python3 tools/hermes-benchmark-model.py --role super --model-id <label> \
+  --endpoint http://10.129.1.15:8095/v1 --suites swebench --limit 1
 ```
 
 Real output from the actual first successful run: `resolved_rate=0.0` (1 instance submitted, 0
@@ -345,3 +346,4 @@ loaded. Poll `/v1/chat/completions` for a 200 instead — dispatch needed ~25s.
 | 3.0.0 | 2026-08-24 | **§4 (SWE-bench) fully rewritten** — direct request to run it from `HomeD13` (x86_64) instead of the aarch64 Sparks. Set up and verified live: Docker installed natively (no emulation needed at all — `docker run hello-world` just works), `/opt/benchmark-venv` with `swebench`/`datasets`. Real network path needed two real fixes: `spark`'s `ufw` only allowed `spark-2` through to `nano`/`super`'s ports (added a matching rule for `HomeD13`'s IP), and `nano`'s own `llama-server` turned out to be bound to `127.0.0.1` only — likely never actually reachable cross-node even for `spark-2`, since nano/super aren't real `model-delegation` targets today — rebound to `0.0.0.0` (matching `muse`'s own convention) and restarted, verified healthy through the live router before and after. First real end-to-end run then surfaced two real code bugs in `tools/hermes_benchmark_common.py`, both fixed: the dataset org was wrong (`princeton-nlp/SWE-bench_Verified` has no `"image"` field `swebench` 5.0.2 requires; `SWE-bench/SWE-bench_Verified` does) and the 180s per-instance generation timeout was too short for a real issue, plus `TimeoutError` wasn't in the caught-exceptions tuple (would have crashed the whole run, not just skipped one instance). Second real run produced a genuine score (`resolved_rate=0.0`, 1/1 submitted). Major bump — this reverses "confirmed blocked" into a real, working path, not just an addition. |
 | 3.1.0 | 2026-10-10 | Added the incumbent ifeval baselines (five of six roles; three reproduce their historical score exactly, `super` is 14 points below the rest, `coder2` cannot finish in 90 minutes because it emits reasoning tokens), and the three obstacles found getting them: Layer 2 classifies ifeval prompts as injections at p=0.997 so role mode must use `--endpoint`; going direct makes a role invisible to `hermes-model-idle-sleep.sh`, which unloaded two backends mid-run at the 15-minute mark; and every backend ran one slot against a 65536 context, which is why benchmarking a shared resident role doubles the bots' LLM timeouts. Records the `--parallel 4` change to muse and dispatch with measured throughput, why `super` must stay at one slot (the digest sends it 15-20k tokens), that the flags live in untracked `/opt/llama.cpp/start-*.sh`, and that `/v1/models` answers before a model is loaded. |
 | 3.1.1 | 2026-10-10 | Added the measured confirmation of `--parallel 4`, with the activity control beside it: 20/9/2 bot LLM timeouts per 10 min on one slot against **0 and 0** on four, while bot activity rose from 171-726 log lines to 6200-7196 — the bots had been queued rather than acting. |
+| 3.1.2 | 2026-11-04 | Model-assumption sweep: router role list and per-port example no longer name the retired `nano` (current roles as of 2026-11-04); SWE-bench example invocation now targets `super` on :8095 instead of nano's dead :8088. Dated results sections left as recorded. |

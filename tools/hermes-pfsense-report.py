@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.5.1
+#
+# 1.5.1 (2026-11-04) — comment-only: ROUTER_MODEL's note still gave "super is on-demand, needs
+# 85GiB free to wake" as a live reason. super has been always-resident GLM-4.7-Flash (~25GiB)
+# since Stage 12. The note now says so; dispatch stays the target (resident and stock).
 #
 # 1.4.0 — HermesAgentV5 S13: ROUTER_MODEL switched nano -> dispatch. nano is retired
 # (IMPLEMENTATION_PLAN.md S13); dispatch fills the same "always resident, stock, safe for an
@@ -102,10 +106,9 @@ from hermes_botnet_intel import lookup_many, cache_age_hours  # noqa: E402
 STATE_FILE = Path.home() / ".hermes" / "state" / "pfsense-report-state.json"
 ROUTER_URL = "http://127.0.0.1:8080/v1/chat/completions"
 ROUTER_MODEL = "dispatch"  # 1.4.0 (V5 S13): nano retired. dispatch is the new always-resident,
-                        # stock role — same reason nano was chosen over super in 1.3.0 still
-                        # applies (super is on-demand, needs 85GiB free to wake, routinely
-                        # unavailable), and this routine unattended daily digest still needs
-                        # something that never risks a 503.
+                        # stock role. 1.3.0's reason for avoiding super (on-demand, 85GiB to
+                        # wake) no longer holds -- super is always-resident since Stage 12 --
+                        # but dispatch is resident and stock, so it stays the target.
 
 # One pull per day, sized generously above the real measured rate (~18,600
 # parseable entries in a ~16h window on 2026-08-09, so a 24h day is roughly

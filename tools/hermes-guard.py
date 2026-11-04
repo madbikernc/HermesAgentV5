@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 2.2.0
+# Version: 2.2.1
+#
+# 2.2.1 (2026-11-04) — comment-only: two present-tense lines in the 2.0.0 account below still said
+# `omni` is this service's default LLM backend. The config section and code have said otherwise
+# since: GUARD_LLM_URL defaults to `dispatch`'s llama-server, GUARD_MODE defaults to classifier
+# (mdeberta-prompt-injection), and spark's live unit runs classifier mode. Also, `omni` is no
+# longer gemma-4-26B-A4B-it -- it has been Nemotron-3.5-Bolt-74B-A9B since S44 (2026-10-27), so the
+# 18-of-18 measurement quoted below describes a checkpoint that is no longer deployed.
 #
 # hermes-guard — Layer 2 of the two-layer screening design (HermesAgentV5/IMPLEMENTATION_PLAN.md
 # S5; target architecture §8, §12.1).
@@ -27,8 +34,8 @@
 #   * No threshold fixes it. The malicious and benign score distributions overlap almost entirely
 #     below 0.063; the best accuracy available at **any** cutoff is 0.722.
 #   * A stock LLM asked the same question caught **18 of 18** with one false positive, and
-#     `omni` (gemma-4-26B-A4B-it) scored identically to `dispatch` — which is why `omni` is the
-#     default here. S22b's standing objection was that screening on the model being protected has
+#     `omni` (then gemma-4-26B-A4B-it) scored identically to `dispatch` — which is why `omni` was
+#     2.0.0's default (no longer: see GUARD_LLM_URL below). S22b's standing objection was that screening on the model being protected has
 #     no independent failure mode; an independent checkpoint scoring the same answers it.
 #
 # Still stock weights, permanently — target §12.1's reasoning is unchanged and now applies to
@@ -40,7 +47,8 @@
 #
 # 1. GUARD_LLM_URL MUST BE A BACKEND, NEVER THE ROUTER. hermes-router.py screens every request it
 #    proxies through this service, so a guard that called the router would have its own screening
-#    call screened, recursively, forever. The default points straight at `omni`'s llama-server,
+#    call screened, recursively, forever. The default points straight at a backend's llama-server
+#    (`dispatch`'s, since `omni` measured non-viable at concurrency -- see GUARD_LLM_URL below),
 #    and main() refuses to start if the URL looks like the router's own port. Same "talk to the
 #    backend, not the router" rule S11's mmlu_pro bypass and S12's DISPATCH_CHAT_URL already follow.
 # 2. THE PROMPT IS LOAD-BEARING AND MUST MATCH THE HARNESS. GUARD_SYSTEM below is byte-identical

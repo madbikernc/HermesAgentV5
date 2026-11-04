@@ -1,6 +1,14 @@
 # Qwen4 (`Qwen3.8-Flash`) as a `coder` Replacement — Bake-off Runbook
 
-**Version:** 1.0.0
+**Version:** 1.1.0
+
+> **Status as of 2026-11-04 — premises below are partly stale; re-check before running.** `coder`
+> moved back to **`spark-2`** on 2026-10-07 (still Huihui-Qwen3.8-27B-abliterated Q4_K, port 8094,
+> `--reasoning off` confirmed live), so every "On spark" step for `coder` below now runs on
+> `spark-2`. `coder2` is no longer Muse Glimmer 30B: since S44 (2026-10-27) it is
+> **GLM-4.7-Flash-Q4_K_M (stock)** on spark-2 port 8099, chosen by S39's `fleet_dualcoder_precision`
+> suite. Where this runbook reasons about `coder2`'s model, that reasoning was about Muse Glimmer.
+> Body left as written.
 
 Runbook for re-running the `coder` bake-off now that `qwen4exp` architecture support exists in
 llama.cpp — the thing that crashed the original `coder2` candidate (`IMPLEMENTATION_PLAN.md`
@@ -141,3 +149,4 @@ branches) to point at the new model's real backend, redeploy the `start-coder.sh
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-03 | Initial version — runbook for re-running the `coder` bake-off against production `Qwen3.8-Flash` now that `qwen4exp` support has shipped in a real llama.cpp release, written from a session with no fleet network access for a session that has one to execute. |
+| 1.1.0 | 2026-11-04 | Added a 2026-11-04 status banner: `coder` now lives on spark-2 (since 2026-10-07) and `coder2` is GLM-4.7-Flash-Q4_K_M (S44), not Muse Glimmer — body left as written, still unexecuted. |

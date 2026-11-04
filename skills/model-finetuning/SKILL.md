@@ -1,7 +1,7 @@
 ---
 name: model-finetuning
 description: "LoRA/QLoRA fine-tune a local model on raw documents (fiction, transcripts, regulatory material, or any other prose) for local deployment. Use when there's real training material ready and a specific model/purpose in mind — not for exploratory model search."
-version: 2.0.1
+version: 2.0.2
 author: HermesAgentV5
 license: MIT
 platforms: [linux]
@@ -14,7 +14,7 @@ prerequisites:
 
 # Model Fine-Tuning
 
-**Version:** 2.0.0
+**Version:** 2.0.2
 
 Produces a LoRA adapter from a base open-weight model, trained on local documents, via
 `tools/hermes-finetune-train.py` (`transformers`/`peft`/`trl`/`bitsandbytes` — see
@@ -38,12 +38,14 @@ question than committing GPU-hours to a real training run.
 ~/HermesAgentV5/tools/hermes-finetune-model.sh <hf-repo-id> <data-dir> <output-dir>
 ```
 
-This stops `llama-coder.service`/`llama-muse.service` on `spark-2` (neither exists on `spark`, so
+This stops `llama-coder.service`/`llama-muse.service` on `spark-2` (neither runs on `spark`, so
 nothing is stopped there unless `--free-omni` is passed, which stops `llama-amy-vision.service`
 instead) for the duration of the run — **never** either persona's own fast-core service, and never
-`spark`'s backbone (`nano`, the on-demand `super`, broker, router, Continuwuity) — runs the training
+`spark`'s backbone (`dispatch`, `super`, broker, router, Continuwuity) — runs the training
 script in the foreground, and restarts whatever it stopped when training finishes, on success,
 failure, or interrupt alike.
+
+**As of 2026-11-04 `--free-omni` frees nothing:** `llama-amy-vision.service` is no longer running on `spark-2`, and the live `omni` backend is `llama-omni.service` (Nemotron-3.5-Bolt), which the script doesn't stop. Stopping `llama-muse.service` also takes the Minecraft bots' in-character chat offline for the duration.
 
 `<data-dir>` is scanned recursively for `.txt`/`.md`/`.pdf`/`.docx`/`.epub` files — extracted the same
 way `hermes-rag-ingest-kb.py` already extracts documents for the `personal-kb` RAG corpus, then
@@ -91,3 +93,4 @@ loss number alone won't catch.
 |---|---|---|
 | 2.0.1 | 2026-08-30 | HermesAgentV5 consolidation: author: field and in-body usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
 | 2.0.0 | 2026-08-21 | Ported from `HermesAgentRedo` 1.0.0, retargeted from spark's Weaver/Muse to spark-2's Coder/Muse (`IMPLEMENTATION_PLAN.md` §4d) — found in the same honest-delegation sweep that caught `hermes-fabrication-guard.sh`'s stale role names, not by the original migration audit. `--free-vision` renamed `--free-omni`. |
+| 2.0.2 | 2026-11-04 | Flagged that `--free-omni` stops `llama-amy-vision.service`, which no longer runs (live `omni` is `llama-omni.service`), so it frees nothing; noted stopping `muse` takes bot chat offline; `spark`'s backbone list says `dispatch` instead of retired `nano`. Body version line aligned with frontmatter. |

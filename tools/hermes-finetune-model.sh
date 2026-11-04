@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Version: 2.0.0
+# Version: 2.0.1
+#
+# 2.0.1 (2026-11-04) — comment-only: same llama-super note fix as hermes-abliterate-model.sh 2.0.1 --
+# super is always-resident since Stage 12, not on-demand. Loop unchanged.
 #
 # 2.0.0 (HermesAgentV4): retargeted from spark's Weaver/Muse to spark-2's Coder/Muse
 # (IMPLEMENTATION_PLAN.md §1, §2c, §4d) — same fix, same reason, and found in the same sweep as
@@ -86,7 +89,7 @@ fi
 # Warn (don't touch) if a persona's own fast core is down -- only meaningful for whichever
 # one actually exists on this host; systemctl cat fails cleanly for one
 # that doesn't, so this stays silent about the other node's core. Never warns about
-# llama-super -- it's on-demand by design (§4a), inactive is its normal resting state.
+# llama-super -- it isn't a persona core (shared escalation tier, always-resident since Stage 12).
 for core in llama-sintra-core.service llama-nano.service llama-amy-core.service; do
   if systemctl cat "$core" >/dev/null 2>&1 && ! systemctl is-active --quiet "$core"; then
     log "WARNING: $core is not active — this script never stops it, so if it's down that's unrelated to this run"

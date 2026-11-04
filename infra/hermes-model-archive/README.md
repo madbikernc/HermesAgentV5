@@ -1,6 +1,6 @@
 # hermes-model-archive — recreate checklist
 
-**Version:** 1.4.1
+**Version:** 1.5.0
 
 Weekly best-effort archive (`tools/hermes-model-archive.py`) of each node's downloaded model files to NAS2,
 so re-provisioning after a wipe (or the documented LUKS-remount issue on spark,
@@ -80,8 +80,8 @@ two:
 ]
 ```
 
-**spark-2** (`muse`, `omni` — S1 reclaimed Forge; `coder` moved to spark and isn't spark-2's concern anymore,
-superseding this section's original Stage-8-era placement):
+**spark-2** (as listed 2026-08-24: `muse`, `omni` — S1 reclaimed Forge; at the time `coder` had moved to spark.
+As of 2026-11-04 spark-2 serves `coder`, `coder2`, `muse` and `omni` — see the drift note below):
 
 ```json
 [
@@ -90,6 +90,20 @@ superseding this section's original Stage-8-era placement):
   {"hf_id": "unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF", "source": "/mnt/hermes-data/models/mmproj-F16.gguf"}
 ]
 ```
+
+**Drift since these lists were verified (live `ls`, 2026-11-04) — not yet added above, because each
+needs its real `hf_id` checked first:**
+
+- spark: `Huihui-GLM-4.7-Flash-abliterated.Q4_K_M.gguf` (live `super`),
+  `Qwen3-Embedding-8B-Q8_0.gguf` (live `embed`), `Qwen3-Reranker-0.6B-Q8_0.gguf` (live `rerank`),
+  `NousResearch_Hermes-4.3-36B-Q4_K_M.gguf` (`log-analyst`), `Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf`
+  (+ mmproj), `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M.gguf`,
+  `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-UD-Q4_K_M.gguf`, `huihui-ai_Qwen3-Coder-Next-abliterated-Q4_K_M.gguf`,
+  and the two `Elbaz-*-PRISM` files.
+- spark-2: `NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf` + its mmproj (live `omni`),
+  `GLM-4.7-Flash-Q4_K_M.gguf` (live `coder2`), `Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf` (live `coder`),
+  `Muse-Glimmer-30B-Q4_K_M.gguf` and `gemma-4-26B-A4B-it-UD-Q4_K_M.gguf` + mmproj (both retired, kept).
+  `Huihui-Qwen3.6-35B-A3B-abliterated` is listed above as spark-2's model but is no longer `muse` (retired S44).
 
 Paths are `/mnt/hermes-data/models/` (the current LUKS-container location, same as spark), not the
 `/opt/hermes-models/` this section originally listed — that path predates the LUKS migration and no longer
@@ -159,3 +173,4 @@ pointing the relevant `start-*.sh` at it — replaces a from-Hugging-Face re-dow
 | 1.1.0 | 2026-08-23 | Corrected per direct request: no new dedicated NFS mount/export. `Models/` is a new folder under `Private/Hermes/` on the *existing* `/mnt/nas2-hermes-backup` mount, sibling to `Spark_Backup/` and `Images/`, not a separate share. Removed the "Prerequisite: NAS2 mount" section entirely (nothing new to provision) and the corresponding `hermes-fleet-health.py` check (redundant — the existing mount check already covers it). 1.0.0's design was never deployed, so nothing downstream depended on the wrong mount path. |
 | 1.2.0 | 2026-08-24 | First real deployment attempt on spark surfaced two real problems, both fixed: (1) destination folders were keyed by an invented role/status label (`nano`, `candidate-qwen3-coder-30b`, `retired-nemotron-3-super`) instead of the model's actual identity — config schema and script both renamed `role`→`hf_id`, using each model's real, individually-verified Hugging Face repo ID as the destination folder (nests naturally since `hf_id` contains `/`). (2) The real run also hit `[Errno 5] Input/output error` on 9 of 11 files — NAS2's `soft,timeo=50,retrans=3` mount gave up under sustained heavy transfer load, worsened by concurrent diagnostic reads against the same share mid-transfer. Not a config/code bug; a real NAS2 capacity/timeout limit under this workload, re-run planned without concurrent load. This entry also replaces every config example in this file with live-verified paths (previously explicitly flagged as best-guess). |
 | 1.4.0 | 2026-08-29 | HermesAgentV5 S9: deployed on spark-2 for the first time (had never run there — `muse`/`omni`, 46.6GB, archived successfully), corrected the spark-2 config example to current post-S1 paths and role placement (`coder` moved to spark; stale `/opt/hermes-models/` paths replaced with `/mnt/hermes-data/models/`), and corrected two stale claims this file made at its 2026-08-24 origin: spark-2 does have a working NAS2 mount now, and a direct pmoney-to-pmoney SSH path between the nodes exists now (S1). Added a weekly systemd timer on both nodes — the tool had been run manually but was never actually scheduled despite this file already describing a timer. |
+| 1.5.0 | 2026-11-04 | Model-assumption sweep: spark-2 heading no longer claims `coder` lives on spark; added a 2026-11-04 live-`ls` drift note listing model files (live super/embed/rerank/log-analyst/coder/coder2/omni and retired gemma/Muse Glimmer) not yet in the manifests above, pending real `hf_id` checks. |

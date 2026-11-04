@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+#
+# 1.0.1 (2026-11-04) — usage text only: the example endpoint was port 8088 (nano's, retired S13).
+# super is on 8095; log-analyst, the role this suite feeds, is on 8098.
 #
 # Initial version (2026-10-23) — S39 Phase B (FLEET_BENCHMARK_DESIGN.md S6.1), after S39a's
 # sign-off. New tool, not a change to an existing one. 18 synthetic cases (see module docstring's
@@ -58,7 +61,7 @@ production path already has its own router-level analysis-mode exemption for thi
 fewer failure mode, rather than a one-off exception reasoned out per suite.
 
 Usage:
-  hermes-log-analyst-eval.py --endpoint http://127.0.0.1:8088/v1 [--model-id "super (live)"]
+  hermes-log-analyst-eval.py --endpoint http://127.0.0.1:8095/v1 [--model-id "super (live)"]
       [--limit N] [--json out.json]
 """
 import argparse

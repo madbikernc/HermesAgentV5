@@ -1,5 +1,5 @@
 [Unit]
-Description=Hermes guard - Layer 2 injection/jailbreak classifier (Llama Prompt Guard 2, stock, CPU-only)
+Description=Hermes guard - Layer 2 injection/jailbreak classifier (mdeberta-v3-base-prompt-injection, stock, CPU-only)
 Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-guard/README.md
 After=network.target
 # Model weights live inside the LUKS container, which is never auto-mounted. After a reboot this

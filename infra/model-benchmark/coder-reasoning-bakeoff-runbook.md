@@ -1,6 +1,14 @@
 # `coder` reasoning-on vs. reasoning-off — bake-off runbook, and the coder2-replacement question
 
-**Version:** 1.0.0
+**Version:** 1.1.0
+
+> **Status as of 2026-11-04 — premises below are partly stale; re-check before running.** `coder`
+> moved back to **`spark-2`** on 2026-10-07 (still Huihui-Qwen3.8-27B-abliterated Q4_K, port 8094,
+> `--reasoning off` confirmed live), so every "On spark" step for `coder` below now runs on
+> `spark-2`. `coder2` is no longer Muse Glimmer 30B: since S44 (2026-10-27) it is
+> **GLM-4.7-Flash-Q4_K_M (stock)** on spark-2 port 8099, chosen by S39's `fleet_dualcoder_precision`
+> suite. Where this runbook reasons about `coder2`'s model, that reasoning was about Muse Glimmer.
+> Body left as written.
 
 **Written from a session with no network path to `spark`/`spark-2`** (cloud container, home LAN
 unreachable — confirmed live, including port 22, not assumed) — **every command below is
@@ -170,3 +178,4 @@ architecturally distinct model in the security-review loop regardless of score.
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-06 | Initial version — written to answer a direct request to run the reasoning-on-vs-off bake-off for `coder` and evaluate replacing `coder2` with it, from a session confirmed to have no network path to `spark`/`spark-2` (verified live, including port 22). Unexecuted; mirrors `qwen4-coder-bakeoff-runbook.md`'s own pattern for the same constraint. |
+| 1.1.0 | 2026-11-04 | Added a 2026-11-04 status banner: `coder` now lives on spark-2 (since 2026-10-07) and `coder2` is GLM-4.7-Flash-Q4_K_M (S44), not Muse Glimmer — body left as written, still unexecuted. |

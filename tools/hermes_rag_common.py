@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.9.0
+# Version: 1.9.1
+#
+# 1.9.1 (2026-11-04) — docstring-only: the module docstring still named the query-time embedder
+# Qwen3-Embedding-0.6B-Q8_0. It has been Qwen3-Embedding-8B-Q8_0 since 1.7.0 (2026-09-04), which
+# is what spark's hermes-embed backend loads today.
 #
 # 1.7.0 (2026-09-04) — EMBED_DIMS 1024 -> 4096, matching the embed swap to Qwen3-Embedding-8B
 # (infra/hermes-rag/start-embed.sh). New `_migrate_vec_chunks_dims()`: `vec_chunks` is a sqlite-vec
@@ -100,7 +104,7 @@ cross-persona data store in this fleet (broker's jobs.db, the botnet-intel
 cache, the usage log).
 
 Embedding: query-time embedding always goes through the resident
-llama.cpp server on 127.0.0.1:8092 (Qwen3-Embedding-0.6B-Q8_0,
+llama.cpp server on 127.0.0.1:8092 (Qwen3-Embedding-8B-Q8_0,
 infra/hermes-rag/), never re-implemented per caller.
 """
 import datetime

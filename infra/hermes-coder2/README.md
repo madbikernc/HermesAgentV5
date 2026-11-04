@@ -1,16 +1,18 @@
 # hermes-coder2 — recreate checklist
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 `coder2` — **GLM-4.7-Flash-Q4_K_M (stock)** as of IMPLEMENTATION_PLAN.md S44 (2026-10-27), the
 second coding backend for `tools/hermes-dualcoder.py`'s cross-review workflow. Previously Meta's
 Muse Glimmer 30B (stock, Apache-2.0) — retired 2026-10-20 for chronic reasoning-token-bloat/timeout
 problems (hermes-dualcoder.py's own comments), then replaced rather than left empty once S39's
 dedicated `fleet_dualcoder_precision` suite measured GLM-4.7-Flash at 1.000 (6/6) against Muse
-Glimmer's 0.000 (0/4, 2 timeouts) on the identical task. Deployed on **`spark-2`**, deliberately not
-alongside `coder` on `spark` — see `tools/hermes-router.py` 2.10.0's own changelog for why
-(memory-bandwidth isolation between the two coding backends, and keeping the review traffic off
-`spark`'s always-resident `dispatch` role). This was `spark-2`'s **first on-demand role** — until
+Glimmer's 0.000 (0/4, 2 timeouts) on the identical task. Deployed on **`spark-2`**, originally
+deliberately not alongside `coder` on `spark` — see `tools/hermes-router.py` 2.10.0's own changelog
+for why (memory-bandwidth isolation between the two coding backends, and keeping the review traffic
+off `spark`'s always-resident `dispatch` role). `coder` has since moved to `spark-2` too
+(2026-10-07, `infra/hermes-router/README.md` §3), so as of 2026-11-04 both coding backends share
+this node and spark-2's single wake-worker instance targets both. This was `spark-2`'s **first on-demand role** — until
 then it only ran always-resident `muse`/`omni`, so several pieces here (the wake worker, idle-sleep
 timer) were genuinely new territory on this node, not copies of something already running there.
 
@@ -40,7 +42,7 @@ sudo cp start-coder2.sh /opt/llama.cpp/start-coder2.sh
 sudo chmod +x /opt/llama.cpp/start-coder2.sh
 sudo cp llama-coder2.service /etc/systemd/system/
 sudo systemctl daemon-reload
-# Deliberately NOT enabled/started here -- like coder on spark, only the wake worker's
+# Deliberately NOT enabled/started here -- like coder, only the wake worker's
 # `systemctl start` should ever bring this up.
 ```
 
@@ -75,7 +77,8 @@ this repo — same untracked-on-spark gap `start-coder.sh`/`llama-coder.service`
 `HERMES_NODE=spark-2` set explicitly.
 
 **This depends on `hermes-broker.py` 1.4.0's new `roles` claim filter** — without it, two wake-worker
-instances (spark's targeting `nano`/`super`/`coder`, this one targeting `coder2`) polling the same
+instances (spark's — at the time targeting `nano`/`super`/`coder`, today `super`/`log-analyst` —
+and this one, today targeting `coder`/`coder2`) polling the same
 `type=wake` queue would occasionally race for each other's jobs, adding latency and, in the worst
 case, risking a job exhausting its retry budget before the right worker ever claims it. Confirm the
 broker is actually running 1.4.0+ before enabling this second instance.
@@ -115,3 +118,4 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/
 |---|---|---|
 | 1.0.0 | 2026-09-05 | Initial version — `coder2` deployment checklist for the dual-coder review orchestrator's second reviewer. |
 | 1.1.0 | 2026-10-27 | S44: model swapped from Muse Glimmer 30B to GLM-4.7-Flash-Q4_K_M, per S39's `fleet_dualcoder_precision` bake-off (1.000 vs 0.000). Port, node, caller and firewall rule unchanged. |
+| 1.2.0 | 2026-11-04 | Model-assumption sweep: noted `coder` now shares spark-2 with `coder2` (since 2026-10-07) and that the two wake-worker instances today target `super`/`log-analyst` (spark) and `coder`/`coder2` (spark-2). |

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.1.1
+#
+# 1.1.1 (2026-11-04) — comment-only: the placement note said coder2 sits on spark-2 so the two coding
+# backends never share a node. Both have been on spark-2 since coder moved there 2026-10-07
+# (hermes-router.py 2.14.0); coder2 is GLM-4.7-Flash-Q4_K_M since S44. call_model()'s docstring
+# now names Muse Glimmer as the then-coder2 its 2026-09-05 finding was made against.
 #
 # 1.1.0 (2026-09-05) — comprehensive security-review capability, direct operator request: a new
 # static-analysis pass (tools/hermes-code-security-scan.py -- bandit, ruff unused-variable checks,
@@ -94,9 +99,11 @@
 # than the plain ok-bool every other specialist's publish_result() uses, since this workflow has a
 # genuine three-plus-way terminal outcome, not just success/failure.
 #
-# coder2 lives on spark-2 (cross-node, muse/omni's dual-branch ROLES shape, not coder's same-node
-# one) specifically so the two coding backends' back-and-forth traffic never contends for the same
-# node's memory bandwidth — see hermes-router.py 2.10.0's own changelog entry. This agent itself
+# coder2 lives on spark-2, originally so the two coding backends' back-and-forth traffic never
+# contended for the same node's memory bandwidth (hermes-router.py 2.10.0). That separation no
+# longer holds: coder moved to spark-2 too on 2026-10-07 (hermes-router.py 2.14.0), so today both
+# reviewers share spark-2 — coder (Qwen3.8-27B-abliterated) and coder2 (GLM-4.7-Flash-Q4_K_M,
+# stock, since S44). This agent itself
 # needs zero awareness of that: it only ever talks to ROUTER_URL, which hides the cross-node hop.
 #
 # Config, all from the environment (injected by hermes-dualcoder-wrapper.sh):
@@ -297,7 +304,7 @@ def log_round(task_id, phase, round_num, actor, content):
 def call_model(role, system_prompt, user_content, max_tokens=1500):
     """Raises RuntimeError on a truncated-mid-reasoning response (empty `content` with real
     `reasoning_content` and finish_reason='length') rather than returning an empty string --
-    confirmed live 2026-09-05 that coder2 (Muse Glimmer) can spend its entire token budget in its
+    confirmed live 2026-09-05 that the then-coder2 (Muse Glimmer) could spend its entire token budget in its
     own reasoning_content field on a real question, leaving nothing in `content` at all. An empty
     string here would otherwise be silently read as a real (if content-free) APPROVE/ISSUES
     verdict by review()'s own `.startswith("APPROVE")` check -- a truncation is a real failure to

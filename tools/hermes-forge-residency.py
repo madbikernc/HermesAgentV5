@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.0.1
+# Version: 1.0.2
+#
+# 1.0.2 (2026-11-04) — comment-only: the header listed spark's fixed placements as
+# "nano/super/coder/dispatch/guard/embed" and Forge's residents as muse and omni. nano is retired
+# (S13) and coder has lived on spark-2 since 2026-10-07, alongside coder2 (S44); both are on-demand
+# with idle-sleep timers there and are not in FORGE_SWAPPABLE_UNITS' default, so `drain` leaves
+# them running. Comment now says so; the default is unchanged.
 #
 # 1.0.1 — real bug found live on the very first `status` run: `cmd_status()` keyed the registry
 # lookup by role in a plain dict comprehension, which keeps only the last row seen for a role
@@ -7,9 +13,11 @@
 # group and sum per role.
 #
 # hermes-forge-residency — the residency controller for Forge (spark-2), HermesAgentV5 S9. Watch
-# (spark) is static residency, no controller needed (target §9's own framing — nano/super/coder/
-# dispatch/guard/embed are all fixed placements). Forge is the swappable, throughput-tolerant
-# node: muse and omni are always-resident until something needs the node's full unified memory —
+# (spark) is static residency, no controller needed (target §9's own framing — super/dispatch/
+# guard/embed/rerank are fixed placements, plus on-demand log-analyst). Forge is the swappable,
+# throughput-tolerant node: muse and omni are always-resident (coder and coder2 also live here,
+# on-demand with idle-sleep, and are NOT in FORGE_SWAPPABLE_UNITS' default — `drain` doesn't stop
+# them) until something needs the node's full unified memory —
 # fine-tuning or abliteration work (V5 target state §4.2's own note: "takes the node when
 # active").
 #

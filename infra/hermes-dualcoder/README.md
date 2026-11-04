@@ -1,9 +1,10 @@
 # hermes-dualcoder — recreate checklist
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Bounded, auditable dual-agent code review (direct operator request, 2026-09-05). `coder` and
-`coder2` (Muse Glimmer 30B, `infra/hermes-coder2/`) alternate bug-review rounds on one coding task
+`coder2` (GLM-4.7-Flash-Q4_K_M stock since S44, 2026-10-27 — formerly Muse Glimmer 30B;
+`infra/hermes-coder2/`) alternate bug-review rounds on one coding task
 until they agree or a round cap is hit, then both write independent security reviews and cross-check
 each other's review. See `tools/hermes-dualcoder.py`'s own header for the full state machine and
 `tools/hermes-nous-judge.py`'s role as a bounded tie-breaker before any human escalation.
@@ -71,8 +72,9 @@ behavior that must never happen at the round cap, the judge call, or the judge v
 - The wake-worker claim-scoping fix (`hermes-broker.py` 1.4.0) narrows the *known* race but hasn't
   been stress-tested under real concurrent load from both nodes simultaneously — do that before
   trusting this under heavy fleet-wide `nano`/`super`/`coder` wake traffic.
-- `coder2`'s exact `llama-server` flags (`start-coder2.sh`) are a first pass adapted from `coder`'s
-  own real flags, not yet confirmed optimal for Muse Glimmer's own architecture.
+- `coder2`'s exact `llama-server` flags (`start-coder2.sh`) were rewritten for GLM-4.7-Flash in S44
+  (`--flash-attn off --reasoning off`, ctx 65536 — see that script's own header); they replaced a
+  first pass written for Muse Glimmer and have not been tuned beyond that.
 
 ## Revision History
 
@@ -80,3 +82,4 @@ behavior that must never happen at the round cap, the judge call, or the judge v
 |---|---|---|
 | 1.1.0 | 2026-09-05 | Security phase now runs a real static-analysis pass (`infra/hermes-code-security-scan/`) before either model's security review, feeding real findings into both prompts as grounding — see `tools/hermes-dualcoder.py` 1.1.0's own changelog. |
 | 1.0.0 | 2026-09-05 | Initial version — dual-coder review orchestrator, direct operator request following the real coder/coder2 bake-off. |
+| 1.2.0 | 2026-11-04 | Model-assumption sweep: `coder2` is GLM-4.7-Flash-Q4_K_M (stock) since S44, not Muse Glimmer 30B — updated the intro and the known-issues note on `start-coder2.sh` flags. |

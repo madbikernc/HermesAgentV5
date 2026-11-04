@@ -1,6 +1,6 @@
 # hermes-log-analyst — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 `log-analyst` — **NousResearch Hermes-4.3-36B-Q4_K_M (stock)**, a new role as of
 IMPLEMENTATION_PLAN.md S44 (2026-10-27): split off `super`'s own log-analyst duty
@@ -73,8 +73,26 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/
   -d '{"model":"log-analyst","messages":[{"role":"user","content":"hi"}],"max_tokens":20}'
 ```
 
+## 5. Known open issues (verified live 2026-11-04)
+
+- **Never yet started on `spark`.** `llama-log-analyst.service` has no journal history at all; every
+  wake so far has been refused by the wake worker (`needs ~29GiB free`, spark had ~21GiB with
+  `super`, `dispatch`, `embed`, `rerank` resident). A router request for `log-analyst` returns a 503 —
+  the router does **not** fall back to `super`.
+- **The 29GiB wake threshold undercounts.** It is the 20.27GiB file × ~1.45, which leaves out the KV
+  cache. Hermes-4.3-36B is `seed_oss` (64 layers, 8 KV heads, head dim 128): f16 KV is 256KiB/token,
+  so `start-log-analyst.sh`'s `--ctx-size 65536` alone needs 16GiB, for a real total near 37GiB.
+  `hermes-logs.py`'s own duty sends at most 20,000 chars (~6k tokens) and asks for 800 tokens, so a
+  16k context (4GiB f16 KV, ~2GiB at `q8_0`) would cover it. Left unchanged here pending an operator
+  decision on how to make room (resize vs. displacing `super` while it runs).
+- **spark-2's router cannot reach it.** Spark's ufw allows spark-2 on `8088,8095` and `8097`, not
+  `8098` (`infra/hermes-router/README.md` §1).
+- **`hermes-logs.service` still predates S44's code** (process started ~2026-10-26), so it is still
+  calling `super`. Restarting it before the wake works would turn every analysis into a 503.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-27 | Initial version — S44's new `log-analyst` role, split off `super`'s own log-analyst duty. |
+| 1.1.0 | 2026-11-04 | Added §5 known open issues from a live check: never yet started (wake refused, ~21GiB free vs 29 needed); the 29GiB threshold omits the 16GiB f16 KV cache at ctx 65536 (true need ~37GiB, hermes-logs needs only ~6k tokens); spark ufw lacks 8098 for spark-2; hermes-logs.service still runs pre-S44 code. No config changed. |

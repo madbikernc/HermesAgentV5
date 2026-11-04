@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.7.0
+# Version: 1.7.1
+#
+# 1.7.1 (2026-11-04) — comment-only: call_role()'s max_tokens comment said coder2 "is backed by
+# Muse-Glimmer-30B". It isn't any more — coder2 has run GLM-4.7-Flash-Q4_K_M (stock, launched with
+# --reasoning off) since S44 (2026-10-27). The 900-token budget stays; the comment now says why
+# it was set and what backs coder2 today.
 #
 # 1.6.0 (2026-09-25) — per-line classification split out of watch_loop into process_message() so
 # services/minecraft-bots/tests/test_triage.py can test MB-19's per-bot dedupe without journalctl.
@@ -242,8 +247,8 @@ def call_role(role, log_line, timeout=150):
         f"Log line(s):\n{log_line}"
     )
     # max_tokens is deliberately generous, not a tight 150 -- real evidence found live minutes
-    # after this shipped: coder2 is backed by Muse-Glimmer-30B (hermes-router.py's own history:
-    # the originally-planned model failed to load on this build), which emits extended
+    # after this shipped: coder2 was then backed by Muse-Glimmer-30B (since S44, 2026-10-27, it's
+    # GLM-4.7-Flash-Q4_K_M launched with --reasoning off; the margin is kept), which emitted extended
     # "reasoning_content" before its final answer. A tight budget let the reasoning consume the
     # whole allowance and leave nothing for the actual SEVERITY/CAUSE/NEXT answer -- the exact
     # same truncation shape found and fixed for the bots' own goal planner hours earlier tonight.

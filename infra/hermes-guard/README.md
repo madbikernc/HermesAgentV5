@@ -1,15 +1,29 @@
 # hermes-guard — recreate checklist
 
-**Version:** 4.2.0
+**Version:** 4.3.0
 
-Layer 2 of screening (HermesAgentV5 S5, `../../HermesAgentV5/IMPLEMENTATION_PLAN.md`) — Meta's
-`Llama-Prompt-Guard-2-22M`, stock weights, permanently (target §12.1: never a candidate for
-abliteration). Runs under `transformers`/CPU, not `llama-server` — Prompt Guard 2 is a
-DeBERTa-v2 classification head, an architecture llama.cpp doesn't support.
+Layer 2 of screening (HermesAgentV5 S5, `../../HermesAgentV5/IMPLEMENTATION_PLAN.md`). **Live
+model since S22d (2026-10-09), verified 2026-11-04:** `proventra/mdeberta-v3-base-prompt-injection`
+(279M, MIT, ungated), `GUARD_MODE=classifier`, `GUARD_MODEL_DIR=/mnt/hermes-data/models/mdeberta-prompt-injection`
+— see "Layer 2 is a dedicated prompt-injection classifier" below. It replaced Meta's
+`Llama-Prompt-Guard-2-22M`, the S5 original, which stays on disk as a rollback. Both are stock
+weights, permanently (target §12.1: never a candidate for abliteration), and both run under
+`transformers`/CPU, not `llama-server` — they are DeBERTa-family classification heads, an
+architecture llama.cpp doesn't support.
 
 ## 1. Weights
 
-Gated on HuggingFace; access was requested and cleared under the `Hermes - HuggingFace` vault
+The live classifier is ungated — download it to the path the unit pins:
+
+```bash
+python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download('proventra/mdeberta-v3-base-prompt-injection',
+                   local_dir='/mnt/hermes-data/models/mdeberta-prompt-injection')
+"
+```
+
+The rollback checkpoint, Prompt Guard 2, is gated on HuggingFace; access was requested and cleared under the `Hermes - HuggingFace` vault
 token before this stage started.
 
 ```bash
@@ -116,7 +130,8 @@ one-line unit edits.
 
 ## The stock-LLM arm, retained as rollback (S22c)
 
-`GUARD_MODE=llm` (pinned in the unit) screens by asking a stock LLM one narrow yes/no question.
+`GUARD_MODE=llm` (pinned in the unit during S22c; the unit has pinned `GUARD_MODE=classifier` since
+S22d) screens by asking a stock LLM one narrow yes/no question.
 **Measured through this live service: 18 of 18 attacks caught, 1 false positive, all three bands
 (direct, indirect, paraphrased) at 6 of 6** — against the classifier's 4 of 18 and 0 of 6 indirect.
 Verified end to end through the real router path: an indirect injection the classifier scored 0 on
@@ -143,8 +158,12 @@ backend) or a small dedicated screening model.
 request `hermes-router.py` proxies, with no clean-role exemption, so every caller pays it —
 including per-tick bot planning.
 
-**Rollback is one line:** `GUARD_MODE=classifier` in the unit, then restart. That restores
-Prompt-Guard-2-22M exactly, with the 4-of-18 coverage documented below.
+**Rollback, as written during S22c:** `GUARD_MODE=classifier` in the unit, then restart, which
+then restored Prompt-Guard-2-22M. Since S22d, `GUARD_MODE=classifier` loads mdeberta;
+Prompt-Guard-2 now also needs `GUARD_MODEL_DIR=/mnt/hermes-data/models/prompt-guard-2-22m` (see
+the rollback list above). The `omni` row above was measured on its then-checkpoint,
+gemma-4-26B-A4B-it; `omni` is Nemotron-3.5-Bolt-74B-A9B since S44 and has not been re-measured
+as a guard arm.
 
 ## What the replaced classifier does and does not detect — measured 2026-10-09 (S22a)
 
@@ -253,3 +272,4 @@ elapsed time and leaves the judgement to the reader.
 | 4.0.0 | 2026-10-09 | **Major — Layer 2 is now a dedicated prompt-injection classifier**, `proventra/mdeberta-v3-base-prompt-injection` (279M, MIT), replacing the stock-LLM arm S22c deployed hours earlier. 17/18 alone with 6/6 on indirect injections, **18/18 composite at tool role**, and the only option that is both independent of the protected model and contention-free: 0% failures at 6-way concurrency with p50 317ms, against `omni`'s 94.4% failures and `dispatch`'s 1175ms. Records the three measured-and-rejected candidates (including the Hub's most-downloaded, which scored 13/18), that label orientation is now read from `id2label` rather than assumed, the role=tool vs role=user composite distinction, and the two one-line rollbacks. |
 | 4.1.0 | 2026-10-09 | Added the `hermes-guard-report` daily blocked-call report (Watch only, 07:45): why screening could silently stop the bot fleet for six hours with nothing alerting, why attribution is a table of prompt templates rather than a caller id or any generic key length, and why each caller's last-blocked age is printed instead of a still-broken verdict. |
 | 4.2.0 | 2026-10-21 | S33 fix, direct request: `hermes-guard-report.py` 1.4.0 reads `memory.db` directly, read-only, instead of calling `hermes-memory`'s HTTP `/turns` API, which silently clamped the real 26h window to its newest 500 rows and had already blinded two of four daily runs to "0 blocks". `MEMORY_TOKEN`/`MEMORY_URL` config dropped; `hermes-guard-report.service` now declares `RequiresMountsFor=/mnt/hermes-data` explicitly, matching every other direct reader of that file. `tests/test_guard_report.py` now 1.4.0, 50 checks (new: a real temp-sqlite-backed check proving the uncapped read past 500 rows, and correct task_id/window filtering). |
+| 4.3.0 | 2026-11-04 | Model-assumption sweep: intro and §1 now name the live Layer 2 model (proventra/mdeberta-v3-base-prompt-injection, classifier mode, verified on spark 2026-11-04) with Prompt-Guard-2-22M as rollback; §1 gains the mdeberta download; S22c section no longer claims `GUARD_MODE=llm` is pinned or that `classifier` restores Prompt-Guard-2; noted the omni guard-arm row predates the S44 omni swap. Unit Description updated to match. |

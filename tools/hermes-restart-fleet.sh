@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Version: 3.2.0
+# Version: 3.2.1
+#
+# 3.2.1 (2026-11-04) — comment-only: two notes said `super` and `coder` are "both on-demand". On
+# spark today super is always-resident (enabled, Restart=always, no idle-sleep timer) and coder's
+# unit is idle because coder lives on spark-2. The restart-only-if-active loop is unchanged and
+# still right for both: it restarts super, and skips coder.
 #
 # 3.2.0 (2026-10-27) — IMPLEMENTATION_PLAN.md S44 follow-up: real cost found live while deploying
 # S44's own changes -- every one of this script's `--node` auto-restarts (hermes-repo-sync.sh's
@@ -46,8 +51,9 @@
 #   `dispatch` role's own resident backend -> the broker (LUKS-dependent) -> the wake worker (needs
 #   the broker) -> Buzz and hermes-memory (everything downstream needs both up) -> guard -> the
 #   router (proxies to every model backend) -> hermes-dispatch (needs Buzz/memory/guard/router) ->
-#   hermes-presenter (needs Buzz/memory/dispatch/Matrix). `super` and `coder` are both on-demand
-#   (checked, not assumed — see below) and no longer include `nano`, retired at S13.
+#   hermes-presenter (needs Buzz/memory/dispatch/Matrix). `super` (always-resident since
+#   Stage 12) and spark's idle `coder` unit (coder lives on spark-2 since 2026-10-07) are restarted
+#   only if active (checked, not assumed — see below); `nano` is retired since S13.
 #
 # - **New spark-2 stack:** `omni` and `muse` -> spark-2's own router -> `hermes-media` (S10, needs
 #   Watch's Buzz/memory/broker/guard). No more Amy-specific units — confirmed live (`systemctl cat`
@@ -193,7 +199,7 @@ service_touched() {
 # the wake worker (needs the broker) -> Buzz and hermes-memory (everything downstream needs both
 # up) -> guard -> spark's own router (proxies to every model backend) -> hermes-dispatch (needs
 # Buzz/memory/guard/router) -> hermes-presenter (needs Buzz/memory/dispatch/Matrix). `super` and
-# `coder` are both on-demand, handled separately below.
+# `coder` are restarted only if already active, handled separately below.
 SPARK_SERVICES=(
   continuwuity.service
   llama-dispatch.service

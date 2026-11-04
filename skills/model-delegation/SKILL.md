@@ -1,7 +1,7 @@
 ---
 name: model-delegation
-description: "Get a raw completion from Super (deep reasoning/planning escalation), Coder (coding), or Muse (uncensored creative writing) — the fleet's other resident backends. Use this for a real task that specifically benefits from a different model, not for general conversation."
-version: 2.0.1
+description: "Get a raw completion from Super (deep reasoning/planning escalation), Coder (coding), or Muse (creative writing and persona voice) — the fleet's other resident backends. Use this for a real task that specifically benefits from a different model, not for general conversation."
+version: 2.0.2
 author: HermesAgentV5
 license: MIT
 platforms: [linux]
@@ -14,7 +14,7 @@ prerequisites:
 
 # Model Delegation
 
-**Version:** 2.0.0
+**Version:** 2.0.2
 
 You already house a Core, a Muse, and a Weaver — this skill is what makes that literally true
 rather than a personality description (`IMPLEMENTATION_PLAN.md` §2c, §4). These are real,
@@ -27,21 +27,23 @@ confuse this with `delegate_task` (that spawns a full child agent session; wrong
 
 ## When to use which
 
-- **`super`** (Nemotron 3 Super) — a genuinely hard planning or reasoning problem where your own
-  default model's speed/depth trade-off isn't enough. **This one loads on demand** — the first
-  call after it's been idle can take up to ~150 seconds while it wakes, on top of normal
-  generation time. Don't reach for it for anything you could already answer directly; it exists
-  for the cases that actually need it.
-- **`coder`** (Qwen3-Coder-Next) — a real coding question: writing or reviewing a nontrivial
-  function, debugging a stack trace, explaining unfamiliar code. Not for one-liners you can
+- **`super`** (Huihui-GLM-4.7-Flash-abliterated, `spark`) — a genuinely hard planning or reasoning
+  problem where your own default model's speed/depth trade-off isn't enough. The router lists it
+  as on-demand, but in practice it stays resident; if it has been stopped, the first call can take
+  up to ~150 seconds while it wakes, on top of normal generation time. Don't reach for it for
+  anything you could already answer directly; it exists for the cases that actually need it.
+- **`coder`** (Huihui-Qwen3.8-27B-abliterated, `spark-2`) — a real coding question: writing or
+  reviewing a nontrivial function, debugging a stack trace, explaining unfamiliar code. Not for one-liners you can
   already answer directly.
-- **`muse`** (Qwen3.6-35B-A3B, abliterated) — creative writing that needs to stay uncensored:
-  fiction, worldbuilding, dialogue, anything where a safety-tuned model would hedge or refuse. It
-  exists specifically so a creative request doesn't get pre-censored before it reaches the
-  diffusion model for an image, or before it reaches The Boss as prose.
+- **`muse`** (NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning, stock, `spark-2`) — creative writing:
+  fiction, worldbuilding, dialogue, persona voice. It was chosen in S44 for persona adherence and
+  override resistance. **It is no longer an abliterated model**: before 2026-10-27 `muse` was
+  Huihui-Qwen3.6-35B-A3B-abliterated, picked so creative requests weren't pre-censored. The stock
+  model can refuse or hedge where the old one didn't. If it refuses, report that rather than
+  rephrasing to get around it.
 
-`nano`/`omni` (each persona's own default core) are not called through this skill — they're
-whichever model answers you by default, not a delegation target.
+`omni` (the vision judge), `dispatch`, `coder2` and `log-analyst` are not called through this
+skill: they serve fixed pipelines, not ad-hoc delegation. `nano` is retired.
 
 ## How to use it
 
@@ -71,3 +73,4 @@ stderr and exits non-zero — there is no result to relay if it doesn't print on
 | Version | Date | Change |
 |---|---|---|
 | 2.0.1 | 2026-08-30 | HermesAgentV5 consolidation: author: field and in-body usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
+| 2.0.2 | 2026-11-04 | Role → model names corrected to the live fleet: `super` is Huihui-GLM-4.7-Flash-abliterated (resident in practice), `coder` is Huihui-Qwen3.8-27B-abliterated, `muse` is now stock Nemotron-3-Nano-Omni (no longer abliterated — refusals possible). `nano` marked retired. Also aligned the body version line with the frontmatter. |

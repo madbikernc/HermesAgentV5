@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.4.2
+# Version: 1.4.3
+#
+# 1.4.3 (2026-11-04) — the model report's closing line said "super/coder wake on demand". super has
+# been always-resident (Restart=always, no idle-sleep timer) since Stage 12; the on-demand roles
+# are coder and coder2 (spark-2) and log-analyst (spark). Line corrected; output text only.
 #
 # 1.4.2 (2026-09-06) — comment-only, no code change: this file's own header below (the "hermes-
 # status" doc comment) documents that "No side-effecting skill ... is reachable from chat at all
@@ -436,7 +440,7 @@ def run_model_report():
         lines.append(f"  {role:<9} {model:<28} {ip_port:<20} {flag}")
         lines.append(f"            {api_url}")
     lines.append("")
-    lines.append("dispatch/muse/omni/embed/tts run always-on; super/coder wake on demand via the broker.")
+    lines.append("super/dispatch/muse/omni/embed/tts run always-on; coder/coder2/log-analyst wake on demand via the broker.")
     return "\n".join(lines), None
 
 

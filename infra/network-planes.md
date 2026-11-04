@@ -1,13 +1,13 @@
 # Network plane separation — `spark` ↔ `spark-2`
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 HermesAgentV5's S4 and S18 (`../../HermesAgentV5/IMPLEMENTATION_PLAN.md`). Three physically separate
 links exist between the Spark nodes, and they carry different kinds of traffic on purpose:
 
 | Plane | Subnet | Interface | Carries |
 |---|---|---|---|
-| **Control** | `10.129.1.0/24` | GigE | Every control-plane service: router, broker, Buzz, memory, Continuwuity, model backend proxying (nano/super/coder/muse/omni), SSH for interactive/admin work |
+| **Control** | `10.129.1.0/24` | GigE | Every control-plane service: router, broker, Buzz, memory, Continuwuity, model backend proxying (super/dispatch/log-analyst/coder/coder2/muse/omni as of 2026-11-04; `nano` retired S13), SSH for interactive/admin work |
 | **Data** | `10.129.9.0/30` | `bond-fabric0` (2× ConnectX-7 `f0` ports, `balance-rr`, MTU 9000, 400 Gb/s aggregate) | **SSH only** — model weight staging, bulk memory/context pulls, fine-tune datasets. **Cannot carry RoCE** (see RDMA plane below) |
 | **RDMA** | `10.129.10.0/30` | `enp1s0f1np1` (one ConnectX-7 `f1` port per node, **unbonded**, MTU 9000, 200 Gb/s) | RoCEv2 and NCCL collectives. Added S18, 2026-09-24 |
 
@@ -135,3 +135,4 @@ deliberate, auditable exception list.
 | 1.0.0 | 2026-08-29 | Initial version — S4 executed: narrowed both nodes' `10.129.9.0/30` ufw rule from blanket-allow to `22/tcp` only, confirmed the prior cross-plane exposure live before fixing it, verified the fix both directions plus SSH continuity, documented why bind-address changes were rejected in favor of a firewall fix. |
 | 1.1.0 | 2026-09-01 | Direct request: benchmarked the fabric for the first time since S4 (real ~4.4x SSH-throughput speedup over the LAN) and added `spark2-fabric`/`spark-fabric` SSH config aliases on each node so the already-existing, already-working S1 keys can actually be used over `bond-fabric0` without remembering the raw `10.129.9.x` addresses. No script uses them yet. |
 | 1.2.0 | 2026-09-24 | S18: new **RDMA plane** (`10.129.10.0/30`, the previously unused unbonded ConnectX-7 `f1` port on each node, MTU 9000). Documents why RoCE cannot ride `bond-fabric0` at all — bond enslavement collapses both ports' MACs/GIDs into one while `balance-rr` sprays a queue pair across both wires, giving `ccnt=0` (zero completions at zero load), which is what S1 saw from NCCL in 2026-08-29 and misattributed to missing PFC/ECN. Fixed with hardware already cabled and idle; `bond-fabric0` untouched, so every existing SSH/rsync path is unaffected. RoCE went 0 → ~13.0 GB/s, persisted as a NetworkManager `roce-f1` profile (not hand-edited netplan — these nodes render netplan from NM). One peer-scoped ufw rule per node rather than a port list, since NCCL bootstrap uses dynamic ports and this `/30` is a direct two-node cable. Records the known ceiling: NCCL collectives reach only ~1.4 GB/s on this plane because GPUDirect RDMA is unavailable on GB10, so it suits bulk host-memory transfer but not tensor-parallel inference. |
+| 1.3.0 | 2026-11-04 | Model-assumption sweep: Control-plane row lists the current proxied roles (super/dispatch/log-analyst/coder/coder2/muse/omni), nano marked retired. S4 evidence sections left as recorded. |

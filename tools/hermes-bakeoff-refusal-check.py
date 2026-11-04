@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+# 1.0.1 (2026-11-04) — docstring-only: "same node `super`/`coder` live on" -> `super` only; coder
+# moved to spark-2 on 2026-10-07.
 """
 hermes-bakeoff-refusal-check.py — Track B of the super/coder consolidation bake-off
 (see IMPLEMENTATION_PLAN.md's own discussion and hermes-logs.py's header for why `super`
@@ -19,7 +21,7 @@ A candidate that never refuses can still analyze badly; that judgment stays huma
 own README applies to its round-cap/judge-verdict paths. Read the logged transcripts
 before concluding anything — this script triages, it doesn't grade.
 
-Run on spark (same node `super`/`coder` live on) — imports hermes-logs.py's own gather
+Run on spark (same node `super` lives on) — imports hermes-logs.py's own gather
 functions directly rather than re-implementing log collection, same "wrap the execution
 plane that already works" instruction hermes-logs.py itself follows for pfsense/canary/
 gameabuse. Some sources need live credentials (pfSense API key via Vaultwarden, the

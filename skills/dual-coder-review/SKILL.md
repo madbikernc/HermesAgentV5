@@ -1,7 +1,7 @@
 ---
 name: dual-coder-review
 description: "Get a bounded, cross-reviewed function from two independent coding models (coder and coder2) instead of one -- they draft/review/revise until they agree it's bug-free, then each writes and cross-checks a security review. Use for a task that genuinely benefits from two-model rigor, not everyday coding questions."
-version: 1.2.0
+version: 1.2.1
 author: HermesAgentV5
 license: MIT
 platforms: [linux]
@@ -14,14 +14,15 @@ prerequisites:
 
 # Dual-Coder Review
 
-**Version:** 1.2.0
+**Version:** 1.2.1
 
-Two independent coding models, `coder` (Qwen3.8-27B-abliterated) and `coder2` (Meta's Muse Glimmer
-30B), draft and cross-review a function until they agree it's bug-free, then each writes an
-independent security review and cross-checks the other's review. Built after a real bake-off found
-the two models genuinely asymmetric — `coder` wins general knowledge/instruction-following,
-`coder2` wins function-calling reliability decisively — so cross-review catches more than either
-model alone would.
+Two independent coding models, `coder` (Huihui-Qwen3.8-27B-abliterated) and `coder2`
+(GLM-4.7-Flash-Q4_K_M, stock — both on `spark-2`), draft and cross-review a function until they agree
+it's bug-free, then each writes an independent security review and cross-checks the other's review.
+The skill was first built on the 2026-09-05 finding that `coder` and the original `coder2` (Muse
+Glimmer 30B, retired 2026-10-20) were genuinely asymmetric, so cross-review caught more than either
+model alone. GLM-4.7-Flash took the `coder2` slot in S44 after scoring 1.000 on
+`fleet_dualcoder_precision`, the suite built for this exact review task.
 
 **This is an async, multi-step Buzz workflow, not a single completion call** — unlike
 `skills/model-delegation`'s "one raw completion" shape, this can run many router calls across
@@ -51,12 +52,12 @@ curl -s -X POST "$BUZZ_URL/messages" -H "Authorization: Bearer $BUZZ_TOKEN" \
 
 ## What to expect
 
-- **Realistic latency: potentially over an hour.** Confirmed live 2026-09-05: `coder2` (Muse
-  Glimmer) reasons heavily even on real tasks, and a single review/revise/security call can burn
-  8,000-10,000 tokens at its observed ~11.6 tok/s — 10-15 minutes for *one* call, before counting
-  cold-wake time. A 5-round loop plus the fixed security/meta-review tail can reasonably take over
-  an hour end to end. This is the real cost of using a heavy-reasoning model as a reviewer, not a
-  bug — budget your expectations accordingly, and don't assume a quiet task is stuck.
+- **Realistic latency: tens of minutes, possibly more.** The over-an-hour figure measured live
+  2026-09-05 came from the original `coder2` (Muse Glimmer), which reasoned heavily, burning
+  8,000-10,000 tokens per call at ~11.6 tok/s. Today's `coder2` (GLM-4.7-Flash) runs with
+  `--reasoning off`, but its end-to-end latency in this workflow hasn't been re-measured. A 5-round
+  loop plus the fixed security/meta-review tail is still many sequential calls, so don't assume a
+  quiet task is stuck.
 - **Check progress via `tasks.state`** (`GET $MEMORY_URL/tasks/<task_id>`): `drafting` →
   `review-round-N` → (on a stuck disagreement) `third-party-review` → `security-review` →
   `security-meta-review` → a terminal state.
@@ -87,6 +88,7 @@ curl -s -X POST "$BUZZ_URL/messages" -H "Authorization: Bearer $BUZZ_TOKEN" \
 
 | Version | Date | Change |
 |---|---|---|
+| 1.2.1 | 2026-11-04 | Model names corrected for S44: `coder2` is GLM-4.7-Flash-Q4_K_M (stock), not Muse Glimmer; latency guidance marked as measured on the old model. |
 | 1.2.0 | 2026-09-05 | Security reviews now grounded in a real static-analysis pass (`infra/hermes-code-security-scan/`) instead of purely free-form LLM output — see `tools/hermes-dualcoder.py` 1.1.0's own changelog. |
 | 1.1.0 | 2026-09-05 | Latency guidance corrected after the first real end-to-end run: coder2's real reasoning overhead on an actual task made the original ~30-40 min estimate a significant understatement — now "potentially over an hour," with the real numbers behind it. |
 | 1.0.0 | 2026-09-05 | Initial version. |

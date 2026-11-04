@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 2.19.0
+# Version: 2.19.1
+#
+# 2.19.1 (2026-11-04) - metadata-only, no routing change: `dispatch`'s /v1/models label said
+# "Qwen3.6-35B-A3B (stock Q8)", but the live llama-dispatch backend on spark loads
+# Qwen3.6-35B-A3B-UD-Q4_K_M.gguf (checked against its running command line). Label corrected on
+# both branches. Every other ROLES label was checked against its node's live llama-server the same
+# day and matches.
 #
 # 2.19.0 (2026-10-27) - IMPLEMENTATION_PLAN.md S44: `coder2` re-registered on both branches as the
 # replacement model decision 2.18.0's own retirement comment said was pending -- GLM-4.7-Flash-
@@ -364,7 +370,7 @@ if NODE == "spark":
         # it now that nano is retired (S13) would mean touching start-dispatch.sh, this unit, ufw,
         # and S12's DISPATCH_CHAT_URL standby override in the same pass for a cosmetic port-number
         # match with no functional benefit. Deferred, not forgotten -- see IMPLEMENTATION_PLAN.md S13.
-        "dispatch": ("http://127.0.0.1:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
+        "dispatch": ("http://127.0.0.1:8097", False, "Qwen3.6-35B-A3B-UD-Q4_K_M (stock)", False),
         # S44 (2026-10-27): re-registered -- see this file's own 2.19.0 changelog entry above.
         "coder2": (f"http://{SPARK2_IP}:8099", True, "GLM-4.7-Flash-Q4_K_M (stock)", False),
         # S44 (2026-10-27): new role, split off `super`'s own log-analyst duty -- see
@@ -378,7 +384,7 @@ else:
         "coder": ("http://127.0.0.1:8094", True, "Qwen3.8-27B-abliterated", True),
         "muse": ("http://127.0.0.1:8090", False, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
         "omni": ("http://127.0.0.1:8091", False, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
-        "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B (stock Q8)", False),
+        "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B-UD-Q4_K_M (stock)", False),
         # S44 (2026-10-27): re-registered -- see spark branch's own comment above.
         "coder2": ("http://127.0.0.1:8099", True, "GLM-4.7-Flash-Q4_K_M (stock)", False),
         # S44 (2026-10-27): see spark branch's own comment above -- log-analyst lives on spark.
