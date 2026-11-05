@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 4.3.0
+**Version:** 4.4.0
 
 Mineflayer bot runtime for the Firmament's nine Minecraft bots. **What the bots do and why lives
 in `../../MINECRAFT_BOTS_DESIGN.md`** — this file covers only how to run and configure the
@@ -13,10 +13,10 @@ an oversight.
 ## Running
 
 One process per bot, `run-bot.sh` rather than `node index.js` — the wrapper fetches
-`MEMORY_TOKEN`/`BUZZ_TOKEN` from Vaultwarden, reads the bot's Matrix token out of
-`~/.hermes/minecraft-matrix.env`, and sets the heap cap. Running `index.js` directly works but
-loses short-term memory, long-term recall, Buzz, and Matrix, each degrading independently rather
-than failing the bot.
+`MEMORY_TOKEN`/`BUZZ_TOKEN` from Vaultwarden and sets the heap cap. (It also reads a legacy
+Matrix token from `~/.hermes/minecraft-matrix.env` if one is there -- optional, from before Buzz;
+no bot needs one.) Running `index.js` directly works but loses short-term memory, long-term
+recall, and Buzz, each degrading independently rather than failing the bot.
 
 ```bash
 cd services/minecraft-bots
@@ -57,7 +57,8 @@ Everything has a working default; a unit file only sets what it overrides.
 | `MC_LIVING_SPACE_REFRESH_MS` | `30000` | How often the shelter-wall scan reruns. The result is what `safeToBreak` reads, so a longer interval means a staler shell |
 | `MC_TORCH_SPACING` / `MC_TORCH_CARRY_MIN` | `6` / `8` | Blocks between trail torches while digging; how many she tops up to |
 | `MC_MAX_STUCK_NUDGES` / `MC_RESTART_STUCK_*` | `2` / `3`, `2` | Stuck detection before teleport self-rescue |
-| `MEMORY_URL` / `BUZZ_URL` / `MATRIX_*` | spark | Service endpoints; tokens come from `run-bot.sh` |
+| `MEMORY_URL` / `BUZZ_URL` | spark | Service endpoints; tokens come from `run-bot.sh` |
+| `MATRIX_*` | — | Legacy, optional: with `MATRIX_ACCESS_TOKEN` set, the bot also watches and replies in the old shared Matrix room |
 | `HERMES_ROUTER_URL` | `127.0.0.1:8080` | Localhost only — the router proxies to whichever node serves a role |
 
 ## Files
@@ -76,7 +77,8 @@ Everything has a working default; a unit file only sets what it overrides.
 | `shelter.js` | Access cells for chests/beds/doors, and the flood fill that recognises a living space's walls |
 | `tunneling.js` | Torch supply and the trail placed while digging |
 | `persona.js` | Prepends `agents/minecraft-common.md` to the bot's own `PROMPT.md` |
-| `memory.js`, `buzz.js`, `matrix.js`, `router.js` | Thin service clients |
+| `memory.js`, `buzz.js`, `router.js` | Thin service clients |
+| `matrix.js` | Legacy, optional Matrix room watcher (pre-Buzz); only runs with a `MATRIX_ACCESS_TOKEN` |
 
 ## Things that will bite you
 
@@ -105,3 +107,12 @@ Everything has a working default; a unit file only sets what it overrides.
   unusability through a few more real attempts before `countUsableNearHome` excludes it again —
   bounded by `UTILITY_UNUSABLE_AFTER_FAILURES`, same tradeoff `builderStallItem`/
   `fleetHasIronTool` already make for comparably short-lived fleet state.
+- **`mine`'s no-path skip list is in-memory too.** A stone (or any target) that just failed "No
+  path" sits out `MINE_UNREACHABLE_MS` (10 min) in actions.js's `mineUnreachableUntil`; a restart
+  clears it, and the first attempt after one may retry a buried block once more.
+- **Dropped surplus can be picked straight back up.** A thrown item is anyone's to pick up 2s
+  later. `makeHomeChest` throws `junkToDrop` items from 6 blocks out from home and walks back at
+  once; anything else that drops items should move her away the same way.
+- **A spectator can't drop, craft or place.** The server keeps a player's game mode between
+  logins, and probe scripts log in as `MBProbe` in spectator; `live-bot.test.mjs` sets survival at
+  every boot. A test that sees an action "succeed" with nothing changing in the world: check this.

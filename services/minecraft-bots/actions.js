@@ -1,5 +1,10 @@
-// Version: 1.102.3
+// Version: 1.103.0
 //
+// 1.103.0 (2026-11-04, 24h review): "mine" tries stone with an open face before buried stone, and
+// skips a target that just failed "No path" for 10 minutes. A stick can come from a log by way of
+// planks, so a torch is made from coal and logs. "place" takes `at`, one named cell (a residence's
+// chest goes inside its room). light_area's and plant_sapling's findBlocks matchers no longer reject
+// the position-less palette blocks findBlocks pre-checks each section with (they found nothing).
 // 1.102.3 (2026-11-02): "patch_shelter" skips a hole that wouldBlockAccess refuses.
 // 1.102.2 (2026-11-01): fences are protected from digging, like their gate.
 // 1.102.1 (2026-11-01): craftItem's chain counts what she holds by item id (it read 0 by name)
@@ -2084,8 +2089,12 @@ async function collectBlocks(bot, token, blocks) {
 // stays out of scope) -- covers "pre-teach the most common recipes" as a real capability
 // without attempting to solve arbitrary multi-tier crafting trees.
 function simpleSourceFor(bot, itemName) {
+  // 2026-11-04: or a log, which the planks step below turns into planks first. checkTorchSupply
+  // counts a log as wood for a torch, but with logs and no planks the stick never got made: 230
+  // "torch supply" failures in a day, "don't have the ingredients" with coal and logs in hand.
   if (itemName === "stick" || itemName === "crafting_table") {
-    return bot.inventory.items().find((i) => i.name.endsWith("_planks"));
+    const items = bot.inventory.items();
+    return items.find((i) => i.name.endsWith("_planks")) ?? items.find((i) => /_(log|stem)$/.test(i.name));
   }
   // 2026-11-01: only that wood's own log. Any log used to count, and the hoe's recipes start at
   // cherry_planks: Babs, holding one birch log and 4 birch planks, tried cherry planks from her
@@ -3410,6 +3419,34 @@ function nearbyBeds(bot, near) {
 // counters, skill replay, and skill authoring all read as genuine success.
 const LOST_CONTROL = Object.freeze({ ok: false, cancelled: true, text: "something more urgent has control right now." });
 
+// 2026-11-04 (24h review): Amy's "mine stone" failed "No path to the goal!" 2,204 times in a day.
+// findBlocks hands back the nearest matches, and the nearest stone at home is buried under dirt --
+// past what the pathfinder's search budget will dig to -- while bare hillside stone a few blocks
+// further out was never tried. A block with an open face comes first now, and one that just
+// failed "No path" sits out MINE_UNREACHABLE_MS so the next attempt picks another.
+const MINE_UNREACHABLE_MS = 10 * 60_000;
+const MINE_RANKING_FETCH = 64;
+const mineUnreachableUntil = new Map();
+const MINE_FACES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+
+function hasOpenFace(bot, pos) {
+  return MINE_FACES.some(([dx, dy, dz]) => bot.blockAt(pos.offset(dx, dy, dz))?.boundingBox === "empty");
+}
+
+function rankMineTargets(bot, positions) {
+  const now = Date.now();
+  const reachable = positions.filter((pos) => (mineUnreachableUntil.get(`${pos.x},${pos.y},${pos.z}`) ?? 0) <= now);
+  const open = reachable.filter((pos) => hasOpenFace(bot, pos));
+  return [...open, ...reachable.filter((pos) => !open.includes(pos))];
+}
+
+function noteMineUnreachable(bot, blocks) {
+  const until = Date.now() + MINE_UNREACHABLE_MS;
+  for (const b of blocks) {
+    if (bot.blockAt(b.position)?.type === b.type) mineUnreachableUntil.set(`${b.position.x},${b.position.y},${b.position.z}`, until);
+  }
+}
+
 export async function performAction(bot, action, speaker, handle = null) {
   const startedAt = Date.now();
   if (handle ? !holdsControl(handle) : isBusy()) return logOutcome(bot, action, startedAt, { ...LOST_CONTROL }, true);
@@ -3512,7 +3549,9 @@ async function performActionAs(bot, action, speaker, token) {
       }
       const stillNeed = wantCount - (chestMatch?.count ?? 0);
 
-      const findOptions = { matching: blockIds, maxDistance: MINE_SEARCH_RADIUS, count: stillNeed * CONTENTION_SEARCH_OVERFETCH };
+      // Fetched wide enough for rankMineTargets() to find an exposed face beyond the nearest few.
+      const findOptions = { matching: blockIds, maxDistance: MINE_SEARCH_RADIUS,
+        count: Math.max(stillNeed * CONTENTION_SEARCH_OVERFETCH, MINE_RANKING_FETCH) };
       let positions = bot.findBlocks(findOptions);
       // Direct request, 2026-09-11 ("each bot uses the global world memory to gather a resource
       // it needs, if it's not in their immediate vicinity"): a remembered position -- her own
@@ -3539,6 +3578,10 @@ async function performActionAs(bot, action, speaker, token) {
         if (!positions.length) {
           return fail(`the only ${action.block} nearby is part of a shelter wall -- not digging that out.`);
         }
+      }
+      positions = rankMineTargets(bot, positions);
+      if (!positions.length) {
+        return fail(`every ${action.block} nearby is one I just couldn't path to -- trying elsewhere later.`);
       }
       positions = filterAwayFromOtherBots(bot, positions).slice(0, stillNeed);
       const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
@@ -3571,6 +3614,7 @@ async function performActionAs(bot, action, speaker, token) {
                            () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
       } catch (err) {
         if (token.cancelled) return ok("stopped mining early.");
+        if (err.name === "NoPath" || /no path/i.test(err.message)) noteMineUnreachable(bot, blocks);
         return fail(`had trouble mining ${collectedNames}: ${err.message}`);
       } finally {
         if (!token.cancelled) await refreshGear(bot); // may have picked up something worth wearing/wielding
@@ -4636,6 +4680,34 @@ async function performActionAs(bot, action, speaker, token) {
       }
       if (token.cancelled) return ok("stopped before placing it.");
 
+      // 2026-11-04 (residences): `at`, one named cell -- a residence's chest goes in its room, not
+      // wherever she stands. Walk within reach, then the same access check every placement makes.
+      if (action.at) {
+        const at = new Vec3(action.at.x, action.at.y, action.at.z);
+        const ground = bot.blockAt(at.offset(0, -1, 0));
+        if (ground?.boundingBox !== "block") return fail(`nothing to set the ${action.item} on at ${at}.`);
+        if (bot.blockAt(at)?.boundingBox === "block") return fail(`something already stands at ${at}.`);
+        const shuts = wouldBlockAccess(bot, at, action.item);
+        if (shuts) return fail(`a ${action.item} at ${at} would block ${shuts.reason} the ${shuts.fixture} at ${shuts.at}.`);
+        try {
+          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(at.x, at.y, at.z, 2)), ACTION_TIMEOUT_MS,
+            () => bot.pathfinder.setGoal(null));
+        } catch (err) {
+          if (token.cancelled) return ok("stopped on the way.");
+          return fail(`couldn't get to ${at} to place the ${action.item}: ${err.message}`);
+        } finally {
+          if (!token.cancelled) bot.pathfinder.setGoal(null);
+        }
+        try {
+          await bot.equip(heldCandidate, "hand");
+          await clearCellForPlacement(bot, at);
+          await bot.placeBlock(ground, new Vec3(0, 1, 0));
+        } catch (err) {
+          return fail(`couldn't place the ${action.item} at ${at}: ${err.message}`);
+        }
+        return ok(`placed a ${action.item} at ${at}.`);
+      }
+
       // A cardinal-adjacent spot with solid ground and clear air above it -- simpler and more
       // robust than assuming the block directly below her own feet works, since that's
       // literally where she's standing.
@@ -4710,9 +4782,12 @@ async function performActionAs(bot, action, speaker, token) {
       const LIGHT_AREA_BATCH_LIMIT = 6;
       const positions = bot.findBlocks({
         point: action.near,
+        // 2026-11-04: a position-less palette block (findBlocks' section pre-check) gets the cheap
+        // test -- rejecting it skipped every section, so no dark spot was ever found.
         matching: (block) => {
-          if (!block?.position || block.boundingBox === "block" || block.light === undefined ||
-              block.light >= DARK_LIGHT_LEVEL) return false;
+          if (!block || block.boundingBox === "block") return false;
+          if (!block.position) return true;
+          if (block.light === undefined || block.light >= DARK_LIGHT_LEVEL) return false;
           const below = bot.blockAt(block.position.offset(0, -1, 0));
           return !!below && below.boundingBox === "block" && !isProtectedBlockName(below.name);
         },
@@ -5955,7 +6030,8 @@ async function performActionAs(bot, action, speaker, token) {
             // either, and a real live placement failure ("Server refused to place
             // dark_oak_sapling ... the block is still dark_oak_sapling") traced to exactly that.
             matching: (block) => {
-              if (!block?.position || !groundIds.includes(block.type)) return false;
+              if (!block || !groundIds.includes(block.type)) return false;
+              if (!block.position) return true; // findBlocks' palette pre-check (2026-11-04)
               if (bot.blockAt(block.position.offset(0, 1, 0))?.name !== "air") return false;
               return !nearBuilding(bot, block.position);
             },

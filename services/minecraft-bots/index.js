@@ -1,5 +1,21 @@
-// Version: 2.132.0
+// Version: 2.133.2
 //
+// 2.133.2 (2026-11-05): the extra-chest retry backs off only when there's no wood (noWood), not
+// on a transient craft failure.
+// 2.133.1 (2026-11-05): the shore search after surfacing runs while she's still at water (atWater),
+// not only while isInWater -- at a deep pool's surface her jump read isInWater=false for a tick, the
+// search was skipped and she sank again.
+// 2.133.0 (2026-11-04, 24h review): a full bot whose chests are all full makes another chest, and
+// with no slot free drops plain surplus first (junkToDrop: spare weapons and tables, seeds past 64,
+// rotten flesh). No pickaxe means the Tier 1 tools item is a wooden one, and stone reinforcement
+// waits for it. A Builder crafting table, furnace or chest she doesn't hold is made by its own
+// runner (no more DONE NONE). Direct requests the same day: the residence model replaces "every
+// bot her own shelter" -- a bed for each ACTIVE bot, each in a residence (enclosure, door, bed,
+// chest): a missing chest first, then a bed in an empty shelter, else a new shelter (residencePlan;
+// shelter_capacity uses the same count). Trash (spent gear, rotten flesh) is thrown into lava she
+// can see. A full set of chests gets another chest even before her own slots run out. The
+// drowning reflex reads her own air (bot.oxygenLevel follows any entity's), and the shore search
+// survives findBlocks' palette pass, so she now reaches dry land.
 // 2.132.0 (2026-11-01, direct request): with no Farmer or Herder in the game, a hungry bot with
 // nothing to hunt stands in -- the food goal becomes a farm goal (or a ranch goal once a farm
 // stand-in has given up), and both now gather their own planks and seeds. Wheat becomes bread.
@@ -2536,10 +2552,12 @@ const CRAFTED_OBJECT_NAMES = ["crafting_table", "furnace", "chest", "trapped_che
 // findBlocks + write, no movement or mining): breaking a villager's job-site block would be
 // griefing a real structure, not resource-gathering.
 const VILLAGE_INDICATOR_NAMES = ["bell", "composter"];
+// 2026-11-04: lava too -- it's where trash goes (checkTrash), so a sighting is worth sharing.
+const DISPOSAL_NAMES = ["lava"];
 
 async function noteNearbyResources(reason, extraTargets = []) {
   const targets = new Set([...getResourceBlockNames(bot), ...CRAFTED_OBJECT_NAMES,
-    ...VILLAGE_INDICATOR_NAMES, ...extraTargets]);
+    ...VILLAGE_INDICATOR_NAMES, ...DISPOSAL_NAMES, ...extraTargets]);
   const positions = bot.findBlocks({ matching: (block) => targets.has(block.name), maxDistance: 24, count: 64 });
   const noted = new Set(); // one note per distinct name per sweep is enough -- matches prior behavior
   for (const pos of positions) {
@@ -3399,10 +3417,12 @@ function countUsableNearHome(names) {
 // other gap left for a cave to connect through -- satisfied by construction, not a new scan.
 const shelterGeometryPositions = shelterPositions;
 
+// 2026-11-04: a chest in the room is furniture too -- a residence has one (see residencePlan).
 function hasHollowInterior(base) {
   return SHELTER_ROOM.every(([dx, dz]) => {
     const floor = bot.blockAt(base.offset(dx, 0, dz)), above = bot.blockAt(base.offset(dx, 1, dz));
-    return (floor?.boundingBox !== "block" || bot.isABed(floor)) && above?.boundingBox !== "block";
+    return (floor?.boundingBox !== "block" || bot.isABed(floor) || /^(trapped_)?chest$/.test(floor?.name ?? "")) &&
+      above?.boundingBox !== "block";
   });
 }
 
@@ -3565,6 +3585,47 @@ function unfinishedShelterNearHome() {
 // AND a bed actually standing in one of its own room cells.
 function hasOwnShelterWithBed() {
   return completeSheltersNearHome().some(shelterHasBed);
+}
+
+// ---- residences (2026-11-04, direct request) -----------------------------------------------------
+// Replaces "every bot builds her own individual shelter": "a residence should consist of a bed, a
+// chest, at least one door, and enclosed walls/ceiling/floor ... a bed is needed for each resident
+// that is ACTIVE. 4 active bots means 4 beds ... if enough beds are not present, make and place a new
+// one in existing shelter (if room); if not enough room in existing shelters, start a new shelter."
+// A complete shelter (completeSheltersNearHome: every wall/roof/floor cell solid, a real door) is a
+// residence once it holds a bed and a chest. The 2x3 room fits one bed and one chest -- with a bed
+// in each column the chest would cut one of them off (fixtureBlockedBy's "last way up") -- so a
+// shelter has room for a bed while it has none. Order of work, fleet-wide and the same for every
+// bot: a bedded shelter's missing chest first (finishing a residence beats starting one), then beds
+// for the active bots, in an empty shelter first, else a new shelter.
+function activeBotCount() {
+  const online = new Set(Object.keys(bot.players ?? {}).map((name) => name.toLowerCase()));
+  return Math.max(1, [...BOT_USERNAMES].filter((name) => online.has(name.toLowerCase())).length);
+}
+
+const CHEST_NAME = /^(trapped_)?chest$/;
+const shelterBedCount = (base) =>
+  Math.ceil(SHELTER_ROOM.filter(([dx, dz]) => bot.isABed(bot.blockAt(base.offset(dx, 0, dz)))).length / 2);
+const shelterHasChest = (base) => SHELTER_ROOM.some(([dx, dz]) => CHEST_NAME.test(bot.blockAt(base.offset(dx, 0, dz))?.name ?? ""));
+
+function residencePlan() {
+  const shelters = completeSheltersNearHome();
+  const active = activeBotCount();
+  const beds = shelters.reduce((n, base) => n + shelterBedCount(base), 0);
+  const chestless = shelters.find((base) => shelterHasBed(base) && !shelterHasChest(base));
+  if (chestless) return { kind: "chest", base: chestless, beds, active };
+  if (beds >= active) return { kind: "done", beds, active };
+  const empty = shelters.find((base) => !shelterHasBed(base));
+  return empty ? { kind: "bed", base: empty, beds, active } : { kind: "build", beds, active };
+}
+
+function residenceDirective(plan) {
+  const tally = `our residences have ${plan.beds} bed${plan.beds === 1 ? "" : "s"} for ${plan.active} ` +
+    `active bot${plan.active === 1 ? "" : "s"}`;
+  if (plan.kind === "chest") return "a residence near home has a bed but no chest -- make a chest and put it inside that shelter.";
+  if (plan.kind === "bed") return `${tally} -- make a bed and place it in the empty shelter near home.`;
+  return `${tally} and no shelter has room for another -- build a new shelter near home: a small ` +
+    "sealed room with complete walls, a roof, a floor and a real door, then a bed and a chest inside.";
 }
 
 // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1 -- "today's separate 'beds'
@@ -3730,15 +3791,10 @@ function nextSurvivalPriority() {
         "works, gather materials and craft one.",
     };
   }
-  if (!hasOwnShelterWithBed()) {
-    return {
-      name: "shelter",
-      directive: "you don't have your own shelter with a bed in it yet -- build one near home: a " +
-        "small sealed room with complete walls, a roof, a floor, a real door (not just an " +
-        "opening), and a bed inside. Check whether an existing shelter nearby already has room " +
-        "for another bed before starting a brand new structure.",
-    };
-  }
+  // 2026-11-04: the residence model (residencePlan) -- beds for the active bots, each in a
+  // residence with a chest -- replaces "her own shelter with a bed in it".
+  const residence = residencePlan();
+  if (residence.kind !== "done") return { name: "shelter", directive: residenceDirective(residence) };
   if (bot.food < HUNGER_THRESHOLD && !hasFood() && !hasRod() && Date.now() < foodFetchBlockedUntil) {
     return {
       name: "food",
@@ -3761,7 +3817,10 @@ function nextSurvivalPriority() {
     toolUpgradeRetryAt = Date.now() + TOOL_UPGRADE_RETRY_MS;
     return { name: "tools", directive: `upgrade your tools: craft a ${upgrade.replace("_", " ")}.` };
   }
-  if (shelterCellsToReface().length && Date.now() >= shelterUpgradeRetryAt) {
+  // 2026-11-04: not without a pickaxe -- stone is the whole job. Babs (no pickaxe) ran this goal
+  // ~1,140 times a day, every step "need a better tool for stone"; nextToolUpgrade() now asks for
+  // the wooden pickaxe first.
+  if (hasPickaxe() && shelterCellsToReface().length && Date.now() >= shelterUpgradeRetryAt) {
     shelterUpgradeRetryAt = Date.now() + SHELTER_UPGRADE_RETRY_MS;
     return { name: "shelter_upgrade", directive: "reinforce your home: swap some of its dirt and wood blocks for stone." };
   }
@@ -3801,7 +3860,11 @@ function toolTargetTier() {
   return pickaxe >= TOOL_RANK.stone && countUsableNearHome(["furnace"]) >= 1 ? "iron" : "stone";
 }
 
+// 2026-11-04: with no pickaxe at all, a wooden one is the upgrade. toolTargetTier() has nothing to
+// offer then, and its "toolStep's own wooden one comes first" only ever ran for a Mayor-assigned
+// "get a pickaxe" -- nothing in Tier 1 ever got a pickaxe-less bot one.
 function nextToolUpgrade() {
+  if (bestToolRank("pickaxe") < 0) return "wooden_pickaxe";
   const tier = toolTargetTier();
   if (!tier) return null;
   const tool = UPGRADE_TOOLS.find((name) => bestToolRank(name) < TOOL_RANK[tier]);
@@ -3834,7 +3897,7 @@ function shelterCellsToReface() {
 function survivalPriorityItemSatisfied(name) {
   switch (name) {
     case "weapon": return hasWeapon(bot);
-    case "shelter": return hasOwnShelterWithBed();
+    case "shelter": return residencePlan().kind === "done";
     case "food": return hasFood();
     case "armor": return [5, 6, 7, 8].filter((slot) => bot.inventory.slots[slot]).length >= 4;
     case "tools": return !nextToolUpgrade();
@@ -3881,13 +3944,9 @@ function builderPriorityCandidates() {
   // hasShelterNearHome, the single nearest match) into one real check -- confirmed live the two
   // could both report satisfied with nine beds scattered in the open and one shelter nowhere near
   // most of them. countQualifyingSheltersNearHome() (above) counts actual qualifying structures
-  // (complete, sealed, a bed inside), same BOT_USERNAMES.size baseline target as before.
-  const shelterCount = countQualifyingSheltersNearHome();
-  if (shelterCount < BOT_USERNAMES.size) {
-    candidates.push({ name: "shelter_capacity", directive: "go home and build yourself a complete " +
-      "individual shelter there -- walls, roof, floor, a real door, and a bed inside -- unless an " +
-      `existing one nearby still has room for another bed. We have ${shelterCount}, need at least ` +
-      `${BOT_USERNAMES.size}.` });
+  // (complete, sealed, a bed inside); shelterCapacityNeeded() (below) has the target.
+  if (shelterCapacityNeeded()) {
+    candidates.push({ name: "shelter_capacity", directive: residenceDirective(residencePlan()) });
   }
   // Added 2026-09-11 ("nest" again -> "wire honey/wax into Builder's ... priority list"). Sits
   // AFTER the operator's original five (crafting table/furnace/chest/beds/shelter) rather than
@@ -3913,6 +3972,14 @@ function builderPriorityCandidates() {
       `or dirt), with real walls, a roof, a real door, and room for at least ${target} beds.` });
   }
   return candidates;
+}
+
+// 2026-11-04 (24h review): "We have 2, need at least 9" -- the target was the whole configured
+// roster, online or not, and its runner (shelterStep) built HER OWN shelter, so a bot who already
+// had one "completed" it on the spot and proposed it again: 209 false completions a day. Now the
+// residence plan's own count: beds for the bots in the game, each in a residence with a chest.
+function shelterCapacityNeeded() {
+  return residencePlan().kind !== "done";
 }
 
 function nextBuilderPriority(candidates = builderPriorityCandidates()) {
@@ -3953,10 +4020,9 @@ function builderPriorityItemSatisfied(name) {
       return countNearHome([name]) >= 1;
     case "shelter_capacity":
       // 2026-10-11: replaces the old separate "beds"/"shelter" cases -- kept in lockstep with
-      // builderPriorityCandidates()'s own >= BOT_USERNAMES.size target the same way those did
-      // (2026-09-14), the same two-copies-of-the-same-number drift this function exists to
-      // prevent in the first place.
-      return countQualifyingSheltersNearHome() >= BOT_USERNAMES.size;
+      // builderPriorityCandidates() through the one shared shelterCapacityNeeded() (2026-11-04),
+      // the same two-copies-of-the-same-number drift this function exists to prevent.
+      return !shelterCapacityNeeded();
     case "communal_shelter":
       return communalShelterSatisfied();
     default:
@@ -4288,9 +4354,50 @@ async function guardTick(goal, takeControl, getHandle) {
 
 const HOME_PLACEABLE = new Set(["crafting_table", "furnace", "chest", "beehive"]);
 
+// 2026-11-04 (24h review): "go home and place a furnace there" went to the planner whenever she
+// didn't already hold one, and the planner answered "DONE NONE" -- rejected, since no usable furnace
+// stands at home -- 421 times in a day, with nothing ever making one. A crafting table, furnace or
+// chest is made here, one step per tick (material, then the craft), and placed by the same runner
+// once it's in hand. A furnace's cobblestone needs a pickaxe, so that comes first.
+const BUILDER_CRAFTABLE = new Set(["crafting_table", "furnace", "chest"]);
+const BUILDER_COBBLESTONE = 8;
+
+async function builderAcquireStep(item, goal, handle) {
+  const tableType = bot.registry.blocksByName.crafting_table;
+  const tableNear = item === "crafting_table" || heldCount((n) => n === "crafting_table") > 0 ||
+    (tableType && bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }).length > 0);
+  if (item === "furnace") {
+    const short = BUILDER_COBBLESTONE - heldCount((n) => n === "cobblestone");
+    if (short > 0) {
+      if (!hasPickaxe()) return toolStep(goal, handle);
+      return { ...(await performAction(bot, { type: "mine", block: "stone", count: short }, USERNAME, handle)),
+        action: { type: "mine", block: "stone" } };
+    }
+  }
+  const planks = { crafting_table: 4, chest: 8, furnace: 0 }[item] + (tableNear ? 0 : 4);
+  if (planks > 0) {
+    const gathering = await gatherPlanks(handle, planks);
+    if (gathering) return gathering;
+  }
+  return { ...(await performAction(bot, { type: "craft", item, count: 1 }, USERNAME, handle)), action: { type: "craft", item } };
+}
+
 async function runBuilderPlacement(goal, takeControl, getHandle, replaced) {
   const item = goal.builderPriorityItem;
   if (replaced() || !(await takeControl())) return;
+  if (!holdsItem(item)) {
+    const step = await builderAcquireStep(item, goal, getHandle());
+    getHandle()?.release();
+    if (step.cancelled || replaced()) return;
+    logStep(goal, `${item}: ${step.text}`, step.ok, step.action);
+    console.log(`[${USERNAME}] builder ${item}: ${step.text} (ok=${step.ok})`);
+    if (step.ok) {
+      goal.consecutiveFailures = 0;
+      await saveGoalIfCurrent(goal);
+      return;
+    }
+    return failGoalStep(goal, step.text);
+  }
   const result = await performAction(bot, { type: "place_home", item }, USERNAME, getHandle());
   getHandle().release();
   if (result.cancelled || replaced()) return;
@@ -4615,7 +4722,7 @@ async function gatherPlanks(handle, count) {
     return { ...(await performAction(bot, { type: "craft", item, count: want }, USERNAME, handle)), action: { type: "craft", item } };
   }
   const tree = bot.findBlocks({ matching: (b) => /_log$/.test(b.name) && !b.name.startsWith("stripped_"), maxDistance: 32, count: 1 })[0];
-  if (!tree) return { ok: false, text: "need wood and there's no tree nearby." };
+  if (!tree) return { ok: false, noWood: true, text: "need wood and there's no tree nearby." };
   const block = bot.blockAt(tree).name;
   return { ...(await performAction(bot, { type: "mine", block, count: Math.ceil(count / 4) }, USERNAME, handle)), action: { type: "mine", block } };
 }
@@ -4743,6 +4850,7 @@ const TOOL_HEADS = { pickaxe: 3, axe: 3, sword: 2, shovel: 1, hoe: 2 };
 async function upgradeToolsStep(goal, handle) {
   const item = nextToolUpgrade();
   if (!item) return { ok: true, text: "my tools are as good as I can make them right now.", done: true };
+  if (item === "wooden_pickaxe") return toolStep(goal, handle); // a chest's pickaxe, else planks and a craft
   const [tier, tool] = item.split("_");
   const need = TOOL_HEADS[tool];
   if (tier === "stone") {
@@ -4869,6 +4977,7 @@ async function runFoodGoal(goal, takeControl, getHandle, replaced) {
 // SHELTER_REFACE_BATCH dirt/wood cells swapped for stone per goal -- "gradually", per the request,
 // and short enough that her shelter is never open for long. Cobblestone first (mined as "stone").
 async function shelterUpgradeStep(goal, handle) {
+  if (!hasPickaxe()) return { ...(await toolStep(goal, handle)), done: false }; // a goal saved before 2026-11-04
   const cells = shelterCellsToReface();
   if (!cells.length) return { ok: true, text: "my shelter is all stone already.", done: true };
   const batch = cells.slice(0, SHELTER_REFACE_BATCH);
@@ -4994,18 +5103,37 @@ const SHELTER_WORDS = /\b(build(ing)?|mak(e|ing)|set(ting)? up|put(ting)? up|nee
 // and the very next proposal re-opened it, forever. Once the structure stands, the goal's second
 // phase puts a bed in it: place one she holds, else bedStep()'s own wool/craft acquisition (its own
 // place branch is unreachable here, same as communalShelterStep's use of it).
+// 2026-11-04: one step of residencePlan()'s work -- a chest into a bedded shelter, a bed into an
+// empty one, else a new shelter (the build below). Done once every active bot has a bed in a
+// residence.
 async function shelterStep(goal, handle) {
-  const found = findShelterNearHome();
-  if (found?.complete) {
-    if (shelterHasBed(found.base)) return { ok: true, text: "my shelter has a bed in it.", done: true };
+  const plan = residencePlan();
+  if (plan.kind === "done") {
+    return { ok: true, text: `${plan.beds} bed${plan.beds === 1 ? "" : "s"} in residences for ${plan.active} active bots.`, done: true };
+  }
+  if (plan.kind === "chest") {
+    if (!holdsItem("chest")) return builderAcquireStep("chest", goal, handle);
+    const doorRow = plan.base.offset(0, 0, 2); // the door's way through
+    const cell = SHELTER_ROOM.map(([dx, dz]) => plan.base.offset(dx, 0, dz))
+      .find((p) => !p.equals(doorRow) && bot.blockAt(p)?.boundingBox !== "block" && !bot.isABed(bot.blockAt(p)));
+    if (!cell) return { ok: false, text: "the residence has no free floor for a chest." };
+    const placed = await performAction(bot, { type: "place", item: "chest", at: { x: cell.x, y: cell.y, z: cell.z } }, USERNAME, handle);
+    return { ...placed, action: { type: "place", item: "chest" } };
+  }
+  if (plan.kind === "bed") {
     if (!bot.inventory.items().some((i) => i.name.endsWith("_bed"))) return bedStep(goal, handle);
     // 2026-10-30: in the room itself, not just near it -- two beds "near" Babs' shelter landed
     // in other covered spots nearby, and each one sent her off for wool for another.
-    const cells = SHELTER_ROOM.map(([dx, dz]) => found.base.offset(dx, 0, dz)).map(({ x, y, z }) => ({ x, y, z }));
-    const placed = await performAction(bot, { type: "place_bed", near: found.base, cells }, USERNAME, handle);
-    return { ...placed, done: !!placed.bedAt && shelterHasBed(found.base), action: { type: "place_bed" } };
+    const cells = SHELTER_ROOM.map(([dx, dz]) => plan.base.offset(dx, 0, dz)).map(({ x, y, z }) => ({ x, y, z }));
+    const placed = await performAction(bot, { type: "place_bed", near: plan.base, cells }, USERNAME, handle);
+    return { ...placed, action: { type: "place_bed" } };
   }
   if (!bot.spawnPoint) return { ok: false, text: "don't know where home is yet." };
+  // A site an earlier build picked that has since become a complete shelter is no site any more.
+  if (goal.shelterAt && completeSheltersNearHome().some((b) =>
+    b.x === goal.shelterAt.x && b.y === goal.shelterAt.y && b.z === goal.shelterAt.z)) {
+    goal.shelterAt = null;
+  }
   const site = goal.shelterAt ? new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z)
     : (unfinishedShelterNearHome() ?? findShelterSite(bot, bot.spawnPoint, SHELTER_SITE_RADIUS));
   if (!site) return { ok: false, text: `couldn't find a flat, clear 3x3 spot within ${SHELTER_SITE_RADIUS} blocks of home.` };
@@ -5069,14 +5197,12 @@ async function runShelterGoal(goal, takeControl, getHandle, replaced) {
       `(${goal.shelterAt.x}, ${goal.shelterAt.y}, ${goal.shelterAt.z}), as of ${new Date().toISOString()}.` })
       .catch((err) => console.error(`[${USERNAME}] shelter memory write failed:`, err.message));
   }
-  if (step.done) {
-    if (step.bedAt) {
-      writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a bed near ` +
-        `(${step.bedAt.x}, ${step.bedAt.y}, ${step.bedAt.z}), as of ${new Date().toISOString()}.` })
-        .catch((err) => console.error(`[${USERNAME}] bed memory write failed:`, err.message));
-    }
-    return completeGoal(goal, "built a shelter with a bed in it");
+  if (step.bedAt && step.ok) {
+    writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a bed near ` +
+      `(${step.bedAt.x}, ${step.bedAt.y}, ${step.bedAt.z}), as of ${new Date().toISOString()}.` })
+      .catch((err) => console.error(`[${USERNAME}] bed memory write failed:`, err.message));
   }
+  if (step.done) return completeGoal(goal, "every active bot has a bed in a residence");
   if (step.ok) {
     goal.consecutiveFailures = 0;
     await saveGoalIfCurrent(goal);
@@ -5193,8 +5319,9 @@ async function goalTick() {
     }
     // Review MB-08 follow-up (2026-09-24): a Builder checklist item she's already carrying is
     // placed deterministically -- walk home, place, verify near home -- with no planner call.
+    // 2026-11-04: and one she can make (BUILDER_CRAFTABLE) is made first, by the same runner.
     if (goal.builderPriorityItem && HOME_PLACEABLE.has(goal.builderPriorityItem) &&
-        holdsItem(goal.builderPriorityItem)) {
+        (holdsItem(goal.builderPriorityItem) || BUILDER_CRAFTABLE.has(goal.builderPriorityItem))) {
       await runBuilderPlacement(goal, takeControl, () => handle, replaced);
       return;
     }
@@ -5207,6 +5334,11 @@ async function goalTick() {
     // otherwise match TOOL_WORDS and go to toolStep, which is satisfied by ANY pickaxe.
     if (goal.survivalPriorityItem === "tools") {
       await runUpgradeToolsGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    // 2026-11-04: by tag -- the residence directive's wording changes with its plan.
+    if (goal.survivalPriorityItem === "shelter") {
+      await runShelterGoal(goal, takeControl, () => handle, replaced);
       return;
     }
     if (goal.survivalPriorityItem === "shelter_upgrade") {
@@ -7055,38 +7187,176 @@ async function storeSurplusNearHome(reason) {
 // mining logs failed outright. Operator's call: she makes a chest and puts it down at home, one
 // step per check. The only thing ever dropped is rotten flesh, and only when she has no free slot
 // and no wood to make the chest from (she can't pick up a log without a slot).
+// 2026-11-04 (24h review): the chests at home were full too -- "destination full" 144 times, and
+// with every slot taken the block collector threw "There are no defined chest locations!" on every
+// dig (341 dirt, 413 clear_access). Babs held 10 bows, 4 crossbows and 576 seeds. A full set of
+// chests now gets another chest, like no chest at all, and when there's no slot free and no wood
+// to make one she drops what's plainly surplus (junkToDrop), not just rotten flesh -- the
+// operator's call, 2026-11-04.
 async function makeHomeChest(handle) {
   if (heldCount((n) => n === "chest") > 0) {
-    return performAction(bot, { type: "place_home", item: "chest" }, USERNAME, handle);
+    const placed = await performAction(bot, { type: "place_home", item: "chest" }, USERNAME, handle);
+    if (placed.ok) {
+      storageBlockedUntil = 0; // a new, empty chest: storing can start again
+      const at = bot.spawnPoint;
+      if (at) {
+        writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a chest near ` +
+          `(${at.x}, ${at.y}, ${at.z}), as of ${new Date().toISOString()}.` })
+          .catch((err) => console.error(`[${USERNAME}] chest memory write failed:`, err.message));
+      }
+    }
+    return placed;
   }
   const items = bot.inventory.items();
   const hasWood = items.some((i) => /_(log|stem)$/.test(i.name) ||
     (i.name.endsWith("_planks") && heldCount((n) => n === i.name) >= 8));
   if (items.length >= INVENTORY_MAIN_HOTBAR_SLOTS && !hasWood) {
-    const flesh = items.filter((i) => i.name === "rotten_flesh");
-    if (!flesh.length) return { ok: false, text: "inventory full, no chest, no wood, and nothing I'd drop." };
-    let dropped = 0;
-    for (const stack of flesh) {
-      await bot.toss(stack.type, null, stack.count);
-      dropped += stack.count;
+    const junk = surplusToDrop(items);
+    if (!junk.length) return { ok: false, noWood: true, text: "inventory full, no room in any chest, and nothing I'd drop." };
+    // A thrown item can be picked up again two seconds later by whoever stands on it, and home is
+    // where everyone stands. She throws from DROP_DISTANCE out from home, facing further out, then
+    // walks straight back.
+    const spot = bot.spawnPoint ? dropSpotAwayFrom(bot.spawnPoint.floored()) : null;
+    if (spot) {
+      await walkTo(spot.at, 1, handle);
+      await bot.lookAt(spot.facing, true);
     }
-    return { ok: true, text: `dropped ${dropped} rotten flesh to make room for wood for a chest.` };
+    for (const { item, count } of junk) {
+      if (count >= item.count) await bot.tossStack(item);
+      else await bot.toss(item.type, null, count);
+    }
+    if (spot) await walkTo(bot.spawnPoint, 2, handle);
+    const summary = [...junk.reduce((m, { item, count }) => m.set(item.name, (m.get(item.name) ?? 0) + count), new Map())]
+      .map(([name, count]) => `${count} ${name}`).join(", ");
+    return { ok: true, text: `dropped ${summary} to make room for a chest.` };
   }
   const gathering = await gatherPlanks(handle, 8);
   if (gathering) return gathering;
   return performAction(bot, { type: "craft", item: "chest", count: 1 }, USERNAME, handle);
 }
 
+const DROP_DISTANCE = 6;
+
+// Standable ground DROP_DISTANCE out from home -- the way she already is from it first, else
+// whichever compass direction has floor -- and a point further out to face while throwing.
+function dropSpotAwayFrom(home) {
+  const off = bot.entity ? { x: bot.entity.position.x - home.x, z: bot.entity.position.z - home.z } : null;
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  if (off && Math.hypot(off.x, off.z) >= 1) {
+    const len = Math.hypot(off.x, off.z);
+    dirs.unshift([off.x / len, off.z / len]);
+  }
+  for (const [dx, dz] of dirs) {
+    const at = home.offset(Math.round(dx * DROP_DISTANCE), 0, Math.round(dz * DROP_DISTANCE));
+    const standable = bot.blockAt(at.offset(0, -1, 0))?.boundingBox === "block" &&
+      bot.blockAt(at)?.boundingBox === "empty" && bot.blockAt(at.offset(0, 1, 0))?.boundingBox === "empty";
+    if (standable) return { at, facing: home.offset(dx * 4 * DROP_DISTANCE, 1, dz * 4 * DROP_DISTANCE) };
+  }
+  return null;
+}
+
+async function walkTo(pos, range, handle) {
+  const timer = setTimeout(() => { if (arbiter.holdsControl(handle)) bot.pathfinder.setGoal(null); }, 20_000);
+  try {
+    await bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, range));
+  } catch { /* short of the spot is still away from where she stood */ } finally {
+    clearTimeout(timer);
+    if (arbiter.holdsControl(handle)) bot.pathfinder.setGoal(null);
+  }
+}
+
+// Trash (2026-11-04, direct request: "'trash' items like almost broken weapons, zombie flesh can be
+// disposed of in lava"): rotten flesh and poisonous potatoes, and any tool, weapon or armor piece at
+// NEAR_BROKEN wear or worse -- unless it's the only one of its kind she carries (then the least worn
+// stays), so she is never left with no sword because her sword was nearly spent.
+const TRASH_NAMES = new Set(["rotten_flesh", "poisonous_potato"]);
+const NEAR_BROKEN = 0.9;
+const GEAR_TIER = /^(wooden|stone|iron|golden|diamond|netherite|leather|chainmail|turtle|copper)_/;
+
+function trashItems(items) {
+  const trash = [];
+  const kinds = new Map();
+  const maxWear = (i) => bot.registry?.items?.[i.type]?.maxDurability ?? 0;
+  for (const i of items) {
+    if (TRASH_NAMES.has(i.name)) { trash.push({ item: i, count: i.count }); continue; }
+    if (!maxWear(i)) continue;
+    const kind = i.name.replace(GEAR_TIER, "");
+    kinds.set(kind, [...(kinds.get(kind) ?? []), i]);
+  }
+  for (const stacks of kinds.values()) {
+    const wear = (i) => (i.durabilityUsed ?? 0) / maxWear(i);
+    const worn = stacks.filter((i) => wear(i) >= NEAR_BROKEN).sort((a, b) => wear(a) - wear(b));
+    for (const i of worn.length === stacks.length ? worn.slice(1) : worn) trash.push({ item: i, count: i.count });
+  }
+  return trash;
+}
+
+// junkToDrop() and trashItems() together, one entry per stack.
+function surplusToDrop(items) {
+  const counts = new Map();
+  for (const { item, count } of [...junkToDrop(items), ...trashItems(items)]) {
+    counts.set(item, Math.max(counts.get(item) ?? 0, count));
+  }
+  return [...counts].map(([item, count]) => ({ item, count }));
+}
+
+// What a full bot may drop: rotten flesh; every weapon of a kind but the best one (bow, crossbow,
+// sword -- a sword by tier, then wear); every crafting table, shield, rod, shears or flint and
+// steel but the least worn; seeds beyond SEED_RESERVE of each kind. Nothing else -- not food, ore,
+// building blocks, armor or tools she works with.
+const KEEP_ONE_OF = new Set(["bow", "crossbow", "crafting_table", "shield", "fishing_rod", "shears", "flint_and_steel"]);
+const SEED_RESERVE = 64;
+const SEED_ITEM = /^(wheat|beetroot|melon|pumpkin|torchflower)_seeds$|^pitcher_pod$/;
+
+function junkToDrop(items) {
+  const drops = [];
+  const kinds = new Map();
+  const kindOf = (name) => (KEEP_ONE_OF.has(name) ? name : name.endsWith("_sword") ? "sword" : null);
+  const worth = (i) => [i.name.endsWith("_sword") ? (TOOL_RANK[i.name.split("_")[0]] ?? 0) : 0, -(i.durabilityUsed ?? 0)];
+  const better = (a, b) => { const [x, y] = [worth(a), worth(b)]; return x[0] !== y[0] ? x[0] > y[0] : x[1] > y[1]; };
+  const seedsKept = new Map();
+  for (const i of items) {
+    if (i.name === "rotten_flesh") { drops.push({ item: i, count: i.count }); continue; }
+    if (SEED_ITEM.test(i.name)) {
+      const room = Math.max(0, SEED_RESERVE - (seedsKept.get(i.name) ?? 0));
+      seedsKept.set(i.name, (seedsKept.get(i.name) ?? 0) + Math.min(room, i.count));
+      if (i.count > room) drops.push({ item: i, count: i.count - room });
+      continue;
+    }
+    const kind = kindOf(i.name);
+    if (kind) kinds.set(kind, [...(kinds.get(kind) ?? []), i]);
+  }
+  for (const stacks of kinds.values()) {
+    const best = stacks.reduce((a, b) => (better(b, a) ? b : a));
+    for (const i of stacks) {
+      const count = i === best ? i.count - 1 : i.count;
+      if (count > 0) drops.push({ item: i, count });
+    }
+  }
+  return drops;
+}
+
+const EXTRA_CHEST_RETRY_MS = 10 * 60_000;
+let extraChestRetryAt = 0;
+
 async function checkInventoryFull() {
   if (!AUTONOMY_ENABLED || routineBlocked("checkInventoryFull") || bot.isSleeping) return;
   const emptySlots = INVENTORY_MAIN_HOTBAR_SLOTS - bot.inventory.items().length;
-  if (emptySlots > INVENTORY_FULL_SLOTS) return;
-  if (bot.spawnPoint && countUsableNearHome(["chest"]) < 1) {
+  const chestsFull = Date.now() < storageBlockedUntil;
+  // 2026-11-04 (direct request: "when a chest is full, they should build another chest"): every
+  // chest at home full is reason enough on its own, not only once her own slots run out.
+  if (emptySlots > INVENTORY_FULL_SLOTS && !(chestsFull && bot.spawnPoint && Date.now() >= extraChestRetryAt)) return;
+  if (bot.spawnPoint && (chestsFull || countUsableNearHome(["chest"]) < 1)) {
     const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
     if (!handle) return;
     try {
       const result = await makeHomeChest(handle);
-      console.log(`[${USERNAME}] inventory full, no chest at home: ${result.text} (ok=${result.ok})`);
+      console.log(`[${USERNAME}] ${emptySlots > INVENTORY_FULL_SLOTS ? "chests" : "inventory"} full, ` +
+        `${chestsFull ? "every chest at home full" : "no chest at home"}: ${result.text} (ok=${result.ok})`);
+      // No wood within reach is no wood 20s from now: that failure waits before the next try. Any
+      // other (2026-11-05: a planks craft read a stale inventory, "missing ingredient") retries on
+      // the next check -- backing off on it left a bot holding 8 planks idle for 10 minutes.
+      if (result.noWood) extraChestRetryAt = Date.now() + EXTRA_CHEST_RETRY_MS;
     } finally {
       handle.release();
     }
@@ -7098,6 +7368,52 @@ async function checkInventoryFull() {
 setInterval(() => {
   checkInventoryFull().catch((err) => console.error(`[${USERNAME}] checkInventoryFull error:`, err.message));
 }, INVENTORY_CHECK_MS);
+
+// Trash into lava (2026-11-04, direct request). Lava she can see, with open air over it so a thrown
+// item falls in; she walks to within reach of it -- a GoalNear beside it, and the pathfinder never
+// routes through lava (it's in Movements.blocksToAvoid) -- looks at it and throws. No lava in sight
+// and nothing happens here: a full inventory still drops surplus the old way (makeHomeChest).
+const TRASH_CHECK_MS = parseInt(process.env.MC_TRASH_CHECK_MS || "300000", 10);
+const LAVA_SEARCH_RADIUS = 24;
+const LAVA_REACH = 4;
+
+function visibleLava() {
+  const lava = bot.registry.blocksByName.lava;
+  if (!lava) return null;
+  return bot.findBlocks({ matching: lava.id, maxDistance: LAVA_SEARCH_RADIUS, count: 16 })
+    .find((pos) => bot.blockAt(pos.offset(0, 1, 0))?.boundingBox === "empty") ?? null;
+}
+
+async function checkTrash() {
+  if (!AUTONOMY_ENABLED || routineBlocked("checkTrash") || bot.isSleeping || !bot.entity) return;
+  const trash = trashItems(bot.inventory.items());
+  if (!trash.length) return;
+  const lava = visibleLava();
+  if (!lava) return;
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
+  try {
+    await walkTo(lava, 2, handle);
+    if (!arbiter.holdsControl(handle)) return;
+    if (bot.entity.position.distanceTo(lava) > LAVA_REACH) {
+      console.log(`[${USERNAME}] trash: couldn't get within reach of the lava at ${lava}.`);
+      return;
+    }
+    await bot.lookAt(lava.offset(0.5, 0.5, 0.5), true);
+    for (const { item, count } of trash) {
+      if (count >= item.count) await bot.tossStack(item);
+      else await bot.toss(item.type, null, count);
+    }
+    console.log(`[${USERNAME}] trash: threw ${trash.map(({ item, count }) => `${count} ${item.name}`).join(", ")} ` +
+      `into the lava at ${lava}.`);
+  } finally {
+    handle.release();
+  }
+}
+
+setInterval(() => {
+  checkTrash().catch((err) => console.error(`[${USERNAME}] checkTrash error:`, err.message));
+}, TRASH_CHECK_MS);
 
 // Item #5 of "fix all the above" (inventory insurance). Real gap: checkInventoryFull() only ever
 // stores surplus when SPACE runs low -- a bot can carry a stack of diamonds or a full spare
@@ -8175,6 +8491,23 @@ const SHORE_SEARCH_DISTANCE = 48; // matches bot.pathfinder.searchRadius's own O
 const SHORE_TRAVEL_TIMEOUT_MS = 20_000;
 let drowningInFlight = false;
 
+// 2026-11-04 (direct report: "the bots do not seem to be able to get out of water"): mineflayer
+// 4.39's entity_metadata handler sets bot.oxygenLevel from ANY entity's air_supply and emits
+// 'breath' for it -- a squid, fish or dolphin nearby drove her drowning emergency (Babs: 124 in 4
+// minutes, each "surfaced (oxygen=296)", a dolphin's 4440 ticks / 15). Her own air is her own
+// entity's metadata, index 1, in ticks (0-300), on the same 0-20 scale.
+function ownOxygenLevel() {
+  const air = bot.entity?.metadata?.[1];
+  return typeof air === "number" ? Math.round(air / 15) : 20;
+}
+
+// In water, or just above it with water at her feet or under them.
+function atWater() {
+  if (bot.entity.isInWater) return true;
+  const at = bot.entity.position?.floored?.();
+  return !!at && [0, -1].some((dy) => /^(water|bubble_column)$/.test(bot.blockAt(at.offset(0, dy, 0))?.name ?? ""));
+}
+
 function findNearestShore(bot, maxDistance) {
   // Real bug found live (2026-09-08): block.position was null for some candidate blocks
   // findBlocks() itself handed in (bot.blockAt() can return a Block missing this even when the
@@ -8185,8 +8518,13 @@ function findNearestShore(bot, maxDistance) {
   const positions = bot.findBlocks({
     maxDistance,
     count: 1,
+    // 2026-11-04: findBlocks first asks this about each section's palette, as blocks with no
+    // position (Block.fromStateId) -- returning false there skipped every section, so no shore was
+    // ever found (490 "couldn't find dry land" in 14 days, not one "heading for dry land"). A
+    // position-less block gets the cheap half of the test.
     matching: (block) => {
-      if (!block?.position || block.liquid || block.boundingBox === "block") return false;
+      if (!block || block.liquid || block.boundingBox === "block") return false;
+      if (!block.position) return true;
       const below = bot.blockAt(block.position.offset(0, -1, 0));
       return !!below && !below.liquid && below.boundingBox === "block";
     },
@@ -8196,10 +8534,10 @@ function findNearestShore(bot, maxDistance) {
 
 bot.on("breath", () => {
   if (!AUTONOMY_ENABLED || drowningInFlight) return;
-  if (!bot.entity.isInWater || bot.oxygenLevel > DROWNING_OXYGEN_THRESHOLD) return;
+  if (!bot.entity.isInWater || ownOxygenLevel() > DROWNING_OXYGEN_THRESHOLD) return;
 
   drowningInFlight = true;
-  console.log(`[${USERNAME}] EMERGENCY: oxygen critical (${bot.oxygenLevel}) -- force-cancelling ` +
+  console.log(`[${USERNAME}] EMERGENCY: oxygen critical (${ownOxygenLevel()}) -- force-cancelling ` +
               `current action to surface`);
 
   // Direct request, 2026-09-10 (coherence-arbiter Phase 2 -- see checkSelfDefense's own
@@ -8221,16 +8559,19 @@ bot.on("breath", () => {
       // Keep holding jump until oxygen is actually recovering (a reliable sign her head cleared
       // the surface) rather than just "not in water anymore" -- isInWater stays true while
       // floating right at the surface, so that alone would release control too early.
-      while (bot.entity.isInWater && bot.oxygenLevel <= DROWNING_OXYGEN_THRESHOLD + 2 &&
+      while (bot.entity.isInWater && ownOxygenLevel() <= DROWNING_OXYGEN_THRESHOLD + 2 &&
              Date.now() < surfaceDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
-      console.log(`[${USERNAME}] surfaced (oxygen=${bot.oxygenLevel}, stillInWater=${bot.entity.isInWater})`);
+      console.log(`[${USERNAME}] surfaced (oxygen=${ownOxygenLevel()}, stillInWater=${bot.entity.isInWater})`);
       bot.setControlState("jump", false);
 
       // Surviving the dunk isn't the same as being somewhere sensible -- head for the nearest
       // real dry land now that the pathfinder can actually generate a route out of water.
-      if (bot.entity.isInWater && arbiter.holdsControl(handle)) { // MB-02: a higher tier may own her now
+      // 2026-11-05: still at water, not just isInWater -- bobbing at the surface of a deep pool,
+      // isInWater reads false for the tick her jump lifts her out, so the shore search was skipped
+      // and she sank again (live: four emergencies in a row, no "heading for dry land").
+      if (atWater() && arbiter.holdsControl(handle)) { // MB-02: a higher tier may own her now
         const shore = findNearestShore(bot, SHORE_SEARCH_DISTANCE);
         if (!shore) {
           console.log(`[${USERNAME}] surfaced but couldn't find dry land within ${SHORE_SEARCH_DISTANCE} blocks`);

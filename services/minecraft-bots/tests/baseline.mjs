@@ -1,4 +1,4 @@
-// Version: 1.9.0
+// Version: 1.10.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -15,7 +15,11 @@
 // When a behavior fix lands, add the metric that proves it here (see tests/README.md), and after
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
-// Revision History: 1.9.0 | 2026-11-02 | access_clears_per_bot_day (patch_shelter vs clear_access).
+// Revision History: 1.10.0 | 2026-11-04 | full_inventory_dig_failures_per_bot_day,
+//   missing_tool_failures_per_bot_day, mine_no_path_per_bot_day, utility_done_rejections_per_bot_day,
+//   shelter_capacity_noop_completions_per_bot_day (the 24h-review loops); drowning_emergencies_per_bot_day,
+//   store_destination_full_per_bot_day, trash_burned_per_bot_day.
+// 1.9.0 | 2026-11-02 | access_clears_per_bot_day (patch_shelter vs clear_access).
 // 1.8.0 | 2026-11-01 | farms_planted_per_bot_day (stand-in Farmer/Herder).
 // 1.7.0 | 2026-11-01 | failed_food_steps_per_bot_day (hunt range/chickens, food-goal retry wait).
 // 1.6.0 | 2026-10-30 | bed_placements_per_bot_day, absent_give_attempts_per_bot_day
@@ -245,6 +249,46 @@ const METRICS = {
     about: "blocks dug out of a door/bed/chest's way -- ~176/bot-day on 2026-11-01, patch_shelter refilling a doorway that clear_access then cleared",
     better: "lower", tolerance: 0.5, floor: 5,
     value: (c, ctx) => perBotDay(c(/\] access check: cleared \d+ block/), ctx),
+  },
+  full_inventory_dig_failures_per_bot_day: {
+    about: "digs that failed because every slot was full (collectBlock's \"no defined chest locations\") -- ~170/bot-day on 2026-11-03",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/OUTCOME .*There are no defined chest locations!/), ctx),
+  },
+  missing_tool_failures_per_bot_day: {
+    about: "mine steps refused for want of a pickaxe -- ~470/bot-day on 2026-11-03, Babs with none running the stone upgrade",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/OUTCOME \{"type":"mine","ok":false.*need a better tool for/), ctx),
+  },
+  mine_no_path_per_bot_day: {
+    about: "mine steps that failed \"No path\" -- ~440/bot-day on 2026-11-03, the nearest stone buried",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/OUTCOME \{"type":"mine","ok":false.*No path to the goal/), ctx),
+  },
+  utility_done_rejections_per_bot_day: {
+    about: "planner DONE claims rejected for a crafting table/furnace/chest not at home -- ~180/bot-day on 2026-11-03",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/REJECTED DONE \(claimed (crafting_table|furnace|chest) done/), ctx),
+  },
+  shelter_capacity_noop_completions_per_bot_day: {
+    about: "shelter_capacity goals \"completed\" by a bot that already had her shelter -- ~100/bot-day on 2026-11-03",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/goal complete \(built a shelter with a bed in it\): go home and build yourself/), ctx),
+  },
+  drowning_emergencies_per_bot_day: {
+    about: "drowning reflexes fired -- ~320/bot-day on 2026-11-04, most from a nearby squid's or dolphin's air read as hers",
+    better: "lower", tolerance: 0.5, floor: 3,
+    value: (c, ctx) => perBotDay(c(/\] EMERGENCY: oxygen critical/), ctx),
+  },
+  store_destination_full_per_bot_day: {
+    about: "deposits refused by a full chest -- ~60/bot-day on 2026-11-04; a full set of chests now gets another",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/\[store\] couldn't deposit into chest at .*: destination full/), ctx),
+  },
+  trash_burned_per_bot_day: {
+    about: "trash thrown into lava (2026-11-04, new) -- 0 before; only moves where lava is in sight of a bot carrying trash",
+    better: "higher", tolerance: 0.9, floor: 0,
+    value: (c, ctx) => perBotDay(c(/\] trash: threw /), ctx),
   },
 };
 

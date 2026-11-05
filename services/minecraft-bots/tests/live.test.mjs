@@ -1,4 +1,7 @@
-// Version: 1.37.0
+// Version: 1.38.0
+//
+// 1.38.0 (2026-11-04): two new scenarios -- "mine stone" takes exposed stone before nearer buried
+// stone, and a torch is crafted from coal and logs (no planks in hand).
 //
 // 1.37.0 (2026-11-02): new scenario -- a bed in a shelter corner is no hole, and patch_shelter
 // never fills a doorway.
@@ -518,6 +521,33 @@ scenario("Shelter rooms: a bed in the corner is no hole, and patch_shelter never
 
   const patched = await performAction(bot, { type: "patch_shelter", holes: [{ x: inside.x, y: inside.y, z: inside.z }] }, TESTER);
   assert.equal(bot.blockAt(inside)?.name, "air", `the cell inside the door stays open: ${patched.text}`);
+});
+
+// 2026-11-04 (24h review): Amy's "mine stone" failed "No path" 2,204 times a day -- the nearest
+// stone at home was buried, bare stone further out never tried (actions.js 1.103.0). A stone block
+// sealed in a dirt cube sits nearer than one standing in the open; the open one is the one mined.
+scenario("Mining: exposed stone is mined before nearer buried stone", async () => {
+  const buried = new Vec3(x + 2, y + 2, z + 2), open = new Vec3(x + 7, y + 1, z);
+  await rcon(`fill ${x + 1} ${y + 1} ${z + 1} ${x + 3} ${y + 3} ${z + 3} minecraft:dirt`,
+    `setblock ${buried.x} ${buried.y} ${buried.z} minecraft:stone`,
+    `setblock ${open.x} ${open.y} ${open.z} minecraft:stone`,
+    `give ${TESTER} minecraft:stone_pickaxe`);
+  await waitFor(() => bot.blockAt(buried)?.name === "stone" && bot.blockAt(open)?.name === "stone" && held("stone_pickaxe") === 1,
+    8000, "buried and open stone placed, pickaxe in hand");
+  const mined = await performAction(bot, { type: "mine", block: "stone", count: 1 }, TESTER);
+  assert.equal(mined.ok, true, mined.text);
+  assert.equal(bot.blockAt(open)?.name, "air", "the stone standing in the open was mined");
+  assert.equal(bot.blockAt(buried)?.name, "stone", "the nearer buried stone was left alone");
+});
+
+// 2026-11-04: torch supply counts a log as wood, but with no planks the stick was never made
+// (actions.js 1.103.0) -- "don't have the ingredients" with coal and logs in hand.
+scenario("Crafting: torches from coal and logs, with no planks or sticks in hand", async () => {
+  await rcon(`give ${TESTER} minecraft:coal 2`, `give ${TESTER} minecraft:oak_log 2`);
+  await waitFor(() => held("coal") >= 2 && held("oak_log") >= 2, 8000, "coal and logs");
+  const crafted = await performAction(bot, { type: "craft", item: "torch", count: 4, here: true }, TESTER);
+  assert.equal(crafted.ok, true, crafted.text);
+  await waitFor(() => held("torch") >= 4, 10_000, "four torches"); // the window update can lag the craft
 });
 
 // Direct report, 2026-11-01: "they are destroying the fence in the pen" -- Amy, netherite axe in

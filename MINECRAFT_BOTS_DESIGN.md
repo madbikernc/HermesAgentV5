@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.34.0
+**Version:** 2.35.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -38,13 +38,12 @@ read whole and never parsed. A fleet-wide rule is edited once, in the common fil
 Roles are one-per-bot; `BOT_ROLES[*].secondary` is `null` fleet-wide and nothing populates it.
 The host split is memory headroom, not design — `spark` carries the LLM stack, `spark2` had room.
 
-**Adding a bot** — all five steps, or it half-works silently:
+**Adding a bot** — all four steps, or it half-works silently:
 1. `agents/minecraft-<name>/PROMPT.md` + a `roles.js` `BOT_ROLES` entry.
 2. `infra/minecraft-bots/minecraft-bot-<name>.service`; `BOT_USERNAMES` defaults in
    `index.js`/`actions.js`.
 3. `hermes-buzz.py` `KNOWN_AGENTS` += `mc-<name>`, then restart `hermes-buzz.service`.
-4. Matrix account `@mc-<name>:spark` on Continuwuity, joined to the shared room.
-5. **Server op grant** in `ops.json`. Without it `teleportToSpawn()`'s `/tp` self-rescue fails
+4. **Server op grant** in `ops.json`. Without it `teleportToSpawn()`'s `/tp` self-rescue fails
    silently forever — the log line looks identical either way (§49).
 
 ## 2. Server and world
@@ -98,8 +97,8 @@ minecraft-bots.service (game server, muncraft 192.168.1.221:25580, offline mode)
         │
   one Node.js process per bot, systemd-supervised, 5 on spark / 4 on spark2
         │
-  hermes-router :8080   hermes-memory :8102   hermes-buzz :8101   Continuwuity :6167
-  (model calls)         (agent_state KV)      (bot↔bot)           (one shared Matrix room)
+  hermes-router :8080   hermes-memory :8102   hermes-buzz :8101
+  (model calls)         (agent_state KV)      (bot↔bot)
         │
   hermes-rag (minecraft, minecraft-world, minecraft-skills corpora)
 ```
@@ -120,17 +119,20 @@ Python client has mineflayer's maturity.
 | `longterm.js` | Per-bot RAG memory + shared world-memory notes |
 | `equipment.js` | `hasWeapon()`, best armor/weapon selection, gear tiers |
 | `swim-movements.js` | `Movements` subclass: water handling + `MAX_DIG_LABOR_COST` cap |
-| `memory.js` / `buzz.js` / `matrix.js` / `persona.js` / `router.js` | Thin clients, one job each |
+| `memory.js` / `buzz.js` / `persona.js` / `router.js` | Thin clients, one job each |
+| `matrix.js` | Legacy, optional room watcher from before Buzz; only runs when a bot has a `MATRIX_ACCESS_TOKEN` |
 
 **Channels.** Buzz agent `mc-<persona>`, topics `minecraft` and `minecraft-coordination` —
 bot-to-bot only. A (re)started bot starts reading each topic at its newest message (`newestSeq`
-pages through the topic without delivering anything), never at the start of its history. Matrix room `!2rXcMwykUS2yVNTLGw:spark`, one
-shared room for every bot and the operator — human-facing only. In-game chat feeds the same
-pipeline as Matrix, tagged by source.
+pages through the topic without delivering anything), never at the start of its history. Bots
+coordinate over Buzz only; people talk to them through in-game chat and whispers. The Matrix room
+`!2rXcMwykUS2yVNTLGw:spark` is legacy from before Buzz: a bot that still has a `MATRIX_ACCESS_TOKEN`
+replies there too, through the same pipeline, but no bot needs one and new bots get none.
 
 ## 4. Control flow
 
-**Chat path.** A message (in-game or Matrix) gets one `dispatch` classification — CHAT, ACTION,
+**Chat path.** An in-game chat message or whisper (or, for a bot with the legacy Matrix token, a
+room message) gets one `dispatch` classification — CHAT, ACTION,
 or GOAL — then either an in-character `muse` reply grounded in real live goal state, or a real
 queued action/goal. A CHAT reply may never promise a future action that isn't actually queued.
 
@@ -184,14 +186,29 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   home, once she's farther than `BUILDER_PRIORITY_RADIUS` from both `bot.spawnPoint` and the
   nearest remembered bed (`place_bed`'s existing `action.near`, added for the communal shelter,
   just never pointed anywhere but home for an individual bed before this).
+- **Residences, not one shelter per bot** (direct request, 2026-11-04 -- this replaces the
+  per-bot individual-shelter model described in the older text below). A residence is a complete
+  shelter (every wall, roof and floor cell solid, a real door) holding a bed and a chest. Beds are
+  needed for each **active** bot -- the fleet's bots in the game now, from the server's player
+  list, not the configured roster: four active bots means four beds. `residencePlan()` decides one
+  next step for the whole fleet, the same for every bot: a bedded shelter with no chest gets one
+  first (finishing a residence beats starting another; the chest goes on free room floor, never in
+  the way through the door); then, while beds are short of active bots, a bed into a complete
+  shelter that has none; and only when no shelter has room, a new shelter (`findShelterSite`'s
+  ring search). The 2x3 room holds one bed and one chest -- with a bed in each column, a chest
+  would cut the second off (`fixtureBlockedBy`'s "last way up") -- so "room for a bed" means a
+  complete shelter with no bed yet. The Tier 1 shelter item and the Builder's `shelter_capacity`
+  both read this one plan (one count, no second mechanism); the goal is done once every active bot
+  has a bed in a residence, and is routed by its `survivalPriorityItem` tag since its wording
+  changes with the plan. A shelter missing any part counts as incomplete: its beds don't count,
+  and finishing it (`unfinishedShelterNearHome`, `build`) comes before a fresh site.
 - **Shelter goals too** (the Builder's "build a small shelter", any self-proposed one). A shelter
   must fit a bed: 4x4 outside, a 2x2 room inside (a bed along one side, placed from the doorway,
   room to stand beside it) -- the old 3x3 with one cell inside no longer counts. A flat, clear
   4x4 site with a walkable approach to the doorway (`findShelterSite`), building blocks if short
   (planks from logs she holds, else dirt), then `build` on that site. **Site search now rings
   outward instead of a fixed 4-block scan** (direct request, 2026-10-27: "allow the shelter search
-  radius to go up to 48 blocks") -- up to `BOT_USERNAMES.size` individual shelters need room near
-  home, and the old fixed radius ran out of space once the crafting table/furnace/chest/earlier
+  radius to go up to 48 blocks") -- several shelters need room near home, and the old fixed radius ran out of space once the crafting table/furnace/chest/earlier
   shelters crowded that tight core, so site-finding then failed forever, correctly, given the
   radius it was allowed to search. The door faces through the doorway (north or south,
   `isShelterDoor`): it is placed looking straight out, without `placeBlock`'s own turn to the
@@ -200,9 +217,9 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   sand/gravel or functional blocks), builds with pathfinder scaffolding off (dirt and cobblestone are
   its defaults, and she pillared up inside her own shelter). **Done means a bed inside it**
   (2026-10-28): once the structure is complete, the goal's second phase places a bed she holds in
-  the room, else gets one through `bedStep()`'s wool/craft sequence -- the Tier 1 item that proposes
-  this goal is "her own shelter with a bed in it", so an empty shelter used to finish the goal and
-  get re-proposed forever. Complete shelters are found by their doors (`completeSheltersNearHome`,
+  the room, else gets one through `bedStep()`'s wool/craft sequence -- the Tier 1 item that proposed
+  this goal was then "her own shelter with a bed in it" (since 2026-11-04, the residence plan
+  above), so an empty shelter used to finish the goal and get re-proposed forever. Complete shelters are found by their doors (`completeSheltersNearHome`,
   a cheap `findBlocks` for doors, then the shelter each one would close) across the same 48-block
   square `findShelterSite` sites them in -- detection used to stop at 24, and Babs' three finished
   shelters ~50 blocks out were invisible (328 "already standing" steps, each counted a success). A
@@ -231,6 +248,24 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   runs `makeHomeChest` when no usable chest is near home. Each check does one step: gather 8 planks
   of one wood, craft a chest, then `place_home`. Operator's call: nothing is dropped except rotten
   flesh, and only when she has no free slot and no wood (she can't pick up a log without a slot).
+  **Full chests count as no chest** (2026-11-04, 24h review): Babs' chests were full too
+  ("destination full" 144 times a day), and with every slot taken each dig failed with collectBlock's
+  "There are no defined chest locations!". While the storage backoff says every chest is full,
+  `checkInventoryFull` makes another chest the same way, and placing it clears the backoff. With no
+  slot and no wood, what may be dropped widened (operator's call, 2026-11-04) from rotten flesh to
+  `junkToDrop`: every bow, crossbow and sword but the best of each (a sword by tier, then wear), every
+  crafting table, shield, rod, shears and flint and steel but one, and seeds beyond 64 of each kind.
+  Never food, ore, building blocks, armor or working tools. She throws them from 6 blocks out from
+  home and walks straight back, so the bots at home don't pick them up again. **Every chest full
+  means another chest** (direct request, 2026-11-04: "when a chest is full, they should build
+  another chest"): the full-chests backoff alone now triggers `makeHomeChest`, not only a full
+  inventory -- planks, the craft, `place_home`, a "Built a chest" world note, and storing resumes;
+  a failed step waits 10 min. **Trash goes into lava** (direct request, 2026-11-04): rotten flesh,
+  poisonous potatoes, and any tool, weapon or armor piece at 90% wear or worse, unless it's the only
+  one of its kind she carries (`trashItems`). `checkTrash` (every 5 min) throws it into lava she
+  can see within 24 blocks with open air over it, from beside it -- a `GoalNear`, and the
+  pathfinder never routes through lava. No lava in sight, nothing happens; a full inventory still
+  drops trash with the rest of the surplus. Lava sightings are world-noted like any resource.
   **Furniture is not wall** (2026-11-02, direct report: "they keep enclosing themselves inside a
   residence with un-necessary blocks"): the integrity check's `holesIn` called any room cell with
   4 solid sides a breach, and a bed counted as one, so the floor cells in a corner beside a bed
@@ -241,6 +276,17 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   server refused every wall, door and bed cell that held one. Every placement breaks a non-solid,
   diggable block in its target cell first (`clearCellForPlacement`), leaving fluids, fire, crops
   and protected fixtures alone; `findBedSites` treats that same cover as open.
+- **Out of water** (direct report, 2026-11-04: "the bots do not seem to be able to get out of
+  water"). Two bugs, both in how mineflayer 4.39 reports things. Its `entity_metadata` handler sets
+  `bot.oxygenLevel` from **any** entity's air supply and emits `breath` for it, so a squid's,
+  fish's or dolphin's air drove her drowning reflex -- 640 emergencies a day, in bursts (Babs: 124
+  in 4 minutes), each "surfaced (oxygen=296)", a dolphin's 4440 ticks over 15. The reflex now reads
+  her own entity's air (`ownOxygenLevel`, metadata index 1). And `findBlocks` first asks a function
+  matcher about each section's palette, with blocks that have no position; `findNearestShore`
+  answered false for those, so every section was skipped and no shore was ever found (490 "couldn't
+  find dry land" in 14 days, not one "heading for dry land"). A position-less block now gets the
+  cheap half of the test; the same fix went to `light_area`'s dark-spot search and
+  `plant_sapling`'s ground search, which had the same silent never-matches bug.
 - **Tools and shelters improve over time** (direct request, 2026-10-28). Two items at the bottom
   of the Tier 1 survival ladder, after armor, each behind a 20-minute retry timer so one that's
   stuck never crowds out the rest. **Tools**: every bot keeps a pickaxe, axe, sword, shovel and
@@ -253,7 +299,11 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   and wood cells are swapped for stone, 8 per goal (`shelterUpgradeStep` +
   `reface_shelter`: dig one cell, refill it with a stone-tier block, then the next, so the shelter
   is never open by more than one block). Stone is the last tier, by the operator's call -- an
-  iron-block shelter would be ~630 ingots.
+  iron-block shelter would be ~630 ingots. **No pickaxe means a wooden one first** (2026-11-04):
+  the tools item had nothing to offer a bot without any pickaxe, so the stone upgrade ran instead
+  and failed "need a better tool for stone" ~1,140 times a day. `nextToolUpgrade()` now answers
+  `wooden_pickaxe` (made by `toolStep`: a chest's pickaxe, else planks and a craft), and the
+  shelter upgrade is only offered to a bot holding a pickaxe.
 
 **DONE is never accepted on the model's word.** Inventory and world state are re-checked
 (`builderPriorityItemSatisfied()` and friends); a rejected claim logs `REJECTED DONE` /
@@ -413,14 +463,20 @@ means two different things, and the distinction is load-bearing:**
 
 - **Builder and Soldier are deterministic.** `nextBuilderPriority()` / `nextSoldierPriority()`
   check real world state and **override** freeform self-propose. Builder's ladder is crafting
-  table → furnace → chest → beds (`BOT_USERNAMES.size`, self-scaling) → shelter → beehive → ranch, each
+  table → furnace → chest → sheltered beds (the bots in the game) → beehive → ranch, each
   verified as a *placed block* near spawn rather than an inventory item -- **and, for crafting
   table/furnace/chest specifically, a *usable* one** (`countUsableNearHome()`, direct request
   2026-10-27: a block that merely exists but has repeatedly failed a real open/reach attempt
   (`isUtilityUsable()`, actions.js) no longer counts as "done," so the checklist re-proposes a
   replacement instead of staying silently satisfied forever -- the root cause behind a day of
   real chests failing "No path to the goal!" while the checklist still called chest storage
-  finished. `beehive` is unchanged, still bare existence. A stalled item is
+  finished. `beehive` is unchanged, still bare existence. A crafting table, furnace or chest she
+  doesn't hold is made by `runBuilderPlacement` itself (2026-11-04: the planner answered "DONE NONE"
+  to "place a furnace" 421 times a day) -- planks, or for a furnace 8 cobblestone mined as "stone"
+  with a pickaxe made first if she has none, then the craft, then `place_home`. The shelter item
+  (`shelter_capacity`) targets the bots in the game, not the whole roster, and is only hers while
+  she has no shelter of her own -- its runner builds her own, so a sheltered bot "completed" it on
+  the spot 209 times a day. A stalled item is
   skipped after `BUILDER_ITEM_STALL_LIMIT` (3) cycles and revisited later. Soldier's ladder is
   weapon → nearby hostile (`SOLDIER_PATROL_RANGE` 32) → missing armor (at most every 30 min) →
   stand guard (a standing goal), and it **always** returns something, so a Soldier never reaches

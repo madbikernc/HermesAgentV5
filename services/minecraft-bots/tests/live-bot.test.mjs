@@ -1,4 +1,4 @@
-// Version: 1.1.3
+// Version: 1.3.1
 //
 // Full-bot live tests: runs a REAL bot process (index.js, as "MBProbe") against the bot-sandbox
 // server and drives it the way a player would -- whispers from the MBTester bot, restarts, injected
@@ -28,6 +28,13 @@
 // 1.1.1 | 2026-09-25 | Fight-or-flee: arm the probe first, then summon the mobs beside it and damage it
 //   in one RCON call (it used to flee unarmed out of range before the hit).
 // 1.1.2 | 2026-10-07 | The access sweep and torch top-up are pushed out of this suite's way.
+// 1.2.0 | 2026-11-04 | Full inventory with full chests drops only plain surplus; a Builder furnace not
+//   in hand is crafted and placed by the runner, never asked of the planner. Every boot puts the probe
+//   back in survival (a spectator MBProbe left over from another probe could not drop or craft).
+// 1.3.0 | 2026-11-04 | Residences (a held bed goes into the empty shelter), trash into lava, out of a
+//   deep pool to dry land with one emergency, and a new chest when every chest at home is full.
+// 1.3.1 | 2026-11-05 | The full-chest scenario fills the chest only once the logs are in hand (it
+//   raced the storage check during boot and the 10-minute chest retry outlasted the wait).
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import http from "node:http";
@@ -142,8 +149,9 @@ function startProbe(memoryRoot, env = {}) {
 async function bootProbe(memoryRoot, env) {
   startProbe(memoryRoot, env);
   await probe.waitLine(/\[MBProbe\] spawned at/, 60_000);
-  // The server keeps MBProbe's inventory between runs; every scenario starts empty-handed.
-  await rcon(`clear ${PROBE}`, `tp ${PROBE} ${HOME[0]} ${HOME[1]} ${HOME[2]}`, `effect give ${PROBE} minecraft:resistance 900 4 true`,
+  // The server keeps MBProbe's inventory between runs; every scenario starts empty-handed. And its
+  // game mode: a spectator probe (other probes log in as MBProbe that way) can't drop, craft or place.
+  await rcon(`gamemode survival ${PROBE}`, `clear ${PROBE}`, `tp ${PROBE} ${HOME[0]} ${HOME[1]} ${HOME[2]}`, `effect give ${PROBE} minecraft:resistance 900 4 true`,
     `effect give ${PROBE} minecraft:saturation 1 20 true`);
   await sleep(8000); // let its Buzz watchers prime, so injected messages count as new
 }
@@ -253,6 +261,144 @@ scenario("MB-09 inventory-full storing keeps the goal's materials", async () => 
   assert(!probe.since(t0, /inventory management: .*cobblestone/), "cobblestone (a furnace input) was never stored");
   const out = await rcon(`clear ${PROBE} minecraft:cobblestone 0`);
   assert.match(out, /Found 64 matching/, `probe still has all 64 cobblestone (${out.trim()})`);
+});
+
+// 2026-11-04 (24h review): Babs at 36/36 slots, every chest at home full ("destination full"), and
+// nothing but the storage backoff ever happened (index.js 2.133.0). Full chest, full probe, no wood:
+// she drops the plain surplus -- spare bows and crossbows, seeds past 64, rotten flesh -- and nothing else.
+scenario("Inventory: full, with the only chest at home full, plain surplus is dropped and the rest kept", async () => {
+  const root = newRoot();
+  const [cx, cy, cz] = [HOME[0] + 2, HOME[1], HOME[2]];
+  await rcon(`setblock ${cx} ${cy} ${cz} minecraft:chest`,
+    ...Array.from({ length: 27 }, (_, i) => `item replace block ${cx} ${cy} ${cz} container.${i} with minecraft:cobblestone 64`));
+  await bootProbe(root, { MC_GOAL_TICK_MS: "600000", MC_INVENTORY_CHECK_MS: "5000" });
+  const other = ["dirt", "sand", "gravel", "andesite", "diorite", "granite", "clay_ball", "flint", "feather", "string",
+    "bone", "gunpowder"];
+  const t0 = Date.now();
+  await rcon(...Array.from({ length: 10 }, () => `give ${PROBE} minecraft:bow 1`),
+    ...Array.from({ length: 4 }, () => `give ${PROBE} minecraft:crossbow 1`),
+    `give ${PROBE} minecraft:wheat_seeds 576`, `give ${PROBE} minecraft:rotten_flesh 5`,
+    ...other.map((o) => `give ${PROBE} minecraft:${o} 1`));
+  await probe.waitLine(/inventory full, every chest at home full: dropped /, 120_000, t0);
+  await sleep(3000);
+  const count = async (item) => Number((await rcon(`clear ${PROBE} minecraft:${item} 0`)).match(/Found (\d+)/)?.[1] ?? 0);
+  assert.equal(await count("bow"), 1, "one bow kept");
+  assert.equal(await count("crossbow"), 1, "one crossbow kept");
+  assert.equal(await count("wheat_seeds"), 64, "a stack of seeds kept");
+  for (const o of other) assert.equal(await count(o), 1, `${o} kept`);
+});
+
+// 2026-11-04: "go home and place a furnace there" without a furnace in hand went to the planner,
+// which answered DONE NONE 421 times a day. The Builder runner makes one from the cobblestone she
+// holds, beside a crafting table, and puts it down at home.
+scenario("Builder: a furnace she doesn't hold is crafted and placed at home by the runner", async () => {
+  const root = newRoot();
+  seedGoal(root, "go home and place a furnace there", { builderPriorityItem: "furnace", servedBySkill: false });
+  await rcon(`setblock ${HOME[0] - 2} ${HOME[1]} ${HOME[2]} minecraft:crafting_table`);
+  // The first tick a minute out: the cobblestone (given after boot clears her inventory) has to land
+  // first -- an RCON step can take seconds, and three failed ticks 2s apart abandon the goal.
+  await bootProbe(root, { MC_GOAL_TICK_MS: "60000" });
+  const t0 = Date.now();
+  await rcon(`give ${PROBE} minecraft:cobblestone 8`);
+  assert.match(await rcon(`clear ${PROBE} minecraft:cobblestone 0`), /Found 8 matching/, "cobblestone in hand before the first tick");
+  await probe.waitLine(/builder furnace: /, 90_000, t0);
+  await probe.waitLine(/goal complete \(placed furnace at home\)/, 120_000, t0);
+  assert(!probe.since(t0, /goal plan: DONE NONE/), "the planner was never asked");
+});
+
+// Direct request, 2026-11-04: a bed for each ACTIVE bot, in an existing shelter with room before a
+// new one. Two shelters at home: one a full residence (bed, chest, door), one empty. The probe,
+// online with the fleet's own bots, holds a bed: it goes into the empty shelter (the old code was
+// done the moment HER nearest shelter had a bed).
+function rconShelter(bx, by, bz, { bed = false, chest = false } = {}) {
+  return [`fill ${bx - 1} ${by - 1} ${bz - 1} ${bx + 2} ${by + 3} ${bz + 3} minecraft:cobblestone hollow`,
+    `setblock ${bx} ${by} ${bz + 3} minecraft:oak_door[facing=north,half=lower]`,
+    `setblock ${bx} ${by + 1} ${bz + 3} minecraft:oak_door[facing=north,half=upper]`,
+    ...(bed ? [`setblock ${bx} ${by} ${bz} minecraft:white_bed[facing=north,part=head]`,
+      `setblock ${bx} ${by} ${bz + 1} minecraft:white_bed[facing=north,part=foot]`] : []),
+    ...(chest ? [`setblock ${bx + 1} ${by} ${bz + 2} minecraft:chest`] : [])];
+}
+scenario("Residences: a held bed goes into the empty shelter, not counted done by the bedded one", async () => {
+  const root = newRoot();
+  const [ax, ay, az] = [HOME[0] - 8, HOME[1], HOME[2] + 2], [ex, ey, ez] = [HOME[0] - 3, HOME[1], HOME[2] + 2];
+  await rcon(...rconShelter(ax, ay, az, { bed: true, chest: true }), ...rconShelter(ex, ey, ez));
+  scenarioCleanup.push(() => rcon(`fill ${ax - 1} ${ay - 1} ${az - 1} ${ex + 2} ${ey + 3} ${ez + 3} minecraft:air`,
+    `fill ${ax - 1} ${ay - 1} ${az - 1} ${ex + 2} ${ay - 1} ${ez + 3} minecraft:sea_lantern`));
+  seedGoal(root, "our residences need beds -- make a bed and place it in the empty shelter near home.",
+    { survivalPriorityItem: "shelter", servedBySkill: false });
+  await bootProbe(root, { MC_GOAL_TICK_MS: "60000" });
+  await rcon(`give ${PROBE} minecraft:white_bed 1`);
+  assert.match(await rcon(`clear ${PROBE} minecraft:white_bed 0`), /Found 1 matching/, "bed in hand before the first tick");
+  const t0 = Date.now();
+  await probe.waitLine(/shelter goal: .*\(ok=true\)/, 150_000, t0);
+  const bedIn = async (bx, by, bz) => {
+    for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+      if (/passed/.test(await rcon(`execute if block ${bx + dx} ${by} ${bz + dz} #minecraft:beds`))) return true;
+    }
+    return false;
+  };
+  await sleep(1000);
+  assert.equal(await bedIn(ex, ey, ez), true, "the empty shelter now has a bed");
+});
+
+// Direct request, 2026-11-04: "'trash' items like almost broken weapons, zombie flesh can be disposed
+// of in lava". A lava pit in the arena floor (bedrock under it, so it can't pour out); the probe
+// holds a spent iron sword, a good diamond one, rotten flesh and bread.
+scenario("Trash: a spent sword and rotten flesh go into the lava; the good sword and the bread stay", async () => {
+  const root = newRoot();
+  const [lx, ly, lz] = [HOME[0] + 3, y, HOME[2]];
+  await rcon(`setblock ${lx} ${ly - 1} ${lz} minecraft:bedrock`, `setblock ${lx} ${ly} ${lz} minecraft:lava`);
+  scenarioCleanup.push(() => rcon(`setblock ${lx} ${ly} ${lz} minecraft:sea_lantern`, `setblock ${lx} ${ly - 1} ${lz} minecraft:air`));
+  await bootProbe(root, { MC_GOAL_TICK_MS: "600000", MC_TRASH_CHECK_MS: "5000" });
+  const t0 = Date.now();
+  await rcon(`give ${PROBE} minecraft:iron_sword[minecraft:damage=240]`, `give ${PROBE} minecraft:diamond_sword`,
+    `give ${PROBE} minecraft:rotten_flesh 4`, `give ${PROBE} minecraft:bread 2`);
+  await probe.waitLine(/trash: threw /, 90_000, t0);
+  await sleep(3000);
+  const count = async (item) => Number((await rcon(`clear ${PROBE} minecraft:${item} 0`)).match(/Found (\d+)/)?.[1] ?? 0);
+  assert.equal(await count("iron_sword"), 0, "the spent sword is gone");
+  assert.equal(await count("rotten_flesh"), 0, "the flesh is gone");
+  assert.equal(await count("diamond_sword"), 1, "the good sword stays");
+  assert.equal(await count("bread"), 2, "food stays");
+});
+
+// Direct report, 2026-11-04: "the bots do not seem to be able to get out of water". A pool six
+// deep cut into the arena floor beside dry floor; the probe starts at the bottom. It surfaces once
+// and swims to land -- the old shore search never matched anything.
+scenario("Water: from the bottom of a deep pool she surfaces once and reaches dry land", async () => {
+  const root = newRoot();
+  const [px, pz] = [HOME[0] - 6, HOME[2]];
+  await rcon(`fill ${px - 3} ${y - 7} ${pz - 3} ${px + 3} ${y - 1} ${pz + 3} minecraft:glass`,
+    `fill ${px - 2} ${y - 6} ${pz - 2} ${px + 2} ${y} ${pz + 2} minecraft:water`);
+  scenarioCleanup.push(() => rcon(`fill ${px - 3} ${y - 7} ${pz - 3} ${px + 3} ${y - 1} ${pz + 3} minecraft:air`,
+    `fill ${px - 3} ${y} ${pz - 3} ${px + 3} ${y} ${pz + 3} minecraft:sea_lantern`));
+  await bootProbe(root, { MC_GOAL_TICK_MS: "600000" });
+  const t0 = Date.now();
+  await rcon(`tp ${PROBE} ${px} ${y - 5} ${pz}`);
+  await probe.waitLine(/EMERGENCY: oxygen critical/, 60_000, t0);
+  await probe.waitLine(/heading for dry land at/, 20_000, t0);
+  await probe.waitLine(/reached shore attempt finished \(isInWater=false\)/, 30_000, t0);
+  const emergencies = probe.lines.filter((l) => l.at >= t0 && /EMERGENCY: oxygen critical/.test(l.text)).length;
+  assert(emergencies <= 1, `one emergency, not a burst (${emergencies})`);
+});
+
+// Direct request, 2026-11-04: "when a chest is full, they should build another chest". The only
+// chest at home is full; the probe has room in her own inventory and three logs.
+scenario("Chests: with every chest at home full, she makes and places another one", async () => {
+  const root = newRoot();
+  const [cx, cy, cz] = [HOME[0] + 2, HOME[1], HOME[2]];
+  await bootProbe(root, { MC_GOAL_TICK_MS: "600000", MC_INVENTORY_CHECK_MS: "5000", MC_SURPLUS_SHARING_CHECK_MS: "5000" });
+  const t0 = Date.now();
+  await rcon(`give ${PROBE} minecraft:oak_log 3`, `give ${PROBE} minecraft:dirt 20`, `give ${PROBE} minecraft:sand 20`,
+    `give ${PROBE} minecraft:crafting_table 1`);
+  // The full chest only once the logs are in hand (2026-11-05): set up before boot, the storage
+  // check found it full while she was still empty-handed, the chest attempt failed "need wood",
+  // and its 10-minute retry outlasted this scenario.
+  await sleep(5000);
+  await rcon(`setblock ${cx} ${cy} ${cz} minecraft:chest`,
+    ...Array.from({ length: 27 }, (_, i) => `item replace block ${cx} ${cy} ${cz} container.${i} with minecraft:cobblestone 64`));
+  await probe.waitLine(/storage: no usable chest space/, 90_000, t0);
+  await probe.waitLine(/chests full, every chest at home full: placed a chest at home/, 150_000, t0);
 });
 
 scenario("MB-20 Mayor keeps curriculum evidence across a restart", async () => {

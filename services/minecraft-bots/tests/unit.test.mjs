@@ -1,4 +1,14 @@
-// Version: 1.47.0
+// Version: 1.50.0
+// 1.50.0 (2026-11-05): the extra-chest retry backs off on no wood, not on a failed craft (index.js 2.133.2).
+// 1.49.0 (2026-11-05): bobbing at a pool's surface (isInWater false for a tick) still runs the
+// shore search (index.js 2.133.1).
+// 1.48.0 (2026-11-04): six checks for the 24h-review loops (index.js 2.133.0/actions.js 1.103.0) --
+// full chests get a new chest and plain surplus dropped, a pickaxe-less bot's tools item is a
+// wooden pickaxe, a Builder furnace is made by its runner, shelter_capacity counts online bots,
+// "mine" prefers exposed stone and skips a no-path target, a torch from coal and logs. Then the
+// residence model (a bed per active bot, each residence with a chest), trash into lava, the
+// drowning reflex on her own air, a shore search that survives findBlocks' palette pass, and a new
+// chest whenever every chest at home is full. Existing shelter checks moved onto residencePlan.
 // 1.35.0 (2026-10-27): checks for index.js 2.122.0/actions.js 1.94.0's four fixes. Builder
 // checklist: builderPriorityCandidates()/builderPriorityItemSatisfied() re-open crafting_table/
 // furnace/chest once isUtilityUsable() reports the only known one broken, and the two functions
@@ -714,11 +724,14 @@ await check('Survival (Tier 1): weapon, then her own sheltered bed, then food, t
   let held = [], shelters = [];
   const bot = { food: 20, inventory: { slots, items: () => held }, blockAt: () => ({ name: 'dirt' }) };
   // 2026-10-28: the tool and shelter upgrade items sit at the bottom of the ladder (see below).
+  // 2026-11-04: the shelter item is the residence plan now (residencePlan, stubbed here by ownShelter).
   const c = vm.createContext({ Date, bot, hasWeapon: () => weapon, hasOwnShelterWithBed: () => ownShelter,
+    residencePlan: () => ({ kind: ownShelter ? 'done' : 'build', beds: 0, active: 1 }), residenceDirective: () => 'build a shelter',
     hasFood: () => food, hasRod: () => rod, HUNGER_THRESHOLD: 18, foodFetchBlockedUntil: Infinity,
     TOOL_NAME: /^(wooden|stone|iron|golden|diamond|netherite)_(pickaxe|axe|sword|shovel|hoe)$/,
     countUsableNearHome: () => 0, completeSheltersNearHome: () => shelters, shelterHasBed: () => true,
-    shelterGeometryPositions: (base) => [base], isCommunalShelterMaterial: (n) => n === 'cobblestone' });
+    shelterGeometryPositions: (base) => [base], isCommunalShelterMaterial: (n) => n === 'cobblestone',
+    hasPickaxe: () => held.some((i) => i.name.endsWith('_pickaxe')) });
   vm.runInContext(between(index, 'function nextSurvivalPriority(', 'function survivalPriorityItemSatisfied('), c);
   assert.equal(c.nextSurvivalPriority().name, 'weapon', 'no weapon beats everything else');
   weapon = true;
@@ -729,7 +742,10 @@ await check('Survival (Tier 1): weapon, then her own sheltered bed, then food, t
   food = true;
   assert.equal(c.nextSurvivalPriority().name, 'armor', 'fed, but no armor at all');
   for (const s of [5, 6, 7, 8]) slots[s] = { name: 'iron_helmet' };
-  assert.equal(c.nextSurvivalPriority(), null, 'every Tier 1 baseline met -- falls through to role work');
+  // 2026-11-04: no pickaxe at all is a tools upgrade too -- a wooden one (it used to fall through).
+  assert.match(c.nextSurvivalPriority()?.directive ?? '', /wooden pickaxe/, 'armored, but no pickaxe: a wooden one');
+  assert.equal(c.nextSurvivalPriority(), null, 'every Tier 1 baseline met (tools on its timer) -- falls through to role work');
+  vm.runInContext('toolUpgradeRetryAt = 0', c);
   held = [{ name: 'wooden_pickaxe', count: 1 }];
   assert.equal(c.nextSurvivalPriority().name, 'tools', 'a pickaxe she can mine stone with: upgrade tools next');
   assert.equal(c.nextSurvivalPriority(), null, 'and not again until its retry timer runs out');
@@ -753,7 +769,7 @@ await check('Survival (Tier 1): survivalPriorityItemSatisfied re-checks real sta
   // trusts, not taken on its word.
   const slots = []; let weapon = false, ownShelter = false, food = false;
   const c = vm.createContext({ bot: { inventory: { slots } }, hasWeapon: () => weapon,
-    hasOwnShelterWithBed: () => ownShelter, hasFood: () => food });
+    hasOwnShelterWithBed: () => ownShelter, residencePlan: () => ({ kind: ownShelter ? 'done' : 'bed' }), hasFood: () => food });
   vm.runInContext(between(index, 'function survivalPriorityItemSatisfied(', '\n// Real bug found live 2026-09-12'), c);
   assert.equal(c.survivalPriorityItemSatisfied('weapon'), false); weapon = true;
   assert.equal(c.survivalPriorityItemSatisfied('weapon'), true);
@@ -1108,7 +1124,12 @@ await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims t
   const bedNames = []; let shelterCount = 0; let beehive = 0; let bred = false;
   let ironTools = false; let communalDone = false;
   const usableUtility = { crafting_table: 1, furnace: 1, chest: 1 };
-  const c = vm.createContext({ bot: { registry: { blocksByName: {} } },
+  // 2026-11-04: the shelter target is the bots in the game (all three here), and the item is only
+  // hers while she has no shelter of her own.
+  const c = vm.createContext({ bot: { registry: { blocksByName: {} }, players: { amy: {}, babs: {}, mark: {} } },
+    hasOwnShelterWithBed: () => false,
+    residencePlan: () => (shelterCount >= 3 ? { kind: 'done', beds: 3, active: 3 } : { kind: 'build', beds: shelterCount, active: 3 }),
+    residenceDirective: (plan) => `our residences have ${plan.beds} beds for ${plan.active} active bots`,
     countNearHome: (names) => (names[0] === 'beehive' ? beehive : 0),
     // 2026-10-27: crafting_table/furnace/chest now go through countUsableNearHome (real
     // interaction outcomes, isUtilityUsable in actions.js), not bare countNearHome -- this slice
@@ -1140,7 +1161,7 @@ await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims t
   assert(names().includes('shelter_capacity'), 'merged item present when short');
   assert(!names().includes('beds') && !names().includes('shelter'), 'the old separate items are gone');
   const capacityItem = c.builderPriorityCandidates().find((x) => x.name === 'shelter_capacity');
-  assert.match(capacityItem.directive, /We have 0, need at least 3/);
+  assert.match(capacityItem.directive, /have 0 beds for 3 active bots/);
   shelterCount = 3;
   assert(!names().includes('shelter_capacity'), 'baseline met -- drops off the list');
   // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a): additive, not blocking on the rest, but
@@ -1161,7 +1182,8 @@ await check('Tier 2: builderPriorityItemSatisfied stays in lockstep with builder
   // done" right after placing a 2nd furnace next to a broken 1st one. This proves they agree.
   let usable = 0;
   const c = vm.createContext({ bot: { registry: { blocksByName: {} } },
-    countNearHome: () => 0, countUsableNearHome: () => usable,
+    countNearHome: () => 0, countUsableNearHome: () => usable, hasOwnShelterWithBed: () => false,
+    residencePlan: () => ({ kind: 'done', beds: 1, active: 1 }),
     countQualifyingSheltersNearHome: () => 0, communalShelterSatisfied: () => false,
     getAchievements: () => [], fleetHasReachedIronTools: () => false,
     BOT_USERNAMES: new Set(['amy']) });
@@ -1229,6 +1251,7 @@ await check('Builder placement: a successful crafting_table/furnace/chest/beehiv
   // registered to the RAG"): runBuilderPlacement() is the one function Fix 1's own checklist
   // dispatch uses for crafting_table/furnace/chest/beehive -- covers all four for free.
   const bot = makeBot(); bot.chat = () => {}; bot.spawnPoint = { x: 5, y: 64, z: 5 };
+  bot.inventory = { items: () => [{ name: 'chest', count: 1 }], slots: [] }; // in hand: placed, not made (2026-11-04)
   const goal = { description: 'go home and place a chest there', builderPriorityItem: 'chest',
     consecutiveFailures: 0, log: [], steps: 0 };
   const notes = [];
@@ -2984,6 +3007,8 @@ await check('Shelter goal: a finished shelter gets a bed put in it; a build nobo
     // The door check (2026-10-28) is its own test below -- here the doorway already has one.
     isDoorway: () => true, doorwayPosition: (b) => b.offset(0, 0, 3), unfinishedShelterNearHome: () => null,
     findShelterNearHome: () => c.found, shelterHasBed: () => c.bedded,
+    // 2026-11-04: what to do comes from the residence plan, not from her own shelter.
+    residencePlan: () => c.plan, completeSheltersNearHome: () => [], holdsItem: () => false, plan: null,
     bedStep: async () => ({ ok: true, text: 'got wool.', action: { type: 'get_wool' } }),
     findShelterSite: () => new V3(41, 65, -30), shelterPositions: () => [], shelterMaterialCount: () => 0,
     performAction: async (_bot, action) => {
@@ -2994,6 +3019,7 @@ await check('Shelter goal: a finished shelter gets a bed put in it; a build nobo
   vm.runInContext(between(index, 'async function shelterStep(', 'async function runShelterGoal('), c);
 
   c.found = { base: new V3(41, 65, -30), complete: true };
+  c.plan = { kind: 'bed', base: c.found.base, beds: 0, active: 1 };
   let step = await c.shelterStep({}, null);
   assert.equal(step.done, undefined, 'a complete shelter with no bed is not done');
   assert.equal(step.action.type, 'get_wool', 'no bed held -- bedStep goes and gets one');
@@ -3005,10 +3031,10 @@ await check('Shelter goal: a finished shelter gets a bed put in it; a build nobo
   assert.deepEqual(calls.at(-1).cells.map(({ x, z }) => [x - 41, z + 30]), [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]],
     "and only into that shelter's own room cells");
   assert(calls.at(-1).cells.every((p) => p.y === 65), "at the room's floor level");
-  assert.equal(step.done, true, 'and that finishes the goal');
-  assert.equal((await c.shelterStep({}, null)).done, true, 'a bedded shelter is done straight away');
+  c.plan = { kind: 'done', beds: 1, active: 1 };
+  assert.equal((await c.shelterStep({}, null)).done, true, 'once every active bot has a bed, done');
 
-  c.found = null; c.bedded = false; c.held = [];
+  c.found = null; c.bedded = false; c.held = []; c.plan = { kind: 'build', beds: 1, active: 2 };
   c.buildResult = { ok: true, built: true, text: 'the shelter is already standing.' };
   step = await c.shelterStep({ shelterAt: { x: 41, y: 65, z: -30 } }, null);
   assert.equal(step.ok, false, 'built but undetectable is a failure, so the goal can give up');
@@ -3053,6 +3079,7 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
     held: [], tableNear: false, shell: null, siteCalls: 0, materials: 0,
     isDoorway: () => false, doorwayPosition: (b) => b.offset(0, 0, 3), heldCount: (fn) => c.held.filter((i) => fn(i.name)).reduce((n, i) => n + i.count, 0),
     findShelterNearHome: () => null, unfinishedShelterNearHome: () => c.shell,
+    residencePlan: () => ({ kind: 'build', beds: 0, active: 1 }), completeSheltersNearHome: () => [],
     findShelterSite: () => { c.siteCalls++; return new V3(5, 65, 5); },
     shelterPositions: () => Array.from({ length: 60 }, (_, i) => new V3(i, 100, 0)), shelterMaterialCount: () => c.materials,
     gatherPlanks: async (_handle, count) => {
@@ -3095,12 +3122,14 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
   assert.equal(calls.at(-1).count, 8, 'as many planks as two logs make, not all 58 missing');
 });
 
-await check('Inventory: full with no chest at home, she makes and places one; only rotten flesh is ever dropped', async () => {
+await check('Inventory: full with no chest at home, she makes and places one; only plain surplus is ever dropped', async () => {
   // 2026-10-30: Babs at 36/36 slots with no chest anywhere -- store failed, crafted bed planks had
   // no slot, mining logs failed. Operator's call: build a chest; drop rotten flesh only to bootstrap.
+  // 2026-11-04: widened to junkToDrop() (spare weapons/tables, extra seeds) -- checked on its own below.
   const calls = [], tossed = [];
   const c = vm.createContext({ USERNAME: 'Babs', INVENTORY_MAIN_HOTBAR_SLOTS: 36, inv: [],
-    bot: { inventory: { items: () => c.inv }, toss: async (type, meta, count) => { tossed.push([type, count]); } },
+    bot: { inventory: { items: () => c.inv }, toss: async (type, meta, count) => { tossed.push([type, count]); },
+      tossStack: async (item) => { tossed.push([item.type, item.count]); } },
     heldCount: (test) => c.inv.filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
     gatherPlanks: async (_h, count) => (c.inv.some((i) => i.name === 'birch_planks' && i.count >= count) ? null
       : { ok: true, text: 'mined a log.', action: { type: 'mine' } }),
@@ -3113,12 +3142,12 @@ await check('Inventory: full with no chest at home, she makes and places one; on
   let r = await c.makeHomeChest(null);
   assert.deepEqual(tossed, [[900, 64], [900, 7]], 'every rotten flesh stack, nothing else');
   assert.equal(calls.length, 0, 'no other action that step');
-  assert.match(r.text, /dropped 71 rotten flesh/);
+  assert.match(r.text, /dropped 71 rotten_flesh/);
 
   tossed.length = 0;
   c.inv = [...filler(35), { name: 'bone', count: 34 }];
   r = await c.makeHomeChest(null);
-  assert.equal(r.ok, false, 'full, no wood, no rotten flesh: nothing dropped');
+  assert.equal(r.ok, false, 'full, no wood, nothing on the surplus list: nothing dropped');
   assert.equal(tossed.length, 0);
 
   c.inv = [...filler(35), { name: 'rotten_flesh', type: 900, count: 9 }, { name: 'oak_log', count: 1 }];
@@ -3219,7 +3248,9 @@ await check('Tool upgrades: stone once she can mine it, iron once she can smelt,
     between(index, 'const UPGRADE_TOOLS', 'function ownBeddedShelter('), c);
   const has = (...names) => { inv = names.map((name) => ({ name, count: 1 })); };
   has();
-  assert.equal(c.nextToolUpgrade(), null, 'no pickaxe at all: the plain wooden-pickaxe goal comes first');
+  // 2026-11-04: was null ("the plain wooden-pickaxe goal comes first") -- but that goal is only ever
+  // Mayor-assigned, so a bot without one never got a pickaxe. The wooden one is the upgrade now.
+  assert.equal(c.nextToolUpgrade(), 'wooden_pickaxe', 'no pickaxe at all: a wooden one first');
   has('wooden_pickaxe', 'wooden_sword');
   assert.equal(c.nextToolUpgrade(), 'stone_pickaxe', 'a pickaxe means stone is minable: pickaxe first');
   has('stone_pickaxe', 'wooden_sword');
@@ -3494,6 +3525,10 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
     logStep: () => {}, farmStatus: () => ({ ripe: 0, growing: 0 }), loadPenLocation: async () => null, LIVESTOCK: [],
     BREEDING_FOOD: {}, countInPen: () => 0, findPenSite: () => null, woolCounts: () => ({}), bedItemFor: () => 'white_bed',
     findShelterNearHome: () => (standing ? { base: new V3(1, 64, 1), complete: true } : null), shelterHasBed: () => bedded,
+    // 2026-11-04: the residence plan, from the same two flags.
+    residencePlan: () => (!standing ? { kind: 'build', beds: 0, active: 1 }
+      : bedded ? { kind: 'done', beds: 1, active: 1 } : { kind: 'bed', base: new V3(1, 64, 1), beds: 0, active: 1 }),
+    completeSheltersNearHome: () => (standing ? [new V3(1, 64, 1)] : []), holdsItem: () => false,
     findShelterSite: () => new V3(1, 64, 1), shelterPositions: s.shelterPositions,
     unfinishedShelterNearHome: () => null, isDoorway: () => false, doorwayPosition: s.doorwayPosition,
     shelterMaterialCount: (b) => b.inventory.items().filter((i) => /_(planks|log)$/.test(i.name)).reduce((n, i) => n + i.count, 0),
@@ -4628,6 +4663,394 @@ await check('Buzz: a (re)started bot starts reading at the newest message, never
     clearInterval(timer);
     globalThis.fetch = realFetch;
   }
+});
+
+// ---- 2026-11-04: the 24h-review loops (index.js 2.133.0 / actions.js 1.103.0) ----------------------
+
+await check('Inventory: full, with every chest at home full -- plain surplus is dropped, never food, ore or tools', async () => {
+  // Babs, 2026-11-04: 36 slots full (10 bows, 4 crossbows, 576 seeds...), every chest "destination
+  // full", and the old code only ever retried storing -- which the storage backoff skipped.
+  const inv = [];
+  const add = (name, count, extra = {}) => inv.push({ name, count, type: name, ...extra });
+  for (let i = 0; i < 10; i++) add('bow', 1, { durabilityUsed: i === 3 ? 2 : 50 + i });
+  for (let i = 0; i < 4; i++) add('crossbow', 1, { durabilityUsed: 10 + i });
+  add('wooden_sword', 1, { durabilityUsed: 0 }); add('iron_sword', 1, { durabilityUsed: 200 }); add('stone_sword', 1);
+  add('crafting_table', 3);
+  for (let i = 0; i < 9; i++) add('wheat_seeds', 64);
+  for (const n of [64, 64, 64, 8]) add('wheat', n);
+  add('rotten_flesh', 5); add('cobblestone', 64); add('cobblestone', 64); add('iron_ingot', 3); add('bone', 9);
+  assert.equal(inv.length, 36);
+  const tossed = [], walked = [];
+  const bot = {
+    isSleeping: false, spawnPoint: new V3(0, 64, 0), entity: { position: new V3(0, 64, 0) }, registry: { items: {} },
+    blockAt: (p) => ({ boundingBox: p.y < 64 ? 'block' : 'empty' }),
+    pathfinder: { goto: async (g) => { walked.push([g.x, g.z, tossed.length]); }, setGoal() {} },
+    lookAt: async () => {},
+    inventory: { items: () => inv.filter((i) => i.count > 0) },
+    tossStack: async (item) => { tossed.push([item.name, item.count]); item.count = 0; },
+    toss: async (type, _m, count) => { tossed.push([type, count]); inv.find((i) => i.name === type && i.count >= count).count -= count; },
+  };
+  const calls = [];
+  const c = vm.createContext({ bot, console: { log() {}, error() {} }, Date, Map, Set, Math, setTimeout, clearTimeout,
+    goals: { GoalNear: class { constructor(x, y, z) { Object.assign(this, { x, z }); } } },
+    AUTONOMY_ENABLED: true, routineBlocked: () => false, INVENTORY_MAIN_HOTBAR_SLOTS: 36, INVENTORY_FULL_SLOTS: 3,
+    countUsableNearHome: () => 2, storageBlockedUntil: Date.now() + 60_000, USERNAME: 'Babs',
+    arbiter: { OWNERS: { ROUTINE: 'routine' }, requestControl: async () => ({ release() {} }), holdsControl: () => true },
+    storeSurplusValuables: async () => calls.push('store'),
+    heldCount: (t) => inv.filter((i) => i.count > 0 && t(i.name)).reduce((n, i) => n + i.count, 0),
+    gatherPlanks: async () => ({ ok: true, text: 'gathering' }),
+    performAction: async (_b, a) => { calls.push(`${a.type} ${a.item}`); return { ok: true, text: 'done' }; },
+    writeMemoryNote: async () => {}, PERSONA_NAME: 'babs',
+    TOOL_RANK: { wooden: 0, golden: 0, stone: 1, iron: 2, diamond: 3, netherite: 4 } });
+  vm.runInContext(between(index, 'async function makeHomeChest', 'setInterval(() => {\n  checkInventoryFull'), c);
+  await c.checkInventoryFull();
+  const total = (name) => tossed.filter(([n]) => n === name).reduce((n, [, k]) => n + k, 0);
+  assert.equal(total('bow'), 9, 'nine bows go');
+  assert.equal(inv.find((i) => i.name === 'bow' && i.count).durabilityUsed, 2, 'the least worn bow stays');
+  assert.equal(total('crossbow'), 3);
+  assert.equal(total('wooden_sword') + total('stone_sword'), 2);
+  assert.equal(total('iron_sword'), 0, 'the best sword (by tier) stays');
+  assert.equal(total('crafting_table'), 2, 'one crafting table kept');
+  assert.equal(total('wheat_seeds'), 512, 'seeds beyond a stack of 64 go');
+  assert.equal(total('rotten_flesh'), 5);
+  for (const keep of ['wheat', 'cobblestone', 'iron_ingot', 'bone']) assert.equal(total(keep), 0, `${keep} is never dropped`);
+  assert(!calls.includes('store'), 'no walk back to the full chests');
+  // Not at her feet, where home's traffic would pick it back up: she throws from 6 blocks out, then walks home.
+  assert.deepEqual(walked[0], [6, 0, 0], 'out to standable ground 6 blocks from home before anything is thrown');
+  assert.deepEqual(walked.at(-1).slice(0, 2), [0, 0], 'then straight back home');
+  assert(walked.at(-1)[2] > 0, 'after the throw');
+
+  // Holding a chest with every chest full: it goes down, and storing starts again.
+  inv.length = 0; tossed.length = 0; calls.length = 0;
+  for (let i = 0; i < 33; i++) add('cobblestone', 64);
+  add('chest', 1);
+  c.storageBlockedUntil = Date.now() + 60_000;
+  await c.checkInventoryFull();
+  assert.deepEqual(calls, ['place_home chest'], 'a new chest is placed at home');
+  assert.equal(c.storageBlockedUntil, 0, 'and the storage backoff is cleared');
+
+  // 2026-11-04 ("when a chest is full, they should build another chest"): not only when she's full.
+  inv.length = 0; calls.length = 0;
+  add('chest', 1); add('cobblestone', 10);
+  c.storageBlockedUntil = Date.now() + 60_000;
+  await c.checkInventoryFull();
+  assert.deepEqual(calls, ['place_home chest'], 'every chest full, her own slots free: another chest anyway');
+
+  // 2026-11-05: a transient craft failure ("missing ingredient" off a stale inventory) retries on the
+  // next check; only no wood at all waits out the retry.
+  inv.length = 0; calls.length = 0;
+  add('oak_planks', 8);
+  c.storageBlockedUntil = Date.now() + 60_000;
+  c.gatherPlanks = async () => null; // planks in hand
+  c.performAction = async (_b, a) => { calls.push(`${a.type} ${a.item}`); return { ok: false, text: 'missing ingredient' }; };
+  await c.checkInventoryFull();
+  await c.checkInventoryFull();
+  assert.deepEqual(calls, ['craft chest', 'craft chest'], 'a failed craft is tried again on the next check');
+  calls.length = 0;
+  c.gatherPlanks = async () => ({ ok: false, noWood: true, text: "need wood and there's no tree nearby." });
+  await c.checkInventoryFull();
+  c.gatherPlanks = async () => { calls.push('gather'); return null; };
+  await c.checkInventoryFull();
+  assert.deepEqual(calls, [], 'no wood: the next check waits');
+});
+
+await check('Tools: with no pickaxe at all, the Tier 1 upgrade is a wooden pickaxe, and stone reinforcement waits for one', async () => {
+  // Babs, 2026-11-04: no pickaxe, so the "tools" item had nothing to offer and "shelter_upgrade"
+  // ran instead -- ~1,140 "need a better tool for stone" a day.
+  const bot = { food: 20, inventory: { items: () => [{ name: 'wooden_sword', count: 1 }], slots: { 5: {}, 6: {}, 7: {}, 8: {} } } };
+  const c = vm.createContext({ bot, Date, hasWeapon: () => true, hasOwnShelterWithBed: () => true, HUNGER_THRESHOLD: 6,
+    residencePlan: () => ({ kind: 'done', beds: 1, active: 1 }),
+    hasFood: () => true, hasRod: () => false, foodFetchBlockedUntil: 0, shelterCellsToReface: () => [new V3(0, 64, 0)],
+    hasPickaxe: () => false, countUsableNearHome: () => 0,
+    TOOL_NAME: /^(wooden|stone|iron|golden|diamond|netherite)_(pickaxe|axe|sword|shovel|hoe)$/ });
+  vm.runInContext(between(index, 'function nextSurvivalPriority', 'function ownBeddedShelter'), c);
+  const pick = c.nextSurvivalPriority();
+  assert.equal(pick?.name, 'tools', `got ${pick?.name}`);
+  assert.match(pick.directive, /wooden pickaxe/);
+  assert.equal(c.nextSurvivalPriority(), null, 'with tools on its retry timer, shelter_upgrade is not offered without a pickaxe');
+
+  const steps = [];
+  const s = vm.createContext({ bot, nextToolUpgrade: () => 'wooden_pickaxe', USERNAME: 'Babs',
+    heldCount: () => 0, toolStep: async () => { steps.push('toolStep'); return { ok: true, text: 'crafted a wooden pickaxe' }; },
+    performAction: async (_b, a) => { steps.push(`${a.type} ${a.block ?? a.item}`); return { ok: true, text: '' }; },
+    gatherPlanks: async () => null });
+  vm.runInContext(between(index, 'const TOOL_HEADS', 'async function runUpgradeToolsGoal'), s);
+  await s.upgradeToolsStep({}, null);
+  assert.deepEqual(steps, ['toolStep'], 'a wooden pickaxe is crafted (or looted), not iron ore mined');
+});
+
+// Residence world for the checks below: shelters are bases; a bed fills column 0 (two cells), a chest
+// sits at (1, 0, 2). slice() tolerates a marker the old code doesn't have, so a check fails on what
+// the old code DOES, not on a missing function.
+const slice = (src, a, b) => { try { return between(src, a, b); } catch { return ''; } };
+function residenceWorld({ online, shelters }) {
+  const blocks = new Map();
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  for (const { base, bed, chest } of shelters) {
+    if (bed) { blocks.set(key(base), 'white_bed'); blocks.set(key(base.offset(0, 0, 1)), 'white_bed'); }
+    if (chest) blocks.set(key(base.offset(1, 0, 2)), 'chest');
+  }
+  const bot = { players: Object.fromEntries(online.map((n) => [n, {}])), spawnPoint: new V3(0, 64, 0),
+    isABed: (b) => !!b?.name?.endsWith('_bed'),
+    blockAt: (p) => { const name = blocks.get(key(p)) ?? 'air'; return { name, boundingBox: name === 'air' ? 'empty' : 'block' }; } };
+  return { bot, bases: shelters.map((x) => x.base) };
+}
+
+await check('Builder: shelter_capacity counts the bots in the game -- beds for the active bots, each in a residence', async () => {
+  // 2026-11-04: "We have 2, need at least 9" with two bots online -- and a bot with her own shelter
+  // "completed" it at once and proposed it again, 209 times a day.
+  let world = residenceWorld({ online: ['Amy', 'Babs', 'Steve'], shelters: [
+    { base: new V3(0, 64, 0), bed: true, chest: true }, { base: new V3(10, 64, 0), bed: true, chest: true }] });
+  const c = vm.createContext({ BOT_USERNAMES: new Set(['Babs', 'Amy', 'Mark', 'Luke', 'Mayor', 'Bob', 'Nell', 'Wade', 'Dale']),
+    SHELTER_ROOM: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]], Math,
+    countUsableNearHome: () => 1, countNearHome: () => 1, getAchievements: () => ['bred:cow'],
+    fleetHasReachedIronTools: () => false, communalShelterSatisfied: () => true,
+    countQualifyingSheltersNearHome: () => world.bases.length, hasOwnShelterWithBed: () => true,
+    completeSheltersNearHome: () => world.bases,
+    shelterHasBed: (b) => c.bot.isABed(c.bot.blockAt(b)) });
+  const use = (w) => { world = w; c.bot = w.bot; };
+  use(world);
+  vm.runInContext(slice(index, 'function activeBotCount', '// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1 --'), c);
+  vm.runInContext(between(index, 'function builderPriorityCandidates', 'function nextBuilderPriority('), c);
+  vm.runInContext(between(index, 'function builderPriorityItemSatisfied', '// Direct request, 2026-09-13'), c);
+  const capacity = () => c.builderPriorityCandidates().find((x) => x.name === 'shelter_capacity');
+  assert.equal(capacity(), undefined, 'two bots online, two residences with a bed each: nothing to build');
+  assert.equal(c.builderPriorityItemSatisfied('shelter_capacity'), true);
+  use(residenceWorld({ online: ['Amy', 'Babs'], shelters: [{ base: new V3(0, 64, 0), bed: true, chest: true }] }));
+  assert.match(capacity()?.directive ?? '', /1 bed for 2 active bots/, 'one bed for two active bots: a new shelter');
+  assert.equal(c.builderPriorityItemSatisfied('shelter_capacity'), false, 'satisfied and the checklist agree');
+});
+
+await check('Builder: a furnace she does not hold is made -- stone mined, else a pickaxe first -- not left to the planner', async () => {
+  // 2026-11-04: "go home and place a furnace there" without a furnace in hand went to the planner,
+  // which answered DONE NONE (rejected) 421 times a day.
+  let cobble = 0, pickaxe = true;
+  const actions = [];
+  const goal = { builderPriorityItem: 'furnace', description: 'go home and place a furnace there', consecutiveFailures: 0 };
+  const c = vm.createContext({ bot: { registry: { blocksByName: { crafting_table: { id: 1 } } }, findBlocks: () => [new V3(0, 64, 0)] },
+    console: { log() {}, error() {} }, USERNAME: 'Amy', holdsItem: () => false,
+    heldCount: (t) => (t('cobblestone') ? cobble : 0), hasPickaxe: () => pickaxe,
+    toolStep: async () => { actions.push('toolStep'); return { ok: true, text: 'made a pickaxe' }; },
+    gatherPlanks: async () => null,
+    performAction: async (_b, a) => { actions.push(`${a.type} ${a.block ?? a.item}${a.count ? ' ' + a.count : ''}`); return { ok: true, text: 'ok' }; },
+    logStep() {}, saveGoalIfCurrent: async () => {}, failGoalStep: async () => {}, builderPriorityItemSatisfied: () => false,
+    MAX_CONSECUTIVE_FAILURES: 20, recordGoalOutcome() {}, broadcastGoalState: async () => {}, retireGoal: async () => {},
+    narrateAction: async (t) => t, writeMemoryNote: async () => {} });
+  vm.runInContext(between(index, 'const HOME_PLACEABLE', 'function holdsItem('), c);
+  const run = () => c.runBuilderPlacement(goal, async () => true, () => ({ release() {} }), () => false);
+  await run();
+  assert.deepEqual(actions, ['mine stone 8'], 'eight cobblestone mined first');
+  actions.length = 0; pickaxe = false; await run();
+  assert.deepEqual(actions, ['toolStep'], 'no pickaxe: that comes first');
+  actions.length = 0; cobble = 8; await run();
+  assert.deepEqual(actions, ['craft furnace 1'], 'with the stone, the furnace is crafted');
+});
+
+await check('Mine: stone with an open face comes before buried stone, and a target that had no path is skipped next time', async () => {
+  // Amy, 2026-11-04: 2,204 "No path to the goal!" a day on "mine stone" -- the nearest stone at home
+  // is buried, while bare stone a few blocks out was never tried.
+  const exposed = new V3(8, 64, 8);
+  const stone = (p) => ({ name: 'stone', type: 1, position: p, harvestTools: null, boundingBox: 'block' });
+  const bot = makeBot();
+  bot.entity = { position: new V3(0, 64, 0) };
+  bot.registry = { blocks: { 1: { name: 'stone' } } };
+  bot.pathfinder = { ...bot.pathfinder, thinkTimeout: 1000, isMining: () => false };
+  bot.blockAt = (p) => (p.x === 8 && p.y === 65 && p.z === 8 ? { name: 'air', boundingBox: 'empty', position: p } : stone(p));
+  let positions = [new V3(1, 60, 1), new V3(2, 60, 2), exposed];
+  bot.findBlocks = () => positions;
+  const collected = [];
+  let noPathAt = null;
+  bot.collectBlock = { cancelTask() {}, collect: async (blocks) => {
+    const at = blocks.map((b) => `${b.position.x},${b.position.y},${b.position.z}`);
+    collected.push(...at);
+    if (noPathAt && at.includes(noPathAt)) { const e = new Error('No path to the goal!'); e.name = 'NoPath'; throw e; }
+  } };
+  const c = context(bot, { Vec3: V3, resolveBlockFamily: () => [1], itemNamesForMinedBlocks: () => ['cobblestone'],
+    tryTakeFromNearbyChest: async () => null, visitRememberedSpot: async () => [], wanderAndRetryFind: async () => [],
+    filterAwayFromOtherBots: (b, p) => p, isProtectedBlockName: () => false, MINE_SEARCH_RADIUS: 32,
+    CONTENTION_SEARCH_OVERFETCH: 3, isLivingSpaceWall: () => false });
+  vm.runInContext(timeoutFn + actionFn, c);
+  const first = await c.performAction(bot, { type: 'mine', block: 'stone', count: 1 }, 'test');
+  assert.equal(first.ok, true, first.text);
+  assert.deepEqual(collected, ['8,64,8'], 'the exposed stone, not the nearer buried one');
+
+  positions = [new V3(1, 60, 1), new V3(2, 60, 2)];
+  collected.length = 0; noPathAt = '1,60,1';
+  const failed = await c.performAction(bot, { type: 'mine', block: 'stone', count: 1 }, 'test');
+  assert.equal(failed.ok, false);
+  collected.length = 0; noPathAt = null;
+  const next = await c.performAction(bot, { type: 'mine', block: 'stone', count: 1 }, 'test');
+  assert.equal(next.ok, true, next.text);
+  assert.deepEqual(collected, ['2,60,2'], 'the block that had no path sits out; the next one is tried');
+});
+
+await check('Craft: a torch from coal and logs -- the stick comes by way of planks', async () => {
+  // 2026-11-04: torch supply counts a log as wood, but with no planks the stick was never made.
+  const ITEM = { coal: 1, stick: 2, oak_planks: 3, oak_log: 4, torch: 5 };
+  const byId = Object.fromEntries(Object.entries(ITEM).map(([name, id]) => [id, { name, id }]));
+  const inv = { coal: 2, oak_log: 2, stick: 0, oak_planks: 0, torch: 0 };
+  const crafted = [];
+  const recipe = (out, n, ins) => ({ result: { id: ITEM[out], count: n },
+    delta: [...ins.map(([name, k]) => ({ id: ITEM[name], count: -k })), { id: ITEM[out], count: n }] });
+  const RECIPES = { torch: [recipe('torch', 4, [['coal', 1], ['stick', 1]])], stick: [recipe('stick', 4, [['oak_planks', 2]])],
+    oak_planks: [recipe('oak_planks', 4, [['oak_log', 1]])] };
+  const affordable = (r) => r.delta.filter((d) => d.count < 0).every((d) => (inv[byId[d.id].name] ?? 0) >= -d.count);
+  const bot = {
+    registry: { itemsByName: Object.fromEntries(Object.entries(ITEM).map(([n, id]) => [n, { id }])), items: byId },
+    inventory: { items: () => Object.entries(inv).filter(([, k]) => k > 0).map(([name, count]) => ({ name, count })),
+      count: (id) => inv[byId[id]?.name] ?? 0 },
+    recipesFor: (id) => (RECIPES[byId[id].name] ?? []).filter(affordable),
+    recipesAll: (id) => RECIPES[byId[id].name] ?? [],
+    craft: async (r, times) => {
+      for (const d of r.delta) inv[byId[d.id].name] = (inv[byId[d.id].name] ?? 0) + d.count * (times || 1);
+      crafted.push(byId[r.result.id].name);
+    },
+  };
+  const c = vm.createContext({ bot, console: { log() {}, error() {} } });
+  vm.runInContext(between(actions, 'function simpleSourceFor(', '// Extracted from "loot"'), c);
+  await c.craftItem(bot, 'torch', 4, null);
+  assert.deepEqual(crafted, ['oak_planks', 'stick', 'torch']);
+  assert.equal(inv.torch, 4);
+});
+
+await check('Residences: a bed for each active bot -- in an empty shelter first, a chest in a bedded one, else a new shelter', async () => {
+  // Direct request, 2026-11-04: "a residence should consist of a bed, a chest, at least one door, and
+  // enclosed walls/ceiling/floor ... 4 active bots means 4 beds ... if not enough room in existing
+  // shelters, start a new shelter." The old shelterStep was done as soon as HER shelter had a bed.
+  const calls = [];
+  const c = vm.createContext({ Vec3: V3, USERNAME: 'Amy', console: { log() {}, error() {} }, Math,
+    BOT_USERNAMES: new Set(['Babs', 'Amy', 'Mark']), SHELTER_ROOM: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]],
+    SHELTER_SITE_RADIUS: 48, held: [],
+    holdsItem: (n) => c.held.includes(n), heldCount: () => 0,
+    builderAcquireStep: async (item) => ({ ok: true, text: `making a ${item}`, action: { type: 'craft', item } }),
+    bedStep: async () => ({ ok: true, text: 'got wool.', action: { type: 'get_wool' } }),
+    findShelterNearHome: () => ({ base: c.bases[0], complete: true }), // what the old code went by
+    unfinishedShelterNearHome: () => null, findShelterSite: () => new V3(20, 64, 0),
+    isDoorway: () => true, doorwayPosition: (b) => b.offset(0, 0, 3), shelterPositions: () => [], shelterMaterialCount: () => 0,
+    gatherPlanks: async () => null,
+    completeSheltersNearHome: () => c.bases,
+    shelterHasBed: (b) => c.bot.isABed(c.bot.blockAt(b)),
+    performAction: async (_b, a) => { calls.push(a); return { ok: true, text: a.type }; } });
+  const use = (w) => { c.bot = w.bot; c.bases = w.bases; calls.length = 0; };
+  vm.runInContext(slice(index, 'function activeBotCount', '// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1 --') +
+    between(index, 'async function shelterStep(', 'async function runShelterGoal('), c);
+  c.bot = { inventory: { items: () => [] } };
+
+  use(residenceWorld({ online: ['Amy', 'Babs'], shelters: [{ base: new V3(0, 64, 0), bed: true, chest: true },
+    { base: new V3(10, 64, 0) }] }));
+  c.bot.inventory = { items: () => [{ name: 'white_bed', count: 1 }] };
+  let step = await c.shelterStep({}, null);
+  assert.equal(calls[0]?.type, 'place_bed', `two active bots, one bed: ${step.text}`);
+  assert.equal(calls[0].near.x, 10, 'into the empty shelter');
+
+  use(residenceWorld({ online: ['Amy'], shelters: [{ base: new V3(0, 64, 0), bed: true }] }));
+  c.bot.inventory = { items: () => [] }; c.held = ['chest'];
+  step = await c.shelterStep({}, null);
+  assert.equal(calls[0]?.type, 'place', `a bedded shelter with no chest gets one: ${step.text}`);
+  assert.deepEqual({ ...calls[0].at }, { x: 1, y: 64, z: 0 }, 'on free floor in its room, not in the way through the door');
+
+  use(residenceWorld({ online: ['Amy', 'Babs'], shelters: [{ base: new V3(0, 64, 0), bed: true, chest: true }] }));
+  c.held = [];
+  const goal = {};
+  step = await c.shelterStep(goal, null);
+  assert.equal(calls[0]?.type, 'build', `no shelter has room: a new one -- ${step.text}`);
+  assert.deepEqual({ ...goal.shelterAt }, { x: 20, y: 64, z: 0 });
+
+  use(residenceWorld({ online: ['Amy'], shelters: [{ base: new V3(0, 64, 0), bed: true, chest: true }] }));
+  step = await c.shelterStep({}, null);
+  assert.equal(step.done, true, 'one active bot, one residence with bed and chest: done');
+});
+
+await check('Trash: a near-broken weapon and rotten flesh go into visible lava; the only one of a kind stays', async () => {
+  // Direct request, 2026-11-04: "'trash' items like almost broken weapons, zombie flesh can be
+  // disposed of in lava".
+  const inv = [
+    { name: 'iron_sword', type: 'iron_sword', count: 1, durabilityUsed: 240 },
+    { name: 'diamond_sword', type: 'diamond_sword', count: 1, durabilityUsed: 10 },
+    { name: 'wooden_pickaxe', type: 'wooden_pickaxe', count: 1, durabilityUsed: 58 },
+    { name: 'rotten_flesh', type: 'rotten_flesh', count: 3 }, { name: 'bread', type: 'bread', count: 4 }];
+  const tossed = [], walked = [];
+  let lava = [new V3(5, 63, 0)];
+  const bot = {
+    isSleeping: false, entity: { position: new V3(3, 64, 0) },
+    registry: { items: { iron_sword: { maxDurability: 250 }, diamond_sword: { maxDurability: 1561 }, wooden_pickaxe: { maxDurability: 59 } },
+      blocksByName: { lava: { id: 99 } } },
+    inventory: { items: () => inv.filter((i) => i.count > 0) },
+    findBlocks: ({ matching }) => (matching === 99 ? lava : []),
+    blockAt: (p) => ({ boundingBox: 'empty', name: 'air', position: p }),
+    pathfinder: { goto: async (g) => walked.push(g), setGoal() {} }, lookAt: async () => {},
+    tossStack: async (item) => { tossed.push(item.name); item.count = 0; },
+    toss: async () => {},
+  };
+  const c = vm.createContext({ bot, console: { log() {}, error() {} }, Date, Map, Set, Math, setTimeout, clearTimeout,
+    AUTONOMY_ENABLED: true, routineBlocked: () => false, USERNAME: 'Amy', process: { env: {} },
+    goals: { GoalNear: class { constructor(x, y, z) { Object.assign(this, { x, y, z }); } } },
+    arbiter: { OWNERS: { ROUTINE: 'routine' }, requestControl: async () => ({ release() {} }), holdsControl: () => true },
+    TOOL_RANK: { wooden: 0, golden: 0, stone: 1, iron: 2, diamond: 3, netherite: 4 } });
+  vm.runInContext(slice(index, 'const DROP_DISTANCE', 'const EXTRA_CHEST_RETRY_MS') +
+    slice(index, '// Trash into lava', 'setInterval(() => {\n  checkTrash'), c);
+  await c.checkTrash();
+  assert.deepEqual(tossed.sort(), ['iron_sword', 'rotten_flesh'], 'the spent sword (a good one stays) and the flesh');
+  assert.equal(walked.length, 1, 'she walks beside the lava first');
+  tossed.length = 0; lava = [];
+  inv.push({ name: 'rotten_flesh', type: 'rotten_flesh', count: 2 });
+  await c.checkTrash();
+  assert.deepEqual(tossed, [], 'no lava in sight: nothing thrown here (a full inventory still drops it the old way)');
+});
+
+await check('Water: the drowning reflex reads her own air, and the shore search survives findBlocks\' palette pass', async () => {
+  // Direct report, 2026-11-04: "the bots do not seem to be able to get out of water". mineflayer
+  // 4.39 sets bot.oxygenLevel from ANY entity's air_supply; and findBlocks first calls the matcher on
+  // position-less palette blocks, which findNearestShore rejected -- every section skipped.
+  const logs = [];
+  const bot = new EventEmitter();
+  Object.assign(bot, { oxygenLevel: 4, entity: { isInWater: true, metadata: { 1: 300 } }, setControlState() {} });
+  const c = vm.createContext({ bot, console: { log: (l) => logs.push(String(l)), error() {} }, Date, Math, setTimeout, clearTimeout,
+    AUTONOMY_ENABLED: true, USERNAME: 'Babs', goals: { GoalNear: class {} },
+    arbiter: { OWNERS: { DROWNING: 'drowning' }, requestControl: async () => null, currentOwner: () => 'x' } });
+  vm.runInContext(between(index, 'const DROWNING_OXYGEN_THRESHOLD', '// Direct request, 2026-09-07 ("they don\'t seem to be fighting back'), c);
+  bot.emit('breath');
+  assert(!logs.some((l) => /EMERGENCY: oxygen critical/.test(l)), 'a nearby squid\'s air (oxygenLevel 4) with her own at 300 ticks: no emergency');
+  await sleep(10);
+  bot.entity.metadata[1] = 30; bot.oxygenLevel = 20;
+  bot.emit('breath');
+  assert(logs.some((l) => /EMERGENCY: oxygen critical \(2\)/.test(l)), 'her own air at 30 ticks: emergency');
+
+  const land = new V3(4, 64, 0);
+  const shoreBot = {
+    findBlocks: ({ matching }) => {
+      // The palette pass: one position-less block per section; false skips the whole section.
+      if (!matching({ name: 'air', boundingBox: 'empty', liquid: false })) return [];
+      return matching({ name: 'air', boundingBox: 'empty', liquid: false, position: land }) ? [land] : [];
+    },
+    blockAt: (p) => (p.y === 63 ? { name: 'stone', boundingBox: 'block', liquid: false } : { name: 'air', boundingBox: 'empty' }),
+  };
+  assert.deepEqual(c.findNearestShore(shoreBot, 48), land, 'dry land beside the water is found');
+});
+
+await check('Water: bobbing at the surface (isInWater false for a tick) still sends her for the shore', async () => {
+  // Live, 2026-11-05: four emergencies in a row in a deep pool, each "surfaced (stillInWater=false)"
+  // and no shore search -- her jump lifted her clear of the water for the tick it was checked.
+  const logs = [];
+  const bot = new EventEmitter();
+  const feet = new V3(0, 64, 0);
+  Object.assign(bot, {
+    entity: { isInWater: true, metadata: { 1: 30 }, position: { floored: () => feet } },
+    setControlState() {},
+    blockAt: (p) => (p.y === 64 ? { name: 'water', boundingBox: 'empty' } : { name: 'stone', boundingBox: 'block' }),
+    findBlocks: () => [],
+    pathfinder: { setGoal() {} },
+  });
+  const handle = { token: {}, release() {} };
+  const c = vm.createContext({ bot, console: { log: (...l) => logs.push(l.join(' ')), error() {} }, Date, Math, setTimeout, clearTimeout,
+    AUTONOMY_ENABLED: true, USERNAME: 'Babs', goals: { GoalNear: class {} },
+    arbiter: { OWNERS: { DROWNING: 'drowning' }, requestControl: async () => handle, holdsControl: () => true, currentOwner: () => 'x' } });
+  vm.runInContext(between(index, 'const DROWNING_OXYGEN_THRESHOLD', '// Direct request, 2026-09-07 ("they don\'t seem to be fighting back'), c);
+  bot.emit('breath');
+  bot.entity.isInWater = false; // her head clears the surface for a tick
+  await sleep(300);
+  assert(logs.some((l) => /surfaced .*stillInWater=false/.test(l)), 'she surfaced');
+  assert(logs.some((l) => /dry land/.test(l)), 'the shore search ran with water still at her feet');
 });
 
 console.log(`${passed} unit checks passed.`);
