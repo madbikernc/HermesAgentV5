@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.7.0
+#
+# 1.7.0 (2026-11-04) — falls back to `super` when the router answers 502/503 for log-analyst (a
+# refused or failed wake; the router itself has no fallback), and the analysis timeout goes
+# 180s -> 400s because a cold log-analyst wake now displaces super first (wake worker 1.7.0).
+# Until now log-analyst had never once started on spark (its 64k context needed ~37GiB), so any
+# analysis after a restart onto 1.6.0 would have failed outright.
 #
 # 1.6.0 (2026-10-27) — IMPLEMENTATION_PLAN.md S44: the analyze() call now targets the new
 # dedicated `log-analyst` role (port 8098, same node) instead of `super` directly -- splitting
@@ -507,7 +513,18 @@ def ask_super(request_context, source, gathered_text, history=None):
     # log-analyst is on-demand, same as `super` was for this call (target §4a) — the first call
     # after idle wakes it, same cost hermes-canary-report.py already accepts for `super`'s own
     # real security analysis. See this file's own 1.6.0 changelog for why this moved off `super`.
-    result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=180, analysis=True)
+    # 1.7.0: a cold wake now displaces super first (hermes-model-wake-worker.py 1.7.0), so the
+    # budget covers wake (router waits up to 150s) plus a dense 36B's generation.
+    try:
+        result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=400, analysis=True)
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (502, 503):
+            raise
+        # The router has no fallback of its own: a wake the worker refused (super busy, so it
+        # can't be displaced) or a backend that never came up lands here as 502/503.
+        log(f"log-analyst unavailable (HTTP {exc.code}) — falling back to super")
+        result = _post(f"{ROUTER_URL}/v1/chat/completions", {**body, "model": "super"},
+                       timeout=400, analysis=True)
     return result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
 

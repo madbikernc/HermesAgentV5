@@ -1,6 +1,6 @@
 # hermes-dispatch — recreate checklist
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 The routing decision, extracted from each persona's own gateway turn (HermesAgentV5 S6,
 `../../HermesAgentV5/IMPLEMENTATION_PLAN.md`). Outbound-only — polls Buzz, calls the router,
@@ -57,7 +57,8 @@ only `task_id`/`memory_ref`.
 - `dispatch` role runs `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` (stock), not the target's proposed Q8
   (already on disk, zero download cost) — a follow-up, not a blocker. Verified live 2026-11-04:
   spark `:8097`, `--ctx-size 65536 --parallel 4 --reasoning off`. Its `llama-dispatch.service` and
-  `/opt/llama.cpp/start-dispatch.sh` exist only on spark — neither is tracked in this repo.
+  `start-dispatch.sh` are tracked in this directory as of 2026-11-04, copied from spark as deployed
+  (installed at `/etc/systemd/system/` and `/opt/llama.cpp/`).
 - Port 8097 stays, though `nano` (and its `:8088`) was retired in S13 — moving dispatch onto
   `:8088` was deferred as cosmetic (`tools/hermes-router.py`'s `ROLES` comment).
 
@@ -132,3 +133,4 @@ actual test transcript.
 | 1.0.0 | 2026-08-29 | Initial version — S6: `hermes-dispatch.py` built and deployed, verified end to end with a manually-published pointer envelope. |
 | 1.1.0 | 2026-08-29 | S12: failover up target §11.2's escalation ladder. Added §4 (heartbeat-based standby detection on Forge, manual promotion command, why promotion isn't automatic). Corrected §3's stale claim that no specialist topic has a real subscriber — `media` has since S10. |
 | 1.2.0 | 2026-11-04 | Model-assumption sweep: §3 now names the live checkpoint (`Qwen3.6-35B-A3B-UD-Q4_K_M`, ctx 65536, parallel 4, verified 2026-11-04), notes its unit/start script exist only on spark, and drops the stale "nano until S8" port note (nano retired S13). |
+| 1.3.0 | 2026-11-04 | `llama-dispatch.service` and `start-dispatch.sh` now tracked in this directory, copied from spark as deployed. |

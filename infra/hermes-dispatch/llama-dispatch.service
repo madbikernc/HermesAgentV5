@@ -1,0 +1,20 @@
+# /etc/systemd/system/llama-dispatch.service
+[Unit]
+Description=llama.cpp server - Qwen3.6-35B-A3B stock (dispatch backend, hard requirement never abliterated, spark)
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/opt/llama.cpp/start-dispatch.sh
+Restart=always
+RestartSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

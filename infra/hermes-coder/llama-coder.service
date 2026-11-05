@@ -1,0 +1,17 @@
+[Unit]
+Description=llama.cpp server - Qwen3.8-27B-abliterated (on-demand coder backend, spark-2)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-router/README.md
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/opt/llama.cpp/start-coder.sh
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal

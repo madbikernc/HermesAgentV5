@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 2.19.1
+# Version: 2.19.2
+#
+# 2.19.2 (2026-11-04) - comment-only: `super`'s on_demand=True looked stale (super is resident),
+# but hermes-model-wake-worker.py 1.7.0 now displaces super while log-analyst needs its memory,
+# so the flag is what wakes it back. Comment on the ROLES entry says so; no code change.
 #
 # 2.19.1 (2026-11-04) - metadata-only, no routing change: `dispatch`'s /v1/models label said
 # "Qwen3.6-35B-A3B (stock Q8)", but the live llama-dispatch backend on spark loads
@@ -360,6 +364,8 @@ if NODE not in ("spark", "spark-2"):
 # same trust level every other value in this table already has.
 if NODE == "spark":
     ROLES = {
+        # on_demand=True is load-bearing since 2026-11-04: super is resident, but the wake worker
+        # stops it while log-analyst needs its memory, and a super request wakes it back.
         "super": ("http://127.0.0.1:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
         # coder moved to spark-2 2026-10-07 (fleet-health investigation: spark was chronically
         # at ~97% memory / swapping; coder was its single largest avoidable resident consumer).

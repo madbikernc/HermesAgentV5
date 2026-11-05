@@ -1,6 +1,6 @@
 # minecraft-bots — recreate checklist
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Ordered steps to install the Minecraft bot orchestrator (`services/minecraft-bots/`) as
 process-supervised systemd services, so a crash or a reboot doesn't leave a bot silently offline
@@ -13,8 +13,6 @@ for the sibling recipe this was built alongside.
 
 - `services/minecraft-bots/` checked out under `~/HermesAgentV5` on the target host, `npm install`
   run there at least once (installs `mineflayer`/`mineflayer-pathfinder`).
-- `~/.hermes/minecraft-matrix.env` exists (`600`) with each bot's Matrix access token -- see
-  `services/minecraft-bots/README.md`'s own note on why this isn't in Vaultwarden yet.
 - `memory-token` and `buzz-token` Vaultwarden items reachable via `tools/vault-get-secret.sh`
   (already true for every other fleet service on this node).
 
@@ -29,9 +27,11 @@ done
 sudo systemctl daemon-reload
 ```
 
-A brand-new bot needs more than a unit file — Buzz `KNOWN_AGENTS`, a Matrix account, and **a
-server op grant in `ops.json`**, without which its `/tp` self-rescue fails silently forever. Full
-checklist: `MINECRAFT_BOTS_DESIGN.md` §1.
+A brand-new bot needs more than a unit file — Buzz `KNOWN_AGENTS` (bots coordinate with each
+other only over Buzz) and **a server op grant in `ops.json`**, without which its `/tp`
+self-rescue fails silently forever. No Matrix account: the per-bot Matrix room watcher is legacy
+from before Buzz, and a bot without a token runs fully. Full checklist: `MINECRAFT_BOTS_DESIGN.md`
+§1.
 
 ## 3. Verify
 
@@ -53,3 +53,4 @@ plausible activity. Only RCON `list` settles it.
 |---|---|---|
 | 1.0.0 | 2026-09-06 | Initial version -- replaces the bare `nohup` processes used during initial development. |
 | 1.1.0 | 2026-09-24 | Updated from the original two-bot (Babs/Amy, spark-only) install to the real nine-unit, two-host layout; added the op-grant/Buzz/Matrix onboarding pointer and the warning that `active` does not mean connected. |
+| 1.2.0 | 2026-11-04 | Matrix dropped as a bot prerequisite and onboarding step: the per-bot Matrix room watcher is legacy from before Buzz; bots coordinate over Buzz only and run fully without a Matrix token. |

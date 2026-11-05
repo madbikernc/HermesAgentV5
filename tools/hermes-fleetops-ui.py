@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 2.18.1
+# Version: 2.18.2
+#
+# 2.18.2 (2026-11-04) — label-only: the log-analyst swap row said its backend had never started;
+# it first served 2026-11-04 (hermes-model-wake-worker.py 1.7.0, start-log-analyst.sh at 16k
+# context). Row now says so.
 #
 # 2.18.1 (2026-11-04) — label-only: every MODEL_SWAP_RECOMMENDATIONS row's `role` still described
 # the pre-S44 state ("coder2 ... retired, but still resident, zero traffic", "... live production
@@ -1642,8 +1646,8 @@ MODEL_SWAP_RECOMMENDATIONS = [
         "date": "2026-10-24/25",
     },
     {
-        "role": "super's log-analyst duty — new log-analyst role registered S44 (2026-10-27); backend "
-                "never yet started on spark (insufficient free memory to wake), hermes-logs still on super",
+        "role": "super's log-analyst duty — new log-analyst role registered S44 (2026-10-27); first "
+                "served 2026-11-04 after a 16k-context resize (displaces an idle super when memory is short)",
         "suite": "fleet_log_analyst",
         "candidate": "NousResearch Hermes-4.3-36B-Q4_K_M",
         "candidate_score": "accuracy 0.750 (9/12), fact-extraction 0.960",

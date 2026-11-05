@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-11-04) — same fix as hermes-abliterate-model.sh 2.1.0: candidate mode's `--free-omni`
+# stopped the long-idle `llama-amy-vision.service`, freeing nothing; it now stops the live
+# `llama-omni.service`. `llama-coder2.service` joins coder/muse in the default swappable set.
 #
 # 1.1.0 — fetches HF_TOKEN from Vaultwarden ("Hermes - HuggingFace") at the start of every run,
 # in-memory only, never written to disk (same rule vault-get-secret.sh itself enforces) — unblocks
@@ -127,7 +131,7 @@ fi
 log "Free memory before stopping anything:"
 free -h
 
-for svc in llama-coder.service llama-muse.service; do
+for svc in llama-coder.service llama-coder2.service llama-muse.service; do
   if systemctl is-active --quiet "$svc" 2>/dev/null; then
     log "Stopping $svc"
     sudo systemctl stop "$svc"
@@ -135,10 +139,10 @@ for svc in llama-coder.service llama-muse.service; do
   fi
 done
 if [ "$FREE_OMNI" -eq 1 ]; then
-  if systemctl is-active --quiet llama-amy-vision.service 2>/dev/null; then
-    log "Stopping llama-amy-vision.service (--free-omni)"
-    sudo systemctl stop llama-amy-vision.service
-    STOPPED+=("llama-amy-vision.service")
+  if systemctl is-active --quiet llama-omni.service 2>/dev/null; then
+    log "Stopping llama-omni.service (--free-omni)"
+    sudo systemctl stop llama-omni.service
+    STOPPED+=("llama-omni.service")
   fi
 fi
 

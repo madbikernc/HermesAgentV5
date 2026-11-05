@@ -1,6 +1,6 @@
 # spark-2 disk encryption — recreate checklist
 
-**Version:** 2.0.0
+**Version:** 2.0.1
 
 Closes a real, verified gap: unlike `spark` (`/opt/hermes-data.img`, LUKS2 file-backed container), `spark-2`'s
 model storage (`/opt/hermes-models/`) sits on the plain, unencrypted root filesystem — confirmed live
@@ -138,7 +138,7 @@ diff <(cd /opt/hermes-models && find . -type f -exec sha256sum {} \; | sort) \
 service restarts, not a multi-GB copy):
 
 ```bash
-sudo systemctl stop llama-amy-vision.service llama-muse.service
+sudo systemctl stop llama-omni.service llama-muse.service
 
 # Catch anything that changed during the bulk copy above (should be nothing for static model files,
 # but re-run rsync's own diff logic rather than assume):
@@ -148,7 +148,7 @@ sudo rsync -av --progress /opt/hermes-models/ /mnt/hermes-data/models/
 sudo sed -i 's|/opt/hermes-models/|/mnt/hermes-data/models/|' /opt/llama.cpp/start-omni.sh /opt/llama.cpp/start-muse.sh
 grep -H model= /opt/llama.cpp/start-omni.sh /opt/llama.cpp/start-muse.sh  # confirm the new path took
 
-sudo systemctl start llama-amy-vision.service llama-muse.service
+sudo systemctl start llama-omni.service llama-muse.service
 ```
 
 Verify both healthy through the live router afterward (not just a direct health check), same standard this
@@ -183,3 +183,4 @@ eventually set up.
 |---|---|---|
 | 1.0.0 | 2026-08-25 | Initial checklist, direct request as part of a spark/spark-2 parity pass. Not yet executed — needs a human with real root on `spark-2`. |
 | 2.0.0 | 2026-08-25 | Reversed the TPM2-auto-unlock design after real testing (3 reboots) proved it non-functional on this GRUB-boot, non-measured-UKI hardware regardless of PCR selection — root cause: systemd's TPM2 measured-boot services (incl. persistent SRK setup) require a measured-UKI boot, which this isn't. Evaluated migrating to systemd-boot+UKI to fix properly; set aside (no BMC/IPMI on this hardware, no established remote-recovery path). Executed: wiped the TPM keyslot, removed the `/etc/crypttab` entry, now matches `spark`'s manual-unlock design exactly. Steps 1-2 rewritten to match; Steps 4-5 (migration) unchanged and still pending. |
+| 2.0.1 | 2026-11-04 | Cutover commands stop/start `llama-omni.service` instead of `llama-amy-vision.service`, which no longer runs; omni has been `llama-omni.service` since its S44 swap. |

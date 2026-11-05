@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Version: 2.0.1
+# Version: 2.1.0
+#
+# 2.1.0 (2026-11-04) — `--free-omni` freed nothing: it stopped `llama-amy-vision.service`, which
+# hasn't run since omni moved to `llama-omni.service` (Nemotron-3.5-Bolt-74B, ~24GiB, spark-2).
+# It now stops `llama-omni.service`. `llama-coder2.service` (GLM-4.7-Flash, ~23GiB, on-demand,
+# re-added in S44) joins coder/muse in the default swappable set -- it's the same kind of slot.
 #
 # 2.0.1 (2026-11-04) — comment-only: the core-warning note said llama-super is "on-demand by
 # design, inactive is its normal resting state". super is always-resident since Stage 12; it is
@@ -37,8 +42,8 @@
 # for when/why to use this and infra/model-abliteration/README.md for the
 # one-time heretic install.
 #
-# Stops llama-coder.service and llama-muse.service (never a persona's own core, never
-# Omni unless --free-omni is passed) for the duration of the run, then
+# Stops llama-coder.service, llama-coder2.service and llama-muse.service (never a persona's own
+# core, never Omni -- llama-omni.service -- unless --free-omni is passed) for the duration of the run, then
 # restores whatever it stopped — on success, failure, or Ctrl-C alike (the
 # EXIT trap runs regardless). Verify these are the real live unit names on
 # this node first (`systemctl list-units | grep llama`) — IMPLEMENTATION_PLAN.md
@@ -89,7 +94,7 @@ trap restore_services EXIT
 log "Free memory before stopping anything:"
 free -h
 
-for svc in llama-coder.service llama-muse.service; do
+for svc in llama-coder.service llama-coder2.service llama-muse.service; do
   if systemctl is-active --quiet "$svc"; then
     log "Stopping $svc"
     sudo systemctl stop "$svc"
@@ -97,10 +102,10 @@ for svc in llama-coder.service llama-muse.service; do
   fi
 done
 if [ "$FREE_OMNI" -eq 1 ]; then
-  if systemctl is-active --quiet llama-amy-vision.service; then
-    log "Stopping llama-amy-vision.service (--free-omni)"
-    sudo systemctl stop llama-amy-vision.service
-    STOPPED+=("llama-amy-vision.service")
+  if systemctl is-active --quiet llama-omni.service; then
+    log "Stopping llama-omni.service (--free-omni)"
+    sudo systemctl stop llama-omni.service
+    STOPPED+=("llama-omni.service")
   fi
 fi
 

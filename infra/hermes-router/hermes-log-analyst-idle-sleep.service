@@ -6,4 +6,4 @@ Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-log-analyst/README.
 Type=oneshot
 User=pmoney
 Group=pmoney
-ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-idle-sleep.sh log-analyst llama-log-analyst 900
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-idle-sleep.sh log-analyst llama-log-analyst 300

@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.7.0
+#
+# 1.7.0 (2026-11-04) — log-analyst could never wake: spark has ~21GiB free with super, dispatch,
+# embed and rerank resident, and log-analyst needs more than that at any useful context. New
+# `displaces` field per WAKE_TARGETS entry: when free memory is short, the worker stops a listed
+# role's backend first -- but only if that backend's /slots shows no request in flight, so a
+# long-running call is never killed mid-answer. log-analyst displaces super; super displaces
+# log-analyst (so a super request never waits out log-analyst's idle timer). Roles in
+# RESTORE_AFTER_DISPLACE (super, the always-resident tier) are written to
+# WAKE_STATE_DIR/<role>.displaced and restarted by hermes-model-idle-sleep.sh 1.1.0 when the
+# displacing role idles out. log-analyst's required_gib 29 -> 25, matching its new 16k/q8_0-KV
+# start-log-analyst.sh (20.27GiB weights + ~2.1GiB KV + compute) instead of a 64k-context guess
+# whose 16GiB f16 KV cache the old 29 never counted.
 #
 # 1.6.0 (2026-10-27) — IMPLEMENTATION_PLAN.md S44: `coder2` re-added to spark-2's WAKE_TARGETS
 # (GLM-4.7-Flash-Q4_K_M now, not Muse-Glimmer-30B -- see hermes-router.py 2.19.0's changelog), and
@@ -70,6 +82,8 @@
 #   WAKE_TIMEOUT_S     default 180  — real measured cold-load times: nano ~56s, super ~100s
 #                                     (IMPLEMENTATION_PLAN.md §4a/§4b) — generous margin, not tight
 #   WAKE_STATE_DIR     default ~/.hermes/state/wake
+#   DISPLACE_SETTLE_S  default 30   — how long to wait for memory to free after displacing a backend
+#   DISPLACE_MIN_AGE_S default 30   — never displace a role woken this recently
 #
 # WAKE_TARGETS below is the one thing this file hardcodes rather than reads from the
 # environment — it names a real systemd unit and a real sudo command, so it gets the same
@@ -115,17 +129,23 @@ STATE_DIR = Path(os.environ.get("WAKE_STATE_DIR", str(Path.home() / ".hermes" / 
 # `sudo systemctl start` locally; claim() also passes `roles=<this node's own WAKE_TARGETS keys>`
 # to the broker (hermes-broker.py 1.4.0's new filter) so the two nodes' instances, polling the same
 # central `type=wake` queue, never race each other for a role only the other one can serve.
+#
+# 1.7.0: a 4th field, `displaces` -- roles this one may stop to make room (see run_job()).
 NODE = os.environ.get("HERMES_NODE", "spark")
 if NODE == "spark":
     WAKE_TARGETS = {
-        "super": ("http://127.0.0.1:8095/health", "llama-super", 25),
+        "super": ("http://127.0.0.1:8095/health", "llama-super", 25, ("log-analyst",)),
         # coder moved to spark-2 2026-10-07 (spark was chronically at ~97% memory) -- see its
         # entry on the spark-2 branch below.
         # S44 (2026-10-27): new on-demand role, split off `super`'s own log-analyst duty -- see
         # hermes-logs.py's own changelog and hermes-router.py 2.19.0's. Hermes-4.3-36B-Q4_K_M,
         # byte-verified 21,762,146,144 bytes (20.27GiB). 29 = 20.27GiB * the same ~1.45 margin
         # ratio super's own 17.2GB->25GiB figure used.
-        "log-analyst": ("http://127.0.0.1:8098/health", "llama-log-analyst", 29),
+        # 1.7.0: 29 -> 25. The 29 came from file size alone and never counted the KV cache: at the
+        # old 64k context Seed-OSS-36B's f16 KV (64 layers x 8 KV heads x 128 dims) is 16GiB, a
+        # real need of ~37GiB. start-log-analyst.sh now runs 16k context with q8_0 KV (~2.1GiB),
+        # ~23-24GiB total. It still doesn't fit beside super, so it displaces super.
+        "log-analyst": ("http://127.0.0.1:8098/health", "llama-log-analyst", 25, ("super",)),
     }
 else:
     WAKE_TARGETS = {
@@ -137,14 +157,20 @@ else:
         # Qwen3.8 passed all correctness checks. On-demand rather than always-resident since coding
         # tasks tolerate the wake latency. 23 = 15.65GiB real size * the same ~1.45 margin ratio
         # super's own 17.2GB->25GiB figure used.
-        "coder": ("http://127.0.0.1:8094/health", "llama-coder", 23),
+        "coder": ("http://127.0.0.1:8094/health", "llama-coder", 23, ()),
         # S44 (2026-10-27): "coder2" re-added -- GLM-4.7-Flash-Q4_K_M now, not Muse-Glimmer-30B
         # (see hermes-router.py 2.19.0's changelog), the replacement model decision 1.5.0's own
         # removal comment said was pending. Byte-verified 18,474,983,296 bytes (17.2GiB) -- the
         # same file size as `super`'s own 17.2GB->25GiB figure, so reusing 25 directly rather than
         # re-deriving it.
-        "coder2": ("http://127.0.0.1:8099/health", "llama-coder2", 25),
+        "coder2": ("http://127.0.0.1:8099/health", "llama-coder2", 25, ()),
     }
+
+# Displaced roles that must come back once the displacing role idles out -- the always-resident
+# tier. An on-demand role that gets displaced simply stays down until its next wake.
+RESTORE_AFTER_DISPLACE = {"super"}
+DISPLACE_SETTLE_S = int(os.environ.get("DISPLACE_SETTLE_S", "30"))
+DISPLACE_MIN_AGE_S = int(os.environ.get("DISPLACE_MIN_AGE_S", "30"))
 
 
 def log(msg):
@@ -198,12 +224,93 @@ def touch_last_used(role):
     (STATE_DIR / f"{role}.last_used").write_text(str(time.time()))
 
 
+def is_busy(health_url):
+    """True if any llama-server slot is mid-request -- or if /slots can't be read, since a backend
+    that can't be confirmed idle must not be stopped out from under a caller."""
+    try:
+        with urllib.request.urlopen(health_url.rsplit("/health", 1)[0] + "/slots", timeout=3) as resp:
+            return any(slot.get("is_processing") for slot in json.load(resp))
+    except Exception:
+        return True
+
+
+def woken_recently(role):
+    """A role woken in the last DISPLACE_MIN_AGE_S may have a request on its way that /slots
+    can't see yet -- the router forwards only after the wake job reports back."""
+    try:
+        last = float((STATE_DIR / f"{role}.last_used").read_text())
+    except (OSError, ValueError):
+        return False
+    return time.time() - last < DISPLACE_MIN_AGE_S
+
+
+def unit_active(unit):
+    return subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0
+
+
+def record_displaced(role, unit):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    path = STATE_DIR / f"{role}.displaced"
+    units = set(path.read_text().split()) if path.exists() else set()
+    path.write_text("\n".join(sorted(units | {unit})) + "\n")
+
+
+def clear_restored(unit):
+    """`unit` is running again, so no displacing role still owes it a restart."""
+    for path in STATE_DIR.glob("*.displaced"):
+        units = set(path.read_text().split()) - {unit}
+        if units:
+            path.write_text("\n".join(sorted(units)) + "\n")
+        else:
+            path.unlink()
+
+
+def restore_displaced(role):
+    """`role` failed to come up after displacing others -- give back what it took."""
+    path = STATE_DIR / f"{role}.displaced"
+    if not path.exists():
+        return
+    for unit in path.read_text().split():
+        log(f"restarting {unit}: {role!r} failed to start after displacing it")
+        subprocess.run(["sudo", "systemctl", "start", unit], capture_output=True, text=True)
+    path.unlink()
+
+
+def make_room(role, required_gib):
+    """Stop this role's idle `displaces` backends until required_gib is free. Returns the free GiB
+    afterwards; if it still isn't enough, every stopped backend is started again."""
+    stopped = []
+    for victim in WAKE_TARGETS[role][3]:
+        victim_health, victim_unit = WAKE_TARGETS[victim][:2]
+        if not unit_active(victim_unit):
+            continue
+        if is_busy(victim_health) or woken_recently(victim):
+            log(f"not displacing {victim_unit} for {role!r}: it has a request in flight")
+            continue
+        log(f"displacing {victim_unit} to make room for {role!r}")
+        subprocess.run(["sudo", "systemctl", "stop", victim_unit], capture_output=True, text=True)
+        stopped.append((victim, victim_unit))
+    free_gib = available_gib()
+    deadline = time.monotonic() + DISPLACE_SETTLE_S
+    while stopped and free_gib < required_gib and time.monotonic() < deadline:
+        time.sleep(2)
+        free_gib = available_gib()
+    if free_gib < required_gib:
+        for _, victim_unit in stopped:
+            subprocess.run(["sudo", "systemctl", "start", victim_unit], capture_output=True, text=True)
+        return free_gib
+    for victim, victim_unit in stopped:
+        if victim in RESTORE_AFTER_DISPLACE:
+            record_displaced(role, victim_unit)
+    return free_gib
+
+
 def run_job(job):
     role = (job.get("payload") or {}).get("role", "")
     target = WAKE_TARGETS.get(role)
     if target is None:
         return 2, f"unknown wake role {role!r} — expected one of {sorted(WAKE_TARGETS)}"
-    health_url, unit, required_gib = target
+    health_url, unit, required_gib, _ = target
 
     if is_healthy(health_url):
         touch_last_used(role)
@@ -211,23 +318,30 @@ def run_job(job):
 
     free_gib = available_gib()
     if free_gib < required_gib:
+        free_gib = make_room(role, required_gib)
+    if free_gib < required_gib:
         return 1, (f"refusing to start {unit}: needs ~{required_gib}GiB free, only "
-                    f"{free_gib:.1f}GiB available — stop another resident backend first "
+                    f"{free_gib:.1f}GiB available after trying to displace "
+                    f"{list(target[3]) or 'nothing'} — stop another resident backend first "
                     f"(see LESSONS_LEARNED-equivalent note in IMPLEMENTATION_PLAN.md §9, "
                     f"2026-08-21 incident)")
 
     log(f"job {job['id']}: {role!r} ({unit}) not healthy — {free_gib:.1f}GiB free, starting")
     proc = subprocess.run(["sudo", "systemctl", "start", unit], capture_output=True, text=True)
     if proc.returncode != 0:
+        restore_displaced(role)
         return 1, f"sudo systemctl start {unit} failed: {(proc.stderr or '').strip()[:500]}"
 
     deadline = time.monotonic() + WAKE_TIMEOUT_S
     while time.monotonic() < deadline:
         if is_healthy(health_url):
             touch_last_used(role)
+            clear_restored(unit)
             return 0, ""
         time.sleep(3)
-    return 1, f"{unit} did not become healthy within {WAKE_TIMEOUT_S}s of starting"
+    subprocess.run(["sudo", "systemctl", "stop", unit], capture_output=True, text=True)
+    restore_displaced(role)
+    return 1, f"{unit} did not become healthy within {WAKE_TIMEOUT_S}s of starting (stopped again)"
 
 
 def report(job_id, exit_code, error):

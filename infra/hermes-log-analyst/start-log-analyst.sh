@@ -9,15 +9,18 @@
 # for this one duty -- `super` itself is untouched and still the fallback if real refusal gaps
 # show up on live payload/exploit content.
 #
-# Base flags match the fleet-wide convention (--n-gpu-layers 99, --ctx-size 65536) rather than
-# tuning down to hermes-logs.py's own modest actual budget (max_tokens=800, ~20k input chars) --
-# consistency with every other backend's resource footprint, not a measured requirement specific
-# to this role. --reasoning off follows the same default every non-"-Reasoning"-branded backend on
+# 2026-11-04: --ctx-size 65536 -> 16384 with q8_0 K/V cache (q8_0 V needs flash attention on).
+# The 64k convention put a 16GiB f16 KV cache (64 layers x 8 KV heads x 128 dims) on top of
+# 20.27GiB of weights -- ~37GiB, which never fit on spark, so this role never once started.
+# hermes-logs.py's real budget is ~20k input chars plus up to 20 history turns and max_tokens=800,
+# well inside 16k. ~2.1GiB KV now; the wake worker still has to displace super to fit it
+# (hermes-model-wake-worker.py 1.7.0). --reasoning off follows the same default every non-"-Reasoning"-branded backend on
 # this fleet uses; this checkpoint is not confirmed immune to the gemma-style empty-content bug
 # other scripts' comments describe -- verify live before trusting this as final.
 exec /opt/llama.cpp/build/bin/llama-server \
   --model /mnt/hermes-data/models/NousResearch_Hermes-4.3-36B-Q4_K_M.gguf \
   --host 0.0.0.0 --port 8098 \
   --n-gpu-layers 99 \
-  --ctx-size 65536 \
+  --ctx-size 16384 \
+  --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 \
   --reasoning off

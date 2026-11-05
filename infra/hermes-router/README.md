@@ -1,6 +1,6 @@
 # hermes-router (V4) — recreate checklist
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 
 Ordered steps to stand up `hermes-router` under HermesAgentV5's target topology
 (`IMPLEMENTATION_PLAN.md` §4, §6 Stage 2): capability endpoints reachable by either persona
@@ -23,9 +23,9 @@ versus the peer's LAN IP. (`coder` moved from spark-2 to spark 2026-08-26, then 
 
 | Role | Node | Port | Model (as loaded) | Residency |
 |---|---|---|---|---|
-| `super` | spark | 8095 | Huihui-GLM-4.7-Flash-abliterated Q4_K_M, ctx 65536 | listed on-demand, resident in practice (§3 caveat) |
+| `super` | spark | 8095 | Huihui-GLM-4.7-Flash-abliterated Q4_K_M, ctx 65536 | resident; displaced while `log-analyst` needs its memory, woken back on demand or restored when log-analyst idles out (§3) |
 | `dispatch` | spark | 8097 | Qwen3.6-35B-A3B-UD-Q4_K_M (stock), ctx 65536, `--parallel 4` | resident |
-| `log-analyst` | spark | 8098 | NousResearch Hermes-4.3-36B-Q4_K_M (stock), ctx 65536 | on-demand — never yet started, see `infra/hermes-log-analyst/README.md` |
+| `log-analyst` | spark | 8098 | NousResearch Hermes-4.3-36B-Q4_K_M (stock), ctx 16384, q8_0 KV | on-demand, 300s idle — see `infra/hermes-log-analyst/README.md` §5 |
 | `coder` | spark-2 | 8094 | Huihui-Qwen3.8-27B-abliterated Q4_K, ctx 65536 | on-demand |
 | `coder2` | spark-2 | 8099 | GLM-4.7-Flash-Q4_K_M (stock), ctx 65536 | on-demand |
 | `muse` | spark-2 | 8090 | NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning UD-Q4_K_M (stock, text-only load) | resident |
@@ -33,8 +33,9 @@ versus the peer's LAN IP. (`coder` moved from spark-2 to spark 2026-08-26, then 
 
 Not proxied by this router: `embed` (spark :8092 and HomeD13, Qwen3-Embedding-8B-Q8_0) and
 `rerank` (spark :8093, Qwen3-Reranker-0.6B-Q8_0). The `llama-super`/`llama-dispatch`/`llama-coder`
-units and their `start-*.sh` scripts are not tracked in this repo — they exist only on-node under
-`/etc/systemd/system/` and `/opt/llama.cpp/`.
+units and their `start-*.sh` scripts are tracked as of 2026-11-04, copied from the live nodes:
+`infra/hermes-super/`, `infra/hermes-dispatch/`, `infra/hermes-coder/` (spark-2's copy; spark's own
+idle `llama-coder` unit is a leftover from before the 2026-10-07 move and is no longer woken).
 
 ## 1. Firewall — the one new opening this requires
 
@@ -46,18 +47,19 @@ node-to-node traffic already uses (`IMPLEMENTATION_PLAN.md` §4e):
 # On spark-2 — allow spark to reach muse/omni/coder/coder2:
 sudo ufw allow from 10.129.1.15 to any port 8090,8091,8094,8099 proto tcp
 
-# On spark — allow spark-2 to reach nano/super:
-sudo ufw allow from 10.129.1.17 to any port 8088,8095 proto tcp
+# On spark — allow spark-2 to reach super/log-analyst, and dispatch for S12 standby failover:
+sudo ufw allow proto tcp from 10.129.1.17 to any port 8095,8098
+sudo ufw allow proto tcp from 10.129.1.17 to any port 8097
+# On spark — HomeD13's SWE-bench harness reaches super:
+sudo ufw allow proto tcp from 10.129.1.16 to any port 8095
 ```
 
 (`coder` left spark 2026-10-07 — the old `8094` entry on spark's own inbound rule was removed,
 not just left stale, since nothing on spark serves that port anymore.)
 
-**As of 2026-11-04, the live rules differ from the block above:** spark also allows `8097`
-(dispatch, S12 standby failover) from spark-2, and still carries the legacy `8088` (`nano`,
-retired) and a `8090,8091` rule nothing on spark serves. **Spark does not allow `8098`** from
-spark-2, so spark-2's router cannot reach `log-analyst` — add `8098` to spark's spark-2 rule before
-relying on that role from spark-2.
+Spark's live rules match this block as of 2026-11-04: the legacy `8088` (`nano`, retired) and
+`8090,8091` (nothing on spark serves them) rules for spark-2 and HomeD13 were removed, and `8098`
+was added so spark-2's router can reach `log-analyst`.
 
 ## 2. Both nodes — install the router
 
@@ -180,6 +182,7 @@ broker code change, same as Phase 30c's own addition of the `embed` type.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.4.0 | 2026-11-04 | log-analyst fixed (16k/q8_0 KV, wake-worker displacement of an idle super); super's residency row updated to match. super/dispatch/coder units now tracked under `infra/hermes-super/`, `infra/hermes-dispatch/`, `infra/hermes-coder/`. §1 ufw block rewritten to the live, cleaned-up rules (nano 8088 and spark-side 8090,8091 removed, 8098 added). |
 | 1.3.0 | 2026-11-04 | Model-assumption sweep: added a live-verified current role/node/port/model table (§0), fixed §0 topology line (nano retired; dispatch/log-analyst on spark), noted the untracked on-node super/dispatch/coder units, recorded live ufw drift including the missing spark `8098` rule (spark-2 router cannot reach log-analyst), and §3 now mentions log-analyst on spark's wake worker. |
 | 1.2.0 | 2026-10-07 | `coder` moved from spark back to spark-2, alongside `coder2` — spark's own wake-worker/idle-sleep setup (§3) now covers `super` only; spark-2 gets its own §3a. Firewall rules in §1 flipped accordingly. Noted a live-found caveat: `super`'s on-demand config on spark looks unfinished (unit is enabled/always-restart, no confirmed idle-sleep stop ever). |
 | 1.1.1 | 2026-08-30 | HermesAgentV5 consolidation: Usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |

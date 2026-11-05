@@ -1,6 +1,6 @@
 # hermes-log-analyst — recreate checklist
 
-**Version:** 1.1.0
+**Version:** 2.0.0
 
 `log-analyst` — **NousResearch Hermes-4.3-36B-Q4_K_M (stock)**, a new role as of
 IMPLEMENTATION_PLAN.md S44 (2026-10-27): split off `super`'s own log-analyst duty
@@ -60,7 +60,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-log-analyst-idle-sleep.timer
 ```
 
-Same 900s threshold as `coder2`/`coder`.
+300s idle threshold (2026-11-04; was 900s like `coder2`/`coder`): when log-analyst stops, the idle-sleep script restarts `super` if the wake worker displaced it, so a short threshold keeps super's downtime short.
 
 ## 4. Verify
 
@@ -73,22 +73,32 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/
   -d '{"model":"log-analyst","messages":[{"role":"user","content":"hi"}],"max_tokens":20}'
 ```
 
-## 5. Known open issues (verified live 2026-11-04)
+## 5. Sizing and making room (fixed 2026-11-04)
 
-- **Never yet started on `spark`.** `llama-log-analyst.service` has no journal history at all; every
-  wake so far has been refused by the wake worker (`needs ~29GiB free`, spark had ~21GiB with
-  `super`, `dispatch`, `embed`, `rerank` resident). A router request for `log-analyst` returns a 503 —
-  the router does **not** fall back to `super`.
-- **The 29GiB wake threshold undercounts.** It is the 20.27GiB file × ~1.45, which leaves out the KV
-  cache. Hermes-4.3-36B is `seed_oss` (64 layers, 8 KV heads, head dim 128): f16 KV is 256KiB/token,
-  so `start-log-analyst.sh`'s `--ctx-size 65536` alone needs 16GiB, for a real total near 37GiB.
-  `hermes-logs.py`'s own duty sends at most 20,000 chars (~6k tokens) and asks for 800 tokens, so a
-  16k context (4GiB f16 KV, ~2GiB at `q8_0`) would cover it. Left unchanged here pending an operator
-  decision on how to make room (resize vs. displacing `super` while it runs).
-- **spark-2's router cannot reach it.** Spark's ufw allows spark-2 on `8088,8095` and `8097`, not
-  `8098` (`infra/hermes-router/README.md` §1).
-- **`hermes-logs.service` still predates S44's code** (process started ~2026-10-26), so it is still
-  calling `super`. Restarting it before the wake works would turn every analysis into a 503.
+Until 2026-11-04 this role had never started: `start-log-analyst.sh` ran a 64k context, and
+Hermes-4.3-36B is `seed_oss` (64 layers, 8 KV heads, head dim 128), so its f16 KV cache alone was
+16GiB on top of 20.27GiB of weights (~37GiB), while the wake worker checked for 29GiB and spark
+usually has ~21GiB free. What changed:
+
+- **`start-log-analyst.sh`:** `--ctx-size 16384` with `--flash-attn on --cache-type-k q8_0
+  --cache-type-v q8_0`. `hermes-logs.py` sends at most 20,000 chars plus up to 20 history turns and
+  asks for 800 tokens, well inside 16k. Measured live: healthy 31s after `systemctl start`,
+  22.9GiB resident, a 7k-token firewall-log prompt answered in 101s through the router.
+- **Wake worker 1.7.0:** threshold 29 -> 25GiB, and log-analyst may *displace* `super` when memory is
+  short: it stops `llama-super` only if super's `/slots` shows no request in flight and it wasn't
+  woken in the last 30s, then records it in `~/.hermes/state/wake/log-analyst.displaced`. If
+  log-analyst then fails to come up, super is started again at once. A request for `super` while
+  log-analyst holds the memory displaces log-analyst the same way (not recorded — an on-demand role
+  just waits for its next wake).
+- **Idle-sleep 1.1.0:** after stopping an idle log-analyst it restarts whatever it displaced; the
+  log-analyst timer's idle threshold is now 300s (was 900s), so super is never down long.
+- **`hermes-logs.py` 1.7.0:** falls back to `super` on a 502/503 for log-analyst (the router has no
+  fallback of its own), and its analysis timeout is 400s to cover a cold wake.
+- **ufw:** spark now allows spark-2 on `8095,8098` (super, log-analyst), so spark-2's router can
+  reach it.
+
+Offline checks: `python3 infra/hermes-router/tests/test_wake_displace.py` (run on a Linux node — the
+idle-sleep half shells out to bash).
 
 ## Revision History
 
@@ -96,3 +106,4 @@ curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/
 |---|---|---|
 | 1.0.0 | 2026-10-27 | Initial version — S44's new `log-analyst` role, split off `super`'s own log-analyst duty. |
 | 1.1.0 | 2026-11-04 | Added §5 known open issues from a live check: never yet started (wake refused, ~21GiB free vs 29 needed); the 29GiB threshold omits the 16GiB f16 KV cache at ctx 65536 (true need ~37GiB, hermes-logs needs only ~6k tokens); spark ufw lacks 8098 for spark-2; hermes-logs.service still runs pre-S44 code. No config changed. |
+| 2.0.0 | 2026-11-04 | §5 rewritten from open issues to the fix: 16k context with q8_0 KV (measured 22.9GiB, 31s load, 101s for a 7k-token prompt), wake-worker displacement of an idle super, idle-sleep restore, hermes-logs fallback to super, ufw 8098 for spark-2. Replaces the prior "left unchanged pending an operator decision" guidance. |

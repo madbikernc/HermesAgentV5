@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.0.2
+# Version: 1.1.0
+#
+# 1.1.0 (2026-11-04) — `drain` now also stops the on-demand units (new FORGE_ON_DEMAND_UNITS,
+# default coder and coder2). They sit resident on Forge most of the time (~43GiB together), so a
+# drain that skipped them left the node nowhere near free. `restore` still starts only
+# FORGE_SWAPPABLE_UNITS: on-demand roles come back through the wake worker on their next request,
+# and while a fine-tune holds the memory the wake worker's free-memory check refuses them. `status`
+# lists both groups.
 #
 # 1.0.2 (2026-11-04) — comment-only: the header listed spark's fixed placements as
 # "nano/super/coder/dispatch/guard/embed" and Forge's residents as muse and omni. nano is retired
@@ -16,8 +23,8 @@
 # (spark) is static residency, no controller needed (target §9's own framing — super/dispatch/
 # guard/embed/rerank are fixed placements, plus on-demand log-analyst). Forge is the swappable,
 # throughput-tolerant node: muse and omni are always-resident (coder and coder2 also live here,
-# on-demand with idle-sleep, and are NOT in FORGE_SWAPPABLE_UNITS' default — `drain` doesn't stop
-# them) until something needs the node's full unified memory —
+# on-demand with idle-sleep — `drain` stops them too, `restore` leaves them to the wake worker)
+# until something needs the node's full unified memory —
 # fine-tuning or abliteration work (V5 target state §4.2's own note: "takes the node when
 # active").
 #
@@ -36,7 +43,8 @@
 #
 # Config:
 #   MEMORY_URL/MEMORY_TOKEN   required for `status` (reads the model registry)
-#   FORGE_SWAPPABLE_UNITS     default "llama-muse.service,llama-omni.service"
+#   FORGE_SWAPPABLE_UNITS     default "llama-muse.service,llama-omni.service" — drained and restored
+#   FORGE_ON_DEMAND_UNITS     default "llama-coder.service,llama-coder2.service" — drained only
 #   FORGE_RAM_BUDGET_GB       default 105 — usable ceiling, same figure used throughout
 #                             IMPLEMENTATION_PLAN.md for this node's real headroom
 
@@ -50,6 +58,7 @@ SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 MEMORY_URL = os.environ.get("MEMORY_URL", f"http://{SPARK_IP}:8102").rstrip("/")
 MEMORY_TOKEN = os.environ.get("MEMORY_TOKEN", "")
 SWAPPABLE_UNITS = os.environ.get("FORGE_SWAPPABLE_UNITS", "llama-muse.service,llama-omni.service").split(",")
+ON_DEMAND_UNITS = os.environ.get("FORGE_ON_DEMAND_UNITS", "llama-coder.service,llama-coder2.service").split(",")
 RAM_BUDGET_GB = int(os.environ.get("FORGE_RAM_BUDGET_GB", "105"))
 
 
@@ -96,7 +105,7 @@ def cmd_status():
             by_role.setdefault(m["role"], []).append(m)
 
     resident_gb = 0.0
-    for unit in SWAPPABLE_UNITS:
+    for unit in SWAPPABLE_UNITS + ON_DEMAND_UNITS:
         active = unit_active(unit)
         role = unit.replace("llama-", "").replace(".service", "")
         rows = by_role.get(role, [])
@@ -113,8 +122,8 @@ def cmd_status():
 
 
 def cmd_drain():
-    log("draining Forge — stopping swappable units for fine-tuning/abliteration work")
-    for unit in SWAPPABLE_UNITS:
+    log("draining Forge — stopping swappable and on-demand units for fine-tuning/abliteration work")
+    for unit in SWAPPABLE_UNITS + ON_DEMAND_UNITS:
         if unit_active(unit):
             result = systemctl("stop", unit)
             if result.returncode != 0:
@@ -137,7 +146,7 @@ def cmd_restore():
             log(f"started {unit}")
         else:
             log(f"{unit} already active")
-    log("restored")
+    log(f"restored ({', '.join(ON_DEMAND_UNITS)} come back on their next request)")
 
 
 def main():
