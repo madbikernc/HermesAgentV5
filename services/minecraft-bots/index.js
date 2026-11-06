@@ -1,5 +1,7 @@
-// Version: 2.134.0
+// Version: 2.134.1
 //
+// 2.134.1 (2026-11-06): gatherPlanks with no tree within 32 blocks goes looking ("mine" oak_log: a
+// remembered spot, then a wandering search) instead of failing -- the fresh world's spawn has none.
 // 2.134.0 (2026-11-05): the Farmer and Herder do their own jobs (nextRoleWork, after Tier 1 but
 // ahead of its fleet-wide residence item, and before the Builder checklist): the Farmer tends the
 // farm whenever nothing grows or something is ripe, the Herder builds the herd up to 6 penned. A
@@ -4757,7 +4759,14 @@ async function gatherPlanks(handle, count) {
     return { ...(await performAction(bot, { type: "craft", item, count: want }, USERNAME, handle)), action: { type: "craft", item } };
   }
   const tree = bot.findBlocks({ matching: (b) => /_log$/.test(b.name) && !b.name.startsWith("stripped_"), maxDistance: 32, count: 1 })[0];
-  if (!tree) return { ok: false, noWood: true, text: "need wood and there's no tree nearby." };
+  if (!tree) {
+    // 2026-11-05 (fresh world): no tree within 32 of spawn, and every bot's first goal -- a wooden
+    // sword -- failed "no tree nearby" 60+ times, blocking all work below it. "mine" goes further:
+    // a remembered spot, then a wandering search, and any log answers for "oak_log".
+    const mined = await performAction(bot, { type: "mine", block: "oak_log", count: Math.ceil(count / 4) }, USERNAME, handle);
+    if (mined.ok || mined.cancelled) return { ...mined, action: { type: "mine", block: "oak_log" } };
+    return { ok: false, noWood: true, text: `need wood: ${mined.text}`, action: { type: "mine", block: "oak_log" } };
+  }
   const block = bot.blockAt(tree).name;
   return { ...(await performAction(bot, { type: "mine", block, count: Math.ceil(count / 4) }, USERNAME, handle)), action: { type: "mine", block } };
 }

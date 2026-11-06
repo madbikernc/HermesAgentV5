@@ -1,4 +1,5 @@
-// Version: 1.51.0
+// Version: 1.52.0
+// 1.52.0 (2026-11-06): gatherPlanks with no tree in sight goes looking (index.js 2.134.1).
 // 1.51.0 (2026-11-05): a two-bed shelter is not asked for a chest; craftItem's chain makes sticks for
 // every run; the Farmer and Herder get their own role work, and stand in for their own role (index.js
 // 2.134.0, actions.js 1.104.0).
@@ -1003,12 +1004,18 @@ await check('Resource-gathering override: gatherPlanks crafts from a held log, e
   assert.equal(mined.action.block, 'birch_log');
   assert.equal(calls.at(-1).count, 2, 'ceil(8/4) logs -- each gives ~4 planks');
 
+  // 2026-11-05 (fresh world): no tree within 32 blocks of spawn -- every bot's first goal failed
+  // "no tree nearby" 60+ times. "mine" goes looking (a remembered spot, then a wandering search).
   calls = [];
   bot.findBlocks = () => [];
+  const far = await c.gatherPlanks({}, 8);
+  assert.deepEqual({ ...calls.at(-1) }, { type: 'mine', block: 'oak_log', count: 2 }, 'no tree in sight: she goes looking for one');
+  assert.equal(far.ok, true);
+  c.performAction = async (b, action) => { calls.push(action); return { ok: false, text: "couldn't find any oak_log nearby, even after looking around." }; };
   const stuck = await c.gatherPlanks({}, 8);
   assert.equal(stuck.ok, false);
-  assert.match(stuck.text, /no tree nearby/);
-  assert.equal(calls.length, 0, 'a real, reported failure -- not a crash');
+  assert.equal(stuck.noWood, true, 'still none after looking: the failure that backs off');
+  assert.match(stuck.text, /need wood: couldn't find any oak_log/);
 });
 
 await check('Resource-gathering override: weaponStep -- a chest first, else gatherPlanks + craft', async () => {
