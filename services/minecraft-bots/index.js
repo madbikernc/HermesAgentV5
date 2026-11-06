@@ -1,5 +1,12 @@
-// Version: 2.133.2
+// Version: 2.134.0
 //
+// 2.134.0 (2026-11-05): the Farmer and Herder do their own jobs (nextRoleWork, after Tier 1 but
+// ahead of its fleet-wide residence item, and before the Builder checklist): the Farmer tends the
+// farm whenever nothing grows or something is ripe, the Herder builds the herd up to 6 penned. A
+// hungry bot stands in for her own role too. Also: a residence's chest goes only where it cuts off
+// no bed or door (residenceChestCell); a two-bed shelter is full without one -- every bot was stuck
+// asking for a chest in a bed's last way in. craftItem (actions.js 1.104.0) makes enough sticks for
+// 23 fences, one recipe run per bot.craft() call.
 // 2.133.2 (2026-11-05): the extra-chest retry backs off only when there's no wood (noWood), not
 // on a transient craft failure.
 // 2.133.1 (2026-11-05): the shore search after surfacing runs while she's still at water (atWater),
@@ -3608,11 +3615,22 @@ const shelterBedCount = (base) =>
   Math.ceil(SHELTER_ROOM.filter(([dx, dz]) => bot.isABed(bot.blockAt(base.offset(dx, 0, dz)))).length / 2);
 const shelterHasChest = (base) => SHELTER_ROOM.some(([dx, dz]) => CHEST_NAME.test(bot.blockAt(base.offset(dx, 0, dz))?.name ?? ""));
 
+// The room cell a chest can go in: free floor, not the door's way through, and not the last way
+// in to a bed (wouldBlockAccess). 2026-11-05: a shelter with a bed in each column has none -- the
+// only free cell is one bed's last approach -- and every bot asked for a chest there, refused
+// every time (1,500 refusals each in a few hours), with all lower work blocked behind it.
+function residenceChestCell(base) {
+  const doorRow = base.offset(0, 0, 2);
+  return SHELTER_ROOM.map(([dx, dz]) => base.offset(dx, 0, dz)).find((p) => !p.equals(doorRow) &&
+    bot.blockAt(p)?.boundingBox !== "block" && !bot.isABed(bot.blockAt(p)) && !wouldBlockAccess(bot, p, "chest")) ?? null;
+}
+
 function residencePlan() {
   const shelters = completeSheltersNearHome();
   const active = activeBotCount();
   const beds = shelters.reduce((n, base) => n + shelterBedCount(base), 0);
-  const chestless = shelters.find((base) => shelterHasBed(base) && !shelterHasChest(base));
+  // A shelter with no room for a chest (two beds) is a full residence as it stands.
+  const chestless = shelters.find((base) => shelterHasBed(base) && !shelterHasChest(base) && residenceChestCell(base));
   if (chestless) return { kind: "chest", base: chestless, beds, active };
   if (beds >= active) return { kind: "done", beds, active };
   const empty = shelters.find((base) => !shelterHasBed(base));
@@ -4111,7 +4129,12 @@ async function proposeOwnGoal() {
   // (Builder's checklist, Soldier's monster/guard list) the same way those already outrank plain
   // freeform self-propose. Like Builder's own ladder, this only wins the NEXT idle choice -- it
   // doesn't preempt a role goal already mid-flight.
-  const survival = nextSurvivalPriority();
+  let survival = nextSurvivalPriority();
+  // 2026-11-05: the residence item is fleet-wide (a bed for every active bot), and ahead of role work
+  // it kept the Farmer and the Herder building shelters while nobody grew or bred food. Theirs is
+  // food; the others build the residences.
+  const roleWork = await nextRoleWork();
+  if (survival?.name === "shelter" && roleWork) survival = null;
   if (survival) {
     currentGoal = newGoal({ description: survival.directive, source: "self" });
     currentGoal.survivalPriorityItem = survival.name;
@@ -4134,6 +4157,17 @@ async function proposeOwnGoal() {
   // nextBuilderPriority()'s own stall-aware pick goes first, then every other unmet item in
   // claim order, so a bot only sits this out entirely once EVERY gap is already claimed by
   // someone else -- a single Builder being busy, dead, or stuck no longer stalls the fleet.
+  if (roleWork) {
+    currentGoal = newGoal({ description: roleWork.directive, source: "self" });
+    currentGoal.farmTask = roleWork.task;
+    currentGoal.roleWork = true;
+    await saveGoal(PERSONA_NAME, currentGoal);
+    await broadcastGoalState("active", roleWork.directive);
+    console.log(`[${USERNAME}] ${myRole.primary.name} role goal (${roleWork.task}): ${roleWork.directive}`);
+    bot.chat(await narrateAction(`back to my own work: ${roleWork.directive}`));
+    return;
+  }
+
   const builderCandidates = builderPriorityCandidates();
   const preferredBuilderItem = nextBuilderPriority(builderCandidates);
   if (preferredBuilderItem) {
@@ -4520,6 +4554,7 @@ async function failGoalStep(goal, reason) {
   if (goal.consecutiveFailures >= limit) {
     console.log(`[${USERNAME}] giving up on goal after ${goal.consecutiveFailures} failures: ${goal.description}`);
     if (goal.standIn) standInGaveUpAt[goal.farmTask] = Date.now();
+    if (goal.roleWork) roleWorkGaveUpAt[goal.farmTask] = Date.now();
     recordGoalOutcome(goal.description, "gave up", reason);
     await broadcastGoalState("abandoned", goal.description);
     await retireGoal(goal);
@@ -4937,13 +4972,46 @@ const STAND_IN_GOALS = {
 const STAND_IN_RETRY_MS = 30 * 60_000;
 const standInGaveUpAt = { farm: 0, ranch: 0 };
 
+// 2026-11-05: or it's her own role. roleInGame() counts her too, so a hungry Farmer with nothing
+// to hunt never farmed -- the Farmer was "in the game" -- and the farm plots went back to grass.
 function standInRole() {
-  return Object.keys(STAND_IN_GOALS).find((task) => !roleInGame(STAND_IN_GOALS[task].role) &&
+  return Object.keys(STAND_IN_GOALS).find((task) => (!roleInGame(STAND_IN_GOALS[task].role) ||
+    myRole?.primary?.name === STAND_IN_GOALS[task].role) &&
     Date.now() - standInGaveUpAt[task] >= STAND_IN_RETRY_MS) ?? null;
 }
 
+// Role work (2026-11-05, direct report: "the herder is not herding, and no-one is farming. the farm
+// plots have all reverted to grass"). Nothing ever gave the Farmer or the Herder their own job:
+// farming and ranching ran only as a hungry bot's stand-in -- off whenever a bot with the role was
+// online, even for that bot -- or as the Builder checklist's last item, done for good after one
+// breeding. Right after Tier 1 survival, ahead of the shared checklist: the Farmer tends the farm
+// whenever nothing is growing or something is ripe; the Herder builds the herd up to
+// RANCH_HERD_TARGET penned animals. A goal given up waits ROLE_WORK_RETRY_MS.
+const ROLE_WORK_RETRY_MS = 30 * 60_000;
+const RANCH_HERD_TARGET = 6;
+const roleWorkGaveUpAt = { farm: 0, ranch: 0 };
+const ROLE_WORK_DIRECTIVES = {
+  farm: "you're the Farmer -- tend the farm near home: till ground, plant seeds, and harvest what's ripe for the fleet",
+  ranch: "you're the Herder -- build up the herd near home: a pen, two animals of one kind led into it, and breed them",
+};
+
+async function nextRoleWork() {
+  const role = myRole?.primary;
+  if (role === ROLES.FARMER && Date.now() - roleWorkGaveUpAt.farm >= ROLE_WORK_RETRY_MS) {
+    const status = farmStatus(bot, bot.spawnPoint ?? null);
+    if (status.ripe || !status.growing) return { task: "farm", directive: ROLE_WORK_DIRECTIVES.farm };
+  }
+  if (role === ROLES.HERDER && Date.now() - roleWorkGaveUpAt.ranch >= ROLE_WORK_RETRY_MS) {
+    const pen = await loadPenLocation();
+    const penned = pen ? Object.keys(BREEDING_FOOD).reduce((n, species) => n + countInPen(bot, pen, species), 0) : 0;
+    if (penned < RANCH_HERD_TARGET) return { task: "ranch", directive: ROLE_WORK_DIRECTIVES.ranch };
+  }
+  return null;
+}
+
 async function startStandInGoal(foodGoal, task) {
-  const { description } = STAND_IN_GOALS[task];
+  const description = myRole?.primary?.name === STAND_IN_GOALS[task].role
+    ? ROLE_WORK_DIRECTIVES[task] : STAND_IN_GOALS[task].description;
   console.log(`[${USERNAME}] food goal: nothing to hunt or harvest -- standing in: ${description}`);
   recordGoalOutcome(foodGoal.description, "handed off", description);
   await retireGoal(foodGoal);
@@ -5113,9 +5181,7 @@ async function shelterStep(goal, handle) {
   }
   if (plan.kind === "chest") {
     if (!holdsItem("chest")) return builderAcquireStep("chest", goal, handle);
-    const doorRow = plan.base.offset(0, 0, 2); // the door's way through
-    const cell = SHELTER_ROOM.map(([dx, dz]) => plan.base.offset(dx, 0, dz))
-      .find((p) => !p.equals(doorRow) && bot.blockAt(p)?.boundingBox !== "block" && !bot.isABed(bot.blockAt(p)));
+    const cell = residenceChestCell(plan.base);
     if (!cell) return { ok: false, text: "the residence has no free floor for a chest." };
     const placed = await performAction(bot, { type: "place", item: "chest", at: { x: cell.x, y: cell.y, z: cell.z } }, USERNAME, handle);
     return { ...placed, action: { type: "place", item: "chest" } };

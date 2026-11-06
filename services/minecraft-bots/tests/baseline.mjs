@@ -1,4 +1,4 @@
-// Version: 1.10.0
+// Version: 1.11.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -15,7 +15,8 @@
 // When a behavior fix lands, add the metric that proves it here (see tests/README.md), and after
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
-// Revision History: 1.10.0 | 2026-11-04 | full_inventory_dig_failures_per_bot_day,
+// Revision History: 1.11.0 | 2026-11-05 | residence_chest_refusals_per_bot_day, fence_craft_failures_per_bot_day.
+// 1.10.0 | 2026-11-04 | full_inventory_dig_failures_per_bot_day,
 //   missing_tool_failures_per_bot_day, mine_no_path_per_bot_day, utility_done_rejections_per_bot_day,
 //   shelter_capacity_noop_completions_per_bot_day (the 24h-review loops); drowning_emergencies_per_bot_day,
 //   store_destination_full_per_bot_day, trash_burned_per_bot_day.
@@ -274,6 +275,18 @@ const METRICS = {
     about: "shelter_capacity goals \"completed\" by a bot that already had her shelter -- ~100/bot-day on 2026-11-03",
     better: "lower", tolerance: 0.5, floor: 5,
     value: (c, ctx) => perBotDay(c(/goal complete \(built a shelter with a bed in it\): go home and build yourself/), ctx),
+  },
+  // 2026-11-05: two loops that kept the Herder from ever building a pen, and every bot's lower work
+  // behind a chest that couldn't go in. Both belong at ~0.
+  residence_chest_refusals_per_bot_day: {
+    about: "residence chest refused for cutting off a bed or door -- ~1,500/bot in a few hours on 2026-11-05 (two-bed shelter)",
+    better: "lower", tolerance: 0.5, floor: 2,
+    value: (c, ctx) => perBotDay(c(/\] shelter goal: a chest at .* would block/), ctx),
+  },
+  fence_craft_failures_per_bot_day: {
+    about: "\"craft <wood>_fence\" failed -- 20+/bot-day for Dale and Bob on 2026-11-04 (sticks made for one run, not eight)",
+    better: "lower", tolerance: 0.5, floor: 1,
+    value: (c, ctx) => perBotDay(c(/\] ranch goal: couldn't craft \w+_fence/), ctx),
   },
   drowning_emergencies_per_bot_day: {
     about: "drowning reflexes fired -- ~320/bot-day on 2026-11-04, most from a nearby squid's or dolphin's air read as hers",

@@ -1,5 +1,7 @@
-// Version: 1.38.0
+// Version: 1.39.0
 //
+// 1.39.0 (2026-11-05): 23 fences from 40 planks and 2 sticks -- the craft chain makes the other 14
+// sticks (actions.js 1.104.0).
 // 1.38.0 (2026-11-04): two new scenarios -- "mine stone" takes exposed stone before nearer buried
 // stone, and a torch is crafted from coal and logs (no planks in hand).
 //
@@ -592,6 +594,16 @@ scenario("Crafting: a wooden hoe from birch planks, with a birch log also in han
   const crafted = await performAction(bot, { type: "craft", item: "wooden_hoe", count: 1, here: true }, TESTER);
   assert.equal(crafted.ok, true, crafted.text);
   assert.equal(held("wooden_hoe"), 1, "a hoe in hand");
+});
+
+// 2026-11-05: Dale and Bob, "couldn't craft birch_fence: don't have the ingredients" with the planks
+// for a pen in hand -- the craft chain made sticks for one run of the recipe, not eight.
+scenario("Crafting: a pen's 23 fences from 40 planks and 2 sticks, the rest of the sticks made on the way", async () => {
+  await rcon(`give ${TESTER} minecraft:birch_planks 40`, `give ${TESTER} minecraft:stick 2`, `give ${TESTER} minecraft:crafting_table`);
+  await waitFor(() => held("birch_planks") >= 40 && held("stick") >= 2 && held("crafting_table") >= 1, 8000, "planks, sticks and table");
+  const crafted = await performAction(bot, { type: "craft", item: "birch_fence", count: 23, here: true }, TESTER);
+  assert.equal(crafted.ok, true, crafted.text);
+  await waitFor(() => held("birch_fence") >= 23, 10000, `23 fences in hand (${held("birch_fence")})`);
 });
 
 // 2026-11-01: a stand-in Farmer or Herder with empty chests gets seeds from grass ("gather_seeds",

@@ -1,5 +1,8 @@
-// Version: 1.103.0
+// Version: 1.104.0
 //
+// 1.104.0 (2026-11-05): craftItem's chain makes each ingredient for every run of the recipe, not
+// one -- 23 fences need 16 sticks, and it made none while two were in hand -- and crafts one run per
+// bot.craft() call, each waited for (mineflayer's multi-run craft worked from a stale inventory).
 // 1.103.0 (2026-11-04, 24h review): "mine" tries stone with an open face before buried stone, and
 // skips a target that just failed "No path" for 10 minutes. A stick can come from a log by way of
 // planks, so a torch is made from coal and logs. "place" takes `at`, one named cell (a residence's
@@ -2170,13 +2173,23 @@ async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
       // 2026-11-01: count() takes an item id. Given the name it always read 0, so with a recipe per
       // plank species (a wooden hoe has 12) every variant made more sticks, until Babs' 4 birch
       // planks were 16 sticks and no hoe. And once one variant is affordable, stop.
+      // 2026-11-05: for every run of the recipe, not one. 23 fences is 8 runs (16 sticks); holding
+      // enough for a single run (2), no stick was made, and "craft birch_fence" failed "don't have
+      // the ingredients" every tick -- Dale never built a pen.
+      const runs = Math.ceil(count / (recipe.result?.count || 1));
       for (const ing of inputs) {
         const ingName = bot.registry.items[ing.id]?.name;
         if (!ingName) continue;
+        const need = ing.count * runs;
         const have = bot.inventory.count(ing.id, null);
-        if (have >= ing.count) continue;
+        if (have >= need) continue;
         if (simpleSourceFor(bot, ingName)) {
-          await craftItem(bot, ingName, ing.count - have, tableBlock, depth + 1);
+          await craftItem(bot, ingName, need - have, tableBlock, depth + 1);
+          // bot.craft() resolves before the inventory shows what it made; recipesFor() below would
+          // read the old counts (live, 2026-11-05: 16 sticks made, the fences still "no ingredients").
+          for (let waited = 0; waited < 3000 && bot.inventory.count(ing.id, null) < need; waited += 100) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
         }
       }
       if (bot.recipesFor(itemDef.id, null, count, tableBlock ?? null).length) break;
@@ -2190,7 +2203,23 @@ async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
   // count is how many times to run the recipe. Passing it straight through (until 2026-10-29)
   // asked for 4x the planks, 3x the fences, 4x the torches: "craft 30 planks" with 8 logs passed
   // the recipesFor check and then failed on the 9th craft, every tick, all afternoon.
-  await bot.craft(recipes[0], Math.ceil(count / recipes[0].result.count), tableBlock ?? undefined);
+  // 2026-11-05: one run per bot.craft() call, each waited for. With several runs in one call,
+  // mineflayer's next run works from an inventory the server hasn't updated yet: it ran one of four
+  // stick runs without an error, and threw "missing ingredient" partway through 8 runs of fences --
+  // Dale's pen never got built. `count` is items wanted (2026-10-29), so the runs stop once the
+  // inventory shows that many made.
+  const held = () => bot.inventory.count(itemDef.id, null);
+  const before = held();
+  const runs = Math.ceil(count / recipes[0].result.count);
+  for (let run = 0; run < runs + 2 && held() - before < count; run++) { // +2: a run the server dropped
+    const recipe = run === 0 ? recipes[0] : bot.recipesFor(itemDef.id, null, 1, tableBlock ?? null)[0];
+    if (!recipe) break;
+    const had = held();
+    await bot.craft(recipe, 1, tableBlock ?? undefined);
+    for (let waited = 0; waited < 1500 && held() <= had; waited += 100) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
 }
 
 // Extracted from "loot" (2026-09-06's own real find, see 1.5.0's history) so "store" (2026-09-07,

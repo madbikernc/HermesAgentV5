@@ -1,4 +1,7 @@
-// Version: 1.50.0
+// Version: 1.51.0
+// 1.51.0 (2026-11-05): a two-bed shelter is not asked for a chest; craftItem's chain makes sticks for
+// every run; the Farmer and Herder get their own role work, and stand in for their own role (index.js
+// 2.134.0, actions.js 1.104.0).
 // 1.50.0 (2026-11-05): the extra-chest retry backs off on no wood, not on a failed craft (index.js 2.133.2).
 // 1.49.0 (2026-11-05): bobbing at a pool's surface (isInWater false for a tick) still runs the
 // shore search (index.js 2.133.1).
@@ -3172,17 +3175,74 @@ await check('Craft: a count is items wanted, not recipe runs', async () => {
   // 2026-10-29: craftItem passed its count straight to bot.craft(), which runs the recipe that
   // many times -- "craft 30 planks" needed 30 logs, and failed with 8.
   const runs = [];
-  const c = vm.createContext({
+  let made = 0;
+  const c = vm.createContext({ setTimeout,
     bot: { registry: { itemsByName: { oak_planks: { id: 1 }, white_bed: { id: 2 }, torch: { id: 3 } } },
+      inventory: { count: () => made },
       recipesFor: (id) => [{ result: { count: id === 1 ? 4 : id === 3 ? 4 : 1 } }],
-      craft: async (_recipe, count) => { runs.push(count); } },
+      craft: async (recipe, count) => { runs.push(count); made += recipe.result.count * count; } },
     recipeInputs: () => null, simpleSourceFor: () => null });
   vm.runInContext(between(actions, 'async function craftItem(', 'function chestObstructed('), c);
-  await c.craftItem(c.bot, 'oak_planks', 3, null);
-  await c.craftItem(c.bot, 'oak_planks', 30, null);
-  await c.craftItem(c.bot, 'white_bed', 1, null);
-  await c.craftItem(c.bot, 'torch', 16, null);
-  assert.equal(JSON.stringify(runs), JSON.stringify([1, 8, 1, 4]), '3 planks is one log, 30 is eight, one bed is one, 16 torches is four');
+  // 2026-11-05: one run per bot.craft() call -- mineflayer's multi-run craft read a stale inventory.
+  const callsFor = async (item, n) => { runs.length = 0; await c.craftItem(c.bot, item, n, null); return runs.length; };
+  assert.equal(await callsFor('oak_planks', 3), 1, '3 planks is one log');
+  assert.equal(await callsFor('oak_planks', 30), 8, '30 planks is eight');
+  assert.equal(await callsFor('white_bed', 1), 1, 'one bed is one');
+  assert.equal(await callsFor('torch', 16), 4, '16 torches is four');
+  assert(runs.every((n) => n === 1), 'every bot.craft() call is a single run');
+  // A run the server never credited is made again.
+  let dropped = 1;
+  c.bot.craft = async (recipe, count) => { runs.push(count); if (dropped-- > 0) return; made += recipe.result.count * count; };
+  assert.equal(await callsFor('torch', 16), 5, 'one run lost: a fifth, to get the 16 asked for');
+});
+
+await check('Craft: the ingredient chain makes enough for every run -- 23 fences need 16 sticks', async () => {
+  // Dale and Bob, 2026-11-04: "couldn't craft birch_fence: don't have the ingredients" 20+ times each
+  // with 40 planks and 2 sticks -- the chain checked one run's 2 sticks, so it never made more.
+  const inv = { planks: 40, stick: 2, fence: 0 };
+  const made = [];
+  const affordable = (id, count) => (id === 7 ? inv.stick >= 2 * Math.ceil(count / 3) && inv.planks >= 4 * Math.ceil(count / 3)
+    : inv.planks >= 2 * Math.ceil(count / 4));
+  const c = vm.createContext({
+    bot: { registry: { itemsByName: { birch_fence: { id: 7 }, stick: { id: 8 } }, items: { 5: { name: 'birch_planks' }, 8: { name: 'stick' } } },
+      inventory: { count: (id) => (id === 8 ? inv.stick : id === 7 ? inv.fence : inv.planks) },
+      recipesFor: (id, _m, count) => (affordable(id, count) ? [{ result: { count: id === 7 ? 3 : 4 } }] : []),
+      recipesAll: () => [{ result: { count: 3 }, delta: [{ id: 5, count: -4 }, { id: 8, count: -2 }, { id: 7, count: 3 }] }],
+      craft: async (r, runs) => { made.push([r.result.count, runs]); if (r.result.count === 4) { inv.stick += 4 * runs; inv.planks -= 2 * runs; } else inv.fence += 3 * runs; } },
+    recipeInputs: (r) => r.delta.filter((d) => d.count < 0).map((d) => ({ id: d.id, count: -d.count })),
+    simpleSourceFor: (_b, name) => name === 'stick', setTimeout });
+  vm.runInContext(between(actions, 'async function craftItem(', 'function chestObstructed('), c);
+  await c.craftItem(c.bot, 'birch_fence', 23, {});
+  assert.deepEqual(made, [...Array(4).fill([4, 1]), ...Array(8).fill([3, 1])], '14 more sticks (four runs), then eight fence runs');
+  assert.equal(inv.fence, 24, '23 fences asked for, 24 made');
+});
+
+await check('Role work: the Farmer farms and the Herder ranches on their own, not only as a stand-in', async () => {
+  // Direct report, 2026-11-05: "the herder is not herding, and no-one is farming. the farm plots have
+  // all reverted to grass". Nothing gave either role its own job.
+  let now = 10_000_000, crops = { ripe: 0, growing: 0 }, penned = 0, pen = null;
+  const ROLES = { FARMER: { name: 'Farmer' }, HERDER: { name: 'Herder' }, MINER: { name: 'Miner' } };
+  const c = vm.createContext({ ROLES, Date: { now: () => now }, bot: { spawnPoint: new V3(0, 64, 0) },
+    farmStatus: () => crops, loadPenLocation: async () => pen, BREEDING_FOOD: { cow: ['wheat'], sheep: ['wheat'] },
+    countInPen: () => penned, myRole: { primary: ROLES.FARMER } });
+  vm.runInContext(between(index, 'const ROLE_WORK_RETRY_MS', 'async function startStandInGoal('), c);
+  assert.equal((await c.nextRoleWork())?.task, 'farm', 'the Farmer, nothing growing: tend the farm');
+  crops = { ripe: 0, growing: 12 };
+  assert.equal(await c.nextRoleWork(), null, 'crops growing, none ripe: nothing to do yet');
+  crops = { ripe: 3, growing: 9 };
+  assert.equal((await c.nextRoleWork())?.task, 'farm', 'something ripe: harvest it');
+  vm.runInContext(`roleWorkGaveUpAt.farm = ${now}`, c);
+  assert.equal(await c.nextRoleWork(), null, 'a farm goal just given up waits');
+  c.myRole = { primary: ROLES.HERDER };
+  assert.equal((await c.nextRoleWork())?.task, 'ranch', 'the Herder, no pen yet: ranch');
+  pen = { center: new V3(10, 64, 10) }; penned = 6;
+  assert.equal(await c.nextRoleWork(), null, 'six penned: the herd is up');
+  c.myRole = { primary: ROLES.MINER };
+  penned = 0;
+  assert.equal(await c.nextRoleWork(), null, 'any other role: none');
+  assert.match(between(index, 'async function proposeOwnGoal(', 'if (myRole?.primary === ROLES.SOLDIER)'),
+    /nextSurvivalPriority\(\)[\s\S]*nextRoleWork\(\)[\s\S]*survival\?\.name === "shelter" && roleWork[\s\S]*builderPriorityCandidates\(\)/,
+    'after Tier 1 survival -- except the fleet-wide residence item, which yields to it -- ahead of the Builder checklist');
 });
 
 await check('Remembered spots: the nearest one wins, and one found empty on arrival is forgotten', async () => {
@@ -3302,7 +3362,7 @@ await check('Food goal: hunts, else takes a ripe crop -- never runs as a farm go
   let outcomes = {};
   const actions_ = [];
   const covered = { BOT_ROLES: { bob: { primary: { name: 'Farmer' } }, dale: { primary: { name: 'Herder' } } } };
-  const c = vm.createContext({ bot: { players: { Bob: {}, Dale: {} } }, USERNAME: 'Babs', hasFood: () => food, heldCount: () => 0, ...covered,
+  const c = vm.createContext({ bot: { players: { Bob: {}, Dale: {} } }, USERNAME: 'Babs', myRole: null, hasFood: () => food, heldCount: () => 0, ...covered,
     performAction: async (_b, action) => {
       actions_.push(action.type + (action.onlyRipe ? ':ripe' : ''));
       const r = outcomes[action.type] ?? { ok: false, text: 'nothing.' };
@@ -3330,7 +3390,7 @@ await check('Food goal: hunts, else takes a ripe crop -- never runs as a farm go
   // 2026-11-01: a step that found nothing used to be retried every 2s goal tick.
   let now = 1_000_000;
   const failures = [];
-  const g = vm.createContext({ bot: { players: { Bob: {}, Dale: {} } }, USERNAME: 'Babs', hasFood: () => false, heldCount: () => 0, ...covered,
+  const g = vm.createContext({ bot: { players: { Bob: {}, Dale: {} } }, USERNAME: 'Babs', myRole: null, hasFood: () => false, heldCount: () => 0, ...covered,
     logStep() {}, console: { log() {} },
     Date: { now: () => now }, failGoalStep: async (_g, why) => failures.push(why),
     completeGoal: async () => {}, performAction: async () => ({ ok: false, text: 'nothing.' }) });
@@ -3352,7 +3412,7 @@ await check('Stand-ins: with no Farmer in the game the food goal becomes a farm 
   const roster = { bob: { primary: { name: 'Farmer' } }, dale: { primary: { name: 'Herder' } }, babs: { primary: { name: 'Miner' } } };
   const started = [];
   const players = { Babs: {} };
-  const c = vm.createContext({ bot: { players }, USERNAME: 'Babs', BOT_ROLES: roster, Date: { now: () => now },
+  const c = vm.createContext({ bot: { players }, USERNAME: 'Babs', myRole: null, BOT_ROLES: roster, Date: { now: () => now },
     hasFood: () => false, heldCount: () => 0, logStep() {}, console: { log() {} }, recordGoalOutcome() {},
     performAction: async () => ({ ok: false, text: 'nothing.' }), failGoalStep: async () => { throw new Error('should hand off'); },
     completeGoal: async () => {}, retireGoal: async () => {}, saveGoal: async () => {}, PERSONA_NAME: 'babs',
@@ -3363,6 +3423,10 @@ await check('Stand-ins: with no Farmer in the game the food goal becomes a farm 
   assert.equal(c.standInRole(), 'ranch', 'Bob online, Dale not: ranch');
   players.Dale = {};
   assert.equal(c.standInRole(), null, 'both roles covered: no stand-in');
+  // 2026-11-05: Bob counted as "the Farmer in the game" for Bob himself, so a hungry Farmer never farmed.
+  c.myRole = roster.bob;
+  assert.equal(c.standInRole(), 'farm', 'the Farmer herself, hungry with nothing to hunt: she farms');
+  c.myRole = null;
   delete players.Bob; delete players.Dale;
   vm.runInContext(`standInGaveUpAt.farm = ${now - 60_000}`, c); // a script-level const, not a context property
   assert.equal(c.standInRole(), 'ranch', 'a farm stand-in that just gave up: ranch has a turn');
@@ -3380,7 +3444,7 @@ await check('Stand-ins: with no Farmer in the game the food goal becomes a farm 
 
 await check('Food goal: wheat she holds becomes bread', async () => {
   const calls = [];
-  const c = vm.createContext({ bot: { players: {} }, USERNAME: 'Babs', BOT_ROLES: {}, hasFood: () => false, heldCount: () => 7,
+  const c = vm.createContext({ bot: { players: {} }, USERNAME: 'Babs', myRole: null, BOT_ROLES: {}, hasFood: () => false, heldCount: () => 7,
     performAction: async (_b, action) => { calls.push(action); return { ok: true, text: 'crafted 2 bread.' }; } });
   vm.runInContext(between(index, 'async function foodStep(', 'async function runFoodGoal('), c);
   const r = await c.foodStep(null);
@@ -4255,7 +4319,7 @@ await check('Craft: the auto-chain works for shaped recipes too, so coal + plank
   const byId = Object.fromEntries(Object.entries(ITEM).map(([name, id]) => [id, { name, id }]));
   const inv = { oak_planks: 8, coal: 8, stick: 0, torch: 0 };
   const crafted = [];
-  const shaped = (out, ins) => ({ result: { id: ITEM[out] },
+  const shaped = (out, ins) => ({ result: { id: ITEM[out], count: 4 },
     delta: [...ins.map(([n, c]) => ({ id: ITEM[n], count: -c })), { id: ITEM[out], count: 4 }] });
   const RECIPES = { torch: shaped('torch', [['coal', 1], ['stick', 1]]), stick: shaped('stick', [['oak_planks', 2]]) };
 
@@ -4278,7 +4342,7 @@ await check('Craft: the auto-chain works for shaped recipes too, so coal + plank
       crafted.push(byId[recipe.result.id].name);
     },
   };
-  const c = vm.createContext({ bot, console: { log() {}, error() {} } });
+  const c = vm.createContext({ bot, console: { log() {}, error() {} }, setTimeout });
   // From simpleSourceFor so the chain's own "what makes a stick" helper comes along with it.
   vm.runInContext(between(actions, 'function simpleSourceFor(', '// Extracted from "loot"'), c);
 
@@ -4786,8 +4850,9 @@ const slice = (src, a, b) => { try { return between(src, a, b); } catch { return
 function residenceWorld({ online, shelters }) {
   const blocks = new Map();
   const key = (p) => `${p.x},${p.y},${p.z}`;
-  for (const { base, bed, chest } of shelters) {
+  for (const { base, bed, chest, secondBed } of shelters) {
     if (bed) { blocks.set(key(base), 'white_bed'); blocks.set(key(base.offset(0, 0, 1)), 'white_bed'); }
+    if (secondBed) { blocks.set(key(base.offset(1, 0, 0)), 'white_bed'); blocks.set(key(base.offset(1, 0, 1)), 'white_bed'); }
     if (chest) blocks.set(key(base.offset(1, 0, 2)), 'chest');
   }
   const bot = { players: Object.fromEntries(online.map((n) => [n, {}])), spawnPoint: new V3(0, 64, 0),
@@ -4806,7 +4871,7 @@ await check('Builder: shelter_capacity counts the bots in the game -- beds for t
     countUsableNearHome: () => 1, countNearHome: () => 1, getAchievements: () => ['bred:cow'],
     fleetHasReachedIronTools: () => false, communalShelterSatisfied: () => true,
     countQualifyingSheltersNearHome: () => world.bases.length, hasOwnShelterWithBed: () => true,
-    completeSheltersNearHome: () => world.bases,
+    completeSheltersNearHome: () => world.bases, wouldBlockAccess: () => null,
     shelterHasBed: (b) => c.bot.isABed(c.bot.blockAt(b)) });
   const use = (w) => { world = w; c.bot = w.bot; };
   use(world);
@@ -4928,7 +4993,8 @@ await check('Residences: a bed for each active bot -- in an empty shelter first,
     unfinishedShelterNearHome: () => null, findShelterSite: () => new V3(20, 64, 0),
     isDoorway: () => true, doorwayPosition: (b) => b.offset(0, 0, 3), shelterPositions: () => [], shelterMaterialCount: () => 0,
     gatherPlanks: async () => null,
-    completeSheltersNearHome: () => c.bases,
+    completeSheltersNearHome: () => c.bases, blockedCells: [],
+    wouldBlockAccess: (_b, p) => (c.blockedCells.some((q) => q.equals(p)) ? { fixture: 'white_bed', reason: 'the last way up to' } : null),
     shelterHasBed: (b) => c.bot.isABed(c.bot.blockAt(b)),
     performAction: async (_b, a) => { calls.push(a); return { ok: true, text: a.type }; } });
   const use = (w) => { c.bot = w.bot; c.bases = w.bases; calls.length = 0; };
@@ -4959,6 +5025,15 @@ await check('Residences: a bed for each active bot -- in an empty shelter first,
   use(residenceWorld({ online: ['Amy'], shelters: [{ base: new V3(0, 64, 0), bed: true, chest: true }] }));
   step = await c.shelterStep({}, null);
   assert.equal(step.done, true, 'one active bot, one residence with bed and chest: done');
+
+  // 2026-11-05: a bed in each column leaves one free cell, and it is one bed's last way in. Every
+  // bot asked for a chest there and was refused, ~1,500 times each, with all other work blocked.
+  use(residenceWorld({ online: ['Amy', 'Babs'], shelters: [{ base: new V3(0, 64, 0), bed: true, secondBed: true }] }));
+  c.blockedCells = [new V3(1, 64, 2)]; c.held = ['chest'];
+  step = await c.shelterStep({}, null);
+  assert(!calls.some((a) => a.type === 'place'), `no chest into a bed's last way in: ${step.text}`);
+  assert.equal(step.done, true, 'two beds for two active bots in a shelter with no room for a chest: done');
+  c.blockedCells = [];
 });
 
 await check('Trash: a near-broken weapon and rotten flesh go into visible lava; the only one of a kind stays', async () => {

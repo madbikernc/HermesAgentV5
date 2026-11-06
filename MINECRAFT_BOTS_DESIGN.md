@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.35.0
+**Version:** 2.36.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -496,6 +496,19 @@ logs or a tree (`gatherPlanks`) for the hoe, fences and gate, and wheat seeds fr
 (`gather_seeds`) for planting and for chickens. Wheat she holds becomes bread in the food goal.
 Plain fences are protected from the pathfinder's auto-dig like their gates (`isProtectedBlockName`):
 Amy cut through two fences of Babs' new pen, which stood against the shelters with no way round.
+
+**The Farmer and Herder do their own jobs** (direct report, 2026-11-05: "the herder is not herding,
+and no-one is farming. the farm plots have all reverted to grass"). Until then farming and ranching
+ran only as a hungry bot's stand-in, which was off whenever a bot with the role was online, even for
+that bot, or as the Builder checklist's last item, done for good after one breeding. `nextRoleWork()`
+now gives each its own goal in `proposeOwnGoal()`, after Tier 1 survival and ahead of the Builder
+checklist. The Farmer gets one whenever nothing is growing near home or something is ripe. The
+Herder gets one until 6 animals are penned. A goal given up waits 30 minutes. Tier 1's residence
+item, which is fleet-wide (a bed for every active bot), yields to role work: the others build the
+residences. A hungry Farmer or Herder also stands in for her own role. The fences for a pen
+(23) are crafted one recipe run per `bot.craft()` call, with the chain making sticks for every run.
+On this server mineflayer's multi-run craft worked from a stale inventory: it ran one of four stick
+runs and threw "missing ingredient" partway through the fences, so no pen was ever built.
 
 **Soldiers are carved out of general work.** `SOLDIER_DIRECTIVE_NOTE` restricts both Mayor's and
 Mark's directives to gear and combat, matching `nextSoldierPriority()`'s own scope so assigned
