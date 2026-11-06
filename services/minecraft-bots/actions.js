@@ -1,5 +1,7 @@
-// Version: 1.104.0
+// Version: 1.105.0
 //
+// 1.105.0 (2026-11-06): herd_to_pen looks 64 blocks out for a loose animal (was 32), with enough
+// herding steps to lead it back from there.
 // 1.104.0 (2026-11-05): craftItem's chain makes each ingredient for every run of the recipe, not
 // one -- 23 fences need 16 sticks, and it made none while two were in hand -- and crafts one run per
 // bot.craft() call, each waited for (mineflayer's multi-run craft worked from a stale inventory).
@@ -2547,6 +2549,10 @@ function findPlantableSpotNear(bot, center, radius) {
 // the new "herd_to_pen" case below can share one definition -- it used to live only inside
 // "breed"'s own case block, which meant the herding verb would otherwise need a second,
 // independently-drifting copy of which food tempts which species.
+// 2026-11-06: 32 blocks found no chicken near Dale's new pen 20 times running; the animals that
+// made pickRanchSpecies() choose chickens were up to 48 from the pen.
+const HERD_SEARCH_RADIUS = 64;
+
 const BREEDING_FOOD = {
   cow: ["wheat"], sheep: ["wheat"], pig: ["carrot", "potato", "beetroot"],
   chicken: ["wheat_seeds", "pumpkin_seeds", "melon_seeds", "beetroot_seeds"],
@@ -5478,7 +5484,7 @@ async function performActionAs(bot, action, speaker, token) {
       const animal = Object.values(bot.entities)
         .filter((e) => e.name === action.species &&
           !(Math.abs(e.position.x - (pen.center.x + 0.5)) < 2.6 && Math.abs(e.position.z - (pen.center.z + 0.5)) < 2.6) && // not already penned
-          e.position.distanceTo(bot.entity.position) <= 32)
+          e.position.distanceTo(bot.entity.position) <= HERD_SEARCH_RADIUS)
         .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
       if (!animal) return fail(`no loose ${action.species} nearby to herd.`);
 
@@ -5509,7 +5515,9 @@ async function performActionAs(bot, action, speaker, token) {
 
 
       const HERD_STEP_DISTANCE = 3;
-      const HERD_MAX_STEPS = 15;
+      // 2026-11-06: enough steps for the distance -- 15 steps of 3 blocks stopped 45 blocks short of a
+      // pen 64 away, the radius she now looks in.
+      const HERD_MAX_STEPS = Math.min(40, Math.max(15, Math.ceil(animal.position.distanceTo(pen.gate) / HERD_STEP_DISTANCE) + 5));
       const HERD_FOLLOW_RANGE = 8; // generous margin over vanilla TemptGoal's own real tempt radius
       const waitForAnimal = async (done, ms) => {
         for (let waited = 0; waited < ms && !token.cancelled && !done(); waited += 250) {

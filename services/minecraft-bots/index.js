@@ -1,5 +1,10 @@
-// Version: 2.134.1
+// Version: 2.135.0
 //
+// 2.135.0 (2026-11-06, direct report: "there's a pen but none of the livestock is moved to it"): the
+// ranch goal picks its species again once that species is gone, counts animals 64 blocks round the
+// pen, and with none of any kind goes exploring instead of failing in place.
+// 2.134.2 (2026-11-06): findNearestShore tells water by name (isWet), not block.liquid, which
+// mineflayer's Block doesn't have -- the "shore" it found was the sea floor.
 // 2.134.1 (2026-11-06): gatherPlanks with no tree within 32 blocks goes looking ("mine" oak_log: a
 // remembered spot, then a wandering search) instead of failing -- the fresh world's spawn has none.
 // 2.134.0 (2026-11-05): the Farmer and Herder do their own jobs (nextRoleWork, after Tier 1 but
@@ -4657,9 +4662,11 @@ function woodKind() {
   return wood ? wood.replace(/^stripped_/, "").replace(/_(planks|log|stem)$/, "") : "oak";
 }
 
+const RANCH_SPECIES_RADIUS = 64; // matches herd_to_pen's own search (actions.js HERD_SEARCH_RADIUS)
+
 function pickRanchSpecies(pen) {
   return LIVESTOCK.map((species) => [species, Object.values(bot.entities)
-    .filter((e) => e.name === species && e.position.distanceTo(pen.center) <= 48).length])
+    .filter((e) => e.name === species && e.position.distanceTo(pen.center) <= RANCH_SPECIES_RADIUS).length])
     .filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 }
 
@@ -4689,7 +4696,13 @@ async function ranchStep(goal, handle) {
     return { ...(await performAction(bot, { type: "build_pen", at: site }, USERNAME, handle)), action: { type: "build_pen" } };
   }
   const species = goal.ranchSpecies ?? pickRanchSpecies(pen);
-  if (!species) return { ok: false, text: "no two animals of one kind anywhere near the pen." };
+  if (!species) {
+    // 2026-11-06: none in sight is no reason to stand by the pen -- walking out loads new ground,
+    // and its animals with it.
+    const looked = await performAction(bot, { type: "explore" }, USERNAME, handle);
+    if (looked.cancelled) return { ...looked, action: { type: "explore" } };
+    return { ok: false, text: "no two animals of one kind anywhere near the pen -- went looking.", action: { type: "explore" } };
+  }
   goal.ranchSpecies = species;
   const foods = BREEDING_FOOD[species];
   if (!bot.inventory.items().some((i) => foods.includes(i.name))) {
@@ -4703,8 +4716,11 @@ async function ranchStep(goal, handle) {
     return { ok: false, text: `need ${foods[0]} to lure and breed ${species}s, and no chest has any.` };
   }
   if (countInPen(bot, pen, species) < 2) {
-    return { ...(await performAction(bot, { type: "herd_to_pen", species }, USERNAME, handle)),
-      action: { type: "herd_to_pen", species } };
+    const herded = await performAction(bot, { type: "herd_to_pen", species }, USERNAME, handle);
+    // 2026-11-06: the species stayed chosen after its animals were gone ("no loose chicken nearby to
+    // herd", 20 times running for Dale). Choose again next step.
+    if (!herded.ok && !herded.cancelled && /^no loose /.test(herded.text)) goal.ranchSpecies = null;
+    return { ...herded, action: { type: "herd_to_pen", species } };
   }
   const bred = await performAction(bot, { type: "breed", species, near: pen.center }, USERNAME, handle);
   return { ...bred, done: !!bred.bred, action: { type: "breed", species } };
@@ -8597,14 +8613,24 @@ function findNearestShore(bot, maxDistance) {
     // position (Block.fromStateId) -- returning false there skipped every section, so no shore was
     // ever found (490 "couldn't find dry land" in 14 days, not one "heading for dry land"). A
     // position-less block gets the cheap half of the test.
+    // 2026-11-06: by name, not block.liquid -- mineflayer's Block has no such property, so a water
+    // block over sand read as air over dry ground and the "shore" was the sea floor (Dale: "heading
+    // for dry land at (-158, 54, -75)", sea level 63, then No path, ~300 times in an hour).
     matching: (block) => {
-      if (!block || block.liquid || block.boundingBox === "block") return false;
+      if (!block || isWet(block) || block.boundingBox === "block") return false;
       if (!block.position) return true;
       const below = bot.blockAt(block.position.offset(0, -1, 0));
-      return !!below && !below.liquid && below.boundingBox === "block";
+      const above = bot.blockAt(block.position.offset(0, 1, 0));
+      return !!below && !isWet(below) && below.boundingBox === "block" &&
+        !!above && !isWet(above) && above.boundingBox !== "block";
     },
   });
   return positions[0] || null;
+}
+
+const WET_BLOCK_NAMES = new Set(["water", "bubble_column", "kelp", "kelp_plant", "seagrass", "tall_seagrass", "lava"]);
+function isWet(block) {
+  return WET_BLOCK_NAMES.has(block.name) || block.getProperties?.().waterlogged === true;
 }
 
 bot.on("breath", () => {

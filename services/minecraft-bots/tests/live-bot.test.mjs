@@ -1,4 +1,4 @@
-// Version: 1.3.1
+// Version: 1.4.0
 //
 // Full-bot live tests: runs a REAL bot process (index.js, as "MBProbe") against the bot-sandbox
 // server and drives it the way a player would -- whispers from the MBTester bot, restarts, injected
@@ -35,6 +35,8 @@
 //   deep pool to dry land with one emergency, and a new chest when every chest at home is full.
 // 1.3.1 | 2026-11-05 | The full-chest scenario fills the chest only once the logs are in hand (it
 //   raced the storage check during boot and the 10-minute chest retry outlasted the wait).
+// 1.4.0 | 2026-11-06 | The Water scenario's pool is wide and shallow, and its shore must be above the
+//   water, not the pool's own floor.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import http from "node:http";
@@ -363,20 +365,27 @@ scenario("Trash: a spent sword and rotten flesh go into the lava; the good sword
 });
 
 // Direct report, 2026-11-04: "the bots do not seem to be able to get out of water". A pool six
-// deep cut into the arena floor beside dry floor; the probe starts at the bottom. It surfaces once
+// cut into the arena floor beside dry floor; the probe starts at the bottom. It surfaces once
 // and swims to land -- the old shore search never matched anything.
 scenario("Water: from the bottom of a deep pool she surfaces once and reaches dry land", async () => {
   const root = newRoot();
-  const [px, pz] = [HOME[0] - 6, HOME[2]];
-  await rcon(`fill ${px - 3} ${y - 7} ${pz - 3} ${px + 3} ${y - 1} ${pz + 3} minecraft:glass`,
-    `fill ${px - 2} ${y - 6} ${pz - 2} ${px + 2} ${y} ${pz + 2} minecraft:water`);
-  scenarioCleanup.push(() => rcon(`fill ${px - 3} ${y - 7} ${pz - 3} ${px + 3} ${y - 1} ${pz + 3} minecraft:air`,
-    `fill ${px - 3} ${y} ${pz - 3} ${px + 3} ${y} ${pz + 3} minecraft:sea_lantern`));
+  // 2026-11-06: wide and shallow, like the sea -- from mid-pool its own bottom (2 down) is nearer than
+  // the floor round it (7 across), which is what made the live "shore" the sea floor. The old pool,
+  // 5 wide and 6 deep, had dry floor nearer than its bottom and could not catch that.
+  const [px, pz, R] = [1997, 2003, 6];
+  await rcon(`fill ${px - R - 1} ${y - 3} ${pz - R - 1} ${px + R + 1} ${y} ${pz + R + 1} minecraft:glass`,
+    `fill ${px - R} ${y - 2} ${pz - R} ${px + R} ${y} ${pz + R} minecraft:water`);
+  scenarioCleanup.push(() => rcon(`fill ${px - R - 1} ${y - 3} ${pz - R - 1} ${px + R + 1} ${y - 1} ${pz + R + 1} minecraft:air`,
+    `fill ${px - R - 1} ${y} ${pz - R - 1} ${px + R + 1} ${y} ${pz + R + 1} minecraft:sea_lantern`));
   await bootProbe(root, { MC_GOAL_TICK_MS: "600000" });
   const t0 = Date.now();
-  await rcon(`tp ${PROBE} ${px} ${y - 5} ${pz}`);
+  await rcon(`tp ${PROBE} ${px} ${y - 2} ${pz}`);
   await probe.waitLine(/EMERGENCY: oxygen critical/, 60_000, t0);
-  await probe.waitLine(/heading for dry land at/, 20_000, t0);
+  const heading = await probe.waitLine(/heading for dry land at/, 20_000, t0);
+  // 2026-11-06: up on the floor, not the pool's own bottom -- a water block over glass passed as
+  // dry land, and live the "shore" was the sea floor.
+  const shoreY = Number(heading.text.match(/y: (-?\d+)/)?.[1]);
+  assert(shoreY > y, `the shore is above the water, not under it (y=${shoreY}, surface ${y})`);
   await probe.waitLine(/reached shore attempt finished \(isInWater=false\)/, 30_000, t0);
   const emergencies = probe.lines.filter((l) => l.at >= t0 && /EMERGENCY: oxygen critical/.test(l.text)).length;
   assert(emergencies <= 1, `one emergency, not a burst (${emergencies})`);

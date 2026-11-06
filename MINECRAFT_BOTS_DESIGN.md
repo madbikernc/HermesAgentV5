@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.37.0
+**Version:** 2.38.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -286,7 +286,13 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   answered false for those, so every section was skipped and no shore was ever found (490 "couldn't
   find dry land" in 14 days, not one "heading for dry land"). A position-less block now gets the
   cheap half of the test; the same fix went to `light_area`'s dark-spot search and
-  `plant_sapling`'s ground search, which had the same silent never-matches bug.
+  `plant_sapling`'s ground search, which had the same silent never-matches bug. A third, found
+  2026-11-06 once the shore search matched at all: it told water apart by `block.liquid`, which
+  mineflayer's Block doesn't have, so a water block over sand read as air over dry ground and the
+  "shore" was the sea floor (~300 No-path trips per bot an hour). It now goes by name (`isWet`:
+  water, bubble columns, kelp, seagrass, waterlogged blocks) and also wants headroom above the spot.
+  The shore search also runs while she is still at water, not only while `isInWater`: bobbing at
+  the surface reads false for a tick.
 - **Tools and shelters improve over time** (direct request, 2026-10-28). Two items at the bottom
   of the Tier 1 survival ladder, after armor, each behind a 20-minute retry timer so one that's
   stuck never crowds out the rest. **Tools**: every bot keeps a pickaxe, axe, sword, shovel and
@@ -509,6 +515,10 @@ residences. A hungry Farmer or Herder also stands in for her own role. The fence
 (23) are crafted one recipe run per `bot.craft()` call, with the chain making sticks for every run.
 On this server mineflayer's multi-run craft worked from a stale inventory: it ran one of four stick
 runs and threw "missing ingredient" partway through the fences, so no pen was ever built.
+Herding looks 64 blocks out for a loose animal (it was 32), with enough steps to lead one back from
+that far, and the ranch goal chooses its species again once the chosen one is gone: Dale's stayed
+on chickens through 20 straight "no loose chicken nearby". With no two animals of a kind in sight,
+it walks out (`explore`) rather than failing by the pen.
 
 **Soldiers are carved out of general work.** `SOLDIER_DIRECTIVE_NOTE` restricts both Mayor's and
 Mark's directives to gear and combat, matching `nextSoldierPriority()`'s own scope so assigned

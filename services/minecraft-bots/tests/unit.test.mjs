@@ -1,4 +1,7 @@
-// Version: 1.52.0
+// Version: 1.54.0
+// 1.54.0 (2026-11-06): the ranch goal re-picks a vanished species and explores with none in sight;
+// herd_to_pen looks 64 out (index.js 2.135.0, actions.js 1.105.0).
+// 1.53.0 (2026-11-06): the sea floor is not a shore (index.js 2.134.2).
 // 1.52.0 (2026-11-06): gatherPlanks with no tree in sight goes looking (index.js 2.134.1).
 // 1.51.0 (2026-11-05): a two-bed shelter is not asked for a chest; craftItem's chain makes sticks for
 // every run; the Farmer and Herder get their own role work, and stand in for their own role (index.js
@@ -3497,6 +3500,37 @@ await check('Ranch goals: chicken feed comes from grass when no chest has any', 
   assert.deepEqual(calls, ['loot:wheat_seeds', 'gather_seeds']);
 });
 
+await check('Ranch goals: a species whose animals are gone is chosen again; with none at all she goes looking', async () => {
+  // Direct report, 2026-11-06: "there's a pen but none of the livestock is moved to it". Dale's goal
+  // stayed on chickens through 20 "no loose chicken nearby to herd" in a row.
+  const calls = [];
+  const pen = { center: new V3(20, 64, 20), gate: new V3(20, 64, 22) };
+  let herdResult = { ok: false, text: 'no loose chicken nearby to herd.' };
+  const entities = { 1: { name: 'cow', position: new V3(70, 64, 20) }, 2: { name: 'cow', position: new V3(72, 64, 20) } };
+  const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Dale', MAX_CONSECUTIVE_FAILURES: 3,
+    bot: { chat() {}, spawnPoint: new V3(0, 64, 0), inventory: { items: () => [{ name: 'wheat', count: 8 }, { name: 'wheat_seeds', count: 8 }] },
+      registry: { blocksByName: {} }, findBlocks: () => [], entities },
+    Vec3: V3, performAction: async (_b, action) => { calls.push(action.type + (action.species ? `:${action.species}` : ''));
+      return action.type === 'herd_to_pen' ? herdResult : { ok: true, text: 'looked around' }; },
+    farmStatus: () => ({ ripe: 0, growing: 0 }), narrateAction: async (t) => t, recordGoalOutcome() {},
+    broadcastGoalState: async () => {}, retireGoal: async () => {}, saveGoalIfCurrent: async () => {},
+    logStep: () => {}, loadPenLocation: async () => pen, LIVESTOCK: ['chicken', 'cow'],
+    BREEDING_FOOD: { chicken: ['wheat_seeds'], cow: ['wheat'] }, countInPen: () => 0, findPenSite: () => null });
+  vm.runInContext(farmGoalSrc(), c);
+  const goal = { ranchSpecies: 'chicken' };
+  await c.ranchStep(goal, null);
+  assert.deepEqual(calls, ['herd_to_pen:chicken']);
+  assert.equal(goal.ranchSpecies, null, 'the chickens are gone: choose again');
+  await c.ranchStep(goal, null);
+  assert.equal(calls.at(-1), 'herd_to_pen:cow', 'two cows 50 blocks from the pen are the herd now');
+  for (const k of Object.keys(entities)) delete entities[k];
+  goal.ranchSpecies = null;
+  const step = await c.ranchStep(goal, null);
+  assert.equal(calls.at(-1), 'explore', `no animals in sight: she walks out to find some -- ${step.text}`);
+  assert.match(between(actions, '    case "herd_to_pen": {', '\n    case "'), /<= HERD_SEARCH_RADIUS\)/, 'herd_to_pen looks HERD_SEARCH_RADIUS out');
+  assert.match(actions, /const HERD_SEARCH_RADIUS = 64;/);
+});
+
 await check('Shelter upgrade: dirt and wood cells are dug out and refilled with stone, one at a time', async () => {
   // Direct request, 2026-10-28: "gradually replace the earth shelter with stone".
   const key = (p) => `${p.x},${p.y},${p.z}`;
@@ -5108,6 +5142,18 @@ await check('Water: the drowning reflex reads her own air, and the shore search 
     blockAt: (p) => (p.y === 63 ? { name: 'stone', boundingBox: 'block', liquid: false } : { name: 'air', boundingBox: 'empty' }),
   };
   assert.deepEqual(c.findNearestShore(shoreBot, 48), land, 'dry land beside the water is found');
+
+  // 2026-11-06: mineflayer's Block has no `liquid`. A water block over sand passed as air over dry
+  // ground -- the "shore" was the sea floor, 9 blocks down, and every trip there failed No path.
+  const seabed = new V3(0, 54, 0);
+  const seaBot = {
+    findBlocks: ({ matching }) => {
+      if (!matching({ name: 'water', boundingBox: 'empty' })) return [];
+      return matching({ name: 'water', boundingBox: 'empty', position: seabed }) ? [seabed] : [];
+    },
+    blockAt: (p) => (p.y < 54 ? { name: 'sand', boundingBox: 'block' } : { name: 'water', boundingBox: 'empty' }),
+  };
+  assert.equal(c.findNearestShore(seaBot, 48), null, 'water over sand is the sea floor, not dry land');
 });
 
 await check('Water: bobbing at the surface (isInWater false for a tick) still sends her for the shore', async () => {
