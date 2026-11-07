@@ -1,4 +1,8 @@
-// Version: 1.54.0
+// Version: 1.57.0
+// 1.57.0 (2026-11-07): a search out of budget walks its partial path and searches again (swim-movements.js 1.6.0).
+// 1.56.0 (2026-11-07): chest searches reach 128 blocks, far chests walked in hops (actions.js 1.107.0).
+// 1.55.0 (2026-11-07): chests chosen by what they're known to hold, and a split kind of item moved
+// together in full stacks (actions.js 1.106.0, index.js 2.136.0).
 // 1.54.0 (2026-11-06): the ranch goal re-picks a vanished species and explores with none in sight;
 // herd_to_pen looks 64 out (index.js 2.135.0, actions.js 1.105.0).
 // 1.53.0 (2026-11-06): the sea floor is not a shore (index.js 2.134.2).
@@ -212,6 +216,9 @@ function context(bot, extras = {}) {
     // test using this shared context keeps working without having to know about it; a test that
     // actually cares passes its own via `extras`, which overrides this default.
     noteUtilityOutcome: () => {},
+    // 2026-11-07: chest searches reach CHEST_SEARCH_RADIUS and walk far chests in hops (hopToward),
+    // both defined above every slice taken here.
+    CHEST_SEARCH_RADIUS: 128, hopToward: async () => {},
     ...extras });
 }
 
@@ -5179,6 +5186,237 @@ await check('Water: bobbing at the surface (isInWater false for a tick) still se
   await sleep(300);
   assert(logs.some((l) => /surfaced .*stillInWater=false/.test(l)), 'she surfaced');
   assert(logs.some((l) => /dry land/.test(l)), 'the shore search ran with water still at her feet');
+});
+
+// 2026-11-07 (actions.js 1.106.0): chests are chosen by what the fleet knows they hold, and one kind
+// of item split between two chests is brought together.
+function chestMemoryStubs(known) {
+  const files = { k: JSON.stringify(known) };
+  return {
+    Vec3: V3, FOOD_NAMES: ['bread', 'beef'], KNOWN_CHESTS_FILE: 'k', path: { dirname: () => '.' }, CHEST_SEARCH_RADIUS: 128,
+    readFile: async (f) => { if (!(f in files)) throw new Error('ENOENT'); return files[f]; },
+    writeFile: async (f, data) => { files[f] = data; }, mkdir: async () => {},
+  };
+}
+const chestMemorySrc = between(actions, 'function chestKey(', '// The read-side counterpart');
+function chestMemory(known = {}) {
+  const c = vm.createContext({ ...chestMemoryStubs(known), console: { log() {}, error() {} } });
+  vm.runInContext(chestMemorySrc, c);
+  return c;
+}
+const chestAt = (x, contents, extra = {}) => ({ position: { x, y: 64, z: 0 }, contents, ...extra });
+
+await check('Chests: an item is stored with its own kind before the nearest empty chest', async () => {
+  const c = chestMemory();
+  const known = {
+    '2,64,0': chestAt(2, {}),
+    '4,64,0': chestAt(4, { white_wool: 5 }),
+    '8,64,0': chestAt(8, { oak_log: 12 }),
+    '10,64,0': chestAt(10, { birch_log: 64 }, { freeSlots: 0 }),
+    '12,64,0': chestAt(12, { birch_log: 3 }),
+    '100,64,0': chestAt(100, { birch_log: 30 }),
+    '200,64,0': chestAt(200, { birch_log: 30 }),
+  };
+  const seen = [new V3(2, 64, 0), new V3(3, 64, 0), new V3(4, 64, 0)]; // (3,64,0) never opened
+  const order = Array.from(c.rankStoreChests(known, seen, 'birch_log', new V3(0, 64, 0)), (r) => r.position.x);
+  assert.deepEqual(order, [12, 100, 8, 2, 3, 4, 10],
+    'same item (100 blocks off still counts), then same kind, then empty/unknown, then other things, a full chest last, 200 off not at all');
+  assert.equal(c.itemFamily('spruce_wood'), 'log'); assert.equal(c.itemFamily('red_wool'), 'wool');
+  assert.equal(c.itemFamily('cobbled_deepslate'), 'stone'); assert.equal(c.itemFamily('raw_iron'), 'ore');
+  assert.equal(c.itemFamily('beef'), 'food'); assert.equal(c.itemFamily('stone_pickaxe'), 'tools');
+});
+
+await check('Chests: a split kind is moved from the smaller pile to the larger, not into a full chest', async () => {
+  const c = chestMemory();
+  const known = {
+    '0,64,0': chestAt(0, { oak_log: 10, bread: 4 }),
+    '5,64,0': chestAt(5, { birch_log: 70, cobblestone: 64 }, { freeSlots: 5 }),
+    '9,64,0': chestAt(9, { bread: 30 }, { freeSlots: 0 }),
+    '200,64,0': chestAt(200, { oak_log: 500 }),
+  };
+  const plan = c.findConsolidation(known, new V3(0, 64, 0));
+  assert.equal(plan.family, 'log');
+  assert.equal(plan.from.position.x, 0); assert.equal(plan.to.position.x, 5);
+  assert.deepEqual({ ...plan.from.items }, { oak_log: 10 });
+  assert.equal(c.findConsolidation(known, new V3(0, 64, 0), { involving: '9,64,0' }), null,
+    'the bread chest is full, so there is nothing to bring into it');
+  assert.equal(c.findConsolidation({ a: chestAt(0, { oak_log: 1 }), b: chestAt(3, { white_wool: 1 }) }, new V3(0, 64, 0)), null);
+});
+
+await check('Chests: looking into a chest that shares a kind with another leaves the move as a hint', async () => {
+  const c = chestMemory({ '5,64,0': chestAt(5, { birch_log: 40 }, { freeSlots: 10 }) });
+  await c.recordChestSnapshot(new V3(0, 64, 0), [{ name: 'white_wool', count: 3 }], 27);
+  assert.equal(c.consolidationPending(), false, 'wool and logs are not the same kind');
+  await c.recordChestSnapshot(new V3(0, 64, 0), [{ name: 'oak_log', count: 3 }], 27);
+  const plan = c.takeConsolidationHint();
+  assert.equal(plan.family, 'log'); assert.equal(plan.to.position.x, 5);
+  assert.equal(c.consolidationPending(), false, 'taking the hint clears it');
+});
+
+// A bot, its inventory and real-enough chests: withdraw/deposit move counts between them, and a
+// deposit tops up part-filled stacks before starting new ones, as mineflayer's transfer() does.
+function chestWorld(chests, held) {
+  const stackSize = 64;
+  const names = { 5: 'oak_log', 6: 'birch_log' };
+  const bot = makeBot();
+  const opened = [];
+  const deposits = [];
+  const inv = held.map((i) => ({ ...i }));
+  Object.assign(bot, {
+    username: 'Amy', entity: { position: new V3(0, 64, 0) },
+    registry: { itemsByName: { oak_log: { id: 5 }, birch_log: { id: 6 } }, blocksByName: { chest: { id: 9 } } },
+    blockAt: (p) => ({ type: 9, name: 'chest', position: new V3(p.x, p.y, p.z) }),
+    findBlocks: () => Object.keys(chests).map((k) => new V3(...k.split(',').map(Number))),
+    inventory: {
+      items: () => inv.filter((i) => i.count > 0),
+      count: (type) => inv.filter((i) => i.type === type).reduce((n, i) => n + i.count, 0),
+      emptySlotCount: () => 36 - inv.filter((i) => i.count > 0).length,
+    },
+    openChest: async (block) => {
+      const key = `${block.position.x},${block.position.y},${block.position.z}`;
+      opened.push(key);
+      const slots = chests[key];
+      return {
+        inventoryStart: 27,
+        containerItems: () => slots.filter((i) => i.count > 0).map((i) => ({ ...i, stackSize })),
+        items: () => inv.filter((i) => i.count > 0),
+        async withdraw(type, _, n) {
+          for (const slot of slots) {
+            if (slot.type !== type || !n) continue;
+            const t = Math.min(n, slot.count); slot.count -= t; n -= t;
+            inv.push({ type, name: slot.name, count: t });
+          }
+        },
+        async deposit(type, _, n) {
+          deposits.push([key, type, n]);
+          let left = n;
+          for (const item of inv) { if (item.type === type && left) { const t = Math.min(left, item.count); item.count -= t; left -= t; } }
+          left = n;
+          for (const slot of slots) {
+            if (slot.type === type && slot.count && slot.count < stackSize) { const t = Math.min(left, stackSize - slot.count); slot.count += t; left -= t; }
+          }
+          while (left > 0) { const t = Math.min(left, stackSize); slots.push({ type, name: names[type], count: t }); left -= t; }
+        },
+        async close() {},
+      };
+    },
+  });
+  bot.pathfinder.goto = async () => {};
+  return { bot, opened, deposits };
+}
+function chestActionContext(bot, known) {
+  const ctx = context(bot, { chestObstructed: () => false, wanderAndRetryFind: async () => [], ...chestMemoryStubs(known) });
+  vm.runInContext(timeoutFn + chestMemorySrc + actionFn, ctx);
+  return ctx;
+}
+
+await check('Chests: loot and the chest-first fallback look 128 blocks out, walking far chests in hops', async () => {
+  const bot = makeBot();
+  const radii = [];
+  Object.assign(bot, { registry: { blocksByName: { chest: { id: 9 } }, itemsByName: {} },
+    findBlocks: (o) => { radii.push(o.maxDistance); return []; } });
+  const c = context(bot, { chestObstructed: () => false, wanderAndRetryFind: async () => [],
+    findKnownChestWithItem: async () => null, refreshGear: async () => {}, CHEST_CHECK_MAX_CANDIDATES: 3 });
+  vm.runInContext(timeoutFn + between(actions, 'async function searchChestsFor(', '// Extracted from tryTakeFromNearbyChest') + actionFn, c);
+  await c.searchChestsFor(bot, { cancelled: false }, ['stick'], 2);
+  await c.performAction(bot, { type: 'loot' }, 'test');
+  assert.deepEqual(radii, [128, 128]);
+  // hopToward: a chest 120 blocks east is walked to in 40-block hops, and one 30 away not at all.
+  const hops = [];
+  const walker = { entity: { position: new V3(0, 64, 0) }, pathfinder: { setGoal() {},
+    goto: async (g) => { hops.push(Math.round(g.x)); walker.entity.position = new V3(g.x, 64, g.z); } } };
+  const h = vm.createContext({ setTimeout, clearTimeout, Promise, EXPLORE_DISTANCE: 40, MAX_DIRECTED_HOPS: 4, EXPLORE_TIMEOUT_MS: 1000,
+    goals: { GoalNearXZ: class { constructor(x, z) { this.x = x; this.z = z; } } } });
+  vm.runInContext(timeoutFn + between(actions, 'async function hopToward(', 'async function gotoRememberedSpot('), h);
+  await h.hopToward(walker, { cancelled: false }, new V3(120, 64, 0));
+  assert.deepEqual(hops, [40, 80]);
+  hops.length = 0; walker.entity.position = new V3(0, 64, 0);
+  await h.hopToward(walker, { cancelled: false }, new V3(30, 64, 0));
+  assert.deepEqual(hops, []);
+});
+
+await check('Chests: store walks past the nearest empty chest to the one already holding that kind', async () => {
+  const chests = { '2,64,0': [], '9,64,0': [{ type: 6, name: 'birch_log', count: 20 }] };
+  const { bot, opened } = chestWorld(chests, [{ type: 5, name: 'oak_log', count: 8 }]);
+  const ctx = chestActionContext(bot, {
+    '2,64,0': chestAt(2, {}, { freeSlots: 27 }), '9,64,0': chestAt(9, { birch_log: 20 }, { freeSlots: 26 }) });
+  const result = await ctx.performAction(bot, { type: 'store', item: 'oak_log', count: Infinity }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(opened, ['9,64,0'], 'the logs went in with the other logs');
+});
+
+await check('Chests: consolidating moves the smaller pile in as full stacks and leaves her own logs alone', async () => {
+  const chests = {
+    '0,64,0': [{ type: 5, name: 'oak_log', count: 10 }],
+    '5,64,0': [{ type: 5, name: 'oak_log', count: 40 }, { type: 6, name: 'birch_log', count: 64 }, { type: 5, name: 'oak_log', count: 20 }],
+  };
+  const { bot, deposits } = chestWorld(chests, [{ type: 5, name: 'oak_log', count: 3 }]);
+  const ctx = chestActionContext(bot, {
+    '0,64,0': chestAt(0, { oak_log: 10 }, { freeSlots: 26 }),
+    '5,64,0': chestAt(5, { oak_log: 60, birch_log: 64 }, { freeSlots: 24 }) });
+  const result = await ctx.performAction(bot, { type: 'consolidate_chests' }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(deposits, [['5,64,0', 5, 70]], 'the 60 already there came out and went back with the 10');
+  assert.deepEqual(chests['5,64,0'].filter((s) => s.type === 5 && s.count).map((s) => s.count), [64, 6],
+    'two part-filled stacks and the moved ten end as one full stack and the rest');
+  assert.equal(chests['0,64,0'].reduce((n, s) => n + s.count, 0), 0, 'the small pile is gone');
+  assert.equal(bot.inventory.count(5), 3, 'her own three logs stayed with her');
+});
+
+// 2026-11-07 (swim-movements.js 1.6.0): a search that runs out of budget walks its partial path
+// toward the goal and searches again, instead of failing.
+function steppedGotoWorld(script) {
+  // script: one entry per real goto() call -- { path, status } rejects with that status's error after
+  // emitting path_update; 'ok' resolves. A GoalBlock leg moves her to its block.
+  const bot = new EventEmitter();
+  const calls = [];
+  const named = (name) => Object.assign(new Error(name), { name });
+  bot.username = 'Amy';
+  bot.entity = { position: new V3(0, 64, 0) };
+  bot.pathfinder = {
+    searchRadius: 48, legRadii: [],
+    async goto(goal) {
+      calls.push(goal.kind ?? 'goal');
+      if (goal.kind === 'block') bot.pathfinder.legRadii.push(bot.pathfinder.searchRadius);
+      if (goal.kind === 'block') { bot.entity.position = new V3(goal.x, goal.y, goal.z); return; }
+      const step = script.shift();
+      if (step === 'ok') return;
+      if (step.error) throw named(step.error);
+      bot.emit('path_update', { status: step.status, path: step.path, cost: step.cost ?? 10 });
+      throw named(step.status === 'noPath' ? 'NoPath' : 'Timeout');
+    },
+  };
+  const c = vm.createContext({ console: { log() {} }, pathfinderPkg: { goals: {
+    GoalBlock: class { constructor(x, y, z) { Object.assign(this, { x, y, z, kind: 'block' }); } } } } });
+  vm.runInContext(between(swim, 'export const STEPPED_GOTO_MAX_LEGS', '// Opens a closed wooden door'), c);
+  c.installSteppedGoto(bot);
+  // The goal: 100 blocks east; its estimate is the distance left.
+  const goal = { heuristic: (n) => Math.abs(100 - n.x) };
+  return { bot, calls, goal };
+}
+
+await check('Pathfinding: out of search budget, she walks the partial path toward the goal and searches again', async () => {
+  const { bot, calls, goal } = steppedGotoWorld([
+    { status: 'noPath', path: [new V3(10, 64, 0), new V3(20, 64, 0)], cost: 64 },
+    { status: 'timeout', path: [new V3(45, 64, 0)] },
+    'ok',
+  ]);
+  await bot.pathfinder.goto(goal);
+  assert.deepEqual(calls, ['goal', 'block', 'goal', 'block', 'goal'], 'two legs walked, then the whole way found');
+  assert.equal(bot.entity.position.x, 45);
+  assert.deepEqual(bot.pathfinder.legRadii, [72, 48], 'a leg costing 64 gets the budget to walk it; the limit is put back after');
+  assert.equal(bot.pathfinder.searchRadius, 48);
+});
+
+await check('Pathfinding: no progress, a changed goal, or too many legs still fail', async () => {
+  let w = steppedGotoWorld([{ status: 'noPath', path: [new V3(1, 64, 0)] }]);
+  await assert.rejects(w.bot.pathfinder.goto(w.goal), { name: 'NoPath' }, 'one block closer is no progress');
+  w = steppedGotoWorld([{ error: 'GoalChanged' }]);
+  await assert.rejects(w.bot.pathfinder.goto(w.goal), { name: 'GoalChanged' });
+  assert.deepEqual(w.calls, ['goal'], 'a preemptor took over -- no leg walked');
+  w = steppedGotoWorld(Array.from({ length: 12 }, (_, i) => ({ status: 'noPath', path: [new V3(5 * (i + 1), 64, 0)] })));
+  await assert.rejects(w.bot.pathfinder.goto(w.goal), { name: 'NoPath' });
+  assert.equal(w.calls.filter((k) => k === 'goal').length, 8, 'eight searches, then she gives up');
 });
 
 console.log(`${passed} unit checks passed.`);

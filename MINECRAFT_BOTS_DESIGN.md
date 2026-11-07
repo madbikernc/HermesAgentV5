@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.39.0
+**Version:** 2.41.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -422,6 +422,23 @@ Chest contents are deliberately **not** in RAG: they change on every open and ne
 point-in-time overwrites, which RAG's append-with-dedup shape can't give. One store per mutable
 fact — two would quietly disagree.
 
+**Storing goes by what the chests hold** (2026-11-07, direct request). `store` ranks every chest
+within 128 blocks, the ones `findBlocks` sees plus any in `known_chests.json`, with
+`rankStoreChests`. The order is: chests already holding the item, then chests holding its kind
+(`itemFamily`), then empty or never-opened chests, then everything else, nearest first in each
+group. A chest last seen full (each snapshot now records `freeSlots`) goes last. A kind is any
+wood's logs or planks, any colour's wool, all seeds, the stone kinds, all food, tools or armour,
+and otherwise the item itself. When a snapshot shows the chest shares a kind with another known
+chest within 128 blocks, `findConsolidation` notes a move from the chest holding less into the one
+holding more. When she's idle, `checkChestConsolidation` runs it (`consolidate_chests`). She lifts
+the target's own part-filled stacks of those items out and puts them back with the moved ones, so
+they end as full stacks. Items she carried beforehand are left alone. A full target is never chosen.
+
+**Nearby chests means 128 blocks** (`CHEST_SEARCH_RADIUS`, 2026-11-07, direct request: 32 kept
+proving too small). That covers `loot`, the chest-first fallback for `mine`/`craft`, `store` and
+consolidation. A chest more than 40 blocks away is walked to in 40-block hops (`hopToward`) before
+the final approach.
+
 World memory is written on a successful mine, a successful explore, a failed search, and a placed
 crafted object, plus a free `noteNearbyResources()` sweep after any mine/explore success. Tracked
 names come from the live block registry (every `_ore`/`_log`/`_stem`, plus `ancient_debris`),
@@ -638,7 +655,8 @@ the original incident number, still cited throughout the code. Narrative is in g
 | Rule | § |
 |---|---|
 | Any plugin carrying its own `Movements` (`collectBlock`, `pvp`) must point at the shared instance, or every tuning is silently undone | 18, 44 |
-| `maxCost = heuristic + searchRadius(48)`. For a nearby goal the whole budget is ~48–58, so one expensive step prunes a valid route entirely. This applies to *every* additive cost, `liquidCost` included | 47, 50 |
+| `maxCost = heuristic + searchRadius(48)`. For a nearby goal the whole budget is ~48–58, so one expensive step prunes a valid route entirely. This applies to *every* additive cost, `liquidCost` included: at 20 a block, three blocks of water are already over it | 47, 50 |
+| The budget caps the detour, not the distance. A search that runs out of it (`noPath` or `timeout`) still returns the path to the closest point it reached, and `goto()` used to throw that away: in the 24h to 2026-11-07, 2,017 of spark's 2,192 `noPath` results carried one. `installSteppedGoto` (swim-movements.js) walks that partial path and searches again, up to 8 legs while each gains at least 2 blocks; a changed goal or a stopped path still ends it at once | 2026-11-07 |
 | `digCost` 15, capped by `MAX_DIG_LABOR_COST` 20 in `swim-movements.js`'s `safeOrBreak`. One knob cannot serve both "don't breach walls" and "can still leave a room" — deterrence lives in `digCost`, safety in the cap | 44, 47, 50 |
 | Blocks with `hardness >= 10` go in `blocksCantBreak`; the cap otherwise makes obsidian/netherite look as cheap as planks and bots freeze on 75-second digs | 51 |
 | `entityCost` 8 — with 7–9 bots in one shelter, nearly every route touches an occupied square | 53 |

@@ -1,4 +1,7 @@
-// Version: 1.5.1
+// Version: 1.6.0
+//
+// 1.6.0 (2026-11-07) -- installSteppedGoto(): a NoPath/Timeout that still carries a partial path is
+// walked to its end and searched again from there, instead of failing.
 //
 // 1.5.1 (2026-10-11) -- isDoorway() exported: the new shelter-integrity check (index.js) and the
 // new door placement in "build" (actions.js) both need "is a real door/gate standing here," the
@@ -147,6 +150,54 @@ export function installDoorSupport(bot) {
     ? Promise.resolve() : activateBlock(block, ...rest));
   installDoorOpener(bot, activateBlock, route);
   installDoorCloser(bot, activateBlock);
+}
+
+// Direct request, 2026-11-07: "pathfinder should operate within its limit to find the best way in
+// the DIRECTION of the target... travel... pathfind again." searchRadius 48 (index.js) is a cost
+// budget, not a distance: astar.js drops any node whose cost plus remaining estimate is over the
+// start's estimate + 48. With liquidCost 20 a route through three water blocks is already over it,
+// and so is a long detour or a few digs. Measured over 24h on 2026-11-07: spark 2,192 noPath
+// results, 2,017 of them carrying a partial path toward the goal, 1,009 after 1,000+ nodes; 130
+// timeouts, all with one; spark2 1,083 / 1,026 / 187 / 95. goto() threw every one of those
+// partial paths away. Now, on NoPath or Timeout, she walks the partial path to its end, the
+// closest point to the goal the search reached, and searches again from there, for up to
+// STEPPED_GOTO_MAX_LEGS legs while each brings her at least STEPPED_GOTO_MIN_PROGRESS closer.
+// Any other rejection (the goal changed, the path was stopped: a preemptor or a caller's timeout)
+// ends it at once. Each leg's search gets enough budget to take the partial path it is walking.
+export const STEPPED_GOTO_MAX_LEGS = 8;
+const STEPPED_GOTO_MIN_PROGRESS = 2;
+
+export function installSteppedGoto(bot) {
+  const goto = bot.pathfinder.goto.bind(bot.pathfinder);
+  let lastResult = null;
+  bot.on("path_update", (results) => { lastResult = results; });
+  bot.pathfinder.goto = async (goal) => {
+    for (let leg = 1; ; leg++) {
+      lastResult = null;
+      try {
+        return await goto(goal);
+      } catch (err) {
+        const partial = lastResult?.path;
+        const partialCost = lastResult?.cost ?? 0;
+        if (leg >= STEPPED_GOTO_MAX_LEGS || (err.name !== "NoPath" && err.name !== "Timeout") || !partial?.length) throw err;
+        const end = partial[partial.length - 1];
+        const gained = goal.heuristic(bot.entity.position.floored()) - goal.heuristic(end);
+        if (gained < STEPPED_GOTO_MIN_PROGRESS) throw err;
+        console.log(`[${bot.username}] pathfinder: no whole path within the search limit (${err.name}) -- ` +
+          `leg ${leg}: walking to (${end.x}, ${end.y}, ${end.z}), ${gained.toFixed(1)} closer, then searching again`);
+        // The leg's own search is budgeted from its own, shorter, straight line, so the partial path
+        // just found can be over it (live: 64 through the water against 52). Its budget is raised
+        // to cover that path for this leg only.
+        const { searchRadius } = bot.pathfinder;
+        if (searchRadius >= 0) bot.pathfinder.searchRadius = Math.max(searchRadius, Math.ceil(partialCost) + 8);
+        try {
+          await goto(new pathfinderPkg.goals.GoalBlock(end.x, end.y, end.z));
+        } finally {
+          bot.pathfinder.searchRadius = searchRadius;
+        }
+      }
+    }
+  };
 }
 
 // Opens a closed wooden door or gate on her route once she's within DOOR_OPEN_REACH of it, without
