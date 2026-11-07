@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version: 1.2.0
+# Version: 1.3.0
 #
 # Minecraft bot test runner -- see tests/README.md.
 #   tests/run.sh unit        offline fix-validation checks (runs anywhere with node)
@@ -15,6 +15,12 @@
 # Revision History: 1.0.0 | 2026-09-24 | Initial runner.
 # 1.1.0 | 2026-09-25 | triage unit checks, livebot suite, monitoring coverage in baseline.
 # 1.2.0 | 2026-09-25 | RAG server checks in the unit suite.
+# 1.3.0 (2026-11-07) -- S47: infra/minecraft-bots-tests split one shared-timeout unit into a
+# fast->live->livebot->baseline chain (each phase's own TimeoutStartSec, sized to what that
+# phase actually takes -- live+livebot alone had grown to consume the old single 60min budget
+# with no slack left for baseline). Standalone `live`/`livebot` invocations now share the same
+# server-reachability guard `all` already had (server_up()), instead of only `all` skipping
+# gracefully when the bot-sandbox server is down.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,16 +42,20 @@ run() {
   return 0
 }
 
+server_up() {
+  [ -d node_modules/mineflayer ] && timeout 3 bash -c "</dev/tcp/${MC_HOST:-192.168.1.221}/${MC_PORT:-25580}" 2>/dev/null
+}
+
 case "$suite" in
   unit)     run unit node tests/unit.test.mjs "$@"; run triage python3 tests/test_triage.py; run ragserver python3 tests/test_rag_server.py ;;
-  live)     run live node tests/live.test.mjs "$@" ;;
-  livebot)  run livebot node tests/live-bot.test.mjs "$@" ;;
+  live)     if server_up; then run live node tests/live.test.mjs "$@"; else echo "=== live: skipped (no node_modules or bot server unreachable from $host)"; fi ;;
+  livebot)  if server_up; then run livebot node tests/live-bot.test.mjs "$@"; else echo "=== livebot: skipped (no node_modules or bot server unreachable from $host)"; fi ;;
   baseline) run baseline node tests/baseline.mjs "$@"; run monitoring node tests/monitoring.mjs ;;
   all)
     run unit node tests/unit.test.mjs
     run triage python3 tests/test_triage.py
     run ragserver python3 tests/test_rag_server.py
-    if [ -d node_modules/mineflayer ] && timeout 3 bash -c "</dev/tcp/${MC_HOST:-192.168.1.221}/${MC_PORT:-25580}" 2>/dev/null; then
+    if server_up; then
       run live node tests/live.test.mjs
       run livebot node tests/live-bot.test.mjs
     else

@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.38.0
+**Version:** 2.39.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -591,7 +591,7 @@ Behaviour worth knowing before touching a caller:
 | `hermes-minecraft-triage.service` | Tails bot journals, fires `coder`+`coder2` in parallel on triage-worthy lines; diagnosis only, never acts |
 | `minecraft-bots-activity-log.service` | Raw durable journal mirror, bot-scoped, for later review — on both hosts, every `minecraft-bot-*` unit |
 | `hermes-minecraft-rag.service` (spark only) | RAG search, indexing and note/skill files for bots off spark (`MC_RAG_URL`, set on spark2's units); the index, embedder and shared memory directory live only on spark |
-| `minecraft-bots-tests.timer` | Daily test run: unit + live + baseline on spark, baseline on spark2 (`services/minecraft-bots/tests/`) |
+| `minecraft-bots-tests-fast/-live/-livebot/-baseline.service` | Daily test chain on spark (`-fast.timer` triggers it; each phase's own `TimeoutStartSec`, `OnSuccess`/`OnFailure` chaining to the next regardless of pass/fail); spark2 runs only `-baseline.service`, via its own `-baseline.timer` (`services/minecraft-bots/tests/`) |
 
 **Tests** (`services/minecraft-bots/tests/README.md`): offline unit checks, live scenarios run as
 `MBTester` on an RCON-built arena at (2000, 200, 2000), and a per-host behavior baseline from the

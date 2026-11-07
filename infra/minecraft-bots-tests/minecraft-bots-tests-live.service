@@ -1,0 +1,18 @@
+[Unit]
+Description=Firmament Minecraft bot tests - live scenarios (live.test.mjs as MBTester)
+Documentation=file:///home/pmoney/HermesAgentV5/services/minecraft-bots/tests/README.md
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/hermes-data
+OnSuccess=minecraft-bots-tests-livebot.service
+OnFailure=minecraft-bots-tests-livebot.service
+
+[Service]
+Type=oneshot
+User=pmoney
+WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
+Environment=MB_TEST_REPORT_DIR=/mnt/hermes-data/minecraft-memory/test-reports
+ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/tests/run.sh live
+# 2026-11-07: measured 40-45min and growing as scenarios are added (23 scenarios at the time of
+# writing) -- was previously sharing one 60min budget with livebot, unit, and baseline combined.
+TimeoutStartSec=75min

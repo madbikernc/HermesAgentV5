@@ -1,0 +1,12 @@
+[Unit]
+Description=Firmament Minecraft bot tests - behavior baseline + monitoring coverage
+Documentation=file:///home/pmoney/HermesAgentV5/services/minecraft-bots/tests/README.md
+RequiresMountsFor=/mnt/hermes-data
+
+[Service]
+Type=oneshot
+User=pmoney
+WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
+Environment=MB_TEST_REPORT_DIR=/mnt/hermes-data/minecraft-memory/test-reports
+ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/tests/run.sh baseline
+TimeoutStartSec=10min

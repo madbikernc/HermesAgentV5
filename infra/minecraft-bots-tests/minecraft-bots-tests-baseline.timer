@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Firmament Minecraft bot tests and behavior-baseline check
+Description=Daily Firmament Minecraft bot tests (spark-2: baseline only -- one live tester per day is enough)
 
 [Timer]
 OnCalendar=*-*-* 05:30:00

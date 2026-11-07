@@ -1,6 +1,6 @@
 # Minecraft bot tests
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 
 Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.json`).
 
@@ -54,8 +54,9 @@ A metric that moves in its worse direction by more than its tolerance fails the 
 `baselines/<host>.pre-remediation.json` keeps the pre-fix fleet, measured on 2026-09-24 at
 `9091ea8`, for reference.
 
-The daily `minecraft-bots-tests.timer` (see `infra/minecraft-bots-tests/`) runs the suites and
-keeps reports in `/mnt/hermes-data/minecraft-memory/test-reports/`.
+The daily `minecraft-bots-tests-fast.timer` on spark (`minecraft-bots-tests-baseline.timer` on
+spark2) runs the suites as a chain of per-phase units with their own timeouts (see
+`infra/minecraft-bots-tests/`) and keeps reports in `/mnt/hermes-data/minecraft-memory/test-reports/`.
 
 ## Rule: every behavior fix adds a test
 
@@ -78,3 +79,4 @@ When a change fixes or adds bot behavior:
 | 1.1.0 | 2026-09-25 | Triage unit checks, the full-bot `livebot` suite, chest scenarios under an isolated memory root, and the monitoring coverage check. |
 | 1.2.0 | 2026-09-25 | RAG server checks in the unit suite. |
 | 1.3.0 | 2026-10-07 | Access/shelter/torch layers: how the offline suite stands in for `vec3` and for `export const` bindings. |
+| 1.4.0 | 2026-11-07 | Daily run split into a per-phase systemd unit chain (`infra/minecraft-bots-tests/`), each phase with its own timeout; standalone `run.sh live`/`run.sh livebot` now skip gracefully when the bot-sandbox server is unreachable, same as `all` already did. |
