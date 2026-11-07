@@ -18,8 +18,23 @@
 #
 # --parallel 4 and --ctx-size 65536 copied verbatim from the incumbent's own start-muse.sh -- same
 # node, same concurrency shape, nothing else changed.
+#
+# 2026-11-07: --mmproj added. The generic mmproj-F16.gguf this file's own earlier comment called
+# "unidentified, never confirmed as this model's own file" turned out to self-identify in its own
+# GGUF metadata (general.name = Nvidia-Nemotron-3-Nano-Omni-30B-A3B-Reasoning, clip.projector_type
+# = nemotron_v2_vl) -- a gguf-dump nobody had run, not a real ambiguity. Renamed to
+# mmproj-NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-F16.gguf and wired in here. Live-verified:
+# plain-text muse_contract-style calls are unaffected (loading the projector doesn't change text
+# behavior), and vision genuinely works -- it accurately describes a real test image in detail.
+# But a live call against the known-defect fleet_vision_judge fixture (hermes_gen_00003_, "digital
+# warrior fighting cybernetically enhanced sharks" where the sharks are actually unmodified)
+# reproduces the exact weakness S39 already measured for this model (false_pass_rate 0.714): it
+# confidently claimed "cybernetically enhanced sharks" are present and the image "matches the
+# prompt exactly." This change makes `muse` *capable* of accepting image input -- nothing in
+# production currently routes vision-judge traffic here, and this result is a reason not to.
 exec /opt/llama.cpp/build/bin/llama-server \
   --model /mnt/hermes-data/models/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_M.gguf \
+  --mmproj /mnt/hermes-data/models/mmproj-NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-F16.gguf \
   --host 0.0.0.0 --port 8090 \
   --n-gpu-layers 99 \
   --ctx-size 65536 \

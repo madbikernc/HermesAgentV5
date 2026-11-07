@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.14.0
+**Version:** 1.15.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -482,7 +482,9 @@ one open question from the sequencing runbook's §0.3 and surfaced a new, more s
 `-00003-` 37.05GB, llama.cpp auto-discovers the siblings from the first shard's path) has its own
 clearly-named mmproj, `mmproj-NVIDIA-Nemotron-3.5-Super-VL-BF16.gguf` (1.73GB, same mtime as the shards) --
 no pairing ambiguity. The generic `mmproj-F16.gguf` the runbook flagged as unidentified belongs to some
-other, still-unidentified candidate, not this one.
+other, still-unidentified candidate, not this one. **Resolved 2026-11-07**: it's `muse`'s own
+projector (NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning) — self-identifies in its own GGUF
+metadata, confirmed via `gguf-dump` rather than guessed. See `infra/hermes-muse/README.md` 1.1.0.
 
 **New finding -- the "all four backends stay down for the duration" assumption doesn't hold under live
 traffic**: extended `run-candidate-suites.sh` with an `EXTRA_STOP` env var (deployed + local scratchpad
@@ -631,3 +633,4 @@ large-candidate run that can't do the same).
 | 1.12.0 | 2026-10-25 | Added Qwen3-Coder-Next-UD-Q4_K_M results, closing Phase 5 and the full operator-authorized Phase 2-5 run. Direct comparison against the live `coder` incumbent on coder-focused suites is mixed, not a clean outperformance finding: the candidate has zero timeouts vs. the incumbent's 3/10 and 3/8, but the incumbent scores better on fleet_dualcoder_precision (0.167 vs. 0.000) -- recorded plainly, not saved to memory. Added a Phase 4/5 structural fix (missing `##` section headers) and a full run summary covering all four saved outperformance findings and the cross-cutting infra/tooling findings. Phase 6 remains explicitly held back pending separate authorization. |
 | 1.13.0 | 2026-10-25 | Attempted Phase 6 (`NVIDIA-Nemotron-3.5-Super-VL-120B-A12B`, ~81GB) on separate operator authorization; aborted mid-run with no usable score. Resolved the runbook's mmproj-pairing question for this candidate. New finding: `llama-coder.service` is an "on-demand" backend that auto-restarted twice under real production traffic despite being deliberately stopped for the maintenance window, visibly contending for memory and degrading the candidate's own decode speed (16 -> 9 t/s) at this candidate's much tighter ~82GB footprint -- invisible at every earlier phase's smaller candidate sizes. The clean fix (`systemctl mask`) was correctly blocked by the auto-mode classifier as a shared-resource change needing operator sign-off. Aborted safely: force-killed the candidate's own hung-on-shutdown `llama-server` process (not a production service) after a clean `SIGTERM` stalled, then confirmed all four production backends (`coder`/`coder2`/`muse`/`omni`) came back up healthy. Also noted, unfixed: `hermes-benchmark-model.sh`'s `--free-omni` flag stops `llama-amy-vision.service`, a distinct real unit, not `llama-omni.service` -- flagged for operator review, not assumed to be a simple naming bug. Phase 6 remains open, needing either a low-traffic window or an operator-approved way to pause `coder`'s on-demand restart before a safe re-attempt. |
 | 1.14.0 | 2026-10-25 | Phase 6 retry, direct operator follow-up: stopped all nine Minecraft bot services (the real source of the contending `coder` traffic) and permanently disabled `coder2` (stopped + masked -- manually, since `systemctl mask --force` refused to clobber the real unit file already at that path; confirmed `coder2` now refuses to start). Retry ran with zero contention, steady 18.0 t/s decode throughout. Real score obtained: Tier 0 `ifeval` 0.750, `fleet_vision_judge` precision 0.895/recall 0.630/false_pass_rate 0.286/false_fail_rate 0.370 -- technically beats the `omni` incumbent (same bar as every other finding this run) but is the weakest of the four vision candidates tested at ~4x the size of the next-largest. Not saved as a new finding; folded into the existing Nemotron-3.5-Bolt-74B memory as a comparison point. Restarted all nine bots afterward. This closes Phase 6 and the full Phases 1-6 run. |
+| 1.15.0 | 2026-11-07 | Resolved the Phase 6 note's leftover "still-unidentified" `mmproj-F16.gguf` pairing: it's `muse`'s own projector, confirmed via `gguf-dump` of its self-identifying metadata (not guessed), renamed, and wired into production `start-muse.sh`. See `infra/hermes-muse/README.md` 1.1.0 and `spark2-candidate-sequencing-runbook.md` 1.1.0. |

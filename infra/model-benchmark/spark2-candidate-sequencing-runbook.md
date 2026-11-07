@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Sequencing Runbook
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Sequencing plan for running S39's Tier 0/1/2/3 suites against the model files already staged in
 `/opt/hermes-models/` on `dgx-spark2` — a separate directory from `/mnt/hermes-data/models/`, which
@@ -29,11 +29,14 @@ has been executed yet; this is the plan, for a session with operator sign-off to
    that unit was meant to run. Confirm with the operator whether this is a deliberate swap or drift
    before treating that file as "just another candidate" — it may instead be "restore the omni role
    to what its own service unit says it should be."
-3. **Confirm which staged candidate owns `mmproj-F16.gguf`** (1.5GB, generically named, no
-   model-specific sidecar file matches it the way the other three VL candidates each have one). Don't
-   guess a pairing in a live `llama-server --mmproj` invocation without checking the model card or
-   testing load first — a wrong mmproj pairing fails to load, or worse, loads and produces silently
-   wrong vision output.
+3. **Resolved (2026-11-07):** `mmproj-F16.gguf` (1.5GB, generically named, no model-specific sidecar
+   file matched it the way the other three VL candidates each had one) is `muse`
+   (NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning)'s own vision projector — its own GGUF metadata
+   self-identifies (`general.name = Nvidia-Nemotron-3-Nano-Omni-30B-A3B-Reasoning`,
+   `clip.projector_type = nemotron_v2_vl`), confirmed via `gguf-dump`, not guessed. Renamed to
+   `mmproj-NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-F16.gguf` and wired into `muse`'s own
+   `start-muse.sh` (see `infra/hermes-muse/README.md` 1.1.0). This caution about guessing a pairing
+   still applies to any *other* candidate's mmproj that remains unconfirmed.
 
 ## 1. Roster, real sizes, role classification
 
@@ -208,3 +211,4 @@ Tier 2 gates, Tier 3 never breaks a tie by itself).
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-24 | Initial version — sequencing plan for the 18 real candidate GGUFs found staged in `/opt/hermes-models/` on spark2, written after live read-only recon (process list, memory, `known_arch_gap`, `history.jsonl`) surfaced the `coder2`-retirement anomaly, the `omni`/`gemma` model mismatch, and `qwen3.8-flash-next`'s architecture block. No command in this runbook has been executed yet. |
+| 1.1.0 | 2026-11-07 | Resolved item 3's open `mmproj-F16.gguf` pairing question: it's `muse`'s own vision projector, confirmed via `gguf-dump` of its self-identifying metadata, not a guess. |
