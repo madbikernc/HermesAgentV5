@@ -1,6 +1,6 @@
 # HermesAgentV5 — Project Instructions
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 These instructions extend the global Claude Code instructions for work specifically within this project.
 This project is the successor to `../HermesAgentV4`, which is itself the successor to `../HermesAgentRedo`.
@@ -59,6 +59,20 @@ skipped:
 - State the call either way — needs a scenario, or doesn't, and why — in the commit message or PR
   description. A decision made silently is indistinguishable from a decision never made.
 
+## Implementation plans — a phased status table, kept current
+
+Any implementation-plan-shaped document — a dedicated `IMPLEMENTATION_PLAN.md`-style file, or a
+design doc's own rollout/build-order section — ends with a table of its phases or steps, carrying
+at minimum `Status` and `Date` (`YYYY-MM-DD`) columns, e.g. `| Phase | Status | Date | Notes |`.
+This table sits at the end of the document, immediately before the file's own `## Revision
+History` table — Revision History stays the true final section (per the versioning rule above),
+since the two tables track different things: Revision History records what changed about the
+document itself; this table records what changed about the plan the document describes.
+
+Whenever a phase or step is started, progressed, or completed, update that row in the same change
+— never deferred to a later pass. Status values are free text but stay consistent within one
+document (e.g. `not started` / `in progress` / `blocked` / `done`).
+
 ## Inherited non-negotiables
 
 `../HermesAgentRedo/LESSONS_LEARNED.md` is **forked into this repo** at `LESSONS_LEARNED.md` rather than
@@ -73,3 +87,4 @@ in full and are not re-derived.
 | 1.0.0 | 2026-08-29 | Initial versioned baseline — versioning convention inherited from `HermesAgentV4`. |
 | 1.1.0 | 2026-09-24 | Added the Minecraft-bots rule: every behavior fix ships with unit/live/baseline tests. |
 | 1.2.0 | 2026-10-20 | Direct operator request: added the benchmark-evaluation rule — any skill/tool built for The Firmament or a similarly-shaped agentic platform must be evaluated against `FLEET_BENCHMARK_DESIGN.md`'s gap structure for whether it needs a new benchmark scenario, call recorded either way. Also fixed a real structural bug found while editing this exact area: the Minecraft-bots rule had been spliced into the middle of the "record every bump" sentence at some point, breaking both into malformed headings — restored as two separate, correctly-headed sections. |
+| 1.3.0 | 2026-11-07 | Direct operator request: added the implementation-plans rule — any implementation-plan-shaped document (a dedicated plan file, or a design doc's rollout/build-order section) ends with a phased status table (`Status`/`Date` columns at minimum), placed immediately before the file's own Revision History table, updated in the same change whenever a phase starts, progresses, or completes. |
