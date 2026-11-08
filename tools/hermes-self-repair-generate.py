@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.1.1
+#
+# 1.1.1 (2026-11-07) — real bug found on this pipeline's first-ever live task (target:
+# tools/hermes-benchmark-compare.py): `git apply --check` refused the converged diff as
+# "corrupt patch" at its very last line. Root cause in compute_diff(): a model's raw completion
+# for the candidate file routinely has no trailing newline after its final line, while the real
+# original file on disk does. difflib.unified_diff() represents that as a same-text remove+add on
+# the last line but — a documented difflib limitation, not a hermes-specific one — never emits the
+# `\ No newline at end of file` marker real diff/patch tooling requires when a line lacks its
+# trailing newline, so git's own parser correctly rejects the result as malformed. Fixed by
+# normalizing both strings to end with exactly one trailing newline before diffing: this is a
+# no-op for any file that already ends in `\n` (the normal case) and, when a model's completion
+# drops the final newline, now reproduces zero spurious diff instead of an unparseable one.
+# Confirmed live: resubmitting the same task's already-converged diff through the fixed
+# compute_diff() produces a clean two-line change instead of the broken last hunk.
 #
 # 1.1.0 (2026-09-18) — Step 3 hand-off: on convergence with a non-empty diff, process_one() now
 # (a) logs the diff itself as its own phase="diff" turn via log_round(), the exact record
@@ -474,9 +488,18 @@ def submit_apply_job(task_id):
 def compute_diff(path, original_content, candidate_content):
     """The ONLY place a diff is produced -- deterministically, from two known strings, no model
     involved. See this file's own header for why a model is never asked to author the diff
-    directly."""
-    original_lines = original_content.splitlines(keepends=True)
-    candidate_lines = candidate_content.splitlines(keepends=True)
+    directly.
+
+    Both strings are normalized to end with exactly one trailing newline before diffing (1.1.1) --
+    a model's raw completion routinely lacks one even when the real original file has one, and
+    difflib.unified_diff() has no way to represent that on its own (see this file's own changelog
+    for the real "corrupt patch" this caused git apply). A no-op for any file that already ends in
+    `\\n`, which is every normal case."""
+    def _with_trailing_newline(text):
+        return text if text.endswith("\n") else text + "\n"
+
+    original_lines = _with_trailing_newline(original_content).splitlines(keepends=True)
+    candidate_lines = _with_trailing_newline(candidate_content).splitlines(keepends=True)
     diff_lines = difflib.unified_diff(
         original_lines, candidate_lines, fromfile=f"a/{path}", tofile=f"b/{path}",
     )
