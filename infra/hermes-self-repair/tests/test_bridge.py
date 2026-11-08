@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 2.0.0
 #
-# Offline checks for tools/hermes-self-repair-minecraft-bridge.py's PURE logic (parsing,
-# severity/dedup gating, problem-text templating, path validation) -- the parts the module's own
-# header says are offline-testable. Network-touching glue (Buzz polling, the path-resolution model
-# call, task submission) is deliberately NOT exercised here; it was proven-shape-compatible by
-# reusing hermes-self-repair-submit.py's own {"path","problem"}/pointer-envelope conventions
-# instead, the same way every other self-repair component already does.
+# 2.0.0 (2026-11-08) — renamed from test_minecraft_bridge.py alongside the bridge's own
+# generalization (hermes-self-repair-bridge.py 2.0.0, Phase 4/§8.4): poll_domain_buzz_topic()
+# became poll_domain_buzz_source() (state keyed "buzz:<topic>", not "<topic>", since a second
+# scheme now shares the same state dict) and seek_to_end() became seek_to_end_buzz(). Added checks
+# for the new "memory-turns" source poller and the egress-guard handler domain #2 actually uses.
+#
+# Offline checks for tools/hermes-self-repair-bridge.py's PURE logic (parsing, severity/dedup
+# gating, problem-text templating, path validation) -- the parts the module's own header says are
+# offline-testable. Network/sqlite-touching glue (Buzz polling, direct sqlite reads, the
+# path-resolution model call, task submission) is deliberately NOT exercised here; it was
+# proven-shape-compatible by reusing hermes-self-repair-submit.py's own
+# {"path","problem"}/pointer-envelope conventions instead, the same way every other self-repair
+# component already does.
 #
 # Fixture bodies below are built to match tools/hermes-minecraft-triage.py's own
 # triage_incident()/diagnosis_worker() output EXACTLY (including the blank line + occurrences
 # suffix diagnosis_worker() appends) -- not an idealized guess at the format.
 #
-# Run: python3 infra/hermes-self-repair/tests/test_minecraft_bridge.py
+# Run: python3 infra/hermes-self-repair/tests/test_bridge.py
 
 import importlib.util
 import sys
@@ -35,7 +42,7 @@ def check(label, cond, detail=""):
 
 
 def load():
-    spec = importlib.util.spec_from_file_location("bridge_test_target", TOOLS / "hermes-self-repair-minecraft-bridge.py")
+    spec = importlib.util.spec_from_file_location("bridge_test_target", TOOLS / "hermes-self-repair-bridge.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules["bridge_test_target"] = mod
     spec.loader.exec_module(mod)
@@ -149,15 +156,20 @@ def main():
     check("the model saying NONE resolves to None", mod.resolve_target_path("NONE", candidates) is None)
     check("an empty answer resolves to None", mod.resolve_target_path("", candidates) is None)
 
-    print("\n[poll_once: only dispatches to a registered, switched-on domain]")
-    real_poll_domain_buzz_topic = mod.poll_domain_buzz_topic  # restored below -- the next few
-    # checks replace it with a dispatch-only spy, and leaving that in place would silently break
-    # every later check that calls the real poll_domain_buzz_topic directly.
+    print("\n[poll_once: dispatches by detection_source SCHEME, not a hardcoded 'buzz:' check]")
+    # SOURCE_POLLERS is looked up by poll_once() as a dict (SOURCE_POLLERS.get(scheme)) built once
+    # at module load with direct references to the real pollers -- reassigning
+    # mod.poll_domain_buzz_source itself would NOT reach poll_once() at all, since the dict already
+    # holds the original function object. Mutating the dict's own entries in place is what actually
+    # intercepts the dispatch, the same reason mod.HANDLERS[...] is mutated in place elsewhere in
+    # this file rather than reassigning mod.HANDLERS.
+    real_source_pollers = dict(mod.SOURCE_POLLERS)  # restored below
     calls = []
     mod.domains_mod.load_domains = lambda: [
         {"name": "minecraft-bots", "detection_source": "buzz:minecraft-ops", "self_managed": False},
     ]
-    mod.poll_domain_buzz_topic = lambda domain, topic, state, budget: calls.append((domain["name"], topic))
+    mod.SOURCE_POLLERS["buzz"] = lambda domain, rest, state, budget: calls.append(("buzz", domain["name"], rest))
+    mod.SOURCE_POLLERS["memory-turns"] = lambda domain, rest, state, budget: calls.append(("memory-turns", domain["name"], rest))
     mod.poll_once({})
     check("a switched-OFF domain is never polled", calls == [], calls)
 
@@ -165,8 +177,17 @@ def main():
         {"name": "minecraft-bots", "detection_source": "buzz:minecraft-ops", "self_managed": True},
     ]
     mod.poll_once({})
-    check("a switched-ON domain with a known detection_source IS polled",
-          calls == [("minecraft-bots", "minecraft-ops")], calls)
+    check("a switched-ON buzz-scheme domain IS dispatched to the buzz poller",
+          calls == [("buzz", "minecraft-bots", "minecraft-ops")], calls)
+
+    calls.clear()
+    mod.domains_mod.load_domains = lambda: [
+        {"name": "egress-guard", "detection_source": "memory-turns:egress-block", "self_managed": True},
+    ]
+    mod.poll_once({})
+    check("a switched-ON memory-turns-scheme domain IS dispatched to the memory-turns poller — "
+          "the real genericity test this phase exists for",
+          calls == [("memory-turns", "egress-guard", "egress-block")], calls)
 
     calls.clear()
     mod.domains_mod.load_domains = lambda: [
@@ -175,30 +196,42 @@ def main():
     mod.poll_once({})
     check("a switched-ON domain with an unhandled detection_source is skipped, not guessed at",
           calls == [], calls)
-    mod.poll_domain_buzz_topic = real_poll_domain_buzz_topic
 
-    print("\n[seek_to_end: a fresh topic is seeded at its tip, never replayed from the start]")
+    calls.clear()
+    mod.HANDLERS["scheme-only:x"] = lambda *a, **k: None
+    mod.domains_mod.load_domains = lambda: [
+        {"name": "weird-domain", "detection_source": "scheme-only:x", "self_managed": True},
+    ]
+    mod.poll_once({})
+    check("a handled detection_source whose scheme has no registered poller is skipped, not guessed at",
+          calls == [], calls)
+    del mod.HANDLERS["scheme-only:x"]
+
+    mod.SOURCE_POLLERS.clear()
+    mod.SOURCE_POLLERS.update(real_source_pollers)
+
+    print("\n[seek_to_end_buzz: a fresh topic is seeded at its tip, never replayed from the start]")
     mod.save_state = lambda state: None  # no real disk I/O in this test
 
     pages = {0: [{"seq": i} for i in range(1, 201)], 200: [{"seq": i} for i in range(201, 251)]}
     mod._get = lambda url, token=None, timeout=15: {
         "messages": pages.get(int(url.split("since=")[1].split("&")[0]), [])
     }
-    check("seek_to_end pages through a full first batch to find the real tip",
-          mod.seek_to_end("minecraft-ops") == 250)
+    check("seek_to_end_buzz pages through a full first batch to find the real tip",
+          mod.seek_to_end_buzz("minecraft-ops") == 250)
 
     mod._get = lambda url, token=None, timeout=15: {"messages": []}
-    check("seek_to_end on a topic with no messages at all returns 0",
-          mod.seek_to_end("minecraft-ops") == 0)
+    check("seek_to_end_buzz on a topic with no messages at all returns 0",
+          mod.seek_to_end_buzz("minecraft-ops") == 0)
 
     domain = {"name": "minecraft-bots", "detection_source": "buzz:minecraft-ops", "self_managed": True}
     state = {}
     mod._get = lambda url, token=None, timeout=15: {"messages": [{"seq": i} for i in range(1, 51)]}
-    mod.poll_domain_buzz_topic(domain, "minecraft-ops", state, {"remaining": 3})
-    check("a topic with no cursor yet is seeded, not processed, on this first call",
-          state.get("minecraft-ops") == 50, state)
+    mod.poll_domain_buzz_source(domain, "minecraft-ops", state, {"remaining": 3})
+    check("a topic with no cursor yet is seeded (keyed 'buzz:<topic>'), not processed, on this "
+          "first call", state.get("buzz:minecraft-ops") == 50, state)
 
-    print("\n[poll_domain_buzz_topic: budget exhaustion leaves the cursor short, not lost]")
+    print("\n[poll_domain_buzz_source: budget exhaustion leaves the cursor short, not lost]")
     handled = []
 
     def fake_handler(message, domain, budget):
@@ -208,24 +241,100 @@ def main():
         handled.append(message["seq"])
 
     mod.HANDLERS["buzz:minecraft-ops"] = fake_handler
-    state2 = {"minecraft-ops": 100}
+    state2 = {"buzz:minecraft-ops": 100}
     mod._get = lambda url, token=None, timeout=15: {
         "messages": [{"seq": s} for s in (101, 102, 103, 104, 105)]
     }
-    mod.poll_domain_buzz_topic(domain, "minecraft-ops", state2, {"remaining": 2})
+    mod.poll_domain_buzz_source(domain, "minecraft-ops", state2, {"remaining": 2})
     check("only as many messages as the budget allows are actually handled",
           handled == [101, 102], handled)
     check("the cursor stops short of the budget-exhausted message, not at the batch's end",
-          state2["minecraft-ops"] == 102, state2)
+          state2["buzz:minecraft-ops"] == 102, state2)
 
     handled.clear()
-    state2 = {"minecraft-ops": 102}
+    state2 = {"buzz:minecraft-ops": 102}
     mod._get = lambda url, token=None, timeout=15: {
         "messages": [{"seq": s} for s in (103, 104, 105)]
     }
-    mod.poll_domain_buzz_topic(domain, "minecraft-ops", state2, {"remaining": 3})
+    mod.poll_domain_buzz_source(domain, "minecraft-ops", state2, {"remaining": 3})
     check("the next poll cycle picks up exactly where the budget left off, retried not lost",
           handled == [103, 104, 105], handled)
+
+    print("\n[egress-guard: no model call needed, caller already names the real path]")
+    candidates_fs = {
+        "tools/hermes-websearch.py", "services/some-service.js", "skills/foo/SKILL.md",
+    }
+
+    def fake_read_proc(cmd, **kwargs):
+        class Proc:
+            pass
+        p = Proc()
+        candidate = cmd[3] if len(cmd) > 3 else None
+        p.returncode = 0 if candidate in candidates_fs else 1
+        return p
+
+    mod.subprocess.run = fake_read_proc
+    check("a caller that resolves under tools/ is found there",
+          mod.resolve_caller_path("hermes-websearch.py") == "tools/hermes-websearch.py")
+    check("a caller with no match anywhere resolves to None, never guessed",
+          mod.resolve_caller_path("totally-unknown-script.py") is None)
+    check("a caller containing a path separator is refused outright (never trusted as a bare name)",
+          mod.resolve_caller_path("../tools/hermes-websearch.py") is None)
+    check("the egress guard's own module can never be named as the fix target",
+          mod.resolve_caller_path("hermes_egress_guard.py") is None)
+    check("an empty/missing caller resolves to None", mod.resolve_caller_path(None) is None
+          and mod.resolve_caller_path("") is None)
+
+    problem = mod.build_egress_problem({"caller": "hermes-websearch.py", "attempted": "evil.example.com",
+                                         "reason": "not fleet-internal and not on the caller's whitelist"})
+    check("the problem text names the real caller/destination",
+          "hermes-websearch.py" in problem and "evil.example.com" in problem, problem)
+    check("the problem text explicitly forbids weakening the egress guard itself",
+          "NEVER weaken, bypass, or special-case" in problem, problem)
+
+    print("\n[seek_to_end_memory_turns / fetch_memory_turns: direct-sqlite cursor, same contract]")
+
+    class FakeCursorConn:
+        def __init__(self, rows, max_id):
+            self._rows, self._max_id = rows, max_id
+
+        def execute(self, sql, params=()):
+            class Result:
+                def __init__(self, data):
+                    self._data = data
+
+                def fetchall(self):
+                    return self._data
+
+                def fetchone(self):
+                    return self._data[0] if self._data else None
+            if sql.startswith("SELECT max(id)"):
+                return Result([(self._max_id,)])
+            after_id = params[1]
+            return Result([(rid, raw) for rid, raw in self._rows if rid > after_id])
+
+        def close(self):
+            pass
+
+    mod.ro_sqlite = lambda path: FakeCursorConn(
+        [(101, '{"caller": "x.py"}'), (102, '{"caller": "y.py"}')], max_id=102)
+    check("seek_to_end_memory_turns returns the real current max id",
+          mod.seek_to_end_memory_turns("egress-block") == 102)
+    found = mod.fetch_memory_turns("egress-block", 100, 50)
+    check("fetch_memory_turns returns rows after the cursor, parsed from JSON",
+          [f["id"] for f in found] == [101, 102] and found[0]["payload"]["caller"] == "x.py", found)
+
+    mod.ro_sqlite = lambda path: FakeCursorConn([], max_id=None)
+    check("seek_to_end_memory_turns on an empty table returns 0", mod.seek_to_end_memory_turns("egress-block") == 0)
+
+    print("\n[poll_domain_memory_turns_source: first-run seeding, mirroring the buzz poller's own contract]")
+    mod.save_state = lambda state: None
+    mod.ro_sqlite = lambda path: FakeCursorConn([], max_id=250)
+    egress_domain = {"name": "egress-guard", "detection_source": "memory-turns:egress-block", "self_managed": True}
+    state3 = {}
+    mod.poll_domain_memory_turns_source(egress_domain, "egress-block", state3, {"remaining": 3})
+    check("a memory-turns source with no cursor yet is seeded (keyed 'memory-turns:<task_id>'), "
+          "not processed, on this first call", state3.get("memory-turns:egress-block") == 250, state3)
 
     total = CHECKS[0]
     failed = len(FAILURES)

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+#
+# 1.0.1 (2026-11-08) — corrected a stale filename reference below: the detection bridge was
+# renamed hermes-self-repair-bridge.py in Phase 4 (§8.4), when it was generalized beyond
+# minecraft-bots.
 #
 # hermes-self-repair-link — links two self-repair tasks for FLEET_SELFREPAIR_DESIGN.md §4.3's
 # completeness hook (§6's "two linked tasks" answer, Phase 3/§8.3). Writes a
@@ -10,7 +14,7 @@
 #
 # This tool does not create tasks, only records a relationship between two that already exist —
 # run by hand after submitting both via hermes-self-repair-submit.py, or called internally by the
-# detection bridge (hermes-self-repair-minecraft-bridge.py, §4.4) right after it submits both.
+# detection bridge (hermes-self-repair-bridge.py, §4.4) right after it submits both.
 #
 # Usage:
 #   python3 hermes-self-repair-link.py <fix_task_id> <test_task_id>

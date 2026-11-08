@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+#
+# 1.0.1 (2026-11-08) — corrected a stale filename reference below: the detection bridge was
+# renamed hermes-self-repair-bridge.py in Phase 4 (§8.4), when it was generalized beyond
+# minecraft-bots.
 #
 # hermes_self_repair_completeness — FLEET_SELFREPAIR_DESIGN.md §4.3's completeness hook, made
 # concrete. Generic: a domain with no completeness_rule (no domain at all, or a domain that
@@ -18,7 +22,7 @@
 # vector finding). What links the two tasks is a pair of plain hermes-memory turns
 # (phase="completeness-link"), written by whichever tool submits both (a human running
 # hermes-self-repair-link.py by hand, or the detection bridge automatically — §4.4,
-# hermes-self-repair-minecraft-bridge.py) — each turn names the OTHER task's id and this task's own
+# hermes-self-repair-bridge.py) — each turn names the OTHER task's id and this task's own
 # role ("fix" or "test"). A "test" task is never itself subject to a completeness rule, checked by
 # its recorded role rather than by re-deriving it from path_scope a second time — its own path still
 # falls inside the same domain's path_scope (e.g. services/minecraft-bots/tests/unit.test.mjs is
