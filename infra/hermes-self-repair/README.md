@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.8.0
+**Version:** 6.9.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -640,13 +640,24 @@ egress-guard handler's path resolution/refusal logic). Fixed three stale filenam
 rename left behind in already-shipped files' own comments
 (`hermes-self-repair-link.py` 1.0.1, `tools/hermes_self_repair_completeness.py` 1.0.1).
 
-**Still open**: deploying the renamed/generalized bridge to spark (replacing the old
-minecraft-bots-only service) is this phase's own remaining live step.
+**Update, same day — deployed and running on spark.** `hermes-self-repair-bridge.service`
+installed and enabled for the first time (no prior minecraft-bots-only service had ever actually
+been started, so there was nothing to replace). One more real bug found live, right at that first
+start: systemd failed with `status=203/EXEC` — the wrapper script had never been marked executable
+in git (`100644`, not `100755`) since Phase 3's own original commit, latent the whole time because
+nothing had tried to run it before now. Fixed with `git update-index --chmod=+x`
+(`hermes-self-repair-bridge-wrapper.sh` 1.1.1), no content change. After that, it started cleanly
+and its own first log line confirmed the bootstrap worked exactly as designed: `first run for
+topic 'minecraft-ops' — seeded cursor at seq=643716, will not replay its history` — real evidence
+the backlog-replay protection actually does what it says, not just what its offline tests assert.
+`egress-guard` is correctly never polled at all (its switch is off); its own cursor key is absent
+from the persisted state file.
 
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 6.9.0 | 2026-11-08 | `hermes-self-repair-bridge.service` installed and enabled on spark for the first time. Found live at first start: the wrapper script had never been marked executable in git since Phase 3's original commit (`status=203/EXEC`), fixed with `git update-index --chmod=+x` (1.1.1). After that, started cleanly and its own log confirmed the backlog-replay bootstrap actually works on real data (`seeded cursor at seq=643716, will not replay its history`); `egress-guard` correctly never polled (switch off). See the "Phase 4" section's own update above. |
 | 6.8.0 | 2026-11-08 | Phase 4 (§8.4) started: registered a real second domain, `egress-guard` (switch off). Its memory-turns-shaped detection source immediately surfaced a real genericity leak — `hermes-self-repair-minecraft-bridge.py`'s own `poll_once()` only knew how to poll Buzz. Fixed by renaming/generalizing it to `hermes-self-repair-bridge.py` (2.0.0): dispatch by detection_source scheme (`SOURCE_POLLERS`), not a hardcoded prefix check. `egress-guard`'s own handler needs no model call (its `caller` field already names the real offending script) and registers no completeness rule. `path_scope` left empty, a real documented limitation. 19 more offline checks. Acceptance result so far: zero changes needed to §4.5–§4.8. See the new "Phase 4" section above for the full account. |
 | 6.7.0 | 2026-11-08 | Direct operator instruction: `minecraft-bots`' `self_managed` switch flipped to `true` (`domains.json`). Found and fixed two real gaps in `hermes-self-repair-minecraft-bridge.py` (1.0.0 → 1.1.0) while actually preparing to enable it, before any live traffic: no bootstrap (`seek_to_end()`, so a fresh enable doesn't replay weeks of triage history as a submission flood) and no per-cycle submission cap (`MAX_SUBMISSIONS_PER_POLL`, default 3, excess retried next cycle rather than dropped). 6 more offline checks. See the "Phase 3" section's own update above for the full account. |
 | 6.6.0 | 2026-11-08 | `FLEET_SELFREPAIR_DESIGN.md` Phase 3 (§8.3): `minecraft-bots` registered as domain #1 (`self_managed: false`). Completeness hook (§4.3, §6 decided as "two linked tasks": `tools/hermes_self_repair_completeness.py`, `hermes-self-repair-link.py`, `hermes-self-repair-apply.py` 1.4.0's `finalize_or_wait()`/`unblock_linked_peer()`) and detection bridge (§4.4: `tools/hermes-self-repair-minecraft-bridge.py`, its wrapper/service, not installed). `hermes_self_repair_domains.py` bumped to 1.1.0 for glob path_scope matching; `hermes-self-repair-read.py` bumped to 1.1.0 for a new `list` operation. 59 new offline checks across three new test files plus a fix to an existing one whose "zero domains" assumption the real registration made stale. See the new "Phase 3" section above for the full account. |
