@@ -1,7 +1,12 @@
 # Fleet Self-Repair Review Loop
 
-**Version:** 1.3.0
-**Status:** Proposed only. Nothing in this file is built, deployed, or wired up. Generalizes
+**Version:** 1.8.0
+**Status:** §8's build order Phases 1–3 are built and live (see §9) — `minecraft-bots` is
+registered as domain #1 (§3) and **switched on** by direct operator instruction (2026-11-08).
+Phase 4 (the second-domain genericity acceptance check) is in progress: a real second domain
+(`egress-guard`, switched off) is registered, and a real genericity leak it surfaced — the
+detection bridge only knowing how to poll Buzz — is fixed (the bridge is now
+`hermes-self-repair-bridge.py`, generic across detection-source shapes). Generalizes
 2026-11-07's first pass at this design, which was written Minecraft-bot-specific
 (`MINECRAFT_SELFREPAIR_DESIGN.md`, superseded by this file and removed) — on operator direction,
 the capability itself is domain-agnostic. Minecraft bot behavior remains the first, and so far
@@ -11,9 +16,9 @@ only, **domain** registered against it (§3).
 human-pick loop, built once as generic fleet infrastructure and applied to one or more registered
 domains. Stitches together four pieces of standing fleet infrastructure that already exist
 independently (`infra/minecraft-bots-triage/`, `tools/hermes-dualcoder.py`,
-`infra/hermes-self-repair/`, `infra/hermes-fleetops-ui/`) plus three genuinely new, domain-agnostic
-pieces (a domain registry, a scheduled Claude Code review routine, a FleetOps UI tab), none of
-which have been built yet either.
+`infra/hermes-self-repair/`, `infra/hermes-fleetops-ui/`) plus the genuinely new, domain-agnostic
+pieces §4 describes (a domain registry, a completeness hook, a detection bridge, a registered-PR
+mechanism, a scheduled Claude Code review routine, a FleetOps UI tab) — all now built (§9).
 
 ## 1. The ask, restated precisely
 
@@ -258,10 +263,13 @@ row source feeding it, via §4.1's registry. Per the house rule
 
 ## 6. Open questions — decisions only the operator can make
 
-- **Domain registry mechanism.** A flat config file (JSON/YAML) read by the bridge, generate step,
-  and FleetOps UI alike, vs. a small Python module per domain each of those three imports? The
-  former is easier to audit at a glance with one domain or ten; the latter allows a domain to
-  express logic a flat file can't (e.g. a non-trivial completeness check).
+- **Domain registry mechanism — resolved in Phase 2 (§8.2).** A flat JSON file
+  (`infra/hermes-self-repair/domains.json`, `tools/hermes_self_repair_domains.py`), not a Python
+  module per domain. Phase 3's own completeness check (below) confirms this didn't actually cost
+  the expressiveness this bullet worried about: a domain names its rule by a short string
+  (`completeness_rule: "test-artifact"`), and the logic itself lives in one shared module
+  (`tools/hermes_self_repair_completeness.py`) dispatching on that name — a second domain with a
+  different rule registers a new name and a new `if` branch there, not a new per-domain file.
 - **Cadence.** Keep each domain's own reactive detection as the default (recommended, §4.2), or
   also support a periodic digest sweep per domain for cross-incident patterns a single finding
   wouldn't show?
@@ -277,9 +285,13 @@ row source feeding it, via §4.1's registry. Per the house rule
   `hermes-self-repair-promote.py`'s cherry-pick script, or do both need to coexist** (e.g. for
   self-repair tasks outside any registered domain's scope, submitted by hand the way Step 8 already
   allows, which never get a PR under this design unless they're also registered)?
-- **Completeness-hook task shape** (§4.3): one task producing two files, or two linked tasks — an
-  answer domain #1 needs regardless, but worth deciding generically rather than re-deciding per
-  domain.
+- **Completeness-hook task shape (§4.3) — resolved in Phase 3 (§8.3), direct operator choice.**
+  Two linked, ordinary, independent tasks (`tools/hermes-self-repair-link.py`,
+  `hermes_self_repair_completeness.py`), over one task regenerating two files together —
+  specifically to avoid touching `hermes-self-repair-apply.py`'s existing hardened refusal of any
+  diff touching more than one file, and to avoid restructuring `-generate.py`'s single-file draft/
+  review loop. Consequence, accepted: one incident under this rule produces two separate draft
+  PRs (fix + test), not one.
 
 ## 7. Benchmark-evaluation call (this project's `CLAUDE.md`)
 
@@ -307,6 +319,13 @@ implicit:
   for `fleet_coder_fix`/`fleet_coder_build`'s own growing corpus tables (§6.7/§6.8) the same way the
   existing fix/build examples were sourced — to be added in the shipping commit itself, not here,
   since nothing in this design is committed yet.
+- **Phase 3 re-check (§8.3, 2026-11-08): the call stands, re-made explicitly rather than assumed.**
+  Domain #1's fix and test tasks both route through the same unmodified `coder`/`coder2`
+  dualcoder-skeleton loop as every other self-repair task; the new detection bridge's own path-
+  resolution call (`tools/hermes-self-repair-bridge.py`) also calls the `coder` role,
+  not a new/different one. Neither condition in the bullet above (a materially different model
+  role, or the review step stopping being plain Claude Code commentary) is triggered. **No new
+  benchmark scenario needed.**
 
 ## 8. Suggested build order
 
@@ -335,14 +354,19 @@ completes — see `CLAUDE.md`'s implementation-plans rule.
 | Phase | Status | Date | Notes |
 |---|---|---|---|
 | 1. Deploy `hermes-self-repair` Steps 2-8 for real (§8.1) | Done | 2026-11-07 | Two real tasks run end-to-end against `tools/hermes-benchmark-compare.py` (non-bot, per §8.1). Found and fixed two real bugs live: missing `BROKER_TOKEN` in the generate wrapper, and a `compute_diff()` trailing-newline bug that made `git apply` reject the patch as corrupt (`infra/hermes-self-repair/README.md` 6.4.0). First task correctly escalated to `dead` on the bug; second converged and reached `verified` — real commit `92ad261` on `nas2-selfrepair/master`, awaiting operator `promote`/`skip`. Still no codesec venv on spark (static-analysis half of verify fails open). |
-| 2. Build the generic pieces with no domain registered (§8.2) | Not started | 2026-11-07 | Domain registry (§4.1), registered-PR mechanism (§4.6), daily Claude review routine (§4.7), FleetOps UI tab (§4.8). |
-| 3. Register `minecraft-bots` as domain #1 (§8.3) | Not started | 2026-11-07 | Completeness hook (§4.3), detection bridge (§4.4); switch flipped only after 1-2 are each independently verified. |
-| 4. Second-domain genericity check (§8.4) | Not started | 2026-11-07 | Acceptance test, not a build step — exercised once a real second domain exists. |
+| 2. Build the generic pieces with no domain registered (§8.2) | Done | 2026-11-08 | All four built and exercised with zero domains registered: domain registry (`infra/hermes-self-repair/domains.json` + `tools/hermes_self_repair_domains.py`), registered-PR mechanism (`tools/hermes-self-repair-open-pr.py`, reusing `-promote.py`'s own fetch/branch/cherry-pick mechanics against a new branch + `gh pr create --draft` instead of `master`), daily Claude review routine (`skills/fleet-selfrepair-review/SKILL.md` — the procedure only; deliberately **not** registered as a live cron, pending §6's still-open daily-cap/reject-handling/scheduled-session-placement decisions), and the FleetOps `/selfrepair` tab (`hermes-fleetops-ui.py` 2.19.0, 423/423 offline checks passing, 43 new). `hermes-self-repair-promote-gate.py` bumped to 1.1.0 (new `TRANSITIONS`/`write_turn()` the UI imports per the house rule, plus a real `set_task_state()` return-value bug fixed along the way) — see `infra/hermes-self-repair/README.md` 6.5.0 for the full account. |
+| 3. Register `minecraft-bots` as domain #1 (§8.3) | Done, switch on | 2026-11-08 | Registered in `domains.json`. Completeness hook built (§4.3 — §6's "two linked tasks" answer: `hermes_self_repair_completeness.py`, `hermes-self-repair-link.py`, `-apply.py` 1.4.0) and detection bridge built (§4.4: `hermes-self-repair-bridge.py`, renamed/generalized in Phase 4). Two real gaps found and fixed before enabling it live (1.1.0): no bootstrap seek-to-end (a fresh switch-on would have replayed the topic's entire history as a submission flood) and no per-cycle submission cap. `self_managed` flipped to `true` by direct operator instruction. See `infra/hermes-self-repair/README.md` 6.7.0 and §9's Phase 4 row below for the actual live-deployment step. |
+| 4. Second-domain genericity check (§8.4) | In progress | 2026-11-08 | Real second domain found and registered: `egress-guard` (`tools/hermes_egress_guard.py` + `EGRESS_GUARD_DESIGN.md`, switch off — this is the audit, not a decision to auto-submit fixes against a security control). Its detection source (hermes-memory `turns`, not Buzz) genuinely broke the bridge's own orchestration: `hermes-self-repair-minecraft-bridge.py` only knew how to extract a Buzz topic from a `detection_source` string, silently skipping anything else — the exact leak this check exists to catch. Fixed by renaming/generalizing it to `hermes-self-repair-bridge.py` (2.0.0): `poll_once()` now dispatches by a source's scheme via `SOURCE_POLLERS` (`"buzz"`, `"memory-turns"`), `HANDLERS` unchanged in shape. `egress-guard`'s own handler needs no model call at all — the denial's own `caller` field already names the real offending script. Registers no completeness rule (§4.3's own "none beyond Step 4's baseline" case, now actually exercised by a second real domain, not just a unit test). `path_scope` is deliberately empty (a real, documented limitation: egress-guard's domain is about detection source, not file ownership — see `domains.json`'s own comment). 19 more offline checks. **Acceptance result so far: registering domain #2 touched zero lines in §4.5 (`-generate.py`/`-apply.py`'s own pipeline logic — only the already-generic completeness/domain lookups ran, unmodified), §4.6 (`-open-pr.py`), §4.7 (the review skill), or §4.8 (`hermes-fleetops-ui.py`) — only §4.1 (registry) and §4.4 (the bridge, which is explicitly meant to be pluggable).** Deployed and running on spark: `hermes-self-repair-bridge.service` installed/enabled for the first time, surfacing one more real bug live (the wrapper script was never marked executable in git since Phase 3's original commit — `status=203/EXEC` — fixed with `git update-index --chmod=+x`). Its own first log line confirmed the backlog-replay bootstrap works on real data: `seeded cursor at seq=643716, will not replay its history`; `egress-guard` correctly never polled (switch off). Still open: this phase's own acceptance *conclusion* (so far, zero §4.5-§4.8 changes needed) is provisional on one real domain's worth of evidence — not formally re-stated as "done" until a reader revisits it, since "acceptance test" has no single finish line the way a build step does. |
 
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 1.8.0 | 2026-11-08 | `hermes-self-repair-bridge.service` deployed to spark, installed/enabled for the first time. Found live at first start: the wrapper script had never been marked executable in git (`status=203/EXEC`), latent since Phase 3's original commit — fixed with `git update-index --chmod=+x`. Its own first log line confirmed the backlog-replay bootstrap works on real data, not just offline tests: `seeded cursor at seq=643716, will not replay its history`. `egress-guard` correctly never polled (switch off). |
+| 1.7.0 | 2026-11-08 | Phase 4 (§8.4) started for real: registered a real second domain, `egress-guard` (switch off — the audit, not a decision to auto-submit security-control fixes). Its detection source (hermes-memory `turns`, not Buzz) immediately surfaced a real genericity leak Phase 3 left behind — `hermes-self-repair-minecraft-bridge.py`'s own orchestration only knew how to poll Buzz, silently skipping any other `detection_source` shape even though its own `HANDLERS` table was already generic. Fixed by renaming/generalizing it to `hermes-self-repair-bridge.py` (2.0.0): `poll_once()` now dispatches by a source's scheme (`SOURCE_POLLERS`), not a hardcoded `"buzz:"` check. Added `handle_egress_guard_denial()` — no model call needed, since the denial's own `caller` field already names the real offending script, resolved against the real repo via the read tool, never guessed, and explicitly refused if it would name `tools/hermes_egress_guard.py` itself. `egress-guard` registers no completeness rule, exercising §4.3's "none beyond Step 4's baseline" case for the first time via a real second domain rather than only a unit test. `path_scope` left deliberately empty — a real, documented limitation (`domains.json`'s own comment): this domain's identity is about its detection source, not a bounded set of owned files, so it renders as `unregistered` wherever something looks up a task's domain by path. 19 more offline checks (now 49 in the renamed `test_bridge.py`). **Acceptance result so far: registering domain #2 required zero changes to §4.5–§4.8's own code** — only §4.1 (registry) and §4.4 (the bridge, explicitly meant to be pluggable). Fixed three stale filename references the rename left behind in already-shipped files' own comments (`hermes-self-repair-link.py` 1.0.1, `hermes_self_repair_completeness.py` 1.0.1). |
+| 1.6.0 | 2026-11-08 | Direct operator instruction: `minecraft-bots`' `self_managed` switch flipped to `true`, and its detection bridge installed/enabled on spark. Found and fixed two real gaps in `hermes-self-repair-minecraft-bridge.py` first, while actually preparing to go live (1.0.0 → 1.1.0): no bootstrap step, so a fresh enable would have polled `minecraft-ops` from the start of its history (weeks of past incidents) and tried to submit tasks for all of them at once (fixed with `seek_to_end()`); and no cap anywhere on how many tasks one poll cycle could submit (fixed with `MAX_SUBMISSIONS_PER_POLL`, default 3, leaving any excess for the next cycle rather than dropping it — a narrow per-cycle safety valve, not an answer to §6's own still-open daily-cap question). 6 more offline checks added for both fixes (now 36 in that file). §9 updated to "Done, switch on." Phase 4 started: surveying for a real second-domain candidate. |
+| 1.5.0 | 2026-11-08 | Phase 3 done, switch off: `minecraft-bots` registered as domain #1 (§3). Resolved two of §6's open questions explicitly — the completeness-hook task shape (two linked tasks, a direct operator choice over one task regenerating two files, to avoid touching `-apply.py`'s hardened multi-file-diff refusal or restructuring `-generate.py`'s single-file loop) and, retroactively, confirmed the domain-registry-mechanism choice (Phase 2's flat file) held up against a real completeness rule. Built and offline-verified: the completeness hook (`hermes_self_repair_completeness.py`, `hermes-self-repair-link.py`, `-apply.py` 1.4.0) and the detection bridge (`hermes-self-repair-minecraft-bridge.py` — a real gap found and closed along the way: triage's own coder/coder2 calls never name a file path, so this bridge adds its own path-resolution call, never trusted without a real-file-listing match). §7's benchmark-evaluation call re-made explicitly for Phase 3's new traffic (still: no new scenario needed). Corrected this file's own top-of-document "Status" line, stale since Phase 1 (claimed nothing was built). §9 updated to "Done, switch off" for Phase 3. See `infra/hermes-self-repair/README.md` 6.6.0 for the full account. |
+| 1.4.0 | 2026-11-08 | Phase 2 done: built and exercised, with zero domains registered, the four generic pieces §8.2 calls for — the domain registry, the registered-PR mechanism, the daily Claude review routine's procedure (deliberately not yet scheduled live — §6's daily-cap/reject-handling/session-placement questions are still open), and the FleetOps `/selfrepair` tab. §9 updated to "Done" for Phase 2. |
 | 1.0.0 | 2026-11-07 | Initial version. Supersedes `MINECRAFT_SELFREPAIR_DESIGN.md` (1.0.0, deleted), which described the same self-managed self-repair loop (periodic detection, coder/coder2 cross-review, automated fix, daily Claude Code review of registered self-repair PRs, a FleetOps UI tab for picking which fixes to implement) as Minecraft-bot-specific. On direct operator request, generalized so the review/PR/UI mechanism (§4.1, §4.6-§4.8) is domain-agnostic, with a new §3 "domains" concept and Minecraft bot behavior registered as domain #1 (§3) rather than built into the mechanism itself. Proposed only; nothing in this design is built. |
 | 1.1.0 | 2026-11-07 | Added §9, the phased build status table required by `CLAUDE.md`'s new implementation-plans rule (1.3.0) — tracks §8's four build-order steps, all currently "Not started." |
 | 1.2.0 | 2026-11-07 | Phase 1 started: live audit of spark found Steps 2/3/5 already deployed and healthy since 2026-10-26, contradicting `infra/hermes-self-repair/README.md`'s stale "nothing deployed" claims (fixed there, 6.3.0). §9 updated to "In progress." |

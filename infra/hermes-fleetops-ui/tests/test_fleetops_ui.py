@@ -683,8 +683,9 @@ def check_write_surface(ui):
     print(NL + "[the write surface is exactly one guarded route]")
     src = (TOOLS / "hermes-fleetops-ui.py").read_text(encoding="utf-8")
     check("there is exactly one write handler", src.count("def do_POST") == 1)
-    check("and it serves only two named routes -- /backlog/decide and /market/monitor/add",
-          'path not in ("/backlog/decide", "/market/monitor/add")' in src)
+    check("and it serves only three named routes -- /backlog/decide, /market/monitor/add, "
+          "/selfrepair/decide",
+          'path not in ("/backlog/decide", "/market/monitor/add", "/selfrepair/decide")' in src)
     check("the decide body cap is a named constant, not a bare magic number",
           "0 <= length <= MAX_DECIDE_BODY" in src and "0 <= length <= 8192" not in src)
     check("an oversized/invalid body closes the connection rather than leaving it unread",
@@ -1814,6 +1815,224 @@ def check_decide_unavailable(ui):
     check("and availability returns once both are present", ui.decide_unavailable() == "")
 
 
+class FakeSelfRepairGate:
+    """Stands in for hermes-self-repair-promote-gate.py. No AGENT/candidate_facts/approval_reply --
+    self-repair tasks have no stable owner agent to check (see read_selfrepair_tasks()'s own
+    header), so this gate's contract is smaller than the scout gate's FakeGate above."""
+
+    TRANSITIONS = {
+        "promote": ({"verified"}, "promotion-approved"),
+        "skip": ({"verified"}, "promotion-declined"),
+    }
+
+    def __init__(self, tasks, write_ok=True, applied_shas=None):
+        self.tasks = tasks
+        self.write_ok = write_ok
+        self.applied_shas = applied_shas or {}
+        self.state_writes = []
+        self.turns = []
+        self.messages = []
+
+    def fetch_task(self, task_id):
+        if task_id not in self.tasks:
+            raise urllib.error.HTTPError(task_id, 404, "not found", None, None)
+        return self.tasks[task_id]
+
+    def fetch_applied_sha(self, task_id):
+        return self.applied_shas.get(task_id)
+
+    def set_task_state(self, task_id, state):
+        if not self.write_ok:
+            return False
+        self.state_writes.append((task_id, state))
+        self.tasks[task_id]["state"] = state
+        return True
+
+    def write_turn(self, task_id, payload):
+        self.turns.append((task_id, payload))
+
+    def send_room_message(self, text):
+        self.messages.append(text)
+
+
+def check_selfrepair_gate_contract(ui):
+    print(NL + "[S48: the self-repair decision rules belong to the gate, not to this page]")
+    gate = ui.load_selfrepair_gate()
+    check("the real self-repair gate module imports cleanly", gate is not None,
+          ui.SELFREPAIR_GATE_IMPORT_ERROR)
+    if gate is None:
+        return
+    check("and the UI uses the gate's table verbatim",
+          gate.TRANSITIONS == FakeSelfRepairGate.TRANSITIONS, str(gate.TRANSITIONS))
+    check("every attribute the UI calls on it exists",
+          all(hasattr(gate, a) for a in ("fetch_task", "set_task_state", "write_turn",
+                                         "fetch_applied_sha", "send_room_message")))
+
+    print(NL + "[a self-repair row only offers transitions legal from its state]")
+    ui.SELFREPAIR_GATE = gate
+    check("verified offers promote and skip",
+          sorted(ui.selfrepair_legal_actions("verified")) == ["promote", "skip"],
+          str(sorted(ui.selfrepair_legal_actions("verified"))))
+    check("a drafting task offers nothing", ui.selfrepair_legal_actions("drafting") == [])
+    check("an unknown state offers nothing rather than everything",
+          ui.selfrepair_legal_actions("weird") == [] and ui.selfrepair_legal_actions(None) == [])
+    ui.SELFREPAIR_GATE = None
+    check("with no gate imported, no action is offered at all",
+          ui.selfrepair_legal_actions("verified") == [])
+    ui.SELFREPAIR_GATE = gate
+
+
+def check_selfrepair_decisions(ui):
+    print(NL + "[a self-repair decision is re-checked against the store, not trusted from the page]")
+    tasks = {"t1": {"id": "t1", "state": "verified"}, "t2": {"id": "t2", "state": "drafting"}}
+    g = FakeSelfRepairGate(tasks, applied_shas={"t1": "abc123def456"})
+    ui.SELFREPAIR_GATE = g
+
+    check("a legal transition is applied",
+          ui.apply_selfrepair_decision("t1", "promote") == "ok")
+    check("and the new state was written", g.state_writes[-1] == ("t1", "promotion-approved"),
+          str(g.state_writes))
+    check("repeating it is refused as stale rather than re-applied",
+          ui.apply_selfrepair_decision("t1", "promote") == "stale")
+    check("no second write happened", len(g.state_writes) == 1, str(g.state_writes))
+    check("an illegal transition for the state is refused",
+          ui.apply_selfrepair_decision("t2", "promote") == "stale")
+    check("a task that does not exist is refused",
+          ui.apply_selfrepair_decision("nope", "promote") == "nosuch")
+    check("an unknown action is refused",
+          ui.apply_selfrepair_decision("t2", "rm -rf") == "badaction")
+
+    print(NL + "[promote without a recorded applied-commit sha refuses rather than guessing]")
+    g2 = FakeSelfRepairGate({"t3": {"id": "t3", "state": "verified"}})  # no sha on file
+    ui.SELFREPAIR_GATE = g2
+    check("refused as readfail", ui.apply_selfrepair_decision("t3", "promote") == "readfail")
+    check("and no state write happened", g2.state_writes == [], str(g2.state_writes))
+
+    print(NL + "[skip needs no applied-commit sha, and the audit record distinguishes the route]")
+    g3 = FakeSelfRepairGate({"t4": {"id": "t4", "state": "verified"}})
+    ui.SELFREPAIR_GATE = g3
+    check("skip succeeds with no sha on file",
+          ui.apply_selfrepair_decision("t4", "skip") == "ok")
+    _tid, payload = g3.turns[0]
+    check("the turn says which route decided it", payload["decided_by"] == "fleetops-ui",
+          str(payload))
+    check("and records the transition both ways",
+          payload["from"] == "verified" and payload["to"] == "promotion-declined", str(payload))
+    check("a decision made here is still announced in FleetOps",
+          any("promotion-declined" in m for m in g3.messages), str(g3.messages))
+
+    print(NL + "[when the write fails, nothing is claimed]")
+    g4 = FakeSelfRepairGate({"t5": {"id": "t5", "state": "verified"}}, write_ok=False)
+    ui.SELFREPAIR_GATE = g4
+    check("a rejected state write reports failure",
+          ui.apply_selfrepair_decision("t5", "skip") == "writefail")
+    check("and writes no turn claiming it happened", g4.turns == [], str(g4.turns))
+    check("and sends no FleetOps notice", g4.messages == [], str(g4.messages))
+
+    print(NL + "[with no gate, the route refuses instead of guessing]")
+    ui.SELFREPAIR_GATE = None
+    check("apply_selfrepair_decision fails closed",
+          ui.apply_selfrepair_decision("t1", "promote") == "nogate")
+
+
+def check_selfrepair(ui, tmp):
+    print(NL + "[S48: self-repair tasks, read the same way the backlog reads model-scout's]")
+    db = tmp / "memory-selfrepair.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, agent TEXT, topic TEXT, state TEXT,"
+        " memory_ref TEXT, created_at TEXT, updated_at TEXT);"
+        "CREATE TABLE turns (id INTEGER PRIMARY KEY, task_id TEXT, agent TEXT, role TEXT,"
+        " raw TEXT, presented TEXT, created_at TEXT, conv_id TEXT);")
+    rows = [
+        ("sr1", "selfrepair-apply", "verified"),
+        ("sr2", "selfrepair-promote-gate", "promotion-approved"),
+        ("scout:x:y", "model-scout", "proposed"),
+    ]
+    for i, (tid, agent, state) in enumerate(rows):
+        conn.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?)",
+                     (tid, agent, "selfrepair", state, None, "1791542000.0",
+                      f"179154{2500 - i}.0"))
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw) VALUES (?,?,?,?)",
+                 ("sr1", "operator", "user",
+                  json.dumps({"path": "tools/foo.py", "problem": "a real bug, for real"})))
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw) VALUES (?,?,?,?)",
+                 ("sr1", "selfrepair", "assistant", json.dumps({"phase": "review", "round": 1})))
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw) VALUES (?,?,?,?)",
+                 ("sr1", "selfrepair", "assistant",
+                  json.dumps({"phase": "diff", "content": "--- a\n+++ b\n"})))
+    conn.execute("INSERT INTO turns (task_id, agent, role, raw) VALUES (?,?,?,?)",
+                 ("sr2", "operator", "user", json.dumps({"path": "tools/bar.py", "problem": "x"})))
+    conn.commit()
+    conn.close()
+
+    # This test's own "with no domain registered, every task reads as unregistered" assertion
+    # needs that to actually be true regardless of what Phase 3 (§8.3) has really registered in
+    # the live infra/hermes-self-repair/domains.json -- pointed at an isolated empty fixture here,
+    # same reasoning as ui.MEMORY_DB just below.
+    domains_file = tmp / "domains-empty.json"
+    domains_file.write_text(json.dumps({"domains": []}))
+    orig_domains_file = ui.sr_domains.DOMAINS_FILE
+    ui.sr_domains.DOMAINS_FILE = domains_file
+
+    # Saved/restored, not left pointing at this fixture -- check_multiselect() below runs later in
+    # main()'s own sequence and reuses whatever ui.MEMORY_DB check_backlog() left behind, the same
+    # cross-check-state hazard check_recommended()'s own orig_db/finally pattern already guards
+    # against for the same reason.
+    orig_db = ui.MEMORY_DB
+    ui.MEMORY_DB = str(db)
+    try:
+        _check_selfrepair_body(ui)
+    finally:
+        ui.MEMORY_DB = orig_db
+        ui.sr_domains.DOMAINS_FILE = orig_domains_file
+
+
+def _check_selfrepair_body(ui):
+    tasks, detail, total, state_counts = ui.read_selfrepair_tasks("all")
+    check("only self-repair's own tasks are listed (agent LIKE 'selfrepair%')",
+          sorted(t["id"] for t in tasks) == ["sr1", "sr2"], str([t["id"] for t in tasks]))
+    check("a model-scout task is not pulled in by this reader",
+          all(t["id"] != "scout:x:y" for t in tasks))
+    check("state=all's own total matches", total == 2, total)
+    check("the spec's path/problem are read off the earliest turn",
+          detail["sr1"]["path"] == "tools/foo.py" and
+          detail["sr1"]["problem"] == "a real bug, for real", str(detail["sr1"]))
+    check("review rounds are counted", detail["sr1"]["round_count"] == 1, detail["sr1"])
+    check("the diff is carried through", detail["sr1"]["diff"] == "--- a\n+++ b\n", detail["sr1"])
+    check("with no domain registered, every task reads as unregistered",
+          detail["sr1"]["domain"] == "unregistered" and detail["sr2"]["domain"] == "unregistered",
+          str(detail))
+
+    print(NL + "[the default filter is 'verified' -- what actually needs a decision]")
+    verified_only, _d, v_total, _c = ui.read_selfrepair_tasks()
+    check("only the verified task shows", [t["id"] for t in verified_only] == ["sr1"],
+          str(verified_only))
+    check("its own total matches", v_total == 1, v_total)
+
+    print(NL + "[rendering the self-repair page]")
+    ui.load_selfrepair_gate()
+    html = ui.render_selfrepair()
+    check("the verified task's path and problem appear", "tools/foo.py" in html and
+          "a real bug, for real" in html, html)
+    check("a verified row gets decide buttons for its legal transitions",
+          "implement" in html and "skip" in html, html)
+    check("it is a POST form, so no GET can decide anything",
+          'method="post" action="/selfrepair/decide"' in html)
+    check("and carries the CSRF token", f'value="{ui.CSRF_TOKEN}"' in html)
+    check("the diff is shown inside a collapsible details block",
+          "<details><summary>diff</summary>" in html and "--- a" in html, html)
+    check("the page says a decision here is the same write as the Matrix reply",
+          "promote|skip" in html and "fleetops-ui" in html)
+
+    print(NL + "[the assembled page carries the section, and the route is registered]")
+    page = ui.page_selfrepair({})
+    check("the page renders under its own heading", b"Self-repair tasks" in page, page[:200])
+    check("the no-domains-registered note appears", b"No domains are registered yet" in page)
+    check("the route is wired up", ui.ROUTES.get("/selfrepair") is ui.page_selfrepair)
+    check("the nav links to it", '<a href="/selfrepair">' in ui.shell("x", "").decode())
+
+
 def check_failure_naming(ui):
     print(NL + "[a read failure must not be reported as a write failure]")
     # The operator saw `writefail=5` -- "hermes-memory rejected the state write" -- when the real
@@ -1884,6 +2103,9 @@ def main():
         check_csrf(ui)
         check_decisions(ui)
         check_decide_unavailable(ui)
+        check_selfrepair_gate_contract(ui)
+        check_selfrepair_decisions(ui)
+        check_selfrepair(ui, tmp)
         check_failure_naming(ui)
         check_attribution(ui)
         check_multiselect(ui)

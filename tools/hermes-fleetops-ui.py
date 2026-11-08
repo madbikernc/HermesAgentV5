@@ -1,5 +1,24 @@
 #!/usr/bin/env python3
-# Version: 2.18.2
+# Version: 2.19.0
+#
+# 2.19.0 (2026-11-08) — S48, FLEET_SELFREPAIR_DESIGN.md §4.8's new `/selfrepair` tab, built as part
+# of §8's Phase 2 (the generic review/PR/UI pieces, with no domain registered yet -- the real test
+# that they are actually generic and not quietly Minecraft-shaped). Read-only report (state,
+# domain, path, problem, dualcoder round count, diff preview, any opened PR, any daily-review
+# recommendation) plus exactly one write route, `/selfrepair/decide`, following the exact same
+# house rule `/backlog/decide` already established: the transition table, task/turn writers, and
+# Matrix-announce all come from `hermes-self-repair-promote-gate.py` (1.1.0, extended with a
+# TRANSITIONS table and write_turn() for this), imported at startup through a fail-closed
+# load_selfrepair_gate(), never reimplemented here. Self-repair tasks carry no single stable owner
+# agent the way model-scout's do, so this route has no ownership check to match -- eligibility is
+# state alone (`verified` -> `promotion-approved`/`promotion-declined`), exactly what the gate's
+# own chat-driven handle_command() already checks. Domain lookups go through the new
+# hermes_self_repair_domains.py (§4.1's registry reader, a plain top-level import like
+# hermes_market_common.py -- no credential, no privileged table, so no load_gate()-style
+# machinery). This is the third write route in one do_POST, not merged into /backlog/decide's
+# own apply_decision()/ACTION_LABELS -- two independently-reasoned-about gates (model-scout's,
+# self-repair's) stay two routes, matching how their own TRANSITIONS tables stay two separate
+# dicts rather than one shared one a future third gate could silently collide with.
 #
 # 2.18.2 (2026-11-04) — label-only: the log-analyst swap row said its backend had never started;
 # it first served 2026-11-04 (hermes-model-wake-worker.py 1.7.0, start-log-analyst.sh at 16k
@@ -216,7 +235,11 @@
 #
 # ── SCOPE ──
 #
-# Read-only reports, plus ONE write route: the model-scout backlog's decide buttons.
+# Read-only reports, plus a small number of deliberately narrow write routes: the model-scout
+# backlog's decide buttons, the market watchlist's add form, and (S48) the self-repair tab's
+# decide buttons. Each is its own route under the one do_POST handler, gated by its own imported
+# transition table where one exists — never a shared write surface two features could disagree
+# through.
 #
 # Services are still not started, stopped or restarted from here. That stays an SSH + `systemctl`
 # operator action, like every other privileged action in this fleet (`tools/hermes-confirm-gate.sh`
@@ -330,6 +353,11 @@ TOPICS_FILE = REPO / "infra" / "hermes-news-digest" / "topics.yaml"
 sys.path.insert(0, str(TOOLS))
 import hermes_market_common as market_common  # noqa: E402
 import hermes_benchmark_common as bc  # noqa: E402
+# FLEET_SELFREPAIR_DESIGN.md §4.1 -- a plain stdlib-only config reader (no write capability, no
+# privileged transition table), the same character of dependency hermes_market_common.py/
+# hermes_benchmark_common.py already are here. Unlike the model-scout/self-repair GATE modules
+# below, there is no fail-closed load_gate()-style import for this one.
+import hermes_self_repair_domains as sr_domains  # noqa: E402
 
 NAS_HISTORY = Path("/mnt/nas2-hermes-backup/Private/Hermes/Benchmarks/history.jsonl")
 LOCAL_HISTORY = Path.home() / ".hermes" / "state" / "benchmark-history.jsonl"
@@ -378,6 +406,37 @@ def load_gate():
         GATE_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
         log(f"decide buttons disabled — could not import the scout gate: {GATE_IMPORT_ERROR}")
     return GATE
+
+
+# FLEET_SELFREPAIR_DESIGN.md §4.8's own instance of the exact same house rule: the /selfrepair
+# tab's one write route imports hermes-self-repair-promote-gate.py's TRANSITIONS/fetch_task/
+# set_task_state/write_turn/fetch_applied_sha rather than restating them, and fails closed (no
+# buttons rendered) if that import fails, for the same reason load_gate() above does.
+SELFREPAIR_GATE = None
+SELFREPAIR_GATE_IMPORT_ERROR = ""
+
+
+def load_selfrepair_gate():
+    global SELFREPAIR_GATE, SELFREPAIR_GATE_IMPORT_ERROR
+    import importlib.util
+    path = TOOLS / "hermes-self-repair-promote-gate.py"
+    try:
+        spec = importlib.util.spec_from_file_location("selfrepairgate", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["selfrepairgate"] = mod
+        spec.loader.exec_module(mod)
+        for attr in ("TRANSITIONS", "fetch_task", "set_task_state", "write_turn",
+                     "fetch_applied_sha"):
+            if not hasattr(mod, attr):
+                raise AttributeError(f"hermes-self-repair-promote-gate.py has no {attr!r}")
+        SELFREPAIR_GATE = mod
+        SELFREPAIR_GATE_IMPORT_ERROR = ""
+    except Exception as exc:
+        SELFREPAIR_GATE = None
+        SELFREPAIR_GATE_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+        log(f"self-repair decide buttons disabled — could not import the promote gate: "
+            f"{SELFREPAIR_GATE_IMPORT_ERROR}")
+    return SELFREPAIR_GATE
 
 
 # What each action is called on its button, and whether it deserves a confirmation prompt. The
@@ -455,6 +514,17 @@ MAX_RECOMMENDATION_ROWS = 400
 MAX_EGRESS_BLOCK_ROWS = 400
 MAX_MARKET_ROWS = 400
 MAX_TAG_PROPOSAL_ROWS = 400
+MAX_SELFREPAIR_ROWS = 400
+
+# Self-repair's own two verbs (disjoint from model-scout's, per hermes-self-repair-promote-gate.py's
+# own "Verbs, and why they are disjoint" comment) -- "implement" is the label §4.8 itself specifies
+# ("Checking a box and clicking 'implement' does exactly what replying `promote <id>` ... does
+# today"), kept separate from ACTION_LABELS above rather than merged into it, since the two button
+# bars belong to two independently-reasoned-about gates.
+SELFREPAIR_ACTION_LABELS = {
+    "promote": ("implement", True),
+    "skip": ("skip", False),
+}
 # A decide POST's body: one `task_id=` field per selected row, plus the CSRF token and the
 # action. 400 rows (MAX_BACKLOG_ROWS) of `task_id=scout:<role>:<model>` is comfortably under
 # this -- see do_POST's own comment for why it must never be raised without also keeping the
@@ -530,7 +600,8 @@ footer { color:var(--dim); padding:18px 20px; border-top:1px solid var(--line); 
 NAV = [("/", "Home"), ("/backlog", "Benchmark backlog"), ("/models", "Models &amp; usage"),
        ("/benchmarks", "Benchmark results"), ("/highlights", "Topic highlights"),
        ("/recommendations", "Recommendations"), ("/egress-blocks", "Egress-guard denials"),
-       ("/market", "Market Watch"), ("/status", "System status and health")]
+       ("/market", "Market Watch"), ("/status", "System status and health"),
+       ("/selfrepair", "Self-repair")]
 
 
 def log(msg):
@@ -644,8 +715,9 @@ def shell(title, body, subtitle=""):
             f"<header><h1>hermes-fleetops</h1><nav>{nav}</nav>"
             f"<span style=\"color:var(--dim);margin-left:auto\">{esc(subtitle)}</span></header>"
             f"<main>{body}</main>"
-            f"<footer>Reports are read-only. The backlog's decide buttons are this page's only "
-            f"write route; starting and stopping services stays an SSH + systemctl action. "
+            f"<footer>Reports are read-only. The backlog's, self-repair's and the market "
+            f"watchlist's decide/add buttons are this page's only write routes; starting and "
+            f"stopping services stays an SSH + systemctl action. "
             f"Rendered {esc(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}.</footer>"
             f'<script nonce="__CSP_NONCE__">{PAGE_SCRIPT}</script>'
             f"</body></html>").encode()
@@ -1234,6 +1306,270 @@ def page_backlog(query=None):
         render_backlog_recommended)
     body += section("Model benchmark backlog", "", lambda: render_backlog(state_filter))
     return shell("Benchmark backlog", body)
+
+
+# ── S48: self-repair review/PR surface (FLEET_SELFREPAIR_DESIGN.md §4.8) ────────────────────────
+
+def read_selfrepair_tasks(state_filter="verified"):
+    """Every self-repair task, read the same way read_backlog() reads model-scout's -- hermes-
+    memory's /tasks is POST-only, confirmed when this page's backlog was first built, so this
+    table's own schema (tools/hermes-self-repair-list.py, built alongside this route) is the only
+    way to ask "which tasks". Self-repair tasks carry no single stable owner agent the way model-
+    scout's do -- each phase stamps its own agent when it writes state -- so `agent LIKE
+    'selfrepair%'` is the filter, not an exact match; no other producer in this fleet uses an agent
+    value starting with "selfrepair" (confirmed by reading every self-repair component's own
+    set_task_state()).
+
+    `state_filter`: "verified" (default -- what actually has a pending decision), "all", or any
+    other exact state. Unlike the backlog's own filter there is no "terminal state" to default-hide
+    here: self-repair states are a short, mostly-non-repeating pipeline, not an ever-growing log."""
+    conn = ro_sqlite(MEMORY_DB)
+    try:
+        where = ["agent LIKE 'selfrepair%'"]
+        params = []
+        if state_filter and state_filter != "all":
+            where.append("state = ?")
+            params.append(state_filter)
+        clause = " AND ".join(where)
+        total = conn.execute(f"SELECT count(*) FROM tasks WHERE {clause}", params).fetchone()[0]
+        state_counts = dict(conn.execute(
+            "SELECT state, count(*) FROM tasks WHERE agent LIKE 'selfrepair%' "
+            "GROUP BY state").fetchall())
+        tasks = conn.execute(
+            f"SELECT id, state, updated_at FROM tasks WHERE {clause} "
+            f"ORDER BY updated_at DESC LIMIT ?", params + [MAX_SELFREPAIR_ROWS]).fetchall()
+        detail = {}
+        for t in tasks:
+            rows = conn.execute(
+                "SELECT raw FROM turns WHERE task_id=? ORDER BY id ASC", (t["id"],)).fetchall()
+            d = {"path": None, "problem": None, "round_count": 0, "diff": None,
+                 "pr_url": None, "review": None}
+            for row in rows:
+                try:
+                    payload = json.loads(row["raw"] or "{}")
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if d["path"] is None and payload.get("path"):
+                    d["path"] = payload["path"]
+                    d["problem"] = payload.get("problem")
+                phase = payload.get("phase")
+                if phase in ("review", "third-party-review", "security-review"):
+                    d["round_count"] += 1
+                elif phase == "diff":
+                    d["diff"] = payload.get("content")
+                elif phase == "pr-opened":
+                    d["pr_url"] = payload.get("pr_url")
+                elif phase == "daily-review":
+                    d["review"] = payload  # latest wins -- one per PR per day, by design (§4.7)
+            domain = sr_domains.domain_for_path(d["path"]) if d["path"] else None
+            d["domain"] = domain.get("name") if domain else "unregistered"
+            detail[t["id"]] = d
+        return [dict(t) for t in tasks], detail, total, state_counts
+    finally:
+        conn.close()
+
+
+def selfrepair_decide_unavailable():
+    """Mirrors decide_unavailable() exactly, for the self-repair gate instead of the scout one."""
+    if not SELFREPAIR_GATE:
+        return (f"the self-repair promote gate module could not be imported, so this page will "
+                f"not guess at the transition rules ({SELFREPAIR_GATE_IMPORT_ERROR})")
+    if not MEMORY_TOKEN:
+        return ("this service has no MEMORY_TOKEN, so it cannot write to hermes-memory. Its "
+                "wrapper fetches that credential best-effort; a restart re-fetches it")
+    return ""
+
+
+def selfrepair_legal_actions(state):
+    if not SELFREPAIR_GATE:
+        return []
+    return [a for a, (legal_from, _to) in SELFREPAIR_GATE.TRANSITIONS.items()
+            if state in legal_from]
+
+
+def apply_selfrepair_decision(task_id, action, who=""):
+    """One guarded transition, the self-repair equivalent of apply_decision() above. No agent-
+    ownership check (self-repair tasks have no stable owner to check against, see
+    read_selfrepair_tasks()'s own header) -- eligibility is state alone, exactly what
+    hermes-self-repair-promote-gate.py's own handle_command() already checks."""
+    if not SELFREPAIR_GATE:
+        return "nogate"
+    if not MEMORY_TOKEN:
+        log(f"self-repair decide refused for {task_id!r}: no MEMORY_TOKEN, so no write is possible")
+        return "notoken"
+    if action not in SELFREPAIR_GATE.TRANSITIONS:
+        log(f"self-repair decide refused for {task_id!r}: unknown action {action!r}")
+        return "badaction"
+    try:
+        task = SELFREPAIR_GATE.fetch_task(task_id)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            log(f"self-repair decide: no such task {task_id!r}")
+            return "nosuch"
+        if exc.code in (401, 403):
+            log(f"self-repair decide: hermes-memory refused the lookup of {task_id!r} as "
+                f"unauthorized (HTTP {exc.code}) — MEMORY_TOKEN missing or wrong")
+            return "unauthorized"
+        log(f"self-repair decide: task lookup for {task_id!r} failed with HTTP {exc.code}")
+        return "readfail"
+    except Exception as exc:
+        log(f"self-repair decide: task lookup for {task_id!r} failed: {type(exc).__name__}: {exc}")
+        return "readfail"
+    if not task:
+        log(f"self-repair decide: hermes-memory returned nothing for {task_id!r}")
+        return "nosuch"
+
+    state = task.get("state")
+    legal_from, new_state = SELFREPAIR_GATE.TRANSITIONS[action]
+    if state not in legal_from:
+        log(f"self-repair decide: {action!r} is not legal for {task_id!r} from state {state!r} "
+            f"(legal from {sorted(legal_from)})")
+        return "stale"
+
+    if action == "promote":
+        sha = SELFREPAIR_GATE.fetch_applied_sha(task_id)
+        if not sha:
+            log(f"self-repair decide: {task_id!r} has no recorded applied-commit sha — refusing")
+            return "readfail"
+
+    if not SELFREPAIR_GATE.set_task_state(task_id, new_state):
+        log(f"self-repair decide: hermes-memory rejected the state write for {task_id!r} "
+            f"({state} -> {new_state})")
+        return "writefail"
+    whom = f" by {who}" if who else ""
+    SELFREPAIR_GATE.write_turn(task_id, {
+        "phase": "transition", "action": action, "from": state, "to": new_state,
+        "decided_by": "fleetops-ui", "decided_by_user": who, "at": time.time(),
+        "summary": f"{task_id}: {state} -> {new_state} by \"{action}\" (fleetops-ui{whom})",
+    })
+    log(f"{task_id}: {state} -> {new_state} ({action}) via fleetops-ui{whom}")
+    # Announce it where the Matrix path would have, same as apply_decision() above -- non-fatal,
+    # since a Matrix outage must not undo a transition already written.
+    try:
+        SELFREPAIR_GATE.send_room_message(
+            f"[self-repair] {task_id}: {state} -> {new_state} (\"{action}\"), decided in "
+            f"hermes-fleetops-ui{whom} rather than by reply here.")
+    except Exception as exc:
+        log(f"FleetOps notice failed for {task_id} (transition already applied): {exc}")
+    return "ok"
+
+
+def apply_selfrepair_decisions(task_ids, action, who=""):
+    counts = Counter()
+    if not task_ids:
+        counts["none"] += 1
+        return counts
+    for task_id in task_ids:
+        counts[apply_selfrepair_decision(task_id, action, who)] += 1
+    return counts
+
+
+def selfrepair_bulk_bar():
+    buttons = []
+    for act in ("promote", "skip"):
+        label, confirm = SELFREPAIR_ACTION_LABELS.get(act, (act, True))
+        attrs = 'data-needs-selection'
+        if confirm:
+            attrs += (f' data-confirm="{esc(label)} {{n}} task(s)?\n\nWritten to hermes-memory and '
+                      f'announced in FleetOps."')
+        buttons.append(f'<button type="submit" name="action" value="{esc(act)}" {attrs}>'
+                       f'{esc(label)} selected</button>')
+    return ('<p style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0">'
+            '<button type="button" data-select="all">select all</button>'
+            '<button type="button" data-select="none">select none</button>'
+            '<span class="note" style="margin:0"><b data-count>0</b> selected</span>'
+            '<span style="flex:1"></span>' + "".join(buttons) + '</p>')
+
+
+def diff_preview(diff_text):
+    if not diff_text:
+        return '<span class="empty">no diff recorded</span>'
+    return f'<details><summary>diff</summary><pre class="mono">{esc(diff_text)}</pre></details>'
+
+
+def render_selfrepair(state_filter="verified"):
+    blocked = selfrepair_decide_unavailable()
+    tasks, detail, total, state_counts = read_selfrepair_tasks(state_filter)
+    summary = " · ".join(f'<span class="pill s-{esc(k)}">{esc(k)} {v:,}</span>'
+                         for k, v in sorted(state_counts.items()))
+    sopts = [f'<option value="verified"{" selected" if state_filter == "verified" else ""}>'
+             f'verified (awaiting a decision)</option>',
+             f'<option value="all"{" selected" if state_filter == "all" else ""}>'
+             f'(every state)</option>']
+    for s in sorted(state_counts):
+        if s == "verified":
+            continue
+        sel = " selected" if s == state_filter else ""
+        sopts.append(f'<option value="{esc(s)}"{sel}>{esc(s)} only</option>')
+    filter_form = (f'<form method="get"><select name="state">{"".join(sopts)}</select> '
+                   f'<button type="submit">show</button></form>')
+    rows = []
+    for t in tasks:
+        d = detail.get(t["id"], {})
+        state = t["state"] or "?"
+        legal = [] if blocked else selfrepair_legal_actions(state)
+        pick = (f'<input type="checkbox" name="task_id" value="{esc(t["id"])}" '
+                f'aria-label="select {esc(t["id"])}">' if legal and SELFREPAIR_GATE
+                else '<span class="empty">—</span>')
+        pr_cell = (f'<a href="{esc(d.get("pr_url"))}">PR</a>' if d.get("pr_url")
+                   else '<span class="empty">none</span>')
+        review = d.get("review") or {}
+        review_cell = (f'{esc(review.get("recommendation", ""))}'
+                       f'<br><span class="note" style="margin:0">{esc(review.get("reasoning", ""))}</span>'
+                       if review else '<span class="empty">not yet reviewed</span>')
+        problem = (d.get("problem") or "")
+        problem_cell = esc(problem[:200] + ("…" if len(problem) > 200 else ""))
+        rows.append([
+            pick,
+            f'<span class="pill s-{esc(state)}">{esc(state)}</span>',
+            esc(d.get("domain") or "unregistered"),
+            f'<span class="mono">{esc(d.get("path") or "")}</span>',
+            problem_cell,
+            f"{d.get('round_count', 0)}",
+            diff_preview(d.get("diff")),
+            pr_cell,
+            review_cell,
+            esc(when(t["updated_at"])),
+        ])
+    if not blocked:
+        note = (f'{summary}<br>Showing {len(rows)} of {total:,} matching this filter, capped at '
+                f'{MAX_SELFREPAIR_ROWS}. Deciding here writes the same transition, through the '
+                f'same code, as replying <span class="mono">promote|skip &lt;id&gt;</span> in '
+                f'FleetOps — and is announced there too, tagged <span class="mono">fleetops-ui'
+                f'</span>. This is the registered-PR mechanism\'s own review surface (§4.6-4.7); '
+                f'merging a PR does not itself promote anything yet.')
+    else:
+        note = (f'{summary}<br>Showing {len(rows)} of {total:,} matching this filter, capped at '
+                f'{MAX_SELFREPAIR_ROWS}. <b>Decide buttons are unavailable</b> and are not '
+                f'rendered, because {esc(blocked)}. The reports on this page are unaffected.')
+    body = f'<p class="note">{note}</p>' + table(
+        ["", "state", "domain", "path", "problem", "rounds", "diff", "PR", "daily review",
+         "updated"], rows)
+    if blocked:
+        return (filter_form + '<p class="err"><b>Decide is unavailable.</b> ' + esc(blocked) +
+                '</p>' + body)
+    bar = selfrepair_bulk_bar()
+    return (filter_form +
+            f'<form method="post" action="/selfrepair/decide" data-decide>'
+            f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
+            f'{bar}{body}{bar}</form>')
+
+
+def page_selfrepair(query=None):
+    query = query or {}
+    state_filter = (query.get("state") or ["verified"])[0]
+    body = results_banner(query)
+    domains = sr_domains.load_domains()
+    dom_note = ("No domains are registered yet — every task below is "
+                 "<span class=\"mono\">unregistered</span>. This is the expected starting state "
+                 "(FLEET_SELFREPAIR_DESIGN.md §8.2): the registry/PR/review/UI pieces are built to "
+                 "work with zero domains before any is added." if not domains else
+                 f"{len(domains)} domain(s) registered: " +
+                 ", ".join(esc(d.get("name", "?")) for d in domains) + ".")
+    body += section("Self-repair tasks", dom_note, lambda: render_selfrepair(state_filter))
+    return shell("Self-repair", body)
 
 
 # ── S21c: models and usage ────────────────────────────────────────────────────────────────────
@@ -2572,7 +2908,12 @@ ROUTES = {
     "/market/history": page_market_history,
     "/market/company": page_market_company,
     "/status": page_system_status,
+    "/selfrepair": page_selfrepair,
 }
+
+# Where a decide POST redirects back to -- keyed by the decide path itself, so do_POST's tail
+# dispatch needs no path-specific branching beyond picking the right apply_* function.
+DECIDE_REDIRECT_BASE = {"/backlog/decide": "/backlog", "/selfrepair/decide": "/selfrepair"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2640,17 +2981,20 @@ class Handler(BaseHTTPRequestHandler):
                                            f'{esc(type(exc).__name__)}: {esc(exc)}</div>'))
 
     def do_POST(self):
-        """This service's only two write routes.
+        """This service's only three write routes.
 
         A GET never changes state — every write arrives here as a form POST, so a link, a
         prefetch or a crawler cannot decide anything or add a monitored ticker. Body-length cap
-        and CSRF check are shared by both routes below; only the field names and the action taken
-        differ."""
+        and CSRF check are shared by all three routes below; only the field names and the action
+        taken differ. /selfrepair/decide (S48, FLEET_SELFREPAIR_DESIGN.md §4.8) is the third,
+        added alongside /backlog/decide rather than merged into it — two independently-reasoned-
+        about gates (model-scout's, self-repair's own) stay two routes, the same way their own
+        TRANSITIONS tables stay two separate dicts."""
         parsed = urllib.parse.urlparse(self.path)
         if not self._authed():
             return
         path = parsed.path.rstrip("/")
-        if path not in ("/backlog/decide", "/market/monitor/add"):
+        if path not in ("/backlog/decide", "/market/monitor/add", "/selfrepair/decide"):
             self._send(404, shell("Not found", '<p class="empty">No such route.</p>'))
             return
         try:
@@ -2671,15 +3015,15 @@ class Handler(BaseHTTPRequestHandler):
             # the connection instead of reusing it sidesteps that without having to drain a body
             # that could be arbitrarily (or maliciously) large.
             self.close_connection = True
-            self._redirect("/backlog?result=badaction" if path == "/backlog/decide"
-                           else "/market?monitor=badaction")
+            self._redirect("/market?monitor=badaction" if path == "/market/monitor/add"
+                           else f"{DECIDE_REDIRECT_BASE[path]}?result=badaction")
             return
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
         if not csrf_ok(self.headers, (form.get("csrf") or [""])[0]):
             log(f"{path} refused: CSRF check failed from {self.address_string()} "
                 f"(Sec-Fetch-Site={self.headers.get('Sec-Fetch-Site')!r})")
-            self._redirect("/backlog?csrf=1" if path == "/backlog/decide"
-                           else "/market?monitor=csrf")
+            self._redirect("/market?monitor=csrf" if path == "/market/monitor/add"
+                           else f"{DECIDE_REDIRECT_BASE[path]}?csrf=1")
             return
 
         if path == "/market/monitor/add":
@@ -2693,19 +3037,22 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Several task_id fields, one action -- multi-select posts the same shape as a single row.
+        # /backlog/decide and /selfrepair/decide share this exact shape, differing only in which
+        # gate-backed apply function actually runs the transition.
         task_ids = [i for i in (form.get("task_id") or []) if i]
         action = (form.get("action") or [""])[0]
         who = tailnet_identity(self.headers)
+        apply_fn = apply_decisions if path == "/backlog/decide" else apply_selfrepair_decisions
         # Log the request before acting on it. On 2026-10-16 the journal held only a 303 for two
         # failed decides, so neither the action nor the candidates could be recovered afterwards
         # and the operator's selection could not be replayed.
         shown = ", ".join(task_ids[:8]) + (f" (+{len(task_ids) - 8} more)" if len(task_ids) > 8
                                            else "")
-        log(f"decide requested: action={action!r} on {len(task_ids)} task(s) "
+        log(f"{path} decide requested: action={action!r} on {len(task_ids)} task(s) "
             f"by {who or 'unidentified'} — {shown}")
-        counts = apply_decisions(task_ids, action, who)
-        log(f"decide result: action={action!r} -> {dict(counts)}")
-        self._redirect("/backlog?" + (results_query(counts) or "none=1"))
+        counts = apply_fn(task_ids, action, who)
+        log(f"{path} decide result: action={action!r} -> {dict(counts)}")
+        self._redirect(f"{DECIDE_REDIRECT_BASE[path]}?" + (results_query(counts) or "none=1"))
 
     def _redirect(self, location):
         """POST -> redirect -> GET, so a decision is never replayed by a refresh or a back button.
@@ -2730,9 +3077,11 @@ def main():
         # once at startup rather than letting every decide fail with a vague write error.
         log("WARNING: no MEMORY_TOKEN — the reports work, the decide buttons will not")
     load_gate()
+    load_selfrepair_gate()
     log(f"listening on {BIND}:{PORT} "
-        f"(reports read-only; one write route, /backlog/decide, "
-        f"{'armed' if GATE and MEMORY_TOKEN else 'DISABLED'})")
+        f"(reports read-only; write routes /backlog/decide "
+        f"[{'armed' if GATE and MEMORY_TOKEN else 'DISABLED'}], /selfrepair/decide "
+        f"[{'armed' if SELFREPAIR_GATE and MEMORY_TOKEN else 'DISABLED'}])")
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
 
 

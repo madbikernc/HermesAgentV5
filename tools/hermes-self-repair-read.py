@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.0.1
+# Version: 1.1.0
+#
+# 1.1.0 (2026-11-08) — Phase 3 (§8.3): added `list [path]`, a third read-only operation --
+# recursively lists allowlisted file paths under [path] (default: repo root), one per line,
+# `node_modules`/dot-directories skipped as noise rather than security (they are still subject to
+# the same is_allowed() gate if somehow reached, just not walked into by default), capped at 500
+# entries. Needed by the new minecraft-bots detection bridge (hermes-self-repair-minecraft-
+# bridge.py, §4.4), which has to name a real candidate file before submitting a task and had no
+# way to see what files exist under services/minecraft-bots/ without this. Reuses cmd_grep()'s own
+# resolve_in_repo()/is_allowed() gating exactly -- no new privilege, same allowlist.
 #
 # 1.0.1 (2026-09-18) — real bug found live during this tool's own first verification pass:
 # cmd_grep() on a single-file target that turned out to be denied (tools/vault-get-secret.sh,
@@ -19,11 +28,13 @@
 # tracking clone from the stepped plan's Step 0, never a live node's own autopull working tree and
 # never the operator's own dev checkout.
 #
-# Two operations, both read-only:
+# Three operations, all read-only:
 #   read <path>            -- print one allowlisted file's contents
 #   grep <pattern> [path]  -- search allowlisted files under [path] (default: repo root) for a
 #                             Python-regex pattern; a match inside a denied or unlisted file is
 #                             never returned, not even the fact that a match exists in it
+#   list [path]             -- print allowlisted file paths under [path] (default: repo root),
+#                              one per line, up to 500
 #
 # Every path is checked against infra/hermes-self-repair/allowlist.json before anything is read:
 #   1. Resolved to a real, absolute path (symlinks followed) and confirmed to still live inside
@@ -175,9 +186,51 @@ def cmd_grep(pattern, rel_root):
     return 0
 
 
+SKIP_DIR_NAMES = {"node_modules", ".git"}
+MAX_LIST_ENTRIES = 500
+
+
+def cmd_list(rel_root):
+    allowed_prefixes, deny_patterns = load_allowlist()
+    real_root = resolve_in_repo(rel_root)
+    if real_root is None:
+        log(f"refused: {rel_root!r} resolves outside the self-repair repo root")
+        return 2
+    if real_root.is_file():
+        ok, reason = is_allowed(real_root, allowed_prefixes, deny_patterns)
+        if not ok:
+            log(f"refused: {rel_root!r} — {reason}")
+            return 2
+        print(real_root.relative_to(REPO_DIR).as_posix())
+        return 0
+    if not real_root.is_dir():
+        log(f"refused: {rel_root!r} is neither a file nor a directory")
+        return 2
+
+    printed = 0
+    for path in sorted(real_root.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in SKIP_DIR_NAMES or part.startswith(".") for part in path.relative_to(real_root).parts[:-1]):
+            continue
+        ok, _ = is_allowed(path, allowed_prefixes, deny_patterns)
+        if not ok:
+            continue  # never surfaced, not even that the file exists
+        print(path.relative_to(REPO_DIR).as_posix())
+        printed += 1
+        if printed >= MAX_LIST_ENTRIES:
+            log(f"stopped at {MAX_LIST_ENTRIES} entries — narrow [path] for a complete listing")
+            break
+
+    if printed == 0:
+        log("no allowlisted files under this path")
+        return 1
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
-        sys.exit("usage: hermes-self-repair-read.py read <path> | grep <pattern> [path]")
+        sys.exit("usage: hermes-self-repair-read.py read <path> | grep <pattern> [path] | list [path]")
     if not REPO_DIR.is_dir():
         sys.exit(f"SELF_REPAIR_REPO_DIR not found: {REPO_DIR}")
     if not ALLOWLIST_PATH.exists():
@@ -193,8 +246,13 @@ def main():
             sys.exit("usage: hermes-self-repair-read.py grep <pattern> [path]")
         rel_root = sys.argv[3] if len(sys.argv) == 4 else "."
         sys.exit(cmd_grep(sys.argv[2], rel_root))
+    elif op == "list":
+        if len(sys.argv) not in (2, 3):
+            sys.exit("usage: hermes-self-repair-read.py list [path]")
+        rel_root = sys.argv[2] if len(sys.argv) == 3 else "."
+        sys.exit(cmd_list(rel_root))
     else:
-        sys.exit(f"unknown operation {op!r} — expected 'read' or 'grep'")
+        sys.exit(f"unknown operation {op!r} — expected 'read', 'grep', or 'list'")
 
 
 if __name__ == "__main__":
