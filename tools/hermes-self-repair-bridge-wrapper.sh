@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.1.0
+# Version: 1.1.1
+#
+# 1.1.1 (2026-11-08) — real bug found live, first time this service was ever actually started
+# (systemd: "status=203/EXEC"): this file, and its predecessor
+# hermes-self-repair-minecraft-bridge-wrapper.sh before it since Phase 3's own original commit,
+# had never been marked executable in git (100644, not 100755) -- latent since Phase 3, because
+# nothing had ever tried to run it as a systemd ExecStart before now. Fixed with `git
+# update-index --chmod=+x`; no content change.
 #
 # 1.1.0 (2026-11-08) — renamed from hermes-self-repair-minecraft-bridge-wrapper.sh alongside the
 # bridge's own generalization (2.0.0, Phase 4/§8.4): it now serves every registered domain's
