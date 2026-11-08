@@ -1,6 +1,6 @@
 # Fleet Self-Repair Review Loop
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Status:** Proposed only. Nothing in this file is built, deployed, or wired up. Generalizes
 2026-11-07's first pass at this design, which was written Minecraft-bot-specific
 (`MINECRAFT_SELFREPAIR_DESIGN.md`, superseded by this file and removed) — on operator direction,
@@ -335,7 +335,7 @@ completes — see `CLAUDE.md`'s implementation-plans rule.
 | Phase | Status | Date | Notes |
 |---|---|---|---|
 | 1. Deploy `hermes-self-repair` Steps 2-8 for real (§8.1) | Done | 2026-11-07 | Two real tasks run end-to-end against `tools/hermes-benchmark-compare.py` (non-bot, per §8.1). Found and fixed two real bugs live: missing `BROKER_TOKEN` in the generate wrapper, and a `compute_diff()` trailing-newline bug that made `git apply` reject the patch as corrupt (`infra/hermes-self-repair/README.md` 6.4.0). First task correctly escalated to `dead` on the bug; second converged and reached `verified` — real commit `92ad261` on `nas2-selfrepair/master`, awaiting operator `promote`/`skip`. Still no codesec venv on spark (static-analysis half of verify fails open). |
-| 2. Build the generic pieces with no domain registered (§8.2) | Not started | 2026-11-07 | Domain registry (§4.1), registered-PR mechanism (§4.6), daily Claude review routine (§4.7), FleetOps UI tab (§4.8). |
+| 2. Build the generic pieces with no domain registered (§8.2) | Done | 2026-11-08 | All four built and exercised with zero domains registered: domain registry (`infra/hermes-self-repair/domains.json` + `tools/hermes_self_repair_domains.py`), registered-PR mechanism (`tools/hermes-self-repair-open-pr.py`, reusing `-promote.py`'s own fetch/branch/cherry-pick mechanics against a new branch + `gh pr create --draft` instead of `master`), daily Claude review routine (`skills/fleet-selfrepair-review/SKILL.md` — the procedure only; deliberately **not** registered as a live cron, pending §6's still-open daily-cap/reject-handling/scheduled-session-placement decisions), and the FleetOps `/selfrepair` tab (`hermes-fleetops-ui.py` 2.19.0, 423/423 offline checks passing, 43 new). `hermes-self-repair-promote-gate.py` bumped to 1.1.0 (new `TRANSITIONS`/`write_turn()` the UI imports per the house rule, plus a real `set_task_state()` return-value bug fixed along the way) — see `infra/hermes-self-repair/README.md` 6.5.0 for the full account. |
 | 3. Register `minecraft-bots` as domain #1 (§8.3) | Not started | 2026-11-07 | Completeness hook (§4.3), detection bridge (§4.4); switch flipped only after 1-2 are each independently verified. |
 | 4. Second-domain genericity check (§8.4) | Not started | 2026-11-07 | Acceptance test, not a build step — exercised once a real second domain exists. |
 
@@ -343,6 +343,7 @@ completes — see `CLAUDE.md`'s implementation-plans rule.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.4.0 | 2026-11-08 | Phase 2 done: built and exercised, with zero domains registered, the four generic pieces §8.2 calls for — the domain registry, the registered-PR mechanism, the daily Claude review routine's procedure (deliberately not yet scheduled live — §6's daily-cap/reject-handling/session-placement questions are still open), and the FleetOps `/selfrepair` tab. §9 updated to "Done" for Phase 2. |
 | 1.0.0 | 2026-11-07 | Initial version. Supersedes `MINECRAFT_SELFREPAIR_DESIGN.md` (1.0.0, deleted), which described the same self-managed self-repair loop (periodic detection, coder/coder2 cross-review, automated fix, daily Claude Code review of registered self-repair PRs, a FleetOps UI tab for picking which fixes to implement) as Minecraft-bot-specific. On direct operator request, generalized so the review/PR/UI mechanism (§4.1, §4.6-§4.8) is domain-agnostic, with a new §3 "domains" concept and Minecraft bot behavior registered as domain #1 (§3) rather than built into the mechanism itself. Proposed only; nothing in this design is built. |
 | 1.1.0 | 2026-11-07 | Added §9, the phased build status table required by `CLAUDE.md`'s new implementation-plans rule (1.3.0) — tracks §8's four build-order steps, all currently "Not started." |
 | 1.2.0 | 2026-11-07 | Phase 1 started: live audit of spark found Steps 2/3/5 already deployed and healthy since 2026-10-26, contradicting `infra/hermes-self-repair/README.md`'s stale "nothing deployed" claims (fixed there, 6.3.0). §9 updated to "In progress." |

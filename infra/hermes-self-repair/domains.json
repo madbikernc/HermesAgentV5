@@ -1,0 +1,4 @@
+{
+  "_comment": "Domain registry for FLEET_SELFREPAIR_DESIGN.md §3/§4.1. A domain names a path scope (prefixes within hermes-self-repair-read.py's own allowlist.json, never outside it -- see that file's header for why the allowlist lives in the tool's own installation, not the target checkout), a detection source, a completeness rule, a cadence, and its own self-managed-mode switch, independent of every other domain. Read by tools/hermes-self-repair-domains.py; nothing else parses this file directly. Starts empty on purpose: FLEET_SELFREPAIR_DESIGN.md §8's build order deploys the generic registry/PR/review/UI pieces BEFORE any domain is registered, specifically so 'renders correctly with zero domains' is a real, exercised state and not an assumption. Domain #1 (minecraft-bots) is added here only in Phase 3 (§8.3), after the completeness hook (§4.3) and detection bridge (§4.4) it depends on each exist.",
+  "domains": []
+}

@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.4.0
+**Version:** 6.5.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -405,10 +405,66 @@ this session's own accumulated test commits — the output above is genuine, not
   full generate/apply/verify cycle; one hit a real bug and correctly escalated, the other
   converged and reached `verified` with a real commit on `nas2-selfrepair`.
 
+## Phase 2: generic review/PR/UI pieces, no domain registered yet
+
+`FLEET_SELFREPAIR_DESIGN.md` §8.2 — the generic pieces built with zero domains registered, on
+purpose, as the real test that they are actually generic and not quietly Minecraft-shaped. Four
+new pieces, all exercised against the "no domains registered" starting state:
+
+- **Domain registry (§4.1).** `infra/hermes-self-repair/domains.json` — a flat JSON file (§6's
+  registry-mechanism question, decided here: a flat file over a Python module per domain, since
+  nothing registered so far needs logic a flat file can't express), read by
+  `tools/hermes_self_repair_domains.py` (`load_domains()`, `domain_for_path()`). Starts with an
+  empty `"domains": []`. Underscore-named, not hyphenated like every other
+  `tools/hermes-self-repair-*.py` file here, because it is meant to be imported directly
+  (`import hermes_self_repair_domains`) — the same reason `hermes_market_common.py` and
+  `hermes_benchmark_common.py` are underscore-named.
+- **Registered-PR mechanism (§4.6).** `tools/hermes-self-repair-open-pr.py <task_id>` — takes one
+  `verified` task and opens it as a **draft** GitHub PR: the exact fetch-both-remotes/branch-off-
+  origin/cherry-pick-one-commit mechanics `hermes-self-repair-promote.py` already uses, but
+  pushing a new branch (`selfrepair/<domain-or-unregistered>/<task_id>`) and `gh pr create
+  --draft` instead of merging to `origin/master`. The task's own state is untouched — opening a PR
+  is a review surface, not a promotion; idempotent re-run (a `pr-opened` turn already exists)
+  prints the existing PR instead of opening a second one. RUN BY HAND or by the daily review skill
+  below, never by fleet infrastructure — confirmed necessary, not just stated as policy: spark's
+  own `origin` deploy key is read-only (`ERROR: The key you are authenticating with has been
+  marked as read only`, hit live promoting `2e732538c2e34ebb` this same session), so this script
+  cannot run there either, for the same reason `-promote.py` can't.
+- **Daily Claude Code review routine (§4.7).** `skills/fleet-selfrepair-review/SKILL.md` — the
+  procedure: list newly-`verified` tasks without a PR yet
+  (`tools/hermes-self-repair-list.py --state verified --without-pr`, a new read-only sqlite
+  listing over the `tasks` table since `hermes-memory`'s own `/tasks` route is POST-only, same
+  finding `infra/hermes-fleetops-ui/README.md` already made for the model-scout backlog), open
+  PRs for them, review every open `selfrepair/*` PR and comment on it (`gh pr comment`, never
+  `gh pr edit`, never a push), and record a ranked recommendation as a `phase="daily-review"` turn.
+  **Deliberately not registered as a live cron job** — the skill's own "Not yet wired to a live
+  schedule" section names exactly why (an unset daily action cap, an unresolved "what happens to a
+  rejected PR" policy, and nowhere a scheduled cloud session has both real GitHub push rights and
+  tailnet reach to `hermes-memory` at once). Fully usable by hand today.
+- **FleetOps `/selfrepair` tab (§4.8).** `tools/hermes-fleetops-ui.py` (2.19.0) — read-only (state,
+  domain, path, problem, dualcoder round count, a collapsible diff preview, any opened PR, any
+  daily-review recommendation) plus exactly one write route, `/selfrepair/decide`, following the
+  exact house rule `/backlog/decide` already established
+  (`infra/hermes-fleetops-ui/README.md:54-68`): the transition table, task/turn writers, and
+  Matrix-announce all come from `hermes-self-repair-promote-gate.py` (now 1.1.0 — extended with a
+  `TRANSITIONS` table and `write_turn()` for exactly this, behavior-equivalence-tested against the
+  original `handle_command()` before deploying), imported through a fail-closed
+  `load_selfrepair_gate()`, never reimplemented. Checking a box and clicking "implement" does
+  exactly what replying `promote <id>` in FleetOps already does — sets `promotion-approved`; it
+  does not itself merge anything. Fixed a real latent gap while wiring this up: the promote gate's
+  own `set_task_state()` never returned anything, so no caller — including its own chat-driven
+  `handle_command()`, not just this new route — had any way to tell a successful write from a
+  failed one except by reading the log line; now returns `True`/`False` like
+  `hermes-model-scout-gate.py`'s own `set_task_state()` already does.
+
+With zero domains registered, every task reads as domain `unregistered` and the tab's own note
+says so plainly — the expected state until Phase 3 (§8.3) registers `minecraft-bots` as domain #1.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 6.5.0 | 2026-11-08 | `FLEET_SELFREPAIR_DESIGN.md` Phase 2 (§8.2): the generic review/PR/UI pieces, built with zero domains registered. New domain registry (`infra/hermes-self-repair/domains.json`, `tools/hermes_self_repair_domains.py`), registered-PR mechanism (`tools/hermes-self-repair-open-pr.py`), daily review skill (`skills/fleet-selfrepair-review/SKILL.md`, not yet scheduled live), and the FleetOps `/selfrepair` tab (`hermes-fleetops-ui.py` 2.19.0). `hermes-self-repair-promote-gate.py` bumped to 1.1.0 for a new `TRANSITIONS`/`write_turn()` pair the UI imports, plus a real `set_task_state()` return-value fix found along the way. See the new "Phase 2" section above for the full account. |
 | 6.4.0 | 2026-11-07 | First real end-to-end verification (`FLEET_SELFREPAIR_DESIGN.md` Phase 1), two real tasks against `tools/hermes-benchmark-compare.py`. Found and fixed two real bugs live: `hermes-self-repair-generate-wrapper.sh` never fetched `BROKER_TOKEN` (fixed 1.0.1), so Step 2 could never actually hand off to Step 3; and `hermes-self-repair-generate.py`'s `compute_diff()` produced a patch `git apply` correctly rejected as corrupt whenever the model's completion lacked a trailing newline at EOF, a `difflib` limitation the original code didn't account for (fixed 1.1.1, normalizes both strings to one trailing newline before diffing). Task `fa2eb82b21af45b8` hit bug 2 and correctly escalated to `dead` after 3 attempts (circuit breaker confirmed live). Task `2e732538c2e34ebb`, submitted after both fixes, converged and reached `verified` — commit `92ad261` on `nas2-selfrepair/master`, awaiting `promote`/`skip`. |
 | 6.3.0 | 2026-11-07 | Live-fleet audit while starting `FLEET_SELFREPAIR_DESIGN.md` Phase 1: this README's "nothing deployed" claims were stale. `hermes-self-repair-generate.service`, `-apply.service`, and `-promote-gate.service` are actually enabled and have been running continuously on spark since 2026-10-26 (confirmed via `systemctl`/`ps` against their real PIDs) — Buzz/memory/guard reachable, `coder2` active, `hermes-broker` 1.4.0. Corrected every "not yet deployed"/"no systemd deploy has happened" claim to the real state: deployed and healthy, but genuinely idle — `nas2-selfrepair/master` still ends at the 2026-09-19 dev-testing commits, so nothing in the "needs a real task" verification lists actually changes. No codesec venv found on spark, so Step 4's static-analysis half will fail open on a real run until that's installed. |
 | 6.2.0 | 2026-09-19 | Security-relevant fix found during hardening self-review, not live traffic: `tools/hermes-self-repair-apply.py`'s (1.3.0) `parse_diff_path()` used `re.search()`, returning only the first `+++ b/<path>` match in a diff — a diff with more than one such header (a multi-file diff, never produced by the legitimate pipeline but exactly the "tampered turn record" threat this file already defends against elsewhere) would have had only its first path allowlist-checked while `git apply` still wrote every hunk in the diff, including files never checked at all. Fixed to `findall()` and refuse anything but exactly one match; verified with a constructed two-file diff (one allowed path, one targeting `infra/vaultwarden/.env`) confirming it is now refused outright rather than silently narrowed to the allowed-looking first file. Full Step 3/4 regression suite re-run clean afterward. |

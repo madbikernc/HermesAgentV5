@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-11-08) — FLEET_SELFREPAIR_DESIGN.md §4.8's FleetOps `/selfrepair` tab needs to import
+# this gate's transition table rather than reimplement it, the exact house rule
+# `infra/hermes-fleetops-ui/README.md:54-68` already established for the model-scout backlog's
+# decide buttons. Adds TRANSITIONS (a lookup table over the same two states/actions
+# handle_command() already enforced inline, so this is a refactor, not a behavior change: a
+# constructed test confirms `state != "verified"` and `state not in TRANSITIONS[action][0]` agree
+# for every state) and write_turn() (model-scout-gate.py's own shape, new here — this gate never
+# wrote a turn for its own transitions before, only hermes-memory's task-state column and the
+# Matrix reply). handle_command() now reads both from the table and calls write_turn() after a
+# successful transition, so a future UI route's own `decided_by: "fleetops-ui"` has a turn to add
+# it to, the same way the scout gate's write_turn() already lets the model-scout backlog page
+# distinguish a browser decision from a chat one. Also fixes a real latent gap found while wiring
+# the UI route to it: set_task_state() never returned anything, so EVERY caller -- including this
+# file's own handle_command(), not just the new UI path -- had no way to tell a successful write
+# from a failed one except by reading the log line. Now returns True/False like
+# hermes-model-scout-gate.py's own set_task_state() already does; handle_command()'s behavior is
+# unchanged since it still never checked the (previously always-None, now True) return value.
 #
 # hermes-self-repair-promote-gate — Step 5's human confirmation gate. Holds NO GitHub credential
 # and runs NO model call — it only watches the FleetOps room for a deterministic
@@ -80,6 +98,17 @@ STATE_FILE = STATE_DIR / "state.json"
 # script's own (much longer) reply text.
 COMMAND_RE = re.compile(r"^\s*(promote|skip)\s+(\S+)\s*$", re.IGNORECASE)
 
+GATE_AGENT = "selfrepair-promote-gate"
+
+# action -> (states it is legal from, resulting state). The table handle_command() actually reads
+# from (1.1.0) — self-repair tasks have no single stable "owner" agent the way model-scout's do
+# (see tools/hermes-self-repair-list.py's own header), so there is no AGENT constant/ownership
+# check here to match model-scout-gate.py's shape; a task's eligibility is its state alone.
+TRANSITIONS = {
+    "promote": ({"verified"}, "promotion-approved"),
+    "skip": ({"verified"}, "promotion-declined"),
+}
+
 
 def log(msg):
     print(f"[hermes-self-repair-promote-gate] {msg}", flush=True)
@@ -111,8 +140,10 @@ def fetch_task(task_id):
 def set_task_state(task_id, state):
     try:
         _post(f"{MEMORY_URL}/tasks", {"id": task_id, "agent": "selfrepair-promote-gate", "state": state}, MEMORY_TOKEN)
+        return True
     except Exception as exc:
         log(f"set_task_state({task_id!r}, {state!r}) failed: {exc}")
+        return False
 
 
 def fetch_applied_sha(task_id):
@@ -125,6 +156,19 @@ def fetch_applied_sha(task_id):
         if payload.get("phase") == "applied-commit":
             return payload.get("sha")
     return None
+
+
+def write_turn(task_id, payload):
+    """The decision's own record (1.1.0) — model-scout-gate.py's own shape. Non-fatal: a turn-write
+    failure must not undo a state transition the human already asked for and which is already
+    written."""
+    try:
+        _post(f"{MEMORY_URL}/turns", {
+            "task_id": task_id, "agent": GATE_AGENT, "role": "gate",
+            "raw": json.dumps(payload, sort_keys=True),
+        }, MEMORY_TOKEN)
+    except Exception as exc:
+        log(f"turn write failed for {task_id}, state change still applied: {exc}")
 
 
 def send_room_message(text):
@@ -187,7 +231,8 @@ def handle_command(action, task_id):
         return
 
     state = task.get("state")
-    if state != "verified":
+    legal_from, new_state = TRANSITIONS[action]
+    if state not in legal_from:
         send_room_message(
             f"[self-repair] Task {task_id} is not awaiting a promotion decision "
             f"(current state: {state!r}) — ignoring \"{action} {task_id}\"."
@@ -202,7 +247,12 @@ def handle_command(action, task_id):
                 f"promotion, something is wrong. Not changing its state."
             )
             return
-        set_task_state(task_id, "promotion-approved")
+        set_task_state(task_id, new_state)
+        write_turn(task_id, {
+            "phase": "transition", "action": action, "from": state, "to": new_state,
+            "decided_by": "fleetops-reply", "at": time.time(),
+            "summary": f"{task_id}: {state} -> {new_state} by \"{action}\"",
+        })
         send_room_message(
             f"[self-repair] Task {task_id} approved for promotion (commit {sha[:12]}). To complete "
             f"it, run this BY HAND on a machine with real GitHub push access:\n\n"
@@ -212,7 +262,12 @@ def handle_command(action, task_id):
             f"on NAS2."
         )
     elif action == "skip":
-        set_task_state(task_id, "promotion-declined")
+        set_task_state(task_id, new_state)
+        write_turn(task_id, {
+            "phase": "transition", "action": action, "from": state, "to": new_state,
+            "decided_by": "fleetops-reply", "at": time.time(),
+            "summary": f"{task_id}: {state} -> {new_state} by \"{action}\"",
+        })
         send_room_message(f"[self-repair] Task {task_id} marked declined — staying staged on NAS2 only.")
 
 

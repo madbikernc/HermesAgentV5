@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.16.0
+**Version:** 2.17.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog (now leading with a "Recommended for benchmarking" section), which checkpoint backs each
@@ -12,7 +12,10 @@ scanners. Runs on **Watch (spark)** only, over **HTTPS**, Basic Auth required.
 
 ## Scope — read this before adding to it
 
-Read-only reports, plus **one** write route: the benchmark backlog's decide buttons.
+Read-only reports, plus a small number of deliberately narrow write routes: the benchmark
+backlog's decide buttons, the market watchlist's add form, and (S48) the self-repair tab's decide
+buttons. Each is its own route in the one `do_POST` handler, each gated by its own imported
+transition table where one exists.
 
 Services are still not started, stopped or restarted from here. That stays an SSH + `systemctl`
 operator action, like every other privileged action in this fleet
@@ -382,6 +385,7 @@ rather than silent. A restart re-fetches the credentials.
 
 | Version | Date | Change |
 |---|---|---|
+| 2.17.0 | 2026-11-08 | New `/selfrepair` tab (S48, `FLEET_SELFREPAIR_DESIGN.md` §4.8, part of that design's Phase 2). Read-only (state, domain, path, problem, dualcoder round count, a collapsible diff preview, any opened PR, any daily-review recommendation) plus a third write route, `/selfrepair/decide`, following this file's own house rule (§"Why this imports the gate instead of reimplementing it" above): the transition table and task/turn writers come from `hermes-self-repair-promote-gate.py` (bumped to 1.1.0 for a new `TRANSITIONS`/`write_turn()` pair built for this), imported through a fail-closed `load_selfrepair_gate()`, mirroring `load_gate()` exactly. No ownership check on this route — unlike model-scout's tasks, self-repair tasks carry no single stable owner agent, so `read_selfrepair_tasks()` selects by `agent LIKE 'selfrepair%'` instead. Also fixes a real latent gap found while wiring this up: `hermes-self-repair-promote-gate.py`'s own `set_task_state()` never returned anything, so no caller could tell a successful write from a failed one except by reading the log line — now returns `True`/`False` like the scout gate's own `set_task_state()` already does. Also corrects this file's own stale "Scope" line, which still said "plus **one** write route" after the market watchlist's add form had already made it two (2.12.0) — now states all three. 43 new offline checks (423 total). |
 | 1.0.0 | 2026-10-09 | Initial version — S21a-e built and verified live on spark: port 8103 chosen against a live `ss -ltnp` after 8101 turned out to be `hermes-buzz`, the backlog source corrected from the plan's `GET /tasks` to a read-only sqlite read, benchmark `suites`/`value` schema corrected from the plan's assumed `scores` blob, and all five pages fetched returning HTTP 200 with zero section errors. 64 offline checks. |
 | 1.1.0 | 2026-10-09 | Service enabled on spark with its `fleetops-ui` vault item; all five pages verified against the real credential on the tailnet address. Records the one sandbox exception the first real start forced — `usage.db` is WAL, so a read-only connection still needs write access for its `-shm` read mark — and why the two narrower grants are not available (systemd rejects a single file in `ReadWritePaths`; SQLite unlinks `-shm` when the last writer closes, so the sidecars cannot be bind-mounted). States what the grant does not confer: the approvals live in `memory.db` under `/mnt`, which stays read-only. |
 | 2.0.0 | 2026-10-09 | **Major — reverses this file's own "no decide buttons" position, on the operator's decision that the Matrix channel is only *perceived* to be more secure, and adds TLS.** The backlog now has approve/defer/reject/un-reject buttons that write the same transition through the same code as the Matrix reply, by importing `hermes-model-scout-gate.py` rather than restating its state machine — failing closed if that import fails. Records the three non-perceptual things that were handled instead of argued about: CSRF (a browser replays Basic Auth cross-origin; Matrix has no equivalent), TLS via `tailscale serve` with a real Let's Encrypt cert, and attribution — `Tailscale-User-Login` now names a person in the audit record, closing the one genuine edge the Matrix route had, while never being used for authentication. States plainly that the service now holds write credentials it did not before. Port 443 was asked for and refused: tailscaled serves the Matrix homeserver there. |
