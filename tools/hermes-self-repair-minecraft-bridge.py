@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-11-08) — two real gaps found while actually preparing to flip minecraft-bots' switch
+# on for the first time, not live traffic (this file had never run): (1) with no persisted cursor,
+# `since` defaulted to 0, meaning a freshly-enabled bridge would have polled minecraft-ops from the
+# very beginning of that topic's history — weeks of past triage incidents since 2026-09-07 — and
+# tried to submit real tasks for all of them in one burst. Fixed with seek_to_end(): the first time
+# a topic has no cursor yet, this bridge pages to its current tip WITHOUT processing anything, so a
+# newly-enabled bridge only ever reacts to incidents from the moment it actually started. (2) no
+# cap existed anywhere on how many tasks one poll cycle could submit — a burst of distinct
+# first-occurrence high-severity incidents arriving close together could submit an unbounded
+# number of real task pairs in one cycle. Added MAX_SUBMISSIONS_PER_POLL (default 3) and
+# BudgetExhausted: a message that would exceed it is left UNADVANCED (retried next cycle, not
+# dropped), while every message already handled this cycle keeps its cursor progress. This is a
+# narrow, per-cycle safety valve, not an attempt to answer FLEET_SELFREPAIR_DESIGN.md §6's own
+# still-open "daily action cap" question (which is about PR-opening/daily-review, a separate,
+# still-undecided policy question).
 #
 # hermes-self-repair-minecraft-bridge — FLEET_SELFREPAIR_DESIGN.md §4.4's detection -> self-repair
 # submission bridge, domain #1's instance (minecraft-bots). Generic in spirit, not in name: the
@@ -56,8 +72,12 @@
 #   POLL_SECONDS                default 20 -- how often each on-switch domain's topic is polled
 #   MIN_SEVERITY                default "medium" -- "low"/"unknown" triage findings are never
 #                               acted on; only "medium"/"high" from either coder or coder2
+#   MAX_SUBMISSIONS_PER_POLL    default 3 -- a per-cycle safety valve (1.1.0), not §6's own
+#                               still-open "daily action cap" question
 #   BRIDGE_STATE_DIR            default ~/.hermes/state/selfrepair-minecraft-bridge -- durable
-#                               since-cursor so a restart never re-processes old Buzz messages
+#                               since-cursor so a restart never re-processes old Buzz messages, and
+#                               a topic with no cursor yet is seeded at its current tip (1.1.0),
+#                               never replayed from the beginning of its history
 
 import json
 import os
@@ -83,6 +103,13 @@ SELF_REPAIR_READ_TOOL = os.environ.get(
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "20"))
 SEVERITY_RANK = {"low": 0, "unknown": 0, "medium": 1, "high": 2}
 MIN_SEVERITY_RANK = SEVERITY_RANK[os.environ.get("MIN_SEVERITY", "medium")]
+MAX_SUBMISSIONS_PER_POLL = int(os.environ.get("MAX_SUBMISSIONS_PER_POLL", "3"))
+
+
+class BudgetExhausted(Exception):
+    """Raised by a handler when MAX_SUBMISSIONS_PER_POLL is already spent this cycle -- the
+    message that triggered it is left unprocessed (cursor not advanced past it), so it's retried
+    next cycle rather than lost."""
 STATE_DIR = Path(os.environ.get(
     "BRIDGE_STATE_DIR", str(Path.home() / ".hermes" / "state" / "selfrepair-minecraft-bridge")))
 BRIDGE_AGENT = "selfrepair-bridge"
@@ -305,13 +332,16 @@ def write_link_turn(task_id, role, linked_task_id):
     }, MEMORY_TOKEN)
 
 
-def handle_minecraft_bots_buzz(message, domain):
+def handle_minecraft_bots_buzz(message, domain, budget):
     body = message.get("body", "")
     parsed = parse_triage_body(body)
     ok, reason = should_submit(parsed)
     if not ok:
         log(f"skipping incident ({reason}): {body[:120]!r}")
         return
+
+    if budget["remaining"] <= 0:
+        raise BudgetExhausted()
 
     candidates = list(list_candidate_paths())
     if not candidates:
@@ -339,7 +369,9 @@ def handle_minecraft_bots_buzz(message, domain):
     except Exception as exc:
         log(f"submission failed partway through: {exc} — a human should check for an orphaned task")
         return
-    log(f"submitted linked tasks fix={fix_task_id} ({fix_path}) test={test_task_id} for domain {domain.get('name')!r}")
+    budget["remaining"] -= 1
+    log(f"submitted linked tasks fix={fix_task_id} ({fix_path}) test={test_task_id} for domain "
+        f"{domain.get('name')!r} ({budget['remaining']} submission(s) left this poll cycle)")
 
 
 HANDLERS = {
@@ -347,8 +379,36 @@ HANDLERS = {
 }
 
 
-def poll_domain_buzz_topic(domain, topic, state):
-    since = state.get(topic, 0)
+def seek_to_end(topic):
+    """Advances to the current tip of `topic` without processing anything -- called once, the
+    first time this topic is ever polled (no persisted cursor yet), so a freshly-enabled bridge
+    reacts only to incidents from the moment it actually started, never replays weeks of triage
+    history as a flood of real model calls and real task submissions on first boot."""
+    since = 0
+    while True:
+        resp = _get(f"{BUZZ_URL}/messages/poll?topic={topic}&since={since}&limit=200", BUZZ_TOKEN)
+        messages = resp.get("messages", [])
+        if not messages:
+            return since
+        since = max(m.get("seq", 0) for m in messages)
+        if len(messages) < 200:
+            return since
+
+
+def poll_domain_buzz_topic(domain, topic, state, budget):
+    if topic not in state:
+        try:
+            seeded_at = seek_to_end(topic)
+        except Exception as exc:
+            log(f"seek_to_end failed for topic {topic!r}: {exc} — will retry next poll")
+            return
+        state[topic] = seeded_at
+        save_state(state)
+        log(f"first run for topic {topic!r} — seeded cursor at seq={seeded_at}, will not replay "
+            f"its history")
+        return  # nothing to process this cycle -- only genuinely new messages arrive from here
+
+    since = state[topic]
     try:
         resp = _get(f"{BUZZ_URL}/messages/poll?topic={topic}&since={since}&limit=50", BUZZ_TOKEN)
     except Exception as exc:
@@ -360,7 +420,11 @@ def poll_domain_buzz_topic(domain, topic, state):
     handler = HANDLERS[domain["detection_source"]]
     for message in messages:
         try:
-            handler(message, domain)
+            handler(message, domain, budget)
+        except BudgetExhausted:
+            log(f"MAX_SUBMISSIONS_PER_POLL reached — leaving message seq={message.get('seq')} and "
+                f"any later ones in topic {topic!r} for the next poll cycle")
+            break
         except Exception as exc:
             log(f"handler failed on message seq={message.get('seq')}: {exc}")
         state[topic] = max(state.get(topic, 0), message.get("seq", 0))
@@ -368,6 +432,7 @@ def poll_domain_buzz_topic(domain, topic, state):
 
 
 def poll_once(state):
+    budget = {"remaining": MAX_SUBMISSIONS_PER_POLL}
     for domain in domains_mod.load_domains():
         if not domains_mod.domain_switch_on(domain):
             continue
@@ -379,13 +444,14 @@ def poll_once(state):
         if not source.startswith("buzz:"):
             continue
         topic = source.split(":", 1)[1]
-        poll_domain_buzz_topic(domain, topic, state)
+        poll_domain_buzz_topic(domain, topic, state, budget)
 
 
 def main():
     if not BUZZ_TOKEN or not MEMORY_TOKEN:
         sys.exit("BUZZ_TOKEN and MEMORY_TOKEN are required")
-    log(f"starting, poll every {POLL_SECONDS}s, MIN_SEVERITY_RANK={MIN_SEVERITY_RANK}")
+    log(f"starting, poll every {POLL_SECONDS}s, MIN_SEVERITY_RANK={MIN_SEVERITY_RANK}, "
+        f"MAX_SUBMISSIONS_PER_POLL={MAX_SUBMISSIONS_PER_POLL}")
     state = load_state()
     while True:
         try:

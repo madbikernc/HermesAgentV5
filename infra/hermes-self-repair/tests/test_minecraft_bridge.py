@@ -150,11 +150,14 @@ def main():
     check("an empty answer resolves to None", mod.resolve_target_path("", candidates) is None)
 
     print("\n[poll_once: only dispatches to a registered, switched-on domain]")
+    real_poll_domain_buzz_topic = mod.poll_domain_buzz_topic  # restored below -- the next few
+    # checks replace it with a dispatch-only spy, and leaving that in place would silently break
+    # every later check that calls the real poll_domain_buzz_topic directly.
     calls = []
     mod.domains_mod.load_domains = lambda: [
         {"name": "minecraft-bots", "detection_source": "buzz:minecraft-ops", "self_managed": False},
     ]
-    mod.poll_domain_buzz_topic = lambda domain, topic, state: calls.append((domain["name"], topic))
+    mod.poll_domain_buzz_topic = lambda domain, topic, state, budget: calls.append((domain["name"], topic))
     mod.poll_once({})
     check("a switched-OFF domain is never polled", calls == [], calls)
 
@@ -172,6 +175,57 @@ def main():
     mod.poll_once({})
     check("a switched-ON domain with an unhandled detection_source is skipped, not guessed at",
           calls == [], calls)
+    mod.poll_domain_buzz_topic = real_poll_domain_buzz_topic
+
+    print("\n[seek_to_end: a fresh topic is seeded at its tip, never replayed from the start]")
+    mod.save_state = lambda state: None  # no real disk I/O in this test
+
+    pages = {0: [{"seq": i} for i in range(1, 201)], 200: [{"seq": i} for i in range(201, 251)]}
+    mod._get = lambda url, token=None, timeout=15: {
+        "messages": pages.get(int(url.split("since=")[1].split("&")[0]), [])
+    }
+    check("seek_to_end pages through a full first batch to find the real tip",
+          mod.seek_to_end("minecraft-ops") == 250)
+
+    mod._get = lambda url, token=None, timeout=15: {"messages": []}
+    check("seek_to_end on a topic with no messages at all returns 0",
+          mod.seek_to_end("minecraft-ops") == 0)
+
+    domain = {"name": "minecraft-bots", "detection_source": "buzz:minecraft-ops", "self_managed": True}
+    state = {}
+    mod._get = lambda url, token=None, timeout=15: {"messages": [{"seq": i} for i in range(1, 51)]}
+    mod.poll_domain_buzz_topic(domain, "minecraft-ops", state, {"remaining": 3})
+    check("a topic with no cursor yet is seeded, not processed, on this first call",
+          state.get("minecraft-ops") == 50, state)
+
+    print("\n[poll_domain_buzz_topic: budget exhaustion leaves the cursor short, not lost]")
+    handled = []
+
+    def fake_handler(message, domain, budget):
+        if budget["remaining"] <= 0:
+            raise mod.BudgetExhausted()
+        budget["remaining"] -= 1
+        handled.append(message["seq"])
+
+    mod.HANDLERS["buzz:minecraft-ops"] = fake_handler
+    state2 = {"minecraft-ops": 100}
+    mod._get = lambda url, token=None, timeout=15: {
+        "messages": [{"seq": s} for s in (101, 102, 103, 104, 105)]
+    }
+    mod.poll_domain_buzz_topic(domain, "minecraft-ops", state2, {"remaining": 2})
+    check("only as many messages as the budget allows are actually handled",
+          handled == [101, 102], handled)
+    check("the cursor stops short of the budget-exhausted message, not at the batch's end",
+          state2["minecraft-ops"] == 102, state2)
+
+    handled.clear()
+    state2 = {"minecraft-ops": 102}
+    mod._get = lambda url, token=None, timeout=15: {
+        "messages": [{"seq": s} for s in (103, 104, 105)]
+    }
+    mod.poll_domain_buzz_topic(domain, "minecraft-ops", state2, {"remaining": 3})
+    check("the next poll cycle picks up exactly where the budget left off, retried not lost",
+          handled == [103, 104, 105], handled)
 
     total = CHECKS[0]
     failed = len(FAILURES)

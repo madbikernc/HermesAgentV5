@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.6.0
+**Version:** 6.7.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -538,17 +538,38 @@ family §7 already covers — no new scenario needed; recorded here rather than 
 §7's own "this call would only need revisiting if a future domain routed through a materially
 different role" condition, which this isn't.
 
-**Still not done, deliberately**: nothing from Phase 3 is deployed to spark (the four new/changed
-tools, the service/wrapper pair, the domain registration itself all exist only in this checkout
-until an operator deploys them — this README documents what was built and offline-verified, the
-same posture Phase 1 and 2 each had before their own live-deployment step). The switch stays
-`false` regardless of deployment — flipping it on is its own separate, deliberate decision, not
-implied by anything in this phase.
+**Update, same day — switch flipped on, by direct operator instruction.** Two real gaps were
+found while actually preparing to do this (never live traffic until now — this is the first time
+anything in Phase 3 has run against the real fleet):
+
+1. **No bootstrap.** `since` defaulted to 0 for a topic with no persisted cursor, so a freshly-
+   enabled bridge would have polled `minecraft-ops` from the very start of its history — every
+   triage incident since `infra/minecraft-bots-triage/` went live on 2026-09-07 — and tried to
+   submit real task pairs for all of them in one burst. Fixed with `seek_to_end()`
+   (`hermes-self-repair-minecraft-bridge.py` 1.1.0): the first time a topic has no cursor, this
+   bridge pages to its current tip without processing anything, so it only ever reacts to
+   incidents from the moment it actually started.
+2. **No submission cap.** Nothing bounded how many tasks one poll cycle could submit. Added
+   `MAX_SUBMISSIONS_PER_POLL` (default 3) and `BudgetExhausted`: a message that would exceed it is
+   left with its cursor UNADVANCED (retried next cycle, not dropped), while everything already
+   handled that cycle keeps its progress. This is a narrow, per-cycle safety valve — it is
+   deliberately not an attempt to answer §6's own still-open "daily action cap" question, which is
+   about PR-opening/daily-review, a separate policy decision.
+
+6 more offline checks added (now 36 in `test_minecraft_bridge.py`) covering both: a multi-page
+`seek_to_end()` walk, a topic with no messages at all, first-run seeding via
+`poll_domain_buzz_topic()` itself, and both orderings of the budget-exhaustion/retry behavior.
+
+`infra/hermes-self-repair/domains.json`'s `self_managed` is now `true`. Deploying and enabling
+`hermes-self-repair-minecraft-bridge.service` on spark is this phase's own remaining live step —
+the first time anything would auto-submit a self-repair task without a human running
+`hermes-self-repair-submit.py` by hand.
 
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 6.7.0 | 2026-11-08 | Direct operator instruction: `minecraft-bots`' `self_managed` switch flipped to `true` (`domains.json`). Found and fixed two real gaps in `hermes-self-repair-minecraft-bridge.py` (1.0.0 → 1.1.0) while actually preparing to enable it, before any live traffic: no bootstrap (`seek_to_end()`, so a fresh enable doesn't replay weeks of triage history as a submission flood) and no per-cycle submission cap (`MAX_SUBMISSIONS_PER_POLL`, default 3, excess retried next cycle rather than dropped). 6 more offline checks. See the "Phase 3" section's own update above for the full account. |
 | 6.6.0 | 2026-11-08 | `FLEET_SELFREPAIR_DESIGN.md` Phase 3 (§8.3): `minecraft-bots` registered as domain #1 (`self_managed: false`). Completeness hook (§4.3, §6 decided as "two linked tasks": `tools/hermes_self_repair_completeness.py`, `hermes-self-repair-link.py`, `hermes-self-repair-apply.py` 1.4.0's `finalize_or_wait()`/`unblock_linked_peer()`) and detection bridge (§4.4: `tools/hermes-self-repair-minecraft-bridge.py`, its wrapper/service, not installed). `hermes_self_repair_domains.py` bumped to 1.1.0 for glob path_scope matching; `hermes-self-repair-read.py` bumped to 1.1.0 for a new `list` operation. 59 new offline checks across three new test files plus a fix to an existing one whose "zero domains" assumption the real registration made stale. See the new "Phase 3" section above for the full account. |
 | 6.5.0 | 2026-11-08 | `FLEET_SELFREPAIR_DESIGN.md` Phase 2 (§8.2): the generic review/PR/UI pieces, built with zero domains registered. New domain registry (`infra/hermes-self-repair/domains.json`, `tools/hermes_self_repair_domains.py`), registered-PR mechanism (`tools/hermes-self-repair-open-pr.py`), daily review skill (`skills/fleet-selfrepair-review/SKILL.md`, not yet scheduled live), and the FleetOps `/selfrepair` tab (`hermes-fleetops-ui.py` 2.19.0). `hermes-self-repair-promote-gate.py` bumped to 1.1.0 for a new `TRANSITIONS`/`write_turn()` pair the UI imports, plus a real `set_task_state()` return-value fix found along the way. See the new "Phase 2" section above for the full account. |
 | 6.4.0 | 2026-11-07 | First real end-to-end verification (`FLEET_SELFREPAIR_DESIGN.md` Phase 1), two real tasks against `tools/hermes-benchmark-compare.py`. Found and fixed two real bugs live: `hermes-self-repair-generate-wrapper.sh` never fetched `BROKER_TOKEN` (fixed 1.0.1), so Step 2 could never actually hand off to Step 3; and `hermes-self-repair-generate.py`'s `compute_diff()` produced a patch `git apply` correctly rejected as corrupt whenever the model's completion lacked a trailing newline at EOF, a `difflib` limitation the original code didn't account for (fixed 1.1.1, normalizes both strings to one trailing newline before diffing). Task `fa2eb82b21af45b8` hit bug 2 and correctly escalated to `dead` after 3 attempts (circuit breaker confirmed live). Task `2e732538c2e34ebb`, submitted after both fixes, converged and reached `verified` — commit `92ad261` on `nas2-selfrepair/master`, awaiting `promote`/`skip`. |
