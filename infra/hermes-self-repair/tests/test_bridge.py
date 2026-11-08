@@ -234,7 +234,7 @@ def main():
     print("\n[poll_domain_buzz_source: budget exhaustion leaves the cursor short, not lost]")
     handled = []
 
-    def fake_handler(message, domain, budget):
+    def fake_handler(message, domain, budget, state):
         if budget["remaining"] <= 0:
             raise mod.BudgetExhausted()
         budget["remaining"] -= 1
@@ -291,6 +291,55 @@ def main():
           "hermes-websearch.py" in problem and "evil.example.com" in problem, problem)
     check("the problem text explicitly forbids weakening the egress guard itself",
           "NEVER weaken, bypass, or special-case" in problem, problem)
+
+    print("\n[egress-guard cooldown: skip only while a caller's prior task is both recent AND active]")
+    check("no record at all for this caller -> never a cooldown",
+          mod.egress_cooldown_active("new-caller.py", {}, now=1000.0) is False)
+
+    fresh_state = {"egress_cooldown": {"loopy.py": {"task_id": "t1", "submitted_at": 1000.0}}}
+    mod.fetch_task_state_or_none = lambda task_id: "drafting"
+    check("recent AND still-active prior task -> cooldown active",
+          mod.egress_cooldown_active("loopy.py", fresh_state, now=1010.0) is True)
+
+    mod.fetch_task_state_or_none = lambda task_id: "promotion-declined"
+    check("recent BUT already-concluded prior task -> cooldown released immediately",
+          mod.egress_cooldown_active("loopy.py", fresh_state, now=1010.0) is False)
+
+    mod.fetch_task_state_or_none = lambda task_id: "drafting"
+    old_state = {"egress_cooldown": {"loopy.py": {"task_id": "t1", "submitted_at": 1000.0}}}
+    check("still-active prior task BUT the time window has elapsed -> cooldown released anyway",
+          mod.egress_cooldown_active("loopy.py", old_state, now=1000.0 + mod.EGRESS_COOLDOWN_SECONDS + 1) is False)
+
+    check("a task-state lookup failure (fetch_task_state_or_none's own UNKNOWN_TASK_STATE "
+          "sentinel) is treated as active, the conservative direction -- only the time window "
+          "can release a cooldown when the task's real state can't be read at all",
+          mod.task_is_active(mod.UNKNOWN_TASK_STATE) is True)
+
+    check("every review-round-N state counts as active",
+          mod.task_is_active("review-round-3") is True)
+    check("'blocked'/'dead'/'error' etc. are not in the active set", mod.task_is_active("dead") is False)
+
+    print("\n[handle_egress_guard_denial: cooldown blocks a looping caller, budget/record wiring]")
+    submitted = []
+    mod.resolve_caller_path = lambda caller: f"tools/{caller}"
+    mod.submit_task = lambda path, problem: submitted.append(path) or f"task-{len(submitted)}"
+    mod.fetch_task_state_or_none = lambda task_id: "drafting"  # still in flight
+
+    cooldown_state = {}
+    finding1 = {"payload": {"caller": "loopy.py", "attempted": "evil.example.com", "reason": "x"}}
+    mod.handle_egress_guard_denial(finding1, {"name": "egress-guard"}, {"remaining": 3}, cooldown_state)
+    check("first denial from a caller submits normally", submitted == ["tools/loopy.py"], submitted)
+    check("the submission is recorded for cooldown purposes",
+          "loopy.py" in cooldown_state.get("egress_cooldown", {}), cooldown_state)
+
+    mod.handle_egress_guard_denial(finding1, {"name": "egress-guard"}, {"remaining": 3}, cooldown_state)
+    check("an immediate repeat denial from the SAME looping caller is skipped, not resubmitted",
+          submitted == ["tools/loopy.py"], submitted)
+
+    finding2 = {"payload": {"caller": "other.py", "attempted": "evil.example.com", "reason": "x"}}
+    mod.handle_egress_guard_denial(finding2, {"name": "egress-guard"}, {"remaining": 3}, cooldown_state)
+    check("a DIFFERENT caller's denial is never blocked by another caller's own cooldown",
+          submitted == ["tools/loopy.py", "tools/other.py"], submitted)
 
     print("\n[seek_to_end_memory_turns / fetch_memory_turns: direct-sqlite cursor, same contract]")
 

@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-# Version: 2.0.0
+# Version: 2.1.0
+#
+# 2.1.0 (2026-11-08) — real gap found while preparing to flip egress-guard's switch on (direct
+# operator request to fix before going live, not live traffic yet): unlike minecraft-bots, whose
+# triage source does its own occurrence-counting dedup, tools/hermes_egress_guard.py's own
+# `_record_denial()` writes a fresh turn on EVERY denial, unconditionally — no rate-limiting
+# anywhere upstream. A caller stuck in a retry loop against a denied destination would have had a
+# new self-repair task submitted for it every poll cycle, bounded only by the per-cycle submission
+# budget (shared with minecraft-bots). Added a per-caller cooldown (`egress_cooldown_active()`,
+# `record_egress_submission()`, state key `"egress_cooldown"`): a new submission is skipped while
+# BOTH (a) the prior task submitted for this same caller is still actively progressing
+# (`task_is_active()` — drafting/review/security/verify/awaiting a promotion decision) AND (b)
+# fewer than EGRESS_COOLDOWN_SECONDS (default 3600) have passed since it was submitted. Either
+# condition alone ends the cooldown: a concluded task releases it immediately (no reason to keep
+# waiting once a human has already decided or the pipeline has already given up), and the time
+# window is a backstop independent of being able to read the task's state at all (e.g. if
+# hermes-memory is briefly unreachable — fetch_task_state_or_none() then returns a sentinel
+# `task_is_active()` treats as still-active, the conservative direction, with the time window as
+# the only way out). All handlers now take `state` as a fourth argument (HANDLERS' own call
+# signature, both source pollers updated) so a handler can read/write bridge-wide cursor state for
+# exactly this kind of per-domain bookkeeping — minecraft-bots' own handler does not yet use it.
 #
 # 2.0.0 (2026-11-08) — FLEET_SELFREPAIR_DESIGN.md §8.4's genericity acceptance check (Phase 4):
 # renamed from hermes-self-repair-minecraft-bridge.py. Registering a real second domain
@@ -81,6 +101,11 @@
 #                               findings are never acted on
 #   MAX_SUBMISSIONS_PER_POLL    default 3 -- a per-cycle safety valve shared by every source, not
 #                               §6's own still-open "daily action cap" question
+#   EGRESS_COOLDOWN_SECONDS     default 3600 -- egress-guard only; a caller with an actively-
+#                               progressing task already submitted for it is never given a second
+#                               one, and even once it concludes, a new one waits out the rest of
+#                               this window (1.1.0/2.1.0's bootstrap/budget protections cover the
+#                               cross-domain burst case; this covers one caller looping on its own)
 #   BRIDGE_STATE_DIR            default ~/.hermes/state/selfrepair-bridge -- durable cursor per
 #                               source so a restart never re-processes old findings, and a source
 #                               with no cursor yet is seeded at its current tip, never replayed
@@ -113,6 +138,7 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "20"))
 SEVERITY_RANK = {"low": 0, "unknown": 0, "medium": 1, "high": 2}
 MIN_SEVERITY_RANK = SEVERITY_RANK[os.environ.get("MIN_SEVERITY", "medium")]
 MAX_SUBMISSIONS_PER_POLL = int(os.environ.get("MAX_SUBMISSIONS_PER_POLL", "3"))
+EGRESS_COOLDOWN_SECONDS = int(os.environ.get("EGRESS_COOLDOWN_SECONDS", "3600"))
 STATE_DIR = Path(os.environ.get(
     "BRIDGE_STATE_DIR", str(Path.home() / ".hermes" / "state" / "selfrepair-bridge")))
 BRIDGE_AGENT = "selfrepair-bridge"
@@ -386,7 +412,57 @@ def write_link_turn(task_id, role, linked_task_id):
     }, MEMORY_TOKEN)
 
 
-def handle_minecraft_bots_buzz(finding, domain, budget):
+ACTIVE_TASK_STATES = {
+    "drafting", "third-party-review", "static-scan", "security-review",
+    "security-meta-review", "done", "verified", "awaiting-completeness",
+    "promotion-approved",
+}
+UNKNOWN_TASK_STATE = "__unknown__"  # lookup failed -- treated as active, the conservative direction
+
+
+def task_is_active(state):
+    """True if a task in this state is still actively progressing toward a human decision (or
+    its state couldn't be determined at all -- fetch_task_state_or_none()'s own sentinel, treated
+    as active so a transient hermes-memory outage doesn't cause a flood of duplicate submissions;
+    EGRESS_COOLDOWN_SECONDS is the backstop for that case, not this function). False for every
+    concluded state (blocked/error/unresolved/dead/verify-failed/promotion-declined/promoted/
+    anything else not recognized as active) -- a concluded task releases the cooldown immediately,
+    no reason to keep waiting once a human has decided or the pipeline has already given up."""
+    if state is None:
+        return False
+    if state == UNKNOWN_TASK_STATE:
+        return True
+    if state in ACTIVE_TASK_STATES:
+        return True
+    return state.startswith("review-round-")
+
+
+def fetch_task_state_or_none(task_id):
+    try:
+        return _get(f"{MEMORY_URL}/tasks/{task_id}", MEMORY_TOKEN).get("state")
+    except Exception:
+        return UNKNOWN_TASK_STATE
+
+
+def egress_cooldown_active(caller, state, now):
+    """Returns True if a new egress-guard submission for `caller` should be SKIPPED -- only when
+    BOTH the prior task submitted for this caller is still actively progressing AND fewer than
+    EGRESS_COOLDOWN_SECONDS have passed since it was submitted. Either condition alone ends the
+    cooldown (see task_is_active()'s own docstring for why)."""
+    record = (state.get("egress_cooldown") or {}).get(caller)
+    if not record:
+        return False
+    if now - record.get("submitted_at", 0) >= EGRESS_COOLDOWN_SECONDS:
+        return False
+    return task_is_active(fetch_task_state_or_none(record.get("task_id")))
+
+
+def record_egress_submission(state, caller, task_id, now):
+    state.setdefault("egress_cooldown", {})[caller] = {"task_id": task_id, "submitted_at": now}
+    save_state(state)
+
+
+def handle_minecraft_bots_buzz(finding, domain, budget, state):
     body = finding.get("body", "")
     parsed = parse_triage_body(body)
     ok, reason = should_submit(parsed)
@@ -428,9 +504,18 @@ def handle_minecraft_bots_buzz(finding, domain, budget):
         f"{domain.get('name')!r} ({budget['remaining']} submission(s) left this poll cycle)")
 
 
-def handle_egress_guard_denial(finding, domain, budget):
+def handle_egress_guard_denial(finding, domain, budget, state):
     payload = finding.get("payload", {})
     caller = payload.get("caller")
+    if not caller:
+        log("skipping egress denial: no caller in payload")
+        return
+
+    now = time.time()
+    if egress_cooldown_active(caller, state, now):
+        log(f"skipping egress denial from {caller!r}: a task for this caller is already active "
+            f"or was submitted too recently (EGRESS_COOLDOWN_SECONDS={EGRESS_COOLDOWN_SECONDS})")
+        return
 
     if budget["remaining"] <= 0:
         raise BudgetExhausted()
@@ -448,6 +533,7 @@ def handle_egress_guard_denial(finding, domain, budget):
         log(f"submission failed: {exc}")
         return
     budget["remaining"] -= 1
+    record_egress_submission(state, caller, fix_task_id, now)
     log(f"submitted task {fix_task_id} ({fix_path}) for domain {domain.get('name')!r} "
         f"({budget['remaining']} submission(s) left this poll cycle)")
 
@@ -503,7 +589,7 @@ def poll_domain_buzz_source(domain, source_rest, state, budget):
     handler = HANDLERS[domain["detection_source"]]
     for message in messages:
         try:
-            handler(message, domain, budget)
+            handler(message, domain, budget, state)
         except BudgetExhausted:
             log(f"MAX_SUBMISSIONS_PER_POLL reached — leaving message seq={message.get('seq')} and "
                 f"any later ones in topic {topic!r} for the next poll cycle")
@@ -577,7 +663,7 @@ def poll_domain_memory_turns_source(domain, source_rest, state, budget):
     handler = HANDLERS[domain["detection_source"]]
     for finding in findings:
         try:
-            handler(finding, domain, budget)
+            handler(finding, domain, budget, state)
         except BudgetExhausted:
             log(f"MAX_SUBMISSIONS_PER_POLL reached — leaving turn id={finding['id']} and any later "
                 f"ones for task_id {task_id!r} for the next poll cycle")

@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.9.0
+**Version:** 6.10.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -653,10 +653,41 @@ the backlog-replay protection actually does what it says, not just what its offl
 `egress-guard` is correctly never polled at all (its switch is off); its own cursor key is absent
 from the persisted state file.
 
+**Update, same day — `egress-guard`'s switch flipped on too, by direct operator instruction; a
+third domain deliberately deferred until these two have a track record.** One more real gap found
+first, while actually preparing to do this: egress-guard had **no dedup at all** on repeated
+denials from the same caller — unlike minecraft-bots, whose triage source does its own occurrence
+counting, `tools/hermes_egress_guard.py`'s own `_record_denial()` writes a fresh turn on every
+single denial, unconditionally. A script stuck in a retry loop against a denied destination would
+have had a new self-repair task submitted for it every poll cycle.
+
+Fixed with a per-caller cooldown (`hermes-self-repair-bridge.py` 2.1.0):
+`egress_cooldown_active()` skips a new submission for a caller only while BOTH the prior task
+submitted for that caller is still actively progressing (`task_is_active()` — drafting through
+awaiting a promotion decision) AND fewer than `EGRESS_COOLDOWN_SECONDS` (default 3600) have passed
+since it was submitted. Either condition alone releases it: a concluded task (promoted, declined,
+dead, errored, unresolved — anything not in the active set) never has to wait out the rest of the
+window, since there's no reason to keep a human from reviewing a new instance of the same problem
+once they've already decided on the last one; and if the task's own state can't even be read (a
+transient hermes-memory outage), `fetch_task_state_or_none()`'s own sentinel is treated as active
+— the conservative direction — with the time window as the only way out, so a lookup failure can
+never wedge the cooldown open forever. All four handlers (`HANDLERS`) now take `state` as a fourth
+argument so a handler can read/write this kind of per-domain bookkeeping; minecraft-bots' own
+handler doesn't use it yet.
+
+11 more offline checks (60 total in `test_bridge.py`), including both release conditions, the
+conservative treatment of an unreadable task state, and confirming a different caller's denial is
+never blocked by another caller's own cooldown.
+
+Both domains are now switched on. A third domain is explicitly **deferred, not forgotten** —
+direct operator instruction — pending seeing how minecraft-bots and egress-guard actually perform
+first.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 6.10.0 | 2026-11-08 | Direct operator instruction: `egress-guard`'s switch flipped on; a third domain explicitly deferred until these two have a track record. Found and fixed one more real gap first — no dedup on repeated denials from the same caller — with a per-caller cooldown in the bridge (2.1.0) that releases on whichever comes first, the prior task concluding or `EGRESS_COOLDOWN_SECONDS` elapsing. 11 more offline checks (60 total). See the "Phase 4" section's own update above. |
 | 6.9.0 | 2026-11-08 | `hermes-self-repair-bridge.service` installed and enabled on spark for the first time. Found live at first start: the wrapper script had never been marked executable in git since Phase 3's original commit (`status=203/EXEC`), fixed with `git update-index --chmod=+x` (1.1.1). After that, started cleanly and its own log confirmed the backlog-replay bootstrap actually works on real data (`seeded cursor at seq=643716, will not replay its history`); `egress-guard` correctly never polled (switch off). See the "Phase 4" section's own update above. |
 | 6.8.0 | 2026-11-08 | Phase 4 (§8.4) started: registered a real second domain, `egress-guard` (switch off). Its memory-turns-shaped detection source immediately surfaced a real genericity leak — `hermes-self-repair-minecraft-bridge.py`'s own `poll_once()` only knew how to poll Buzz. Fixed by renaming/generalizing it to `hermes-self-repair-bridge.py` (2.0.0): dispatch by detection_source scheme (`SOURCE_POLLERS`), not a hardcoded prefix check. `egress-guard`'s own handler needs no model call (its `caller` field already names the real offending script) and registers no completeness rule. `path_scope` left empty, a real documented limitation. 19 more offline checks. Acceptance result so far: zero changes needed to §4.5–§4.8. See the new "Phase 4" section above for the full account. |
 | 6.7.0 | 2026-11-08 | Direct operator instruction: `minecraft-bots`' `self_managed` switch flipped to `true` (`domains.json`). Found and fixed two real gaps in `hermes-self-repair-minecraft-bridge.py` (1.0.0 → 1.1.0) while actually preparing to enable it, before any live traffic: no bootstrap (`seek_to_end()`, so a fresh enable doesn't replay weeks of triage history as a submission flood) and no per-cycle submission cap (`MAX_SUBMISSIONS_PER_POLL`, default 3, excess retried next cycle rather than dropped). 6 more offline checks. See the "Phase 3" section's own update above for the full account. |
