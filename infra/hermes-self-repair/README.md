@@ -1,12 +1,36 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.2.0
+**Version:** 6.4.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
-`nas2-selfrepair`=NAS2's native git server — already done. Per this project's own "documentation
-rot" lesson, this README describes only what exists right now, not the pipeline this is part of:
-**nothing here is deployed or wired to the dispatcher yet.**
+`nas2-selfrepair`=NAS2's native git server — already done. **Steps 2, 3, and 5
+(`hermes-self-repair-generate.py`, `-apply.py`, `-promote-gate.py`) are deployed and enabled on
+spark** — confirmed live 2026-11-07: all three running continuously since 2026-10-26 (`systemctl
+status` and `ps` against their real PIDs, not just unit files sitting on disk), with Buzz/memory/
+guard all reachable over the LAN IP and `coder2` active. **Deployed is not the same as exercised**:
+no real task has ever been submitted to this pipeline — `nas2-selfrepair/master` still ends at the
+Step 0/1 dev-testing commits from 2026-09-19, and the journal for all three services is empty
+because none has ever claimed a task. Step 8's own boundary (never wired to `hermes-dispatch.py`,
+by design) is unaffected by this — "deployed as a standalone service" and "reachable from chat" are
+different things, and only the first is now true.
+
+**Second update, same day: fed two real tasks, both against `tools/hermes-benchmark-compare.py`,
+and the full generate → apply → verify cycle now genuinely works end to end.** Two real,
+previously-undiscovered bugs surfaced and were fixed along the way, both confirmed live, not
+assumed: (1) `hermes-self-repair-generate-wrapper.sh` never fetched `BROKER_TOKEN`, so Step 2's own
+`submit_apply_job()` always failed its POST to the broker silently — fixed in that wrapper's 1.0.1;
+(2) `compute_diff()` produced a patch `git apply` rejected as corrupt whenever the model's raw
+completion lacked a trailing newline at EOF (routine for LLM output) while the real file had one —
+a documented `difflib` limitation, not applied-for in the original code — fixed in
+`hermes-self-repair-generate.py` 1.1.1 by normalizing both strings to end in exactly one newline
+before diffing. The first real task (`fa2eb82b21af45b8`) hit bug 2 and correctly went `dead` after
+3 attempts (the circuit breaker's intentional "escalates, never auto-retries" behavior, now
+confirmed live, not just read). The second (`2e732538c2e34ebb`, same file/problem, submitted after
+both fixes) converged, applied, and reached `verified` — a real commit (`92ad261`) now sits on
+`nas2-selfrepair/master` ahead of `origin/master`, awaiting the operator's own `promote`/`skip`
+decision. Per this project's own "documentation rot" lesson, this README describes only what
+exists right now, not the pipeline this is part of.
 
 ## What this is
 
@@ -104,11 +128,16 @@ checkout through the *real* Step 1 tool (one allowed path, one denied-by-pattern
 denied-by-prefix — all three refused/succeeded correctly), `compute_diff` (a real hunk, and the
 identical-content/empty-diff edge case), and both bundle builders.
 
-**Not yet verified — needs the real fleet, not this machine:** `claim_next`/Buzz subscription, the
-Layer 1/2 screen against a live guard service, `call_model` against real `coder`/`coder2` backends,
-a full `run_bug_loop` end-to-end round trip, `publish_result` against live `hermes-memory`. No
-systemd deploy has happened — `infra/hermes-self-repair/hermes-self-repair-generate.service` and
-`tools/hermes-self-repair-generate-wrapper.sh` exist but are untested on a real node.
+**Not yet verified — needs a real task, not just a live deployment:** `claim_next`/Buzz
+subscription, the Layer 1/2 screen against a live guard service, `call_model` against real
+`coder`/`coder2` backends, a full `run_bug_loop` end-to-end round trip, `publish_result` against
+live `hermes-memory`. **Systemd deploy is done** — `hermes-self-repair-generate.service` has been
+enabled and running on spark since 2026-10-26, confirmed live 2026-11-07 — but it has sat idle the
+entire time: zero tasks claimed, so every item in this list is still genuinely unverified, just no
+longer blocked on a deploy that hasn't happened. **Update, same day**: now verified, for real —
+see this file's top-of-document note and the 6.4.0 changelog entry below. `claim_next`/Buzz
+subscription, the Layer 1/2 screen, real `coder`/`coder2` calls, and `publish_result` all ran for
+real across two live tasks.
 
 `DRAFT_MAX_TOKENS`/`MAX_FILE_CHARS` are explicitly unverified placeholders (see the script's own
 header) — expect to retune both against a real target file and this fleet's actual coder/coder2
@@ -165,11 +194,15 @@ on `nas2-selfrepair/master` and absent from GitHub — confirmed with
 `git log origin/master..nas2-selfrepair/master`. This is the "compare separately" capability from
 the original NAS2 proposal, demonstrated working, not just described.
 
-**Not yet verified — needs the real fleet:** the broker `claim`/`report` cycle end-to-end, a real
+**Not yet verified — needs a real task:** the broker `claim`/`report` cycle end-to-end, a real
 `selfrepair-apply` job actually submitted by Step 2 and picked up by this worker, and the
-escalation path (FleetOps notice + email) on a real repeated failure. No systemd deploy has
-happened — `infra/hermes-self-repair/hermes-self-repair-apply.service` and its wrapper exist but
-are untested on a real node.
+escalation path (FleetOps notice + email) on a real repeated failure. **Systemd deploy is done** —
+`hermes-self-repair-apply.service` has been enabled and running on spark since 2026-10-26,
+confirmed live 2026-11-07 — idle the whole time, same caveat as Step 2 above. **Update, same
+day**: now verified, for real — see this file's top-of-document note and the 6.4.0 changelog
+entry below. The broker `claim`/`report` cycle, a real `selfrepair-apply` job from Step 2, and the
+escalation path (the first real task's circuit breaker correctly went `dead` after 3 attempts on a
+genuinely bad diff) have all now happened for real.
 
 ## Step 4: verification (two gates, both deterministic, no model call)
 
@@ -358,14 +391,26 @@ this session's own accumulated test commits — the output above is genuine, not
   common, benign case in practice.
 - `hermes-self-repair-status.py`'s `<task_id>` mode is unverified against a real hermes-memory —
   only synthetic turns have exercised its rendering/sorting logic.
-- Nothing in this pipeline has been deployed to a real node yet. Every systemd unit and wrapper
-  exists on disk, none have been installed or started. The entire pipeline exists as reviewed,
-  individually-tested code — not as a running system.
+- **Steps 2, 3, and 5 are now deployed** — `hermes-self-repair-generate.service`, `-apply.service`,
+  and `-promote-gate.service` are enabled and have been running continuously on spark since
+  2026-10-26 (confirmed live 2026-11-07 via `systemctl`/`ps` against their real PIDs, not just
+  reading unit files). **Deployed and exercised are still different things**: no real task has ever
+  been submitted to this pipeline, so every "needs the real fleet"/"needs a real task" item noted
+  under each step's own `### Verified so far` section above remains genuinely open — the gap is no
+  longer "not deployed," it is "deployed, idle, never fed a real task." `hermes-self-repair-promote.py`
+  (Step 5's GitHub-touching half) and `hermes-self-repair-verify-live.py` (Step 4's post-promotion
+  check) remain standalone scripts a human runs directly, by design — never their own systemd unit.
+  **Update, same day**: the gap really is closed now, not just relabeled — see this file's
+  top-of-document second update and the 6.4.0 changelog entry. Two real tasks have now run the
+  full generate/apply/verify cycle; one hit a real bug and correctly escalated, the other
+  converged and reached `verified` with a real commit on `nas2-selfrepair`.
 
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 6.4.0 | 2026-11-07 | First real end-to-end verification (`FLEET_SELFREPAIR_DESIGN.md` Phase 1), two real tasks against `tools/hermes-benchmark-compare.py`. Found and fixed two real bugs live: `hermes-self-repair-generate-wrapper.sh` never fetched `BROKER_TOKEN` (fixed 1.0.1), so Step 2 could never actually hand off to Step 3; and `hermes-self-repair-generate.py`'s `compute_diff()` produced a patch `git apply` correctly rejected as corrupt whenever the model's completion lacked a trailing newline at EOF, a `difflib` limitation the original code didn't account for (fixed 1.1.1, normalizes both strings to one trailing newline before diffing). Task `fa2eb82b21af45b8` hit bug 2 and correctly escalated to `dead` after 3 attempts (circuit breaker confirmed live). Task `2e732538c2e34ebb`, submitted after both fixes, converged and reached `verified` — commit `92ad261` on `nas2-selfrepair/master`, awaiting `promote`/`skip`. |
+| 6.3.0 | 2026-11-07 | Live-fleet audit while starting `FLEET_SELFREPAIR_DESIGN.md` Phase 1: this README's "nothing deployed" claims were stale. `hermes-self-repair-generate.service`, `-apply.service`, and `-promote-gate.service` are actually enabled and have been running continuously on spark since 2026-10-26 (confirmed via `systemctl`/`ps` against their real PIDs) — Buzz/memory/guard reachable, `coder2` active, `hermes-broker` 1.4.0. Corrected every "not yet deployed"/"no systemd deploy has happened" claim to the real state: deployed and healthy, but genuinely idle — `nas2-selfrepair/master` still ends at the 2026-09-19 dev-testing commits, so nothing in the "needs a real task" verification lists actually changes. No codesec venv found on spark, so Step 4's static-analysis half will fail open on a real run until that's installed. |
 | 6.2.0 | 2026-09-19 | Security-relevant fix found during hardening self-review, not live traffic: `tools/hermes-self-repair-apply.py`'s (1.3.0) `parse_diff_path()` used `re.search()`, returning only the first `+++ b/<path>` match in a diff — a diff with more than one such header (a multi-file diff, never produced by the legitimate pipeline but exactly the "tampered turn record" threat this file already defends against elsewhere) would have had only its first path allowlist-checked while `git apply` still wrote every hunk in the diff, including files never checked at all. Fixed to `findall()` and refuse anything but exactly one match; verified with a constructed two-file diff (one allowed path, one targeting `infra/vaultwarden/.env`) confirming it is now refused outright rather than silently narrowed to the allowed-looking first file. Full Step 3/4 regression suite re-run clean afterward. |
 | 6.1.0 | 2026-09-19 | Hardening pass, no deployment: `tools/hermes-self-repair-promote.py` (1.1.0) now diagnoses an empty/"already applied" cherry-pick separately from a real content conflict — a real distinction found live during Step 5's own testing that the original code lumped together. `hermes-self-repair-apply.py`'s circuit breaker was run through 5 consecutive real failures, a real reset, and independent-task-counter checks — confirmed a genuine, non-obvious operational property along the way: once a task hits `MAX_ATTEMPTS`, `do_apply()` is never called again for it, ever, even for a purely transient failure — recovery requires a human to delete its state file. Not a bug (matches `hermes-remediate-worker.py`'s own intentional design), but now explicitly documented rather than merely inheritable-by-reading-code. |
 | 6.0.0 | 2026-09-18 | Steps 6–8: `tools/hermes-self-repair-submit.py` (the deliberate operator-run submission entry point — this IS Step 8, kept fully separate from `hermes-dispatch.py`) and `tools/hermes-self-repair-status.py` (Step 7's tracing/comparison, `<task_id>` timeline view + `--repo-diff`). Step 6 required no new code — confirmed by reading `hermes-repo-sync.sh` directly. `--repo-diff` run for real against this session's own accumulated test history. All nine steps (0–8) of the stepped plan now exist as reviewed, tested code; none deployed to a live node. |

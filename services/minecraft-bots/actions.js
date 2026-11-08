@@ -1,5 +1,11 @@
-// Version: 1.105.0
+// Version: 1.107.0
 //
+// 1.107.0 (2026-11-07): every chest search (loot, the chest-first fallback, store, consolidation)
+// reaches CHEST_SEARCH_RADIUS, 128 blocks (was 32); a chest beyond 40 is walked to in hops (hopToward).
+// 1.106.0 (2026-11-07): "store" picks the chest already holding that item or its kind (rankStoreChests,
+// itemFamily), and known_chests.json records each chest's free slots. New "consolidate_chests": a
+// kind split between two chests near her goes into the fuller one in full stacks; a chest snapshot
+// that shows such a split leaves it as takeConsolidationHint().
 // 1.105.0 (2026-11-06): herd_to_pen looks 64 blocks out for a loose animal (was 32), with enough
 // herding steps to lead it back from there.
 // 1.104.0 (2026-11-05): craftItem's chain makes each ingredient for every run of the recipe, not
@@ -1700,6 +1706,30 @@ async function visitRememberedSpot(bot, token, resourceName, rescan) {
 // goto (EXPLORE_TIMEOUT_MS, cancel-on-token, best-effort if she can't fully reach it) -- worth
 // checking from wherever she actually ends up even on a partial path, same reasoning as that
 // function's own catch block.
+// Direct request, 2026-11-07: "expand the range of 'nearby chests' from 32 to 128 -- you keep using
+// 32 as 'nearby' and keep learning that it's too small a range." Every chest search (loot, the
+// chest-first fallback for mine/craft, store, consolidation) looks this far.
+const CHEST_SEARCH_RADIUS = 128;
+
+// A chest up to CHEST_SEARCH_RADIUS away is walked to in EXPLORE_DISTANCE hops, the way
+// wanderAndRetryFind walks toward its beacon, before the final short GoalNear to it.
+async function hopToward(bot, token, pos) {
+  for (let hop = 0; hop < MAX_DIRECTED_HOPS && !token.cancelled; hop++) {
+    const here = bot.entity.position;
+    const dx = pos.x - here.x, dz = pos.z - here.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist <= EXPLORE_DISTANCE) return;
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalNearXZ(here.x + (dx / dist) * EXPLORE_DISTANCE,
+        here.z + (dz / dist) * EXPLORE_DISTANCE, 4)), EXPLORE_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+    } catch {
+      // short of this hop's point -- the next hop (or the final GoalNear) starts from wherever she got to
+    } finally {
+      if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+    }
+  }
+}
+
 async function gotoRememberedSpot(bot, token, pos) {
   if (token.cancelled) return;
   try {
@@ -2276,7 +2306,7 @@ async function searchChestsFor(bot, token, itemNames, wantCount) {
   const trappedType = bot.registry.blocksByName.trapped_chest;
   const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
   if (!matchIds.length) return null;
-  const positions = bot.findBlocks({ matching: matchIds, maxDistance: 32, count: CHEST_CHECK_MAX_CANDIDATES });
+  const positions = bot.findBlocks({ matching: matchIds, maxDistance: CHEST_SEARCH_RADIUS, count: CHEST_CHECK_MAX_CANDIDATES });
 
   for (const pos of positions) {
     if (token.cancelled) return null;
@@ -2324,6 +2354,8 @@ async function searchChestsFor(bot, token, itemNames, wantCount) {
 // two independently-drifting copies. Returns the withdrawal result object, "cancelled" (caller
 // should stop entirely), or null (this specific chest didn't have enough -- try another).
 async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount) {
+  await hopToward(bot, token, chestBlock.position);
+  if (token.cancelled) return "cancelled";
   try {
     await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
       chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
@@ -2358,7 +2390,7 @@ async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount
     if (!totalAvailable) {
       // Real, current truth either way -- an empty/wrong-contents chest is worth recording too,
       // so a stale known-chests entry gets corrected rather than kept forever.
-      await recordChestSnapshot(chestBlock.position, contents);
+      await recordChestSnapshot(chestBlock.position, contents, chest.inventoryStart);
       return null;
     }
     // Review MB-17, 2026-09-24: `matches` can span several concrete item types (oak + birch logs
@@ -2384,7 +2416,7 @@ async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount
     // takes the item out redact it from global memory"): a fresh post-withdraw snapshot IS the
     // redaction -- whatever was just taken is naturally absent from this real, current-truth
     // read, no separate delete-this-item step to get subtly out of sync with reality.
-    await recordChestSnapshot(chestBlock.position, chest.containerItems());
+    await recordChestSnapshot(chestBlock.position, chest.containerItems(), chest.inventoryStart);
     return taken ? { name: firstName, count: taken } : null;
   } catch {
     noteUtilityOutcome("chest", chestBlock.position, false);
@@ -3135,16 +3167,138 @@ async function saveKnownChests(data) {
 // piece of shared fleet state here already accepts (pen location, claimed beds) -- a rare
 // simultaneous write from two bots opening the same chest at once could lose one update, judged
 // an acceptable, self-correcting-on-next-open tradeoff rather than building real locking for it.
-async function recordChestSnapshot(position, items) {
+// slotCount (the chest window's inventoryStart) records how many slots are still free, so storing
+// can pass over a chest already known to be full. When this chest shares a kind of item with
+// another known chest nearby, the move that would bring them together is left for
+// takeConsolidationHint() (2026-11-07).
+async function recordChestSnapshot(position, items, slotCount) {
   const known = await loadKnownChests();
   const contents = {};
   for (const item of items) contents[item.name] = (contents[item.name] || 0) + item.count;
   known[chestKey(position)] = {
     position: { x: position.x, y: position.y, z: position.z },
     contents,
+    ...(slotCount ? { freeSlots: Math.max(0, slotCount - items.length) } : {}),
     lastSeenAt: new Date().toISOString(),
   };
   await saveKnownChests(known);
+  const plan = findConsolidation(known, position, { involving: chestKey(position) });
+  if (plan) consolidationHint = plan;
+}
+
+// Direct request, 2026-11-07: "check world knowledge of chest contents before stashing inventory in
+// a chest, and stash their items in a chest already containing the same or similar items. If they
+// look in a chest, and learn that something in there is the same or similar to what's in another
+// chest, they should move the items to be together in full stacks." Similar means one family: any
+// wood's logs, any color's wool, every seed, all the stone kinds, all food, tools, armor.
+const STONE_ITEM_NAMES = new Set(["cobblestone", "stone", "cobbled_deepslate", "deepslate", "granite",
+  "diorite", "andesite", "tuff", "blackstone", "netherrack", "sandstone"]);
+const FAMILY_SUFFIX = /_(log|wood|stem|planks|sapling|leaves|wool|carpet|bed|seeds|ingot|nugget|ore|dye|boat)$/;
+export function itemFamily(name) {
+  if (name.startsWith("raw_")) return "ore";
+  if (STONE_ITEM_NAMES.has(name)) return "stone";
+  if (FOOD_NAMES.includes(name)) return "food";
+  if (/_(sword|pickaxe|axe|shovel|hoe)$/.test(name)) return "tools";
+  if (/_(helmet|chestplate|leggings|boots)$/.test(name)) return "armor";
+  const suffix = name.match(FAMILY_SUFFIX)?.[1];
+  if (suffix === "wood" || suffix === "stem") return "log";
+  return suffix ?? name;
+}
+
+const STORE_CANDIDATE_LIMIT = 5;
+
+// Where to put itemName: chests already holding it first, then ones holding its family, then empty
+// or never-opened ones, then the rest; a chest last seen full goes behind all of those. Nearest
+// first within each. `positions` are the chests findBlocks just saw; known chests within the
+// search radius of `point` join them even when findBlocks missed them.
+export function rankStoreChests(known, positions, itemName, point) {
+  const family = itemFamily(itemName);
+  const candidates = new Map();
+  for (const pos of positions) candidates.set(chestKey(pos), { position: pos, entry: known[chestKey(pos)] });
+  for (const [key, entry] of Object.entries(known)) {
+    if (candidates.has(key)) continue;
+    const pos = new Vec3(entry.position.x, entry.position.y, entry.position.z);
+    if (pos.distanceTo(point) <= CHEST_SEARCH_RADIUS) candidates.set(key, { position: pos, entry });
+  }
+  const tier = ({ entry }) => {
+    const names = Object.keys(entry?.contents ?? {});
+    const base = names.includes(itemName) ? 0
+      : names.some((n) => itemFamily(n) === family) ? 1
+      : names.length === 0 ? 2 : 3;
+    return entry?.freeSlots === 0 ? base + 4 : base;
+  };
+  return [...candidates.values()]
+    .map((c) => ({ ...c, tier: tier(c), dist: c.position.distanceTo(point) }))
+    .sort((a, b) => a.tier - b.tier || a.dist - b.dist);
+}
+
+// One family's items split between two known chests near `point`: the move is from the chest
+// holding less of it into the one holding more. `involving` limits it to splits that include
+// that chest (the one just looked into). Null when nothing near is split.
+export function findConsolidation(known, point, { involving } = {}) {
+  const byFamily = new Map();
+  for (const [key, entry] of Object.entries(known)) {
+    const pos = new Vec3(entry.position.x, entry.position.y, entry.position.z);
+    if (pos.distanceTo(point) > CHEST_SEARCH_RADIUS) continue;
+    for (const [name, count] of Object.entries(entry.contents ?? {})) {
+      const family = itemFamily(name);
+      if (!byFamily.has(family)) byFamily.set(family, new Map());
+      const chests = byFamily.get(family);
+      if (!chests.has(key)) chests.set(key, { key, position: pos, freeSlots: entry.freeSlots, total: 0, items: {} });
+      const holding = chests.get(key);
+      holding.total += count;
+      holding.items[name] = count;
+    }
+  }
+  let best = null;
+  for (const [family, chests] of byFamily) {
+    if (chests.size < 2) continue;
+    if (involving && !chests.has(involving)) continue;
+    const ordered = [...chests.values()].sort((a, b) => b.total - a.total);
+    const to = ordered[0];
+    const from = ordered[ordered.length - 1];
+    // A full chest takes nothing; what she carried would go straight back where it came from.
+    if (to.freeSlots === 0) continue;
+    if (!best || from.total > best.from.total) best = { family, from, to };
+  }
+  return best;
+}
+
+// Walk to a chest and open it: { chest }, { cancelled: true }, or { error }.
+async function openChestAt(bot, token, position) {
+  await hopToward(bot, token, position);
+  if (token.cancelled) return { cancelled: true };
+  try {
+    await withTimeout(bot.pathfinder.goto(new goals.GoalNear(position.x, position.y, position.z, 2)),
+      ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+  } catch (err) {
+    if (token.cancelled) return { cancelled: true };
+    noteUtilityOutcome("chest", position, false);
+    return { error: err.message };
+  } finally {
+    if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
+  }
+  if (token.cancelled) return { cancelled: true };
+  const block = bot.blockAt(position);
+  if (!block || !["chest", "trapped_chest"].includes(block.name)) return { error: "there's no chest there now" };
+  try {
+    const chest = await bot.openChest(block);
+    noteUtilityOutcome("chest", position, true);
+    return { chest };
+  } catch (err) {
+    noteUtilityOutcome("chest", position, false);
+    return { error: err.message };
+  }
+}
+
+let consolidationHint = null;
+export function consolidationPending() {
+  return consolidationHint !== null;
+}
+export function takeConsolidationHint() {
+  const plan = consolidationHint;
+  consolidationHint = null;
+  return plan;
 }
 
 // The read-side counterpart: a real, structured, position-precise lookup ("which known chest
@@ -3896,7 +4050,7 @@ async function performActionAs(bot, action, speaker, token) {
       // MAX_CANDIDATES in distance order, skipping to the next on any per-chest failure
       // (obstructed, unreachable, won't open) instead of giving up after the first one.
       const MAX_CANDIDATES = 3;
-      const lootFindOptions = { matching: matchIds, maxDistance: 32, count: MAX_CANDIDATES };
+      const lootFindOptions = { matching: matchIds, maxDistance: CHEST_SEARCH_RADIUS, count: MAX_CANDIDATES };
       let positions = bot.findBlocks(lootFindOptions);
       if (!positions.length) positions = await wanderAndRetryFind(bot, token, lootFindOptions);
       if (!positions.length) return fail("couldn't find any chests nearby, even after looking around.");
@@ -3989,6 +4143,8 @@ async function performActionAs(bot, action, speaker, token) {
           continue;
         }
 
+        await hopToward(bot, token, chestBlock.position);
+        if (token.cancelled) return ok("stopped on the way to a chest.");
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
             chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
@@ -4011,7 +4167,7 @@ async function performActionAs(bot, action, speaker, token) {
           // container-only view.
           const contents = chest.containerItems();
           console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
-          await recordChestSnapshot(chestBlock.position, contents);
+          await recordChestSnapshot(chestBlock.position, contents, chest.inventoryStart);
           await chest.close();
           return ok(contents.length
             ? `checked a chest -- has ${contents.map((i) => `${i.count} ${i.name}`).join(", ")}.`
@@ -5700,14 +5856,25 @@ async function performActionAs(bot, action, speaker, token) {
       // position; every other "store" caller (checkInventoryFull/Insurance) omits it and keeps
       // the original "nearest to wherever I am right now" behavior, which is what they actually
       // want (get rid of it quickly, not necessarily near home).
-      const storeFindOptions = { matching: matchIds, maxDistance: 32, count: 3, point: action.near };
-      let positions = bot.findBlocks(storeFindOptions);
-      if (!positions.length) positions = await wanderAndRetryFind(bot, token, storeFindOptions);
-      if (!positions.length) return fail("couldn't find a chest nearby, even after looking around.");
+      // 2026-11-07: candidates are ranked by what the fleet knows each chest holds (rankStoreChests),
+      // so an item joins its own kind instead of going into whichever chest is nearest.
+      const storeFindOptions = { matching: matchIds, maxDistance: CHEST_SEARCH_RADIUS, count: 8, point: action.near };
+      const searchPoint = action.near ? new Vec3(action.near.x, action.near.y, action.near.z) : bot.entity.position;
+      const known = await loadKnownChests();
+      let ranked = rankStoreChests(known, bot.findBlocks(storeFindOptions), action.item, searchPoint);
+      if (!ranked.length) ranked = rankStoreChests(known, await wanderAndRetryFind(bot, token, storeFindOptions), action.item, searchPoint);
+      if (!ranked.length) return fail("couldn't find a chest nearby, even after looking around.");
 
-      for (const pos of positions) {
+      for (const { position: pos, tier } of ranked.slice(0, STORE_CANDIDATE_LIMIT)) {
         if (token.cancelled) return ok("stopped on the way to a chest.");
         const chestBlock = bot.blockAt(pos);
+        if (chestBlock && !matchIds.includes(chestBlock.type)) {
+          console.log(`[store] skipping remembered chest at ${pos}: it's ${chestBlock.name} now.`);
+          continue;
+        }
+        if (chestBlock && tier <= 1) {
+          console.log(`[store] ${action.item} -> chest at ${pos}, which already holds ${tier === 0 ? "some" : "the same kind"}.`);
+        }
         // Real live gap, found 2026-10-07 investigating spark's own store_failure_rate baseline
         // (0.781, already the worst metric in the fleet): this candidate was still as silent as
         // the other two the 2026-09-09 fix closed -- blockAt() returning nothing for a position
@@ -5728,6 +5895,8 @@ async function performActionAs(bot, action, speaker, token) {
           continue;
         }
 
+        await hopToward(bot, token, chestBlock.position);
+        if (token.cancelled) return ok("stopped on the way to a chest.");
         try {
           await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
             chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
@@ -5748,7 +5917,7 @@ async function performActionAs(bot, action, speaker, token) {
           await chest.deposit(itemDef.id, null, storeCount);
           // Direct request, 2026-09-13 ("remember what is in chests when someone opens it") --
           // a deposit is exactly as real a change to this chest's contents as a withdrawal.
-          await recordChestSnapshot(chestBlock.position, chest.containerItems());
+          await recordChestSnapshot(chestBlock.position, chest.containerItems(), chest.inventoryStart);
           await chest.close();
         } catch (err) {
           // Real live gap found 2026-09-09 (storeSurplusNearHome's own post-craft cleanup
@@ -5763,6 +5932,91 @@ async function performActionAs(bot, action, speaker, token) {
         return ok(`stored ${storeCount} ${action.item} in a chest.`);
       }
       return fail("found chests nearby, but couldn't store anything in any of them.");
+    }
+
+    case "consolidate_chests": {
+      // Direct request, 2026-11-07: one kind of item split between two chests is brought together
+      // in full stacks. action.plan is findConsolidation()'s move (a snapshot just found it);
+      // without one she works out her own from what the fleet knows of the chests around her.
+      const plan = action.plan ?? findConsolidation(await loadKnownChests(), bot.entity.position);
+      if (!plan) return ok("no two chests near here hold the same kind of thing.");
+      const names = Object.keys(plan.from.items);
+      const freeSlots = () => bot.inventory.emptySlotCount();
+      if (freeSlots() < 2) return fail("no free slots to carry anything between chests.");
+
+      // 1. Take the family out of the chest that holds less of it, as many stacks as she can carry
+      // and the other chest has room for (one inventory slot kept free).
+      const source = await openChestAt(bot, token, plan.from.position);
+      if (source.cancelled) return ok("stopped on the way to a chest.");
+      if (source.error) return fail(`couldn't open the chest at ${plan.from.position}: ${source.error}`);
+      // Counts come from each open window -- its containerItems() and its own copy of her inventory
+      // (items()); bot.inventory doesn't see a withdrawal until the window closes (live, 2026-11-07:
+      // counted from there, only 30 of 70 birch logs went in). Item objects change under a
+      // withdraw, so each count is copied out before anything moves.
+      const totals = (items, wanted) => {
+        const byType = new Map();
+        for (const { type, name, count, stackSize } of items) {
+          if (!wanted(type, name)) continue;
+          const entry = byType.get(type) ?? { name, count: 0, slots: 0, stackSize: stackSize ?? 64 };
+          entry.count += count;
+          entry.slots++;
+          byType.set(type, entry);
+        }
+        return byType;
+      };
+      const heldIn = (window, type) => window.items().filter((i) => i.type === type).reduce((n, i) => n + i.count, 0);
+      const own = new Map(); // type -> { name, mine }: what she held herself beforehand is never moved
+      let carried = 0;
+      try {
+        let room = Math.min(freeSlots() - 1, plan.to.freeSlots ?? Infinity);
+        for (const [type, { name, count, stackSize }] of totals(source.chest.containerItems(), (_, name) => names.includes(name))) {
+          if (token.cancelled || room < 1) break;
+          const take = Math.min(count, room * stackSize);
+          own.set(type, { name, mine: heldIn(source.chest, type) });
+          await source.chest.withdraw(type, null, take);
+          carried += take;
+          room -= Math.ceil(take / stackSize);
+        }
+        await recordChestSnapshot(plan.from.position, source.chest.containerItems(), source.chest.inventoryStart);
+      } catch (err) {
+        console.log(`[consolidate] couldn't take from chest at ${plan.from.position}: ${err.message}`);
+      } finally {
+        try { await source.chest.close(); } catch { /* already closed */ }
+      }
+      if (token.cancelled) return ok("stopped while moving chest items.");
+      if (!carried) return fail(`the chest at ${plan.from.position} had none of its ${plan.family} left to move.`);
+
+      // 2. Into the chest that holds more. What it already has of these items comes out first, so
+      // putting it all back fills whole stacks instead of leaving several part-filled ones.
+      const target = await openChestAt(bot, token, plan.to.position);
+      if (target.cancelled) return ok("stopped on the way to a chest.");
+      if (target.error) return fail(`took ${carried} ${plan.family} but couldn't open the chest at ${plan.to.position}: ${target.error}`);
+      let stored = 0;
+      try {
+        for (const [type, { count, slots, stackSize }] of totals(target.chest.containerItems(), (type) => own.has(type))) {
+          const stacks = Math.ceil(count / stackSize);
+          if (slots === stacks || freeSlots() < stacks) continue; // already in whole stacks, or no room to lift them
+          await target.chest.withdraw(type, null, count);
+        }
+        for (const [type, { name, mine }] of own) {
+          const put = heldIn(target.chest, type) - mine;
+          if (put < 1) continue;
+          try {
+            await target.chest.deposit(type, null, put);
+            stored += put;
+          } catch (err) {
+            console.log(`[consolidate] couldn't put ${name} into chest at ${plan.to.position}: ${err.message}`);
+            break; // destination full -- the rest stays with her for the next store
+          }
+        }
+        await recordChestSnapshot(plan.to.position, target.chest.containerItems(), target.chest.inventoryStart);
+      } catch (err) {
+        console.log(`[consolidate] couldn't sort chest at ${plan.to.position}: ${err.message}`);
+      } finally {
+        try { await target.chest.close(); } catch { /* already closed */ }
+      }
+      if (!stored) return fail(`took ${carried} ${plan.family} but couldn't put them in with the rest.`);
+      return ok(`moved ${carried} ${plan.family} from the chest at ${plan.from.position} in with the rest at ${plan.to.position}.`);
     }
 
     case "trade": {

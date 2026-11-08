@@ -1,5 +1,8 @@
-// Version: 2.135.0
+// Version: 2.137.0
 //
+// 2.137.0 (2026-11-07): installSteppedGoto -- a goto whose search runs out of budget walks the partial
+// path toward the goal and searches again (swim-movements.js 1.6.0).
+// 2.136.0 (2026-11-07): checkChestConsolidation() runs the move a chest snapshot found, once she's idle.
 // 2.135.0 (2026-11-06, direct report: "there's a pen but none of the livestock is moved to it"): the
 // ranch goal picks its species again once that species is gone, counts animals 64 blocks round the
 // pen, and with none of any kind goes exploring instead of failing in place.
@@ -1755,11 +1758,11 @@ import { recordTurn, recentTurns } from "./memory.js";
 import { searchMemory, writeMemoryNote } from "./longterm.js";
 import { publish as buzzPublish, watchTopic } from "./buzz.js";
 import { watchRoom, sendMessage as matrixSend } from "./matrix.js";
-import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, isShelterDoor, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor, communalShelterPositions, communalDoorwayPosition, findCommunalShelterSite, isCommunalShelterMaterial, communalShelterMaterialCount, isUtilityUsable, findRememberedLocation } from "./actions.js";
+import { loadActionPlugins, performAction, FOOD_NAMES, SCOUT_FEATURE_BLOCKS, HOSTILE_MOBS, nearestHostile, nearestFriendlyGolem, isEssentialItem, isProtectedBlockName, loadAchievements, getAchievements, farmStatus, woolCounts, bedItemFor, findShelterSite, shelterPositions, shelterMaterialCount, SHELTER_ROOM, doorwayPosition, isShelterDoor, loadPenLocation, BREEDING_FOOD, LIVESTOCK, countInPen, findPenSite, DARK_LIGHT_LEVEL, FLEE_ONLY_MOBS, getResourceBlockNames, claimBuilderItem, myBuilderClaim, releaseBuilderItem, holdsGuardAnchor, communalShelterPositions, communalDoorwayPosition, findCommunalShelterSite, isCommunalShelterMaterial, communalShelterMaterialCount, isUtilityUsable, findRememberedLocation, consolidationPending, takeConsolidationHint } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchantsFix } from "./equipment.js";
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
-import { SwimMovements, installDoorSupport, isDoorway } from "./swim-movements.js";
+import { SwimMovements, installDoorSupport, installSteppedGoto, isDoorway } from "./swim-movements.js";
 import { refreshLivingSpace, findAccessObstructions, wouldBlockAccess, ACCESS_SCAN_RADIUS,
   shelterRoomsNear } from "./shelter.js";
 import { installTorchTrail, needsTorches, torchCount, TORCH_CARRY_MIN } from "./tunneling.js";
@@ -2099,6 +2102,7 @@ bot.once("spawn", async () => {
   }
   bot.pathfinder.setMovements(movements);
   installDoorSupport(bot); // swim-movements.js: doorway waypoints, never shut an open door
+  installSteppedGoto(bot); // swim-movements.js: past the search limit, walk the partial path and search again
   installTorchTrail(bot); // tunneling.js: a torch every TORCH_SPACING blocks while digging
   // The shell SwimMovements.safeToBreak() reads has to exist before the first path search, not
   // only after the first timer tick (LIVING_SPACE_REFRESH_MS below) -- a bot spawns inside the
@@ -7234,6 +7238,31 @@ setInterval(() => {
   checkLocationSharing().catch((err) =>
     console.error(`[${USERNAME}] location sharing sweep failed:`, err.message));
 }, LOCATION_SHARING_CHECK_MS);
+
+// Direct request, 2026-11-07: when a look into a chest shows it shares a kind of item with another
+// chest nearby (recordChestSnapshot leaves the move as a hint), she brings them together in full
+// stacks once she has nothing else to do.
+const CHEST_CONSOLIDATION_CHECK_MS = 60_000;
+async function checkChestConsolidation() {
+  if (!consolidationPending()) return;
+  if (!AUTONOMY_ENABLED || currentGoal || routineBlocked("checkChestConsolidation") || bot.isSleeping) return;
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+  if (!handle) return;
+  try {
+    const plan = takeConsolidationHint();
+    if (!plan) return;
+    const result = await performAction(bot, { type: "consolidate_chests", plan }, USERNAME, handle);
+    console.log(`[${USERNAME}] chest consolidation (${plan.family}): ${result.text} (ok=${result.ok})`);
+  } catch (err) {
+    console.error(`[${USERNAME}] chest consolidation failed:`, err.message);
+  } finally {
+    handle.release();
+  }
+}
+setInterval(() => {
+  checkChestConsolidation().catch((err) =>
+    console.error(`[${USERNAME}] chest consolidation check failed:`, err.message));
+}, CHEST_CONSOLIDATION_CHECK_MS);
 
 async function storeSurplusNearHome(reason) {
   if (Date.now() < storageBlockedUntil) return;

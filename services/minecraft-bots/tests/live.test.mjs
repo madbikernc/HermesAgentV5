@@ -1,5 +1,9 @@
-// Version: 1.39.0
+// Version: 1.41.0
 //
+// 1.41.0 (2026-11-07): new scenario -- a water channel past the search budget is crossed leg by leg
+// (swim-movements.js 1.6.0); chest searches reach 128 blocks (actions.js 1.107.0).
+// 1.40.0 (2026-11-07): new scenario -- logs stored with the other logs from what the fleet knows of
+// the chests, then two chests of logs brought together in full stacks (actions.js 1.106.0).
 // 1.39.0 (2026-11-05): 23 fences from 40 planks and 2 sticks -- the craft chain makes the other 14
 // sticks (actions.js 1.104.0).
 // 1.38.0 (2026-11-04): two new scenarios -- "mine stone" takes exposed stone before nearer buried
@@ -166,7 +170,7 @@ import { fileURLToPath } from "node:url";
 import mineflayer from "mineflayer";
 import pathfinderPkg from "mineflayer-pathfinder";
 import { Vec3 } from "vec3";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -178,7 +182,7 @@ const { loadActionPlugins, performAction, loadPenLocation, countInPen, findBedSi
   communalShelterPositions, communalDoorwayPosition, isUtilityUsable, findShelterSite } = await import("../actions.js");
 const arbiter = await import("../arbiter.js");
 const { equipBestArmor, installEnchantsFix } = await import("../equipment.js");
-const { SwimMovements, installDoorSupport } = await import("../swim-movements.js");
+const { SwimMovements, installDoorSupport, installSteppedGoto } = await import("../swim-movements.js");
 const { isProtectedBlockName } = await import("../actions.js");
 const { refreshLivingSpace, shelterRoomsNear } = await import("../shelter.js");
 const { installTorchTrail, needsTorches, torchCount, TORCH_CARRY_MIN, TORCH_SPACING } = await import("../tunneling.js");
@@ -473,6 +477,23 @@ for (const [label, block, open, gapAbove] of [
     await waitFor(() => bot.blockAt(new Vec3(x, y + 1, z + 2)).getProperties().open === false, 5000, "it shut behind her");
   });
 }
+// Direct request, 2026-11-07: "pathfinder should operate within its limit to find the best way in the
+// DIRECTION of the target... travel... pathfind again." With index.js's own liquidCost 20 and
+// searchRadius 48, four blocks of water are past the search budget: goto() used to fail No path.
+// Now she walks the partial path into the water and searches again from there (swim-movements.js 1.6.0).
+scenario("Pathfinding: a water channel past the search budget is crossed leg by leg", async () => {
+  const movements = bot.pathfinder.movements;
+  const { liquidCost } = movements;
+  const { searchRadius } = bot.pathfinder;
+  movements.liquidCost = 20;
+  bot.pathfinder.searchRadius = 48;
+  scenarioCleanup.push(() => { movements.liquidCost = liquidCost; bot.pathfinder.searchRadius = searchRadius; });
+  await rcon(`fill ${x + 2} ${y + 1} ${z - r + 1} ${x + 5} ${y + 1} ${z + r - 1} minecraft:water`);
+  await waitFor(() => bot.blockAt(new Vec3(x + 3, y + 1, z))?.name === "water", 5000, "the channel");
+  await bot.pathfinder.goto(new goals.GoalNear(x + 8, y + 1, z, 1));
+  assert(bot.entity.position.x > x + 6, `she got across: ${bot.entity.position}`);
+});
+
 scenario("Doors: walks into a room through an open door", async () => {
   useBotMovements();
   const room = await doorRoom("spruce_door");
@@ -1121,6 +1142,44 @@ async function placeChest(dx, dz, items) {
   await waitFor(() => bot.blockAt(new Vec3(x + dx, y + 1, z + dz))?.name === "chest", 5000, "chest placed");
 }
 
+// Direct request, 2026-11-07: "check world knowledge of chest contents before stashing ... stash
+// their items in a chest already containing the same or similar items", and a kind of item split
+// between chests is moved together in full stacks (actions.js 1.106.0). The fleet's chest memory is
+// seeded with what three chests hold; the nearest one is empty.
+async function chestItems(dx, dz) {
+  const out = await rcon(`data get block ${x + dx} ${y + 1} ${z + dz} Items`);
+  return [...out.matchAll(/\{[^{}]*\}/g)].map(([s]) => ({
+    id: s.match(/id: "minecraft:(\w+)"/)?.[1], count: Number(s.match(/count: (\d+)/)?.[1]) }))
+    .filter((i) => i.id);
+}
+scenario("Chests: logs are stored with the other logs, then two chests of logs become one in full stacks", async () => {
+  const E = [2, 0], L = [-6, 0], S = [6, 6]; // L is the nearer of the two log chests
+  await placeChest(...E, []);
+  await placeChest(...L, [["birch_log", 30], ["birch_log", 10]]);
+  await placeChest(...S, [["oak_log", 10], ["birch_log", 30]]);
+  const key = ([dx, dz]) => `${x + dx},${y + 1},${z + dz}`;
+  const entry = ([dx, dz], contents) => ({ position: { x: x + dx, y: y + 1, z: z + dz }, contents, freeSlots: 25,
+    lastSeenAt: new Date().toISOString() });
+  writeFileSync(path.join(process.env.MC_MEMORY_ROOT, "known_chests.json"), JSON.stringify({
+    [key(E)]: entry(E, {}), [key(L)]: entry(L, { birch_log: 40 }), [key(S)]: entry(S, { oak_log: 10, birch_log: 30 }) }));
+
+  await rcon(`give ${TESTER} minecraft:spruce_log 5`);
+  await waitFor(() => held("spruce_log") >= 5, 8000, "spruce logs");
+  const stored = await performAction(bot, { type: "store", item: "spruce_log", count: Infinity }, TESTER);
+  assert.equal(stored.ok, true, stored.text);
+  assert.equal((await chestItems(...E)).length, 0, "the nearest chest, empty, was passed over");
+  const inL = await chestItems(...L);
+  assert(inL.some((i) => i.id === "spruce_log" && i.count === 5), `spruce went in with the birch: ${JSON.stringify(inL)}`);
+
+  const moved = await performAction(bot, { type: "consolidate_chests" }, TESTER);
+  assert.equal(moved.ok, true, moved.text);
+  const after = await chestItems(...L);
+  const counts = (id) => after.filter((i) => i.id === id).map((i) => i.count).sort((a, b) => b - a);
+  assert.deepEqual(counts("birch_log"), [64, 6], `birch in full stacks: ${JSON.stringify(after)}`);
+  assert.deepEqual(counts("oak_log"), [10], "the oak came over too");
+  assert.equal((await chestItems(...S)).length, 0, "the smaller pile's chest is empty");
+});
+
 scenario("Builder checklist: a furnace sealed in solid blocks is marked unusable after real failures", async () => {
   // 2026-10-27: the Builder checklist used to count a furnace as "done" forever the moment one
   // existed near home, by bare existence -- never reachability. This proves the real fix: a
@@ -1368,6 +1427,7 @@ try {
   movements.canDig = false;
   bot.pathfinder.setMovements(movements);
   installDoorSupport(bot); // as index.js does
+  installSteppedGoto(bot);
   installEnchantsFix(bot);
   console.log(`connected as ${TESTER} to ${HOST}:${PORT} (${bot.version})`);
   await buildArena();
