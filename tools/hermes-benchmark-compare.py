@@ -46,6 +46,12 @@ def print_trend(history: list, model_id: str, n: int):
                 print(f"  {suite:14s} {r.get('metric', '?')}={r['value']}")
             elif r.get("status") == "error":
                 print(f"  {suite:14s} ERROR")
+            elif "value" in r and r["value"] is None:
+                metric = r.get("metric")
+                if metric is not None:
+                    print(f"  {suite:14s} {metric}=no usable value (attempted)")
+                else:
+                    print(f"  {suite:14s} no usable value (attempted)")
 
 
 def print_gate(history: list, candidate_id: str, incumbent_id: str, suite: str) -> int:
