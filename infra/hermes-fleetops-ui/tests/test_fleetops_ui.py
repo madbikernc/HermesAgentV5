@@ -1966,6 +1966,15 @@ def check_selfrepair(ui, tmp):
     conn.commit()
     conn.close()
 
+    # This test's own "with no domain registered, every task reads as unregistered" assertion
+    # needs that to actually be true regardless of what Phase 3 (§8.3) has really registered in
+    # the live infra/hermes-self-repair/domains.json -- pointed at an isolated empty fixture here,
+    # same reasoning as ui.MEMORY_DB just below.
+    domains_file = tmp / "domains-empty.json"
+    domains_file.write_text(json.dumps({"domains": []}))
+    orig_domains_file = ui.sr_domains.DOMAINS_FILE
+    ui.sr_domains.DOMAINS_FILE = domains_file
+
     # Saved/restored, not left pointing at this fixture -- check_multiselect() below runs later in
     # main()'s own sequence and reuses whatever ui.MEMORY_DB check_backlog() left behind, the same
     # cross-check-state hazard check_recommended()'s own orig_db/finally pattern already guards
@@ -1976,6 +1985,7 @@ def check_selfrepair(ui, tmp):
         _check_selfrepair_body(ui)
     finally:
         ui.MEMORY_DB = orig_db
+        ui.sr_domains.DOMAINS_FILE = orig_domains_file
 
 
 def _check_selfrepair_body(ui):

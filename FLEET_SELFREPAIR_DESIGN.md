@@ -1,7 +1,9 @@
 # Fleet Self-Repair Review Loop
 
-**Version:** 1.4.0
-**Status:** Proposed only. Nothing in this file is built, deployed, or wired up. Generalizes
+**Version:** 1.5.0
+**Status:** §8's build order Phases 1–3 are built and offline/live-verified (see §9) —
+`minecraft-bots` is registered as domain #1 (§3), **switched off** pending an operator decision to
+turn it on. Phase 4 (the second-domain genericity acceptance check) remains not started. Generalizes
 2026-11-07's first pass at this design, which was written Minecraft-bot-specific
 (`MINECRAFT_SELFREPAIR_DESIGN.md`, superseded by this file and removed) — on operator direction,
 the capability itself is domain-agnostic. Minecraft bot behavior remains the first, and so far
@@ -11,9 +13,9 @@ only, **domain** registered against it (§3).
 human-pick loop, built once as generic fleet infrastructure and applied to one or more registered
 domains. Stitches together four pieces of standing fleet infrastructure that already exist
 independently (`infra/minecraft-bots-triage/`, `tools/hermes-dualcoder.py`,
-`infra/hermes-self-repair/`, `infra/hermes-fleetops-ui/`) plus three genuinely new, domain-agnostic
-pieces (a domain registry, a scheduled Claude Code review routine, a FleetOps UI tab), none of
-which have been built yet either.
+`infra/hermes-self-repair/`, `infra/hermes-fleetops-ui/`) plus the genuinely new, domain-agnostic
+pieces §4 describes (a domain registry, a completeness hook, a detection bridge, a registered-PR
+mechanism, a scheduled Claude Code review routine, a FleetOps UI tab) — all now built (§9).
 
 ## 1. The ask, restated precisely
 
@@ -258,10 +260,13 @@ row source feeding it, via §4.1's registry. Per the house rule
 
 ## 6. Open questions — decisions only the operator can make
 
-- **Domain registry mechanism.** A flat config file (JSON/YAML) read by the bridge, generate step,
-  and FleetOps UI alike, vs. a small Python module per domain each of those three imports? The
-  former is easier to audit at a glance with one domain or ten; the latter allows a domain to
-  express logic a flat file can't (e.g. a non-trivial completeness check).
+- **Domain registry mechanism — resolved in Phase 2 (§8.2).** A flat JSON file
+  (`infra/hermes-self-repair/domains.json`, `tools/hermes_self_repair_domains.py`), not a Python
+  module per domain. Phase 3's own completeness check (below) confirms this didn't actually cost
+  the expressiveness this bullet worried about: a domain names its rule by a short string
+  (`completeness_rule: "test-artifact"`), and the logic itself lives in one shared module
+  (`tools/hermes_self_repair_completeness.py`) dispatching on that name — a second domain with a
+  different rule registers a new name and a new `if` branch there, not a new per-domain file.
 - **Cadence.** Keep each domain's own reactive detection as the default (recommended, §4.2), or
   also support a periodic digest sweep per domain for cross-incident patterns a single finding
   wouldn't show?
@@ -277,9 +282,13 @@ row source feeding it, via §4.1's registry. Per the house rule
   `hermes-self-repair-promote.py`'s cherry-pick script, or do both need to coexist** (e.g. for
   self-repair tasks outside any registered domain's scope, submitted by hand the way Step 8 already
   allows, which never get a PR under this design unless they're also registered)?
-- **Completeness-hook task shape** (§4.3): one task producing two files, or two linked tasks — an
-  answer domain #1 needs regardless, but worth deciding generically rather than re-deciding per
-  domain.
+- **Completeness-hook task shape (§4.3) — resolved in Phase 3 (§8.3), direct operator choice.**
+  Two linked, ordinary, independent tasks (`tools/hermes-self-repair-link.py`,
+  `hermes_self_repair_completeness.py`), over one task regenerating two files together —
+  specifically to avoid touching `hermes-self-repair-apply.py`'s existing hardened refusal of any
+  diff touching more than one file, and to avoid restructuring `-generate.py`'s single-file draft/
+  review loop. Consequence, accepted: one incident under this rule produces two separate draft
+  PRs (fix + test), not one.
 
 ## 7. Benchmark-evaluation call (this project's `CLAUDE.md`)
 
@@ -307,6 +316,13 @@ implicit:
   for `fleet_coder_fix`/`fleet_coder_build`'s own growing corpus tables (§6.7/§6.8) the same way the
   existing fix/build examples were sourced — to be added in the shipping commit itself, not here,
   since nothing in this design is committed yet.
+- **Phase 3 re-check (§8.3, 2026-11-08): the call stands, re-made explicitly rather than assumed.**
+  Domain #1's fix and test tasks both route through the same unmodified `coder`/`coder2`
+  dualcoder-skeleton loop as every other self-repair task; the new detection bridge's own path-
+  resolution call (`tools/hermes-self-repair-minecraft-bridge.py`) also calls the `coder` role,
+  not a new/different one. Neither condition in the bullet above (a materially different model
+  role, or the review step stopping being plain Claude Code commentary) is triggered. **No new
+  benchmark scenario needed.**
 
 ## 8. Suggested build order
 
@@ -336,13 +352,14 @@ completes — see `CLAUDE.md`'s implementation-plans rule.
 |---|---|---|---|
 | 1. Deploy `hermes-self-repair` Steps 2-8 for real (§8.1) | Done | 2026-11-07 | Two real tasks run end-to-end against `tools/hermes-benchmark-compare.py` (non-bot, per §8.1). Found and fixed two real bugs live: missing `BROKER_TOKEN` in the generate wrapper, and a `compute_diff()` trailing-newline bug that made `git apply` reject the patch as corrupt (`infra/hermes-self-repair/README.md` 6.4.0). First task correctly escalated to `dead` on the bug; second converged and reached `verified` — real commit `92ad261` on `nas2-selfrepair/master`, awaiting operator `promote`/`skip`. Still no codesec venv on spark (static-analysis half of verify fails open). |
 | 2. Build the generic pieces with no domain registered (§8.2) | Done | 2026-11-08 | All four built and exercised with zero domains registered: domain registry (`infra/hermes-self-repair/domains.json` + `tools/hermes_self_repair_domains.py`), registered-PR mechanism (`tools/hermes-self-repair-open-pr.py`, reusing `-promote.py`'s own fetch/branch/cherry-pick mechanics against a new branch + `gh pr create --draft` instead of `master`), daily Claude review routine (`skills/fleet-selfrepair-review/SKILL.md` — the procedure only; deliberately **not** registered as a live cron, pending §6's still-open daily-cap/reject-handling/scheduled-session-placement decisions), and the FleetOps `/selfrepair` tab (`hermes-fleetops-ui.py` 2.19.0, 423/423 offline checks passing, 43 new). `hermes-self-repair-promote-gate.py` bumped to 1.1.0 (new `TRANSITIONS`/`write_turn()` the UI imports per the house rule, plus a real `set_task_state()` return-value bug fixed along the way) — see `infra/hermes-self-repair/README.md` 6.5.0 for the full account. |
-| 3. Register `minecraft-bots` as domain #1 (§8.3) | Not started | 2026-11-07 | Completeness hook (§4.3), detection bridge (§4.4); switch flipped only after 1-2 are each independently verified. |
+| 3. Register `minecraft-bots` as domain #1 (§8.3) | Done, switch off | 2026-11-08 | Registered in `domains.json` (`self_managed: false`). Completeness hook built (§4.3 — §6's "two linked tasks" answer: `hermes_self_repair_completeness.py`, `hermes-self-repair-link.py`, `-apply.py` 1.4.0) and detection bridge built (§4.4: `hermes-self-repair-minecraft-bridge.py` + wrapper/service, not installed). 59 new offline checks, all passing; nothing live-verified against the real fleet yet (no real task has gone through either piece) — see `infra/hermes-self-repair/README.md` 6.6.0. Switch flip is a separate, still-open decision. |
 | 4. Second-domain genericity check (§8.4) | Not started | 2026-11-07 | Acceptance test, not a build step — exercised once a real second domain exists. |
 
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 1.5.0 | 2026-11-08 | Phase 3 done, switch off: `minecraft-bots` registered as domain #1 (§3). Resolved two of §6's open questions explicitly — the completeness-hook task shape (two linked tasks, a direct operator choice over one task regenerating two files, to avoid touching `-apply.py`'s hardened multi-file-diff refusal or restructuring `-generate.py`'s single-file loop) and, retroactively, confirmed the domain-registry-mechanism choice (Phase 2's flat file) held up against a real completeness rule. Built and offline-verified: the completeness hook (`hermes_self_repair_completeness.py`, `hermes-self-repair-link.py`, `-apply.py` 1.4.0) and the detection bridge (`hermes-self-repair-minecraft-bridge.py` — a real gap found and closed along the way: triage's own coder/coder2 calls never name a file path, so this bridge adds its own path-resolution call, never trusted without a real-file-listing match). §7's benchmark-evaluation call re-made explicitly for Phase 3's new traffic (still: no new scenario needed). Corrected this file's own top-of-document "Status" line, stale since Phase 1 (claimed nothing was built). §9 updated to "Done, switch off" for Phase 3. See `infra/hermes-self-repair/README.md` 6.6.0 for the full account. |
 | 1.4.0 | 2026-11-08 | Phase 2 done: built and exercised, with zero domains registered, the four generic pieces §8.2 calls for — the domain registry, the registered-PR mechanism, the daily Claude review routine's procedure (deliberately not yet scheduled live — §6's daily-cap/reject-handling/session-placement questions are still open), and the FleetOps `/selfrepair` tab. §9 updated to "Done" for Phase 2. |
 | 1.0.0 | 2026-11-07 | Initial version. Supersedes `MINECRAFT_SELFREPAIR_DESIGN.md` (1.0.0, deleted), which described the same self-managed self-repair loop (periodic detection, coder/coder2 cross-review, automated fix, daily Claude Code review of registered self-repair PRs, a FleetOps UI tab for picking which fixes to implement) as Minecraft-bot-specific. On direct operator request, generalized so the review/PR/UI mechanism (§4.1, §4.6-§4.8) is domain-agnostic, with a new §3 "domains" concept and Minecraft bot behavior registered as domain #1 (§3) rather than built into the mechanism itself. Proposed only; nothing in this design is built. |
 | 1.1.0 | 2026-11-07 | Added §9, the phased build status table required by `CLAUDE.md`'s new implementation-plans rule (1.3.0) — tracks §8's four build-order steps, all currently "Not started." |

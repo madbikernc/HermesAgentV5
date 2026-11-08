@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.5.0
+**Version:** 6.6.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -460,10 +460,96 @@ new pieces, all exercised against the "no domains registered" starting state:
 With zero domains registered, every task reads as domain `unregistered` and the tab's own note
 says so plainly — the expected state until Phase 3 (§8.3) registers `minecraft-bots` as domain #1.
 
+## Phase 3: `minecraft-bots` registered as domain #1
+
+`FLEET_SELFREPAIR_DESIGN.md` §8.3. `infra/hermes-self-repair/domains.json` now carries one real
+entry — path scope `services/minecraft-bots/` + `agents/minecraft-*/PROMPT.md`, detection source
+`buzz:minecraft-ops`, completeness rule `test-artifact`, cadence `reactive`, **`self_managed:
+false`** (§3's own table: off by default, a separate decision from building or registering
+anything). `tools/hermes_self_repair_domains.py` bumped to 1.1.0: `domain_for_path()` gained
+`fnmatch`-style glob matching (the `agents/minecraft-*/PROMPT.md` entry is a real glob, which the
+1.0.0 pure-prefix matcher could never have matched) — every glob-free entry still matches exactly
+as before.
+
+**Completeness hook (§4.3) — the operator's own direct call on §6's open question**: a fix and its
+required test are **two linked, ordinary, independent self-repair tasks**, not one task
+regenerating two files together. Zero change to `hermes-self-repair-generate.py`'s or `-apply.py`'s
+single-file draft/review/diff/commit loop, and no loosening of `-apply.py`'s own hardened refusal
+of any diff touching more than one file (added in 1.3.0 after a real multi-file-diff finding) — the
+alternative this design doc's §6 named and the operator declined, specifically to avoid touching
+either of those. New pieces:
+
+- `tools/hermes_self_repair_completeness.py` — `completeness_satisfied(task_id, domain)`: no
+  domain, or a domain with no `completeness_rule`, is always satisfied (Step 4's existing
+  syntax/static-analysis gate already covers that baseline for everyone). `"test-artifact"` (domain
+  #1's instance) requires a `phase="completeness-link"` turn naming a linked task; a task whose own
+  recorded role is `"test"` is never itself subject to the rule (checked by role, not by re-walking
+  path_scope a second time, to avoid "does a test need its own test").
+- `tools/hermes-self-repair-link.py <fix_task_id> <test_task_id>` — writes that link turn on both
+  tasks. Run by hand after submitting two tasks via `hermes-self-repair-submit.py`, or called
+  automatically by the new bridge below.
+- `hermes-self-repair-apply.py` bumped to 1.4.0: both `set_task_state(task_id, "verified")` sites
+  now go through `finalize_or_wait()`, which checks the task's domain completeness before
+  finalizing — not satisfied parks it in a new `awaiting-completeness` state instead (not yet
+  eligible for promotion/PR-opening; both already gate on `state=="verified"`, so this is a pure
+  addition, not a behavior change for any task with no completeness rule). `unblock_linked_peer()`
+  handles the one ordering that needs it: whichever of a linked pair finishes its own apply+verify
+  **second** re-checks and finalizes the one that finished first and was waiting.
+- `tools/hermes-self-repair-read.py` bumped to 1.1.0: added a third read-only operation, `list
+  [path]` — recursive allowlisted file listing, needed by the bridge below to validate a path
+  before ever trusting it.
+- 22 + 7 new offline checks (`infra/hermes-self-repair/tests/test_completeness.py`,
+  `test_domains.py`), covering both orderings of the linked-pair race, the unlinked/not-yet-linked/
+  unknown-rule refusal paths, and the new glob matching. `infra/hermes-fleetops-ui/tests/
+  test_fleetops_ui.py`'s own self-repair checks were updated to point `sr_domains.DOMAINS_FILE` at
+  an isolated empty fixture — they test the zero-domains state on principle, not by accident of
+  what's really registered.
+
+**Detection bridge (§4.4)**: `tools/hermes-self-repair-minecraft-bridge.py` — polls Buzz topic
+`minecraft-ops` (`infra/minecraft-bots-triage/`'s own output) for every domain whose switch is on,
+dispatched by `detection_source` through a small `HANDLERS` table (one entry today,
+`"buzz:minecraft-ops"`; a second domain with a differently-shaped source registers its own handler
+the same way, without this file's own poll loop changing). Real gap found while building this:
+triage's own `coder`/`coder2` calls are asked for severity/cause/next-step prose about a log line,
+**never a file path** — `tools/hermes-minecraft-triage.py`'s own prompt has no path-naming
+instruction at all. This bridge is what actually names one: a model call (reusing `ROUTER_URL`,
+`X-Hermes-Screening: analysis` set the same reason triage's own call already sets it) proposes a
+path, which is **never trusted directly** — it must exactly match an entry from
+`hermes-self-repair-read.py list`'s real file listing or the finding is skipped (logged, not
+guessed through). Conservative implementation defaults, not §6 operator decisions: only a triage
+finding's **first occurrence** of a given bot+signature (reusing triage's own existing dedup
+counter) at or above **medium** severity from either role is acted on. On a real incident: submits
+a fix task and a test task (`services/minecraft-bots/tests/unit.test.mjs`) and links them via
+`hermes-self-repair-link.py`'s own logic. Publishes to Buzz as `"selfrepair"` — the identity
+`hermes-self-repair-generate.py`'s own `publish_result()` already uses live — deliberately not a
+new `"selfrepair-bridge"` Buzz identity, so this needs zero live `hermes-buzz.py` `KNOWN_AGENTS`
+change to work once deployed. 30 new offline checks
+(`infra/hermes-self-repair/tests/test_minecraft_bridge.py`) cover the pure parsing/gating/
+templating/path-validation logic against fixture bodies built to match triage's real output
+format exactly; the network-touching glue (actual Buzz polling, the real model call, real
+submission) is not offline-tested, the same posture `hermes-self-repair-apply.py`/`-generate.py`
+themselves have always had (proven live in Phase 1, not by synthetic unit test).
+
+`hermes-self-repair-minecraft-bridge-wrapper.sh` and `.service` exist, matching every other
+self-repair component's fetch-secrets-then-exec pattern — **not installed or enabled on spark**.
+Benchmark-evaluation call (`CLAUDE.md`'s rule, `FLEET_SELFREPAIR_DESIGN.md` §7): both the fix/test
+tasks and the bridge's own path-resolution call route through the exact same `coder`/`coder2` role
+family §7 already covers — no new scenario needed; recorded here rather than silently assumed, per
+§7's own "this call would only need revisiting if a future domain routed through a materially
+different role" condition, which this isn't.
+
+**Still not done, deliberately**: nothing from Phase 3 is deployed to spark (the four new/changed
+tools, the service/wrapper pair, the domain registration itself all exist only in this checkout
+until an operator deploys them — this README documents what was built and offline-verified, the
+same posture Phase 1 and 2 each had before their own live-deployment step). The switch stays
+`false` regardless of deployment — flipping it on is its own separate, deliberate decision, not
+implied by anything in this phase.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 6.6.0 | 2026-11-08 | `FLEET_SELFREPAIR_DESIGN.md` Phase 3 (§8.3): `minecraft-bots` registered as domain #1 (`self_managed: false`). Completeness hook (§4.3, §6 decided as "two linked tasks": `tools/hermes_self_repair_completeness.py`, `hermes-self-repair-link.py`, `hermes-self-repair-apply.py` 1.4.0's `finalize_or_wait()`/`unblock_linked_peer()`) and detection bridge (§4.4: `tools/hermes-self-repair-minecraft-bridge.py`, its wrapper/service, not installed). `hermes_self_repair_domains.py` bumped to 1.1.0 for glob path_scope matching; `hermes-self-repair-read.py` bumped to 1.1.0 for a new `list` operation. 59 new offline checks across three new test files plus a fix to an existing one whose "zero domains" assumption the real registration made stale. See the new "Phase 3" section above for the full account. |
 | 6.5.0 | 2026-11-08 | `FLEET_SELFREPAIR_DESIGN.md` Phase 2 (§8.2): the generic review/PR/UI pieces, built with zero domains registered. New domain registry (`infra/hermes-self-repair/domains.json`, `tools/hermes_self_repair_domains.py`), registered-PR mechanism (`tools/hermes-self-repair-open-pr.py`), daily review skill (`skills/fleet-selfrepair-review/SKILL.md`, not yet scheduled live), and the FleetOps `/selfrepair` tab (`hermes-fleetops-ui.py` 2.19.0). `hermes-self-repair-promote-gate.py` bumped to 1.1.0 for a new `TRANSITIONS`/`write_turn()` pair the UI imports, plus a real `set_task_state()` return-value fix found along the way. See the new "Phase 2" section above for the full account. |
 | 6.4.0 | 2026-11-07 | First real end-to-end verification (`FLEET_SELFREPAIR_DESIGN.md` Phase 1), two real tasks against `tools/hermes-benchmark-compare.py`. Found and fixed two real bugs live: `hermes-self-repair-generate-wrapper.sh` never fetched `BROKER_TOKEN` (fixed 1.0.1), so Step 2 could never actually hand off to Step 3; and `hermes-self-repair-generate.py`'s `compute_diff()` produced a patch `git apply` correctly rejected as corrupt whenever the model's completion lacked a trailing newline at EOF, a `difflib` limitation the original code didn't account for (fixed 1.1.1, normalizes both strings to one trailing newline before diffing). Task `fa2eb82b21af45b8` hit bug 2 and correctly escalated to `dead` after 3 attempts (circuit breaker confirmed live). Task `2e732538c2e34ebb`, submitted after both fixes, converged and reached `verified` — commit `92ad261` on `nas2-selfrepair/master`, awaiting `promote`/`skip`. |
 | 6.3.0 | 2026-11-07 | Live-fleet audit while starting `FLEET_SELFREPAIR_DESIGN.md` Phase 1: this README's "nothing deployed" claims were stale. `hermes-self-repair-generate.service`, `-apply.service`, and `-promote-gate.service` are actually enabled and have been running continuously on spark since 2026-10-26 (confirmed via `systemctl`/`ps` against their real PIDs) — Buzz/memory/guard reachable, `coder2` active, `hermes-broker` 1.4.0. Corrected every "not yet deployed"/"no systemd deploy has happened" claim to the real state: deployed and healthy, but genuinely idle — `nas2-selfrepair/master` still ends at the 2026-09-19 dev-testing commits, so nothing in the "needs a real task" verification lists actually changes. No codesec venv found on spark, so Step 4's static-analysis half will fail open on a real run until that's installed. |

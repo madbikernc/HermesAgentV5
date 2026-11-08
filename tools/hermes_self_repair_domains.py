@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-11-08) — Phase 3 (§8.3): domain_for_path() gained fnmatch-style glob matching for any
+# path_scope entry containing a glob metacharacter (*, ?, [), falling back to the original plain
+# prefix match otherwise. Needed because §3's own domain #1 table registers
+# `agents/minecraft-*/PROMPT.md` — a real glob, not a prefix — which the 1.0.0 matcher (pure
+# `startswith`) could never match. Every existing/future glob-free path_scope entry is matched
+# exactly as before; this is additive, not a behavior change for them.
 #
 # hermes_self_repair_domains — FLEET_SELFREPAIR_DESIGN.md §4.1's domain registry, made concrete.
 # Underscore-named, not hyphenated like every other tools/hermes-self-repair-*.py file, for the
@@ -35,6 +42,7 @@
 #                              privileged decision and must not be editable by a self-repair task
 #                              that happens to touch a path under its own scope).
 
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -60,14 +68,24 @@ def load_domains():
 
 
 def domain_for_path(path):
-    """The registered domain, if any, whose path_scope prefixes this path -- or None. `path` is
-    repo-relative, the same shape hermes-self-repair-generate.py's own task spec already uses. A
-    domain with an empty/missing path_scope matches nothing, deliberately (an unscoped domain would
-    silently claim every task, which is never what a registration means)."""
+    """The registered domain, if any, whose path_scope prefixes or glob-matches this path -- or
+    None. `path` is repo-relative, the same shape hermes-self-repair-generate.py's own task spec
+    already uses. A domain with an empty/missing path_scope matches nothing, deliberately (an
+    unscoped domain would silently claim every task, which is never what a registration means).
+
+    A path_scope entry containing a glob metacharacter (*, ?, [) is matched with fnmatch instead of
+    a plain prefix -- needed for entries like `agents/minecraft-*/PROMPT.md` that name a pattern,
+    not a directory. fnmatch's `*` matches across `/` the same as elsewhere in Python, which is fine
+    here since the literal text around it (`agents/minecraft-` ... `/PROMPT.md`) already bounds the
+    match to what the registration intends."""
     path = str(path).replace("\\", "/").lstrip("/")
     for domain in load_domains():
         for prefix in domain.get("path_scope") or []:
             prefix = str(prefix).replace("\\", "/").rstrip("/")
+            if any(c in prefix for c in "*?["):
+                if fnmatch.fnmatch(path, prefix):
+                    return domain
+                continue
             if path == prefix or path.startswith(prefix + "/"):
                 return domain
     return None

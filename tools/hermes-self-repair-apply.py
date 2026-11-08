@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-11-08) — FLEET_SELFREPAIR_DESIGN.md §4.3's completeness hook (Phase 3, §8.3): both
+# `set_task_state(task_id, "verified")` call sites now go through finalize_or_wait(), which looks
+# up this task's domain (hermes_self_repair_domains.domain_for_path()) and checks
+# hermes_self_repair_completeness.completeness_satisfied() before finalizing. Not satisfied ->
+# "awaiting-completeness" instead of "verified" (not yet eligible for promotion/PR-opening — both
+# already require state=="verified"), with a logged turn naming what it's waiting on. A task with
+# no registered domain, or whose domain registers no completeness_rule, is always satisfied — zero
+# behavior change for every task this pipeline has run before this version. Also adds
+# unblock_linked_peer(): whichever of a linked fix/test pair (§6's "two linked tasks" answer)
+# finishes its own apply+verify SECOND re-checks and, if now satisfied, finalizes the OTHER one too
+# — the only way an "awaiting-completeness" task is ever revisited, since this process only runs
+# do_apply() once per task. No change to this file's own apply_diff()/parse_diff_path() — every task
+# is still exactly one file, exactly one diff, exactly as hardened in 1.3.0.
 #
 # 1.3.0 (2026-09-19) — security-relevant fix found during a hardening self-review, not live traffic:
 # parse_diff_path() used re.search(), which returns only the FIRST '+++ b/<path>' match. A diff
@@ -112,6 +126,16 @@ import urllib.parse
 import urllib.request
 from email.mime.text import MIMEText
 from pathlib import Path
+
+# hermes_self_repair_domains.py/hermes_self_repair_completeness.py are underscore-named modules
+# beside this file (not hyphenated tools), so a plain import works -- same shape
+# hermes-self-repair-open-pr.py/-list.py and hermes-fleetops-ui.py's own hermes_market_common
+# import already use. sys.path needs the explicit insert because this file can also be loaded via
+# importlib.util.spec_from_file_location (its own offline test suite), which does not add its
+# directory to sys.path the way running it directly as a script already does.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hermes_self_repair_completeness as completeness_mod  # noqa: E402
+import hermes_self_repair_domains as domains_mod  # noqa: E402
 
 BROKER_URL = os.environ.get("BROKER_URL", "http://10.129.1.15:8100").rstrip("/")
 BROKER_TOKEN = os.environ.get("BROKER_TOKEN", "")
@@ -227,6 +251,112 @@ def post_promotion_offer(task_id, path, sha):
         f"to GitHub, or \"skip {task_id}\" to leave it staged on NAS2 only."
     )
     matrix_notice(text)
+
+
+def log_completeness_wait_turn(task_id, note):
+    try:
+        _post(f"{MEMORY_URL}/turns", {
+            "task_id": task_id, "agent": "selfrepair-apply", "role": "assistant",
+            "raw": json.dumps({"phase": "completeness-wait", "note": note}),
+        }, MEMORY_TOKEN)
+    except Exception as exc:
+        log(f"log_completeness_wait_turn failed (task {task_id!r}): {exc}")
+
+
+def fetch_task_path(task_id):
+    """The target path from this task's ORIGINAL spec turn (the earliest {"path", "problem"} JSON
+    object by turn id) — not the diff turn, which may not exist yet (the empty-diff case) or whose
+    own header path is already trusted elsewhere. Same scan hermes-self-repair-open-pr.py's own
+    fetch_task_spec() already does. Returns None if no such turn is found rather than raising — a
+    missing spec must never block the pre-existing verify/promote flow this file already ran before
+    completeness checking existed."""
+    try:
+        turns = _get(f"{MEMORY_URL}/turns?task_id={task_id}&limit=200", MEMORY_TOKEN).get("turns", [])
+    except Exception as exc:
+        log(f"fetch_task_path failed (task {task_id!r}): {exc}")
+        return None
+    for t in sorted(turns, key=lambda t: t.get("id", 0)):
+        try:
+            payload = json.loads(t.get("raw") or "{}")
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("path"), str) and payload["path"]:
+            return payload["path"]
+    return None
+
+
+def fetch_applied_sha(task_id):
+    try:
+        turns = _get(f"{MEMORY_URL}/turns?task_id={task_id}&limit=200", MEMORY_TOKEN).get("turns", [])
+    except Exception as exc:
+        log(f"fetch_applied_sha failed (task {task_id!r}): {exc}")
+        return None
+    for t in turns:
+        try:
+            payload = json.loads(t.get("raw") or "{}")
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if payload.get("phase") == "applied-commit" and payload.get("sha"):
+            return payload["sha"]
+    return None
+
+
+def finalize_or_wait(task_id, path, sha):
+    """Shared tail for both set_task_state(task_id, "verified") call sites (§4.3's completeness
+    hook, Phase 3/§8.3) — checks this task's domain (if any) before finalizing. `sha` is None for
+    the empty-diff no-op path (nothing was applied, so post_promotion_offer() is skipped, exactly
+    like before this hook existed); `path` is still required there too, since a domain's
+    completeness rule applies regardless of whether this particular task's diff was empty."""
+    domain = domains_mod.domain_for_path(path) if path else None
+    complete, note = completeness_mod.completeness_satisfied(task_id, domain)
+    if complete:
+        set_task_state(task_id, "verified")
+        log(f"task {task_id!r}: pre-promotion verification PASSED ({note})" if domain
+            else f"task {task_id!r}: pre-promotion verification PASSED")
+        if sha:
+            post_promotion_offer(task_id, path, sha)
+        unblock_linked_peer(task_id)
+    else:
+        set_task_state(task_id, "awaiting-completeness")
+        log_completeness_wait_turn(task_id, note)
+        log(f"task {task_id!r}: pre-promotion verification passed but domain completeness is not "
+            f"yet satisfied — {note}")
+
+
+def unblock_linked_peer(task_id):
+    """Only a "test" task finishing (itself just finalized "verified" above) can unblock anything
+    — a "fix" task's own completeness_satisfied() call already sees its linked test task's current
+    state directly, so the reverse ordering (test verifies first, fix finishes later) needs no
+    special-casing here at all. This function exists only for the other ordering: the fix task ran
+    its own apply+verify first, found its test task not yet verified, and parked itself in
+    "awaiting-completeness" — nothing re-invokes ITS do_apply() when the test task later verifies,
+    since this process only ever runs do_apply() once per task (broker claim -> process -> done).
+    Best-effort throughout: any failure here is logged, never fatal to the task whose own apply
+    just genuinely succeeded."""
+    try:
+        link = completeness_mod.fetch_link(task_id)
+    except Exception as exc:
+        log(f"unblock_linked_peer: link lookup failed (task {task_id!r}): {exc}")
+        return
+    if not link or link.get("role") != "test":
+        return
+    peer_id = link["linked_task_id"]
+    peer_state = completeness_mod.fetch_task_state(peer_id)
+    if peer_state != "awaiting-completeness":
+        return  # peer isn't waiting on anything (not run yet, already verified, or failed/dead)
+
+    peer_path = fetch_task_path(peer_id)
+    peer_domain = domains_mod.domain_for_path(peer_path) if peer_path else None
+    complete, note = completeness_mod.completeness_satisfied(peer_id, peer_domain)
+    if not complete:
+        log(f"unblock_linked_peer: peer task {peer_id!r} still not satisfied ({note})")
+        return
+
+    set_task_state(peer_id, "verified")
+    log(f"task {peer_id!r}: unblocked by linked test task {task_id!r} — now verified ({note})")
+    peer_sha = fetch_applied_sha(peer_id)
+    if peer_sha and peer_path:
+        post_promotion_offer(peer_id, peer_path, peer_sha)
 
 
 def broker_request(method, path, data=None, headers=None):
@@ -442,9 +572,9 @@ def do_apply(task_id):
 
     if not diff_text.strip():
         log(f"task {task_id!r}: empty diff (converged candidate was byte-identical) — nothing to apply, success")
-        set_task_state(task_id, "verified")
         log_verify_turn(task_id, True, "No diff was applied (converged candidate was byte-identical "
                                         "to the original) — trivially verified, nothing changed.")
+        finalize_or_wait(task_id, fetch_task_path(task_id), None)
         return 0, ""
 
     path = parse_diff_path(diff_text)
@@ -477,13 +607,14 @@ def do_apply(task_id):
     verify_ok, verify_report = _verify_tool.verify(real_path)
     log_verify_turn(task_id, verify_ok, verify_report)
     if verify_ok:
-        set_task_state(task_id, "verified")
-        log(f"task {task_id!r}: pre-promotion verification PASSED")
-        # Step 5 hand-off: a one-shot notice, never a blocking wait — this process is a broker-job
-        # worker, not a Matrix-sync loop, and must not stall claiming new jobs waiting on a human
-        # reply that could take hours. tools/hermes-self-repair-promote-gate.py's own poll loop is
-        # what actually watches for and parses the "promote"/"skip" reply.
-        post_promotion_offer(task_id, path, sha)
+        # Step 5 hand-off (post_promotion_offer, inside finalize_or_wait) is a one-shot notice,
+        # never a blocking wait — this process is a broker-job worker, not a Matrix-sync loop, and
+        # must not stall claiming new jobs waiting on a human reply that could take hours.
+        # tools/hermes-self-repair-promote-gate.py's own poll loop is what actually watches for and
+        # parses the "promote"/"skip" reply. finalize_or_wait() gates "verified" itself on this
+        # task's domain completeness rule, if any (§4.3, Phase 3/§8.3) — may park this task in
+        # "awaiting-completeness" instead, if it has one still unsatisfied.
+        finalize_or_wait(task_id, path, sha)
     else:
         set_task_state(task_id, "verify-failed")
         log(f"task {task_id!r}: pre-promotion verification FAILED — commit stays on {GIT_REMOTE}, "
