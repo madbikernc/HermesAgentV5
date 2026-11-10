@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 2.1.0
+# Version: 2.2.0
+#
+# 2.2.0 (2026-11-10) — direct operator request ("repeat failures that have never been submitted
+# should get submitted"): should_submit() gated minecraft-bots findings on triage's own occurrence
+# counter being exactly 1. Triage had been counting since long before this bridge was installed
+# (2026-11-08), and the bridge seeds its cursor at the topic's tip, so every failure already
+# repeating by then -- `[stuck-path]` at 4000-6000+ occurrences, `[goal-abandoned]` -- could
+# never be submitted, while the skip log claimed "a task was already considered". The bridge now
+# keeps its own record (state key `"submitted_signatures"`, keyed by finding_signature():
+# category + normalized source line, bot tag dropped, so one failure across nine bots is one
+# task): a signature at or above MIN_SEVERITY is submitted the first time it arrives with no
+# record, and never again once recorded. The triage count no longer gates anything.
 #
 # 2.1.0 (2026-11-08) — real gap found while preparing to flip egress-guard's switch on (direct
 # operator request to fix before going live, not live traffic yet): unlike minecraft-bots, whose
@@ -254,17 +265,35 @@ def max_severity_rank(parsed):
     return max(ranks) if ranks else 0
 
 
-def should_submit(parsed):
-    """Returns (ok: bool, reason: str). Conservative gate, not a §6 operator decision -- an
-    implementation default: only a first-ever occurrence of a signature (triage's own dedup
-    counter, re-used rather than re-invented) at or above MIN_SEVERITY, from either role."""
+def finding_signature(parsed):
+    """Fleet-wide key for one kind of incident: the category plus the source line with its
+    leading "[Bot]" tag dropped and numbers collapsed (same collapsing as triage's own
+    normalize_signature()), so the same failure on nine bots is one signature, not nine."""
+    line = re.sub(r"^\[[^\]]*\]\s*", "", (parsed.get("source_line") or "").strip())
+    line = re.sub(r"\s+", " ", re.sub(r"\d+(\.\d+)?", "N", line))[:160]
+    return f"{parsed['category']}|{line}"
+
+
+def should_submit(parsed, state):
+    """Returns (ok: bool, reason: str). A signature at or above MIN_SEVERITY, from either role,
+    is submitted once, the first time the bridge sees it with no task recorded for it in its own
+    state (`submitted_signatures`) -- whatever triage's occurrence count says. Triage counted
+    occurrences long before this bridge existed, so gating on that count == 1 meant a failure
+    that was already repeating when the bridge started could never be submitted at all."""
     if parsed is None:
         return False, "unparseable triage body"
-    if parsed["occurrences"] != 1:
-        return False, f"not a first occurrence (seen {parsed['occurrences']} times already) — a task was already considered for this signature"
     if max_severity_rank(parsed) < MIN_SEVERITY_RANK:
         return False, f"below MIN_SEVERITY (roles: {parsed['roles']})"
-    return True, "first occurrence, severity threshold met"
+    record = (state.get("submitted_signatures") or {}).get(finding_signature(parsed))
+    if record:
+        return False, f"already submitted for this signature (fix task {record.get('fix')})"
+    return True, "never submitted for this signature, severity threshold met"
+
+
+def record_signature_submission(state, parsed, fix_task_id, test_task_id, now):
+    state.setdefault("submitted_signatures", {})[finding_signature(parsed)] = {
+        "fix": fix_task_id, "test": test_task_id, "submitted_at": now}
+    save_state(state)
 
 
 def build_fix_problem(parsed):
@@ -465,7 +494,7 @@ def record_egress_submission(state, caller, task_id, now):
 def handle_minecraft_bots_buzz(finding, domain, budget, state):
     body = finding.get("body", "")
     parsed = parse_triage_body(body)
-    ok, reason = should_submit(parsed)
+    ok, reason = should_submit(parsed, state)
     if not ok:
         log(f"skipping incident ({reason}): {body[:120]!r}")
         return
@@ -500,6 +529,7 @@ def handle_minecraft_bots_buzz(finding, domain, budget, state):
         log(f"submission failed partway through: {exc} — a human should check for an orphaned task")
         return
     budget["remaining"] -= 1
+    record_signature_submission(state, parsed, fix_task_id, test_task_id, time.time())
     log(f"submitted linked tasks fix={fix_task_id} ({fix_path}) test={test_task_id} for domain "
         f"{domain.get('name')!r} ({budget['remaining']} submission(s) left this poll cycle)")
 

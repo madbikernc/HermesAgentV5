@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.10.0
+**Version:** 6.11.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -111,7 +111,8 @@ own header comment:
    model. Asking an open-weight model to emit a syntactically correct unified diff directly (right
    line numbers, right context) was considered and rejected as an unreliable-structured-output
    risk; a mechanical diff of two known strings has no such failure mode.
-3. **`MAX_FILE_CHARS` (default 12000) is a hard, honest scope limit.** A file over the limit is
+3. **`MAX_FILE_CHARS` (default 40000, raised from 12000 on 2026-11-10 to fit coder/coder2's
+   65536-token context) is a hard, honest scope limit.** A file over the limit is
    refused with a clear `error`, not attempted and silently truncated. Whole-file regeneration
    doesn't scale arbitrarily; a hunk-level editing design is future scope, not this step's.
 
@@ -516,9 +517,12 @@ instruction at all. This bridge is what actually names one: a model call (reusin
 `X-Hermes-Screening: analysis` set the same reason triage's own call already sets it) proposes a
 path, which is **never trusted directly** — it must exactly match an entry from
 `hermes-self-repair-read.py list`'s real file listing or the finding is skipped (logged, not
-guessed through). Conservative implementation defaults, not §6 operator decisions: only a triage
-finding's **first occurrence** of a given bot+signature (reusing triage's own existing dedup
-counter) at or above **medium** severity from either role is acted on. On a real incident: submits
+guessed through). Conservative implementation defaults, not §6 operator decisions: a triage
+finding at or above **medium** severity from either role is acted on **once per signature** —
+the first time it arrives with no task recorded for it in the bridge's own state
+(`submitted_signatures`; signature = category + source line, bot tag dropped, numbers collapsed).
+Until 2.2.0 this gated on triage's own occurrence count being exactly 1, which meant any failure
+already repeating before the bridge was installed could never be submitted. On a real incident: submits
 a fix task and a test task (`services/minecraft-bots/tests/unit.test.mjs`) and links them via
 `hermes-self-repair-link.py`'s own logic. Publishes to Buzz as `"selfrepair"` — the identity
 `hermes-self-repair-generate.py`'s own `publish_result()` already uses live — deliberately not a
@@ -687,6 +691,7 @@ first.
 
 | Version | Date | Change |
 |---|---|---|
+| 6.11.0 | 2026-11-10 | Direct operator request. Bridge 2.2.0: findings are submitted once per signature, tracked in the bridge's own state, instead of only when triage's occurrence count is exactly 1. That gate had blocked every failure already repeating before 2026-11-08, `[stuck-path]` included, while the skip log claimed a task "was already considered". Generator 1.2.0: `MAX_FILE_CHARS` 12000 -> 40000 and `DRAFT_MAX_TOKENS`/`REVISE_MAX_TOKENS` -> 16000, sized to coder/coder2's live 65536-token context. 65 bridge checks. |
 | 6.10.0 | 2026-11-08 | Direct operator instruction: `egress-guard`'s switch flipped on; a third domain explicitly deferred until these two have a track record. Found and fixed one more real gap first — no dedup on repeated denials from the same caller — with a per-caller cooldown in the bridge (2.1.0) that releases on whichever comes first, the prior task concluding or `EGRESS_COOLDOWN_SECONDS` elapsing. 11 more offline checks (60 total). See the "Phase 4" section's own update above. |
 | 6.9.0 | 2026-11-08 | `hermes-self-repair-bridge.service` installed and enabled on spark for the first time. Found live at first start: the wrapper script had never been marked executable in git since Phase 3's original commit (`status=203/EXEC`), fixed with `git update-index --chmod=+x` (1.1.1). After that, started cleanly and its own log confirmed the backlog-replay bootstrap actually works on real data (`seeded cursor at seq=643716, will not replay its history`); `egress-guard` correctly never polled (switch off). See the "Phase 4" section's own update above. |
 | 6.8.0 | 2026-11-08 | Phase 4 (§8.4) started: registered a real second domain, `egress-guard` (switch off). Its memory-turns-shaped detection source immediately surfaced a real genericity leak — `hermes-self-repair-minecraft-bridge.py`'s own `poll_once()` only knew how to poll Buzz. Fixed by renaming/generalizing it to `hermes-self-repair-bridge.py` (2.0.0): dispatch by detection_source scheme (`SOURCE_POLLERS`), not a hardcoded prefix check. `egress-guard`'s own handler needs no model call (its `caller` field already names the real offending script) and registers no completeness rule. `path_scope` left empty, a real documented limitation. 19 more offline checks. Acceptance result so far: zero changes needed to §4.5–§4.8. See the new "Phase 4" section above for the full account. |

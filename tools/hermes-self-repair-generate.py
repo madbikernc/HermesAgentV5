@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.1.1
+# Version: 1.2.0
+#
+# 1.2.0 (2026-11-10) — direct operator request: raise the whole-file limit. MAX_FILE_CHARS
+# 12000 -> 40000, sized to the real backends instead of a placeholder: coder (Qwen3.8-27B) and
+# coder2 (GLM-4.7-Flash) both serve a 65536-token context (llama-server /props, checked live).
+# The largest call, revise(), sends the original plus the previous candidate and must return the
+# whole file again, about 3x the file in total. 40000 chars of JS is about 12k tokens, so that
+# comes to about 36k tokens plus the issues text and any reasoning, under 65536 with room left
+# for another request sharing the server. DRAFT_MAX_TOKENS 6000 -> 16000 and REVISE_MAX_TOKENS
+# 10000 -> 16000 so the rewritten file itself fits in the reply (6000 tokens already truncated
+# a file near the old 12000-char limit). Still a hard ceiling: index.js/actions.js (585k/429k
+# chars) cannot fit any whole-file call on a 65536-token model and are still refused.
 #
 # 1.1.1 (2026-11-07) — real bug found on this pipeline's first-ever live task (target:
 # tools/hermes-benchmark-compare.py): `git apply --check` refused the converged diff as
@@ -74,13 +85,11 @@
 #   MAX_ROUNDS                  default 5
 #   JUDGE_MAX_CALLS              default 1
 #   JUDGE_MAX_TOKENS             default 800
-#   MAX_FILE_CHARS               default 12000 — UNVERIFIED placeholder; confirm live against a
-#                                real target file and this fleet's actual coder/coder2 context
-#                                budgets before trusting this number for anything but a first pass
-#   DRAFT_MAX_TOKENS             default 6000 — larger than hermes-dualcoder.py's 2000 (a whole
-#                                file, not one function); UNVERIFIED, same caveat as MAX_FILE_CHARS
+#   MAX_FILE_CHARS               default 40000 — sized to coder/coder2's 65536-token context
+#                                (see 1.2.0); not yet run live against a file this large
+#   DRAFT_MAX_TOKENS             default 16000 — must hold the whole rewritten file (see 1.2.0)
 #   REVIEW_MAX_TOKENS            default 8000 — same as hermes-dualcoder.py's own review budget
-#   REVISE_MAX_TOKENS            default 10000 — same as hermes-dualcoder.py's own revise budget
+#   REVISE_MAX_TOKENS            default 16000 — must hold the whole rewritten file (see 1.2.0)
 #   SECURITY_MAX_TOKENS          default 8000
 #   META_REVIEW_MAX_TOKENS       default 6000
 #   SELF_REPAIR_REPO_DIR         default ~/HermesAgentV5-selfrepair — passed through to the read
@@ -123,10 +132,10 @@ MODEL_TIMEOUT_SECONDS = int(os.environ.get("MODEL_TIMEOUT_SECONDS", "1500"))
 MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "5"))
 JUDGE_MAX_CALLS = int(os.environ.get("JUDGE_MAX_CALLS", "1"))
 JUDGE_MAX_TOKENS = int(os.environ.get("JUDGE_MAX_TOKENS", "800"))
-MAX_FILE_CHARS = int(os.environ.get("MAX_FILE_CHARS", "12000"))
-DRAFT_MAX_TOKENS = int(os.environ.get("DRAFT_MAX_TOKENS", "6000"))
+MAX_FILE_CHARS = int(os.environ.get("MAX_FILE_CHARS", "40000"))
+DRAFT_MAX_TOKENS = int(os.environ.get("DRAFT_MAX_TOKENS", "16000"))
 REVIEW_MAX_TOKENS = int(os.environ.get("REVIEW_MAX_TOKENS", "8000"))
-REVISE_MAX_TOKENS = int(os.environ.get("REVISE_MAX_TOKENS", "10000"))
+REVISE_MAX_TOKENS = int(os.environ.get("REVISE_MAX_TOKENS", "16000"))
 SECURITY_MAX_TOKENS = int(os.environ.get("SECURITY_MAX_TOKENS", "8000"))
 META_REVIEW_MAX_TOKENS = int(os.environ.get("META_REVIEW_MAX_TOKENS", "6000"))
 CLAIMANT = os.environ.get("CLAIMANT", "hermes-self-repair-generate")

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.0.0
+# Version: 2.1.0
+#
+# 2.1.0 (2026-11-10) — should_submit() now takes the bridge's state and gates on its own
+# `submitted_signatures` record, not triage's occurrence count (bridge 2.2.0): a repeat that was
+# never submitted is submitted, a recorded signature is skipped, one failure across bots is one
+# signature, and the handler records what it submitted.
 #
 # 2.0.0 (2026-11-08) — renamed from test_minecraft_bridge.py alongside the bridge's own
 # generalization (hermes-self-repair-bridge.py 2.0.0, Phase 4/§8.4): poll_domain_buzz_topic()
@@ -114,21 +119,60 @@ def main():
     check("unparseable body returns None, not a guess", mod.parse_triage_body(UNPARSEABLE_BODY) is None)
     check("an empty body returns None", mod.parse_triage_body("") is None)
 
-    print("\n[should_submit: first-occurrence + severity gating]")
-    ok, reason = mod.should_submit(parsed)
+    print("\n[should_submit: never-submitted signature + severity gating]")
+    ok, reason = mod.should_submit(parsed, {})
     check("first occurrence + high severity -> submit", ok is True, reason)
 
     repeat = mod.parse_triage_body(REPEAT_OCCURRENCE)
-    ok, reason = mod.should_submit(repeat)
-    check("a 7th occurrence of the same signature -> skipped (dedup)", ok is False, reason)
-    check("skip reason names the repeat", "7 times" in reason, reason)
+    ok, reason = mod.should_submit(repeat, {})
+    check("a 7th occurrence that was never submitted -> submitted (triage counted it before the "
+          "bridge existed)", ok is True, reason)
+
+    real_save_state = mod.save_state
+    mod.save_state = lambda state: None
+    seen_state = {}
+    mod.record_signature_submission(seen_state, repeat, "fix-1", "test-1", now=1000.0)
+    ok, reason = mod.should_submit(repeat, seen_state)
+    check("once submitted, the same signature is skipped", ok is False, reason)
+    check("skip reason names the task already submitted", "fix-1" in reason, reason)
+    other_bot = mod.parse_triage_body(FIRST_OCCURRENCE_HIGH.replace(
+        "source line: TypeError", "source line: [Mark] TypeError"))
+    seen_state = {}
+    mod.record_signature_submission(seen_state, mod.parse_triage_body(FIRST_OCCURRENCE_HIGH.replace(
+        "source line: TypeError", "source line: [Amy] TypeError")), "fix-2", "test-2", now=1000.0)
+    ok, reason = mod.should_submit(other_bot, seen_state)
+    check("the same failure on another bot is the same signature, not a second task", ok is False, reason)
+    mod.save_state = real_save_state
+
+    stuck = {"category": "stuck-path", "source_line": "[Bob] path_reset: stuck at 12.5 64 -3"}
+    check("signature drops the bot tag and collapses numbers",
+          mod.finding_signature(stuck) == "stuck-path|path_reset: stuck at N N -N", mod.finding_signature(stuck))
 
     low = mod.parse_triage_body(LOW_SEVERITY_FIRST)
-    ok, reason = mod.should_submit(low)
+    ok, reason = mod.should_submit(low, {})
     check("first occurrence but low severity -> skipped", ok is False, reason)
 
-    ok, reason = mod.should_submit(None)
+    ok, reason = mod.should_submit(None, {})
     check("an unparseable body -> skipped, not a crash", ok is False, reason)
+
+    print("\n[handle_minecraft_bots_buzz: a long-repeating failure is submitted once, then recorded]")
+    real = {k: getattr(mod, k) for k in ("list_candidate_paths", "ask_model_for_path", "submit_task",
+                                          "write_link_turn", "save_state")}
+    sent = []
+    mod.list_candidate_paths = lambda: ["services/minecraft-bots/swim-movements.js"]
+    mod.ask_model_for_path = lambda parsed, candidates: "services/minecraft-bots/swim-movements.js"
+    mod.submit_task = lambda path, problem: sent.append(path) or f"task-{len(sent)}"
+    mod.write_link_turn = lambda *a: None
+    mod.save_state = lambda state: None
+    handler_state = {}
+    mc_domain = {"name": "minecraft-bots"}
+    mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, handler_state)
+    check("a 7th-occurrence finding with no task yet submits a fix+test pair",
+          sent == ["services/minecraft-bots/swim-movements.js", "services/minecraft-bots/tests/unit.test.mjs"], sent)
+    mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, handler_state)
+    check("the next repeat of it submits nothing more", len(sent) == 2, sent)
+    for k, v in real.items():
+        setattr(mod, k, v)
 
     print("\n[build_fix_problem / build_test_problem: deterministic templating]")
     fix_problem = mod.build_fix_problem(parsed)
