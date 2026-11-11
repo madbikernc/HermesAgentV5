@@ -1,5 +1,7 @@
-// Version: 1.1.0
+// Version: 1.2.0
 //
+// 1.2.0 (2026-11-11): a complete shelter is not an unfinished shell, and a "build" that says it stands
+// only passes shelterStep's guard when that goal's own site checks out as complete.
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: doors and doorways (part 1 of 2).
@@ -253,6 +255,16 @@ await check('Shelters: a doorless shell near home is found again, not abandoned 
   assert.equal(find(shellBot(farShell.slice(20))), null, 'a third of it missing is not a shell');
   const door = s.doorwayPosition(far);
   assert.equal(find(shellBot(farShell, [door, door.offset(0, 1, 0)])), null, 'a solid block where the door goes is a closed box, not her shell');
+  // 2026-11-11: the finished residence at (1, 96, 8) came back as an "unfinished" shell every tick.
+  const doored = (cells, doorAt, facing) => {
+    const b = shellBot(cells);
+    const blockAt = b.blockAt;
+    b.blockAt = (p) => (p.equals(doorAt) ? { name: 'oak_door', boundingBox: 'block', getProperties: () => ({ half: 'lower', facing }) } : blockAt(p));
+    return b;
+  };
+  assert.equal(find(doored(farShell, door, 'south')), null, 'a complete shelter with its door is finished, not an unfinished shell');
+  assert.equal(JSON.stringify(find(doored(farShell, door, 'west'))), JSON.stringify(far), 'a wrong-way door still hands it to "build", which turns it round');
+  assert.equal(JSON.stringify(find(doored(farShell.slice(3), door, 'south'))), JSON.stringify(far), 'a doored shell with blocks missing is still unfinished');
 });
 
 
@@ -294,6 +306,21 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
   c.materials = 66; calls.length = 0;
   await c.shelterStep(goal, null);
   assert.equal(calls.at(-1).type, 'build', 'door planks plus a full set of walls: build');
+
+  // 2026-11-11: "already standing" at a site that isn't itself complete is a failure, even while
+  // some other complete shelter (the fleet's one residence) stands near home.
+  const other = new V3(1, 96, 8);
+  c.findShelterNearHome = () => ({ base: other, complete: true });
+  c.completeSheltersNearHome = () => [other];
+  c.performAction = async (_bot, action) => { calls.push(action); return { ok: true, built: true, text: 'the shelter is already standing.' }; };
+  step = await c.shelterStep({ shelterAt: { x: 5, y: 65, z: 5 } }, null);
+  assert.equal(step.ok, false, 'another complete shelter near home is no proof this site stands');
+  assert.equal(step.built, false);
+  c.completeSheltersNearHome = (() => { let n = 0; return () => (n++ === 0 ? [other] : [other, new V3(5, 65, 5)]); })();
+  step = await c.shelterStep({ shelterAt: { x: 5, y: 65, z: 5 } }, null);
+  assert.equal(step.ok, true, 'once this site itself checks out complete, the build counts');
+  c.findShelterNearHome = () => null; c.completeSheltersNearHome = () => [];
+  c.performAction = async (_bot, action) => { calls.push(action); return { ok: true, text: action.type }; };
 
   c.shell = new V3(41, 65, -30); c.siteCalls = 0;
   goal = {};

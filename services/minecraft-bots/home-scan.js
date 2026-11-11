@@ -1,4 +1,11 @@
-// Version: 1.0.0
+// Version: 1.0.1
+//
+// 1.0.1 (2026-11-11, direct report: "they are all showing a history of build successes. are those
+// false positives?"): unfinishedShelterNearHome() no longer returns a shelter that is already
+// complete. It accepted "missing at most 8" -- 0 included -- with a door, so once shelterStep
+// cleared a goal's site for being a finished shelter, this handed the same finished residence
+// (1, 96, 8) straight back: Amy, Bob and Dale each called "build" on it every ~2.7s, 0ms, ok:true
+// ("already standing"), Amy for 1,242 steps, while no new shelter for the missing beds went up.
 //
 // 1.0.0 (2026-11-10) -- split out of index.js (2.143.0) unchanged: home scanning -- counting
 // blocks near home, finding and judging shelters, and the residence plan (a bed and a chest per
@@ -227,6 +234,8 @@ export function unfinishedShelterNearHome() {
         for (const pos of shelterGeometryPositions(base)) {
           if (bot.blockAt(pos)?.boundingBox !== "block" && ++missing > UNFINISHED_SHELL_MAX_MISSING) break;
         }
+        // Complete (nothing missing, a door the right way round) is finished, not unfinished.
+        if (missing === 0 && isShelterDoor(door)) continue;
         if (missing <= UNFINISHED_SHELL_MAX_MISSING) { best = base; bestDist = dist; }
       }
     }

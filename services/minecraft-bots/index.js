@@ -1,4 +1,10 @@
-// Version: 2.144.0
+// Version: 2.144.1
+//
+// 2.144.1 (2026-11-11, direct report: build "successes" were false positives): shelterStep's
+// "build says it stands" guard checks that THIS goal's site is a complete shelter, not that any
+// complete shelter exists near home -- the fleet's one finished residence always satisfied the old
+// check, so a build that did nothing passed as progress and reset consecutiveFailures every tick.
+// (home-scan.js 1.0.1 closes the loop's other half: it no longer offers that residence as a site.)
 //
 // 2.144.0 (2026-11-10): the priority lists (survival, tools, shelter reface, builder, soldier) and
 // the communal shelter checks moved unchanged to priorities.js.
@@ -3454,10 +3460,11 @@ async function shelterStep(goal, handle) {
       action: { type: "mine", block: "dirt" } };
   }
   // Never done here any more -- the next tick's bed phase (above) finishes the goal. A build that
-  // says it stands but that findShelterNearHome() still can't see is a failure, not a success:
+  // says it stands but that completeSheltersNearHome() can't see AT THIS SITE is a failure, not a
+  // success (any other complete shelter near home is no proof this one stands):
   // ok:true there is exactly what kept the 328-step loop from ever hitting the failure limit.
   const built = await performAction(bot, { type: "build", at: goal.shelterAt }, USERNAME, handle);
-  if (built.built && !findShelterNearHome()?.complete) {
+  if (built.built && !completeSheltersNearHome().some((b) => b.equals(site))) {
     return { ...built, ok: false, built: false, text: `${built.text} -- but it doesn't check out as a complete shelter.`,
       action: { type: "build" } };
   }

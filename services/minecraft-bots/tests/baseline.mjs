@@ -1,4 +1,4 @@
-// Version: 1.14.0
+// Version: 1.15.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -15,7 +15,8 @@
 // When a behavior fix lands, add the metric that proves it here (see tests/README.md), and after
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
-// Revision History: 1.14.0 | 2026-11-07 | no_path_action_failures_per_bot_day, stepped_goto_legs_per_bot_day.
+// Revision History: 1.15.0 | 2026-11-11 | noop_shelter_builds_per_bot_day.
+// 1.14.0 | 2026-11-07 | no_path_action_failures_per_bot_day, stepped_goto_legs_per_bot_day.
 // 1.13.0 | 2026-11-07 | stores_with_own_kind_per_bot_day, chest_consolidations_per_bot_day.
 // 1.12.0 | 2026-11-06 | shore_no_path_per_bot_day.
 // 1.11.0 | 2026-11-05 | residence_chest_refusals_per_bot_day, fence_craft_failures_per_bot_day.
@@ -285,6 +286,13 @@ const METRICS = {
     about: "residence chest refused for cutting off a bed or door -- ~1,500/bot in a few hours on 2026-11-05 (two-bed shelter)",
     better: "lower", tolerance: 0.5, floor: 2,
     value: (c, ctx) => perBotDay(c(/\] shelter goal: a chest at .* would block/), ctx),
+  },
+  // 2026-11-11: the fleet's one finished residence was handed back as a shelter site every tick, and
+  // "build" on it did nothing and passed as progress (home-scan.js 1.0.1, index.js 2.144.1).
+  noop_shelter_builds_per_bot_day: {
+    about: "shelter goal steps where \"build\" did nothing and passed as ok -- 646-3,309/bot in the 24h to 2026-11-11",
+    better: "lower", tolerance: 0.5, floor: 5,
+    value: (c, ctx) => perBotDay(c(/\] shelter goal: the shelter is already standing\. \(ok=true\)/), ctx),
   },
   fence_craft_failures_per_bot_day: {
     about: "\"craft <wood>_fence\" failed -- 20+/bot-day for Dale and Bob on 2026-11-04 (sticks made for one run, not eight)",
