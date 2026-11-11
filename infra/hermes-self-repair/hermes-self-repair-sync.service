@@ -1,0 +1,13 @@
+[Unit]
+Description=Hermes self-repair sync - merge origin/master into the self-repair checkout and push it to nas2-selfrepair
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-self-repair/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-self-repair-sync.sh
+StandardOutput=journal
+StandardError=journal

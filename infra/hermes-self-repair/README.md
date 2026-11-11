@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.12.0
+**Version:** 6.13.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -89,6 +89,26 @@ python3 tools/hermes-self-repair-read.py read ../../etc/passwd
 
 # grep, scoped the same way:
 python3 tools/hermes-self-repair-read.py grep "class.*Guard" tools
+```
+
+## Keeping the checkout current
+
+The generator and the bridge read every file from `HermesAgentV5-selfrepair`, not from the
+autopulled `~/HermesAgentV5`, and until 2026-11-10 nothing ever updated it from GitHub: it sat at
+2026-11-07 while `pathfinding.js` and `tests/unit/*` landed on origin. `tools/hermes-self-repair-sync.sh`,
+run every 30 minutes by `hermes-self-repair-sync.timer` on spark, merges `origin/master` into the
+checkout's `master` and pushes it to `nas2-selfrepair`. It merges, never rebases or resets, so
+commits staged there keep their hashes; promotion still cherry-picks only the one task commit onto
+`origin/master`, so the merge commits never reach GitHub. It skips without changing anything when
+the tree is dirty, when HEAD is not exactly `nas2-selfrepair/master`, or when origin is already
+merged; a conflict is aborted and logged for a human. It holds the same lock
+(`.git/hermes-self-repair.lock`) the apply worker (1.5.0) takes around `apply_diff()`, so a sync
+never lands mid-apply. Check: `python3 infra/hermes-self-repair/tests/test_sync.py` (Linux).
+
+```bash
+sudo cp infra/hermes-self-repair/hermes-self-repair-sync.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now hermes-self-repair-sync.timer
+journalctl -u hermes-self-repair-sync -n 5
 ```
 
 ## Step 2: fix-generation engine
@@ -691,6 +711,7 @@ first.
 
 | Version | Date | Change |
 |---|---|---|
+| 6.13.0 | 2026-11-10 | Added "Keeping the checkout current": `hermes-self-repair-sync.sh` + timer merge `origin/master` into the self-repair checkout every 30 minutes and push it to `nas2-selfrepair`, sharing a lock with the apply worker (1.5.0). The checkout had never been updated from GitHub since 2026-11-07. 10 checks in `tests/test_sync.py`. |
 | 6.12.0 | 2026-11-10 | Bridge 2.3.0: a minecraft-bots test task now targets one per-area `services/minecraft-bots/tests/unit/*.test.mjs` file (chosen by the same validated model call as the fix path, from those files only) instead of the 363k-char `unit.test.mjs`, which the generator always refused. 67 bridge checks. |
 | 6.11.0 | 2026-11-10 | Direct operator request. Bridge 2.2.0: findings are submitted once per signature, tracked in the bridge's own state, instead of only when triage's occurrence count is exactly 1. That gate had blocked every failure already repeating before 2026-11-08, `[stuck-path]` included, while the skip log claimed a task "was already considered". Generator 1.2.0: `MAX_FILE_CHARS` 12000 -> 40000 and `DRAFT_MAX_TOKENS`/`REVISE_MAX_TOKENS` -> 16000, sized to coder/coder2's live 65536-token context. 65 bridge checks. |
 | 6.10.0 | 2026-11-08 | Direct operator instruction: `egress-guard`'s switch flipped on; a third domain explicitly deferred until these two have a track record. Found and fixed one more real gap first — no dedup on repeated denials from the same caller — with a per-caller cooldown in the bridge (2.1.0) that releases on whichever comes first, the prior task concluding or `EGRESS_COOLDOWN_SECONDS` elapsing. 11 more offline checks (60 total). See the "Phase 4" section's own update above. |

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-11-10) — apply_diff() now runs under an exclusive lock on SELF_REPAIR_LOCK
+# (default <checkout>/.git/hermes-self-repair.lock), the same lock the new
+# tools/hermes-self-repair-sync.sh holds while it merges origin/master into this checkout, so a
+# sync never lands between this worker's `git apply` and its commit/push.
 #
 # 1.4.0 (2026-11-08) — FLEET_SELFREPAIR_DESIGN.md §4.3's completeness hook (Phase 3, §8.3): both
 # `set_task_state(task_id, "verified")` call sites now go through finalize_or_wait(), which looks
@@ -112,6 +117,7 @@
 # Deliberately boring: stdlib only, same as every other worker in this fleet.
 
 import importlib.util
+import contextlib
 import json
 import os
 import re
@@ -153,6 +159,8 @@ SELF_REPAIR_READ_TOOL = os.environ.get(
     "SELF_REPAIR_READ_TOOL", str(Path.home() / "HermesAgentV5" / "tools" / "hermes-self-repair-read.py"))
 SELF_REPAIR_VERIFY_TOOL = os.environ.get(
     "SELF_REPAIR_VERIFY_TOOL", str(Path.home() / "HermesAgentV5" / "tools" / "hermes-self-repair-verify.py"))
+SELF_REPAIR_LOCK = Path(os.environ.get(
+    "SELF_REPAIR_LOCK", str(SELF_REPAIR_REPO_DIR / ".git" / "hermes-self-repair.lock")))
 GIT_REMOTE = os.environ.get("GIT_REMOTE", "nas2-selfrepair")
 GIT_BRANCH = os.environ.get("GIT_BRANCH", "master")
 GIT_AUTHOR_NAME = os.environ.get("GIT_AUTHOR_NAME", "hermes-self-repair")
@@ -498,6 +506,20 @@ def run_git(args, check=True):
         ["git", *args], cwd=str(SELF_REPAIR_REPO_DIR), capture_output=True, text=True, check=check)
 
 
+@contextlib.contextmanager
+def checkout_lock():
+    """Exclusive lock shared with tools/hermes-self-repair-sync.sh (flock on the same file).
+    fcntl is imported here, not at module top, so this module still imports on Windows for the
+    offline tests."""
+    import fcntl
+    with open(SELF_REPAIR_LOCK, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def apply_diff(task_id, path, diff_text):
     """Returns (ok, detail, sha) — sha is None on any failure, the real commit hash on success.
     Writes the diff to a temp file, `git apply --check`s it before applying for real so a conflict
@@ -592,7 +614,8 @@ def do_apply(task_id):
                   f"turn record, since hermes-self-repair-generate.py could not have produced " \
                   f"this diff without first reading {path!r} through the same gate"
 
-    ok, detail, sha = apply_diff(task_id, path, diff_text)
+    with checkout_lock():
+        ok, detail, sha = apply_diff(task_id, path, diff_text)
     if not ok:
         return 1, detail
     log(f"task {task_id!r}: {detail}")
