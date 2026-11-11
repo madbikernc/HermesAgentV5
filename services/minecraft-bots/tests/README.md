@@ -1,6 +1,6 @@
 # Minecraft bot tests
 
-**Version:** 1.6.0
+**Version:** 1.7.0
 
 Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.json`).
 
@@ -9,6 +9,7 @@ Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.j
 | `unit` — `unit.test.mjs` (runs every `unit/*.test.mjs`) + `test_triage.py` + `test_rag_server.py` | The fixed logic, extracted from the real source and run against controlled stubs; triage classification and per-bot dedupe; the spark RAG server spark2 uses | Anywhere with Node and Python (no server, no `npm install`) |
 | `live` — `live.test.mjs` | The real `actions.js`/`arbiter.js`/`equipment.js` against the real server, mobs and items | Spark nodes (needs `node_modules`, the bot server, and `live/rcon.py`'s vault/SSH access) |
 | `livebot` — `live-bot.test.mjs` | A whole bot process (`index.js` as `MBProbe`) driven by whispers, restarts and injected coordination messages: STOP, goal identity, resume, night pause, storing during a goal, Mayor curriculum persistence | Spark nodes |
+| `multibot` — `multibot.test.mjs` | Real Buzz item handoff and a server-verified two- and six-bot planner comparison | Opt-in, starts disposable Java worlds on the test host |
 | `baseline` — `baseline.mjs` + `monitoring.mjs` | What the deployed fleet on this host actually did over the last 24h vs the committed baseline; every bot unit mirrored into the activity log and visible to triage | Each Spark node, over its own `minecraft-bot-*` journals |
 
 The unit checks live in per-area files under `unit/` (`chests-1.test.mjs`, `pathfinding.test.mjs`,
@@ -37,6 +38,7 @@ Anything a module imports is injected too, which is why `context()` hands `actio
 tests/run.sh unit            # offline
 tests/run.sh live [filter]   # e.g. tests/run.sh live combat
 tests/run.sh livebot [filter]
+tests/run.sh multibot [all|handoff|planner]
 tests/run.sh baseline        # add --hours 6, --update, --save <file>
 tests/run.sh all             # everything this host can run
 ```
@@ -60,6 +62,33 @@ so its whisper-driven steps use generous timeouts.
 RCON goes through `live/rcon.py`. It reuses `tools/hermes-minecraft-admin.py`'s SSH connection
 and runs the server box's own `mcrcon`, reading the RCON password on the box itself. No secrets
 live in this directory.
+
+## Disposable-world multiplayer tests
+
+See the [research and evaluation](../../../docs/minecraft-local-agent-evaluation.md) for the protocol.
+The full-bot suite also runs the second-shelter goal regression with `tests/run.sh livebot "new build site"`.
+
+For multiplayer trials, set `MB_MULTI_SERVER_JAR` to a compatible vanilla server jar and run
+`tests/run.sh multibot`. Supplying the jar authorizes the harness to write the Minecraft server
+EULA acceptance file in its temporary directory. The suite needs installed bot dependencies, a
+compatible Java runtime, Python 3, `mcrcon`, and a running local Hermes router with `dispatch` and
+`coder`. Use `MB_MULTI_JAVA`, `MB_MULTI_PYTHON`, `MB_MULTI_MCRCON` or `HERMES_ROUTER_URL`
+to override executable paths and the local router endpoint. The suite uses neither the deployment's
+Minecraft server nor its Buzz database. It creates and removes its own worlds, bot state, and Buzz
+database. `tests/run.sh all` runs this suite when the jar is set and reports a skip otherwise.
+
+The default seeds are `173,419`. Set `MB_MULTI_SEEDS` to override them. Each seed runs both
+planners at two and six players, alternating planner order across seeds. Every bot must acquire
+the crafted item within the trial budget. Reports retain successful milestones and failed trials.
+Capture the JSON lines with `MB_TEST_REPORT_DIR` for comparison.
+
+For the cross-host handoff, set `MB_MULTI_SSH` to an SSH alias, `MB_MULTI_REMOTE_SCRIPT` to the
+absolute path of this same script on the second host, and `MB_MULTI_LAN_HOST` to a private IPv4
+address assigned to the test host and reachable from that worker. Use matching checkouts and installed
+dependencies on both hosts, with the remote host's Hermes router running for Amy. This mode binds
+the disposable offline-mode server and its password-protected RCON and Buzz to that interface.
+Use a test network restricted to the participating hosts. Without SSH configuration the suite
+explicitly reports the cross-host skip and runs the same handoff with two local processes.
 
 ## Behavior baseline
 
@@ -97,3 +126,4 @@ When a change fixes or adds bot behavior:
 | 1.4.0 | 2026-11-07 | Daily run split into a per-phase systemd unit chain (`infra/minecraft-bots-tests/`), each phase with its own timeout; standalone `run.sh live`/`run.sh livebot` now skip gracefully when the bot-sandbox server is unreachable, same as `all` already did. |
 | 1.5.0 | 2026-11-10 | Unit checks split into per-area files under `unit/`, each under 40000 characters, with shared stubs in `unit/_harness.mjs`; `unit.test.mjs` only runs them. |
 | 1.6.0 | 2026-11-10 | The harness's view of the split modules (`index`, `indexOnly`, `actionFn`, `actionCases`), and the link check. |
+| 1.7.0 | 2026-11-11 | Add the isolated multiplayer suite and the second-shelter goal regression. |

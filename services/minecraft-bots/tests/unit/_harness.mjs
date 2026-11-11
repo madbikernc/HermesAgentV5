@@ -1,4 +1,5 @@
-// Version: 1.3.0
+// Version: 1.4.0
+// 1.4.0 | 2026-11-11 | Normalize CRLF before slicing runtime sources.
 //
 // 1.3.0 (2026-11-10): `index` also carries chat.js, planning.js, home-scan.js and priorities.js;
 // `indexOnly` is index.js alone.
@@ -17,21 +18,22 @@ import vm from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const root = fileURLToPath(new URL('../../', import.meta.url));
-export const actions = await readFile(root + 'actions.js', 'utf8');
+const readSource = async (file) => (await readFile(root + file, 'utf8')).replace(/\r\n/g, '\n');
+export const actions = await readSource('actions.js');
 // index.js plus the modules split out of it (self-defense.js, chat.js, planning.js, home-scan.js, priorities.js, 2026-11-10), so a check that slices a
 // function by its markers finds it wherever it now lives.
-export const indexOnly = await readFile(root + 'index.js', 'utf8');
-export const selfDefenseSrc = await readFile(root + 'self-defense.js', 'utf8');
-export const chatSrc = await readFile(root + 'chat.js', 'utf8');
-export const planningSrc = await readFile(root + 'planning.js', 'utf8');
-export const homeScanSrc = await readFile(root + 'home-scan.js', 'utf8');
-export const prioritiesSrc = await readFile(root + 'priorities.js', 'utf8');
+export const indexOnly = await readSource('index.js');
+export const selfDefenseSrc = await readSource('self-defense.js');
+export const chatSrc = await readSource('chat.js');
+export const planningSrc = await readSource('planning.js');
+export const homeScanSrc = await readSource('home-scan.js');
+export const prioritiesSrc = await readSource('priorities.js');
 export const index = [indexOnly, selfDefenseSrc, chatSrc, planningSrc, homeScanSrc, prioritiesSrc].join(String.fromCharCode(10));
-export const equipment = await readFile(root + 'equipment.js', 'utf8');
-export const skills = await readFile(root + 'skills.js', 'utf8');
-export const swim = await readFile(root + 'swim-movements.js', 'utf8');
-export const shelterSrc = await readFile(root + 'shelter.js', 'utf8');
-export const tunnelSrc = await readFile(root + 'tunneling.js', 'utf8');
+export const equipment = await readSource('equipment.js');
+export const skills = await readSource('skills.js');
+export const swim = await readSource('swim-movements.js');
+export const shelterSrc = await readSource('shelter.js');
+export const tunnelSrc = await readSource('tunneling.js');
 export const arbiter = await import(pathToFileURL(root + 'arbiter.js').href);
 
 // The `vec3` stand-in for every context below: there is no node_modules in this suite. Declared
@@ -57,10 +59,10 @@ export function between(source, start, end) {
 // Their source, imports dropped, is appended to every slice that runs performActionAs, so the
 // handlers are plain functions in the same context, the way the switch's cases used to be.
 const actionFiles = (await readdir(root + 'actions')).filter((f) => f.endsWith('.js')).sort();
-export const actionHandlerSrc = (await Promise.all(actionFiles.map((f) => readFile(root + 'actions/' + f, 'utf8'))))
+export const actionHandlerSrc = (await Promise.all(actionFiles.map((f) => readSource('actions/' + f))))
   .map((s) => s.replace(/^import [^;]*;$/gm, '').replace(/export /g, '')).join(String.fromCharCode(10));
 const actionSources = Object.fromEntries(await Promise.all(actionFiles.map(async (f) =>
-  [f.replace(/\.js$/, '').replace(/-/g, '_'), await readFile(root + 'actions/' + f, 'utf8')])));
+  [f.replace(/\.js$/, '').replace(/-/g, '_'), await readSource('actions/' + f)])));
 // The source of one action's own file (what used to be its `case "<type>":` block).
 export const actionSource = (type) => { assert(actionSources[type], type); return actionSources[type]; };
 // The old performActionAs switch, rebuilt from the action files in ACTION_HANDLERS' order: each

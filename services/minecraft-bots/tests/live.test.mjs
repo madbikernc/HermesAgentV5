@@ -1,4 +1,5 @@
-// Version: 1.41.0
+// Version: 1.42.0
+// 1.42.0 | 2026-11-11 | Verify a complete three-ingot furnace batch via RCON.
 //
 // 1.41.0 (2026-11-07): new scenario -- a water channel past the search budget is crossed leg by leg
 // (swim-movements.js 1.6.0); chest searches reach 128 blocks (actions.js 1.107.0).
@@ -1229,6 +1230,20 @@ scenario("Builder checklist: a furnace sealed in solid blocks is marked unusable
   await waitFor(() => held("raw_iron") >= 5 && held("coal") >= 5, 5000, "fuel and ore to smelt with");
   for (let i = 0; i < 5; i++) await performAction(bot, { type: "smelt", item: "iron_ingot", count: 1 }, TESTER);
   assert.equal(isUtilityUsable("furnace", pos), false, "five real attempts, all genuinely blocked by the lava moat, mark this furnace unusable");
+});
+
+scenario("Smelt: one furnace action collects the entire three-ingot batch", async () => {
+  const furnace = new Vec3(x + 2, y + 1, z);
+  try {
+    await rcon(`setblock ${furnace.x} ${furnace.y} ${furnace.z} minecraft:furnace`,
+      `give ${TESTER} minecraft:raw_iron 3`, `give ${TESTER} minecraft:coal 1`);
+    await waitFor(() => held("raw_iron") === 3 && held("coal") === 1, 5000, "ore and fuel");
+    const result = await performAction(bot, { type: "smelt", item: "iron_ingot", count: 3 }, TESTER);
+    assert.equal(result.ok, true, result.text);
+    assert.match(await rcon(`clear ${TESTER} minecraft:iron_ingot 0`), /Found 3 matching/);
+  } finally {
+    await rcon(`setblock ${furnace.x} ${furnace.y} ${furnace.z} minecraft:air`);
+  }
 });
 
 scenario("Builder checklist: a chest sealed in solid blocks is marked unusable after real failures", async () => {

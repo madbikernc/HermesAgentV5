@@ -1,4 +1,5 @@
-// Version: 1.4.0
+// Version: 1.5.0
+// 1.5.0 | 2026-11-11 | Full goal-loop regression for a completed shelter masking the new site.
 //
 // Full-bot live tests: runs a REAL bot process (index.js, as "MBProbe") against the bot-sandbox
 // server and drives it the way a player would -- whispers from the MBTester bot, restarts, injected
@@ -341,6 +342,31 @@ scenario("Residences: a held bed goes into the empty shelter, not counted done b
   };
   await sleep(1000);
   assert.equal(await bedIn(ex, ey, ez), true, "the empty shelter now has a bed");
+});
+
+scenario("Residences: an existing complete shelter does not satisfy the new build site", async () => {
+  const root = newRoot();
+  const [ax, ay, az] = [HOME[0] - 2, HOME[1], HOME[2] + 2];
+  const [bx, by, bz] = [HOME[0] - 8, HOME[1], HOME[2] + 2];
+  const hole = `${bx - 1} ${by + 1} ${bz}`;
+  scenarioCleanup.push(() => rcon(
+    `fill ${bx - 1} ${by} ${bz - 1} ${ax + 2} ${ay + 3} ${az + 3} minecraft:air`,
+    `fill ${bx - 1} ${by - 1} ${bz - 1} ${ax + 2} ${ay - 1} ${az + 3} minecraft:sea_lantern`));
+  await rcon(...rconShelter(ax, ay, az, { bed: true, chest: true }),
+    ...rconShelter(bx, by, bz), `setblock ${hole} minecraft:air`);
+  assert.match(await rcon(`execute if block ${hole} minecraft:air`), /passed/);
+  seedGoal(root, "Build a second residence near home.", {
+    survivalPriorityItem: "shelter", servedBySkill: false, shelterAt: { x: ax, y: ay, z: az },
+  });
+  await bootProbe(root, {
+    MC_BOT_USERNAMES: `${PROBE},${TESTER}`, MC_GOAL_TICK_MS: "60000",
+    MC_SHELTER_INTEGRITY_CHECK_MS: "3600000",
+  });
+  await rcon(`give ${PROBE} minecraft:cobblestone 32`);
+  const step = await probe.waitLine(/shelter goal: .*\(ok=(true|false)\)/, 150_000);
+  assert.match(step.text, /ok=true/);
+  assert.match(await rcon(`execute if block ${hole} minecraft:cobblestone`), /passed/,
+    "the goal must place the missing block at the second site");
 });
 
 // Direct request, 2026-11-04: "'trash' items like almost broken weapons, zombie flesh can be disposed
