@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: goals, arbitration, commands and memory notes.
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -58,7 +60,7 @@ await check('MB-08 goal parser accepts GOHOME', async () => {
 
 
 await check('MB-06 an addressed STOP is recognized without the model', async () => {
-  const c = vm.createContext({ USERNAME: 'Amy', setInterval() {} });
+  const c = vm.createContext({ USERNAME: 'Amy', setInterval() {}, guardedInterval() {} });
   vm.runInContext(between(index, 'const STOP_MESSAGE', 'async function stopNow('), c);
   assert.equal(c.isAddressedStop('Amy, stop!', false), true);
   assert.equal(c.isAddressedStop('stop', true), true);
@@ -143,7 +145,7 @@ await check('MB-02 a takeover closes the interrupted action\'s open window', asy
 
 
 await check('MB-06 a bare "stop" from the player whose command is running stops the bot', async () => {
-  const c = vm.createContext({ USERNAME: 'Amy', setInterval() {} });
+  const c = vm.createContext({ USERNAME: 'Amy', setInterval() {}, guardedInterval() {} });
   vm.runInContext(between(index, 'const STOP_MESSAGE', 'async function stopNow('), c);
   assert.equal(c.isStopFromActiveCommander('Steve', 'stop'), false, 'no command running');
   vm.runInContext('activeDirectSpeaker = "Steve"', c);
@@ -160,7 +162,7 @@ await check('MB-13 a failed delivery is retried once; a success is acknowledged'
     performAction: async () => outcome, narrateAction: async (t) => t,
     buzzPublish: async (_, __, body) => { published.push(JSON.parse(body)); } });
   vm.runInContext('var pendingGiveRequest = { forPlayer: "Amy", item: "oak_log", count: 2, requestId: "r1", attempts: 0, expiresAt: Date.now() + 60000 };' +
-    between(index, 'async function checkPendingGiveRequests(', 'setInterval(() => {\n  checkPendingGiveRequests'), c);
+    between(index, 'async function checkPendingGiveRequests(', 'guardedInterval(() => {\n  checkPendingGiveRequests'), c);
   await c.checkPendingGiveRequests();
   assert.equal(vm.runInContext('pendingGiveRequest?.attempts', c), 1, 'queued for one retry');
   await c.checkPendingGiveRequests();
@@ -173,7 +175,7 @@ await check('MB-13 a failed delivery is retried once; a success is acknowledged'
 
 
 await check('Fairness: routine checks that lose their turn are counted', async () => {
-  const c = vm.createContext({ busy: true, arbiter: { isBusy: () => false }, setInterval() {}, console, USERNAME: 'Amy', JSON, Object });
+  const c = vm.createContext({ busy: true, arbiter: { isBusy: () => false }, setInterval() {}, guardedInterval() {}, console, USERNAME: 'Amy', JSON, Object });
   vm.runInContext('var busy = this.busy;' + between(index, 'const ROUTINE_SKIP_REPORT_MS', '\n// Goal-identity guards'), c);
   assert.equal(c.routineBlocked('checkHunger'), true);
   assert.equal(c.routineBlocked('checkHunger'), true);
@@ -357,7 +359,7 @@ await check('Dedicated runners get a much longer failure leash than the freeform
   // "No path to the goal" failures in a row abandoned the WHOLE goal -- losing accumulated
   // progress flags like triedWeaponChest/goal.shelterAt -- instead of just the one step.
   let retired = false;
-  const c = vm.createContext({ setInterval() {}, Date, USERNAME: 'Amy', console, MAX_CONSECUTIVE_FAILURES: 3,
+  const c = vm.createContext({ setInterval() {}, guardedInterval() {}, Date, USERNAME: 'Amy', console, MAX_CONSECUTIVE_FAILURES: 3,
     recordGoalOutcome() {}, broadcastGoalState: async () => {},
     retireGoal: async () => { retired = true; }, saveGoalIfCurrent: async () => {} });
   vm.runInContext(farmGoalSrc(), c);
@@ -402,10 +404,10 @@ await check('Goal loop: a finished step chains the next tick instead of waiting 
   const goal = { steps: 0 };
   let ran = 0, step = true;
   const c = vm.createContext({ console: { error() {} }, USERNAME: 'Babs', process: { env: {} }, parseInt,
-    currentGoal: goal, setTimeout: (fn, ms) => timers.push(ms), setInterval: () => {},
+    currentGoal: goal, setTimeout: (fn, ms) => timers.push(ms), setInterval: () => {}, guardedInterval: () => {},
     goalTick: async () => { ran++; if (step) goal.steps++; } });
   vm.runInContext('var currentGoal = this.currentGoal;' +
-    between(index, 'const GOAL_FOLLOWUP_MS', 'setInterval(runGoalTick'), c);
+    between(index, 'const GOAL_FOLLOWUP_MS', 'guardedInterval(runGoalTick'), c);
   await c.runGoalTick();
   assert.deepEqual([...timers], [2000], 'a step ran: the next tick is queued 2s out');
   step = false;

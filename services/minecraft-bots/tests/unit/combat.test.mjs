@@ -1,4 +1,9 @@
-// Version: 1.0.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
+//
+// 1.1.0 (2026-11-10): the attacker-memory check registers the health listener from
+// self-defense.js's installSelfDefense().
 //
 // Unit checks: fighting, fleeing, hunting and guard duty.
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -8,7 +13,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, arbiter, V3, between, actionFn, timeoutFn, makeBot, context, sleep, check, guardAnchorWorld, policyContext, slice, passedCount } from './_harness.mjs';
+import { prioritiesSrc, selfDefenseSrc, actionCases, actions, index, arbiter, V3, between, actionFn, timeoutFn, makeBot, context, sleep, check, guardAnchorWorld, policyContext, slice, passedCount } from './_harness.mjs';
 
 
 await check('MB-01 attack starts combat and only claims a kill on entityDead', async () => {
@@ -99,7 +104,7 @@ await check('Soldier priorities: monster, then guard -- weapon/armor moved to th
   let threat = null;
   const c = vm.createContext({ bot: {}, nearestHostile: () => threat, FLEE_ONLY_MOBS: new Set(), SOLDIER_PATROL_RANGE: 32,
     isGuardAnchor: async () => true });
-  vm.runInContext(between(index, 'async function nextSoldierPriority(', 'async function proposeOwnGoal('), c);
+  vm.runInContext(between(prioritiesSrc, 'async function nextSoldierPriority('), c);
   threat = { name: 'zombie' }; assert.equal((await c.nextSoldierPriority()).name, 'monster'); threat = null;
   assert.equal((await c.nextSoldierPriority()).name, 'guard');
   assert.equal(Object.getOwnPropertyNames(c).includes('soldierArmorRetryAt'), false,
@@ -136,7 +141,7 @@ await check('Soldier priorities: one live Soldier is trivially the anchor; two o
     BOT_ROLES: { mark: { primary: SOLDIER_ROLE }, luke: { primary: SOLDIER_ROLE } }, ROLES: { SOLDIER: SOLDIER_ROLE },
     otherBotGoalSeenAt, GOAL_LEASE_MS: 60_000, Date,
     holdsGuardAnchor: async (bot) => holds[bot.username] ?? false });
-  vm.runInContext(between(index, 'function isLiveSoldier(', 'async function proposeOwnGoal('), c);
+  vm.runInContext(between(prioritiesSrc, 'function isLiveSoldier('), c);
 
   assert.equal((await c.nextSoldierPriority()).name, 'guard', 'alone (Luke never seen) -- trivially the anchor, no claim touched');
   threat = { name: 'zombie' };
@@ -219,6 +224,8 @@ await check('Fight-or-flee: the mob that just hurt the bot is the threat, not me
   const c = vm.createContext({ bot, Date, HOSTILE_MOBS: new Set(['zombie', 'skeleton']),
     nearestHostile: () => zombie });
   vm.runInContext(between(index, 'const RANGED_MOBS', 'async function checkSelfDefense('), c);
+  // The health listener that remembers the attacker is registered by installSelfDefense() (2026-11-10).
+  vm.runInContext(between(selfDefenseSrc, '  bot.prependListener("health"', '  guardedInterval('), c);
   assert.equal(c.pickThreat(24), zombie, 'nothing has hit it yet: nearest');
   zombie.position.d = 8; // the zombie backs off; an arrow lands
   bot.health = 17; bot.emit('health');
@@ -238,7 +245,7 @@ await check('Hunt: goes for a spare animal -- never a species\' last two nearby 
     ok: (text) => ({ ok: true, text }), fail: (text) => ({ ok: false, text }),
     performActionAs: async (_b, action) => { attacked.push(action.target.name); return { ok: true }; },
     collectDrops: async () => { inv.push({ name: 'porkchop', count: 1 }); } });
-  const hunt = between(actions, '    case "hunt": {', '\n    case "');
+  const hunt = between(actionCases, '    case "hunt": {', '\n    case "');
   vm.runInContext(`async function run(action, token, speaker = "test") { switch (action.type) {${hunt}} }`, c);
   let r = await c.run({ type: 'hunt' }, { cancelled: false });
   assert.deepEqual(attacked, ['pig'], 'the nearest spare: one of three pigs, not the two cows or the (here unlisted) chicken');
@@ -267,7 +274,7 @@ await check('Hunt: chickens within 64 blocks are prey, and raw chicken is food, 
     ok: (text) => ({ ok: true, text }), fail: (text) => ({ ok: false, text }),
     performActionAs: async (_b, action) => { attacked.push(action.target.name); return { ok: true }; },
     collectDrops: async () => { inv.push({ name: 'chicken', count: 1 }); } });
-  const hunt = between(actions, '    case "hunt": {', '\n    case "');
+  const hunt = between(actionCases, '    case "hunt": {', '\n    case "');
   vm.runInContext(`async function run(action, token, speaker = "test") { switch (action.type) {${hunt}} }`, c);
   const r = await c.run({ type: 'hunt' }, { cancelled: false });
   assert.deepEqual(attacked, ['chicken'], 'a chicken 50 blocks out, not the lone cow');
@@ -290,6 +297,7 @@ await check('Self-defense: a spider in daylight is no threat unless it just hit 
   const c = vm.createContext({ bot, Date, HOSTILE_MOBS: new Set(['spider', 'zombie']),
     nearestHostile: () => mobs.slice().sort((a, b) => a.position.d - b.position.d)[0] ?? null });
   vm.runInContext(between(index, 'const RANGED_MOBS', 'async function checkSelfDefense('), c);
+  vm.runInContext(between(selfDefenseSrc, '  bot.prependListener("health"', '  guardedInterval('), c);
   assert.equal(c.pickThreat(12), null, 'a lone daytime spider is left alone');
   mobs = [spider, zombie];
   assert.equal(c.pickThreat(12), zombie, 'a zombie beyond it is still the threat');
@@ -304,7 +312,7 @@ await check('Self-defense: a spider in daylight is no threat unless it just hit 
 await check('Wool: string she already holds becomes wool before any sheep hunt', async () => {
   // 2026-10-28: no sheep near home on this seed (32+ "no sheep nearby" failures each for Babs and
   // Dale) while Babs carried 45 string. 4 string -> 1 white wool, no table.
-  const wool = actions.slice(actions.indexOf('case "get_wool": {'), actions.indexOf('case "place_bed": {'));
+  const wool = actionCases.slice(actionCases.indexOf('case "get_wool": {'), actionCases.indexOf('case "place_bed": {'));
   const inv = [{ name: 'string', count: 45 }];
   const crafted = [];
   let hunted = false;

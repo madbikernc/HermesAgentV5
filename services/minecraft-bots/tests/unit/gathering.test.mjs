@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: gathering and mining.
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -14,7 +16,7 @@ await check('MB-11 fallback coordinator accepted once Mayor is unreachable; serv
   let classified = 0;
   const c = vm.createContext({ bot: { username: 'Amy' }, MATRIX_USER_ID: '@mc-amy:spark', USERNAME: 'Amy',
     MAYOR_USERNAME: 'Mayor', MAYOR_LIVENESS_TIMEOUT_MS: 0, lastMayorSeenAt: 0, busy: false,
-    lastActivityAt: 0, setInterval() {}, Date, process: { env: {} },
+    lastActivityAt: 0, setInterval() {}, guardedInterval() {}, Date, process: { env: {} },
     isAnotherBot: (s) => ['Mark', 'Mayor', 'Luke'].includes(s), isMayor: (s) => s === 'Mayor',
     classifyIntent: async () => { classified++; return { type: 'none' }; }, console: { log() {}, error() {} } });
   vm.runInContext('var lastMayorSeenAt = 0;' + between(index, 'const PROCESS_STARTED_AT', '// Real gap found live (2026-09-07): with no memory') +
@@ -35,9 +37,9 @@ await check('Tier 2: checkLocationSharing runs noteNearbyResources on a standing
   // no-movement scan, same as when mine/explore/craft already trigger it as a side effect.
   let calls = 0;
   const bot = { entity: { position: {} } };
-  const c = vm.createContext({ setInterval() {}, console: { error() {} },
+  const c = vm.createContext({ setInterval() {}, guardedInterval() {}, console: { error() {} },
     AUTONOMY_ENABLED: true, bot, noteNearbyResources: async (reason) => { calls++; assert.match(reason, /location sweep/); } });
-  vm.runInContext(between(index, 'async function checkLocationSharing(', 'setInterval(() => {\n  checkLocationSharing'), c);
+  vm.runInContext(between(index, 'async function checkLocationSharing(', 'guardedInterval(() => {\n  checkLocationSharing'), c);
   await c.checkLocationSharing();
   assert.equal(calls, 1, 'runs while loaded in and autonomous');
   bot.entity = null;

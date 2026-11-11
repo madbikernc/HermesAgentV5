@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: fleet services: RAG, Buzz and analysis mode.
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -44,7 +46,7 @@ await check('S27f analysis mode is opt-in, and the chat paths only opt in for a 
   // And the real call sites: every one that carries `<speaker> message` must either stay
   // unflagged (player chat, screened in full) or flag only via `fromVerifiedBot` -- never a
   // literal `analysis: true`, which has no way to tell a verified bot sender from a player.
-  const src = await readFile(root + 'index.js', 'utf8');
+  const src = index /* index.js and the modules split out of it */;
   const lines = src.split(String.fromCharCode(10));
   const chatSites = lines
     .map((l, i) => ({ l, i }))

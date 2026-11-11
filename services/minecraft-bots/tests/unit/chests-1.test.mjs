@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: chest memory, storing, looting and consolidation (part 1 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -7,7 +9,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { root, actions, index, arbiter, V3, between, actionFn, timeoutFn, makeBot, context, shelter, sleep, check, builderClaimsWorld, goalTickContext, hungerWorld, farmGoalSrc, farmGoalWorld, blockWorld, room, slice, passedCount } from './_harness.mjs';
+import { actionHandlerSrc, root, actions, index, arbiter, V3, between, actionFn, timeoutFn, makeBot, context, shelter, sleep, check, builderClaimsWorld, goalTickContext, hungerWorld, farmGoalSrc, farmGoalWorld, blockWorld, room, slice, passedCount } from './_harness.mjs';
 
 
 await check('MB-17 chest withdrawal spans mixed item types', async () => {
@@ -43,7 +45,7 @@ await check('Tier 2: checkSurplusSharing runs storeSurplusNearHome on a standing
   // never got checked. Same gating as checkDeferredSurplusCleanup's own post-craft version.
   let calls = 0;
   const bot = { isSleeping: false };
-  const c = vm.createContext({ setInterval() {}, console: { error() {} }, process: { env: {} },
+  const c = vm.createContext({ setInterval() {}, guardedInterval() {}, console: { error() {} }, process: { env: {} },
     AUTONOMY_ENABLED: true, currentGoal: null, routineBlocked: () => false, bot,
     storeSurplusNearHome: async () => { calls++; }, USERNAME: 'Amy' });
   vm.runInContext(between(index, 'const SURPLUS_SHARING_CHECK_MS', 'const LOCATION_SHARING_CHECK_MS'), c);
@@ -247,8 +249,8 @@ await check('Food: loot "food" asks chests for every edible item; "seeds" for an
   const groups = vm.runInContext('LOOT_GROUPS', c);
   assert.deepEqual([...groups.food], ['bread', 'carrot']);
   assert.deepEqual([...groups.seeds], ['wheat_seeds', 'carrot', 'potato', 'beetroot_seeds']);
-  assert.match(actions, /: LOOT_GROUPS\[action\.item\]; \/\/ "food", "seeds"/);
-  assert.match(actions, /const wantedNames = group \|\| gearCategoryNames\(bot, action\.item\);/);
+  assert.match(actionHandlerSrc, /: LOOT_GROUPS\[action\.item\]; \/\/ "food", "seeds"/);
+  assert.match(actionHandlerSrc, /const wantedNames = group \|\| gearCategoryNames\(bot, action\.item\);/);
 });
 
 
@@ -340,7 +342,7 @@ await check('Inventory: full with no chest at home, she makes and places one; on
   await c.makeHomeChest(null);
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { type: 'place_home', item: 'chest' }, 'holding a chest: put it down at home');
 
-  const full = between(index, 'async function checkInventoryFull(', 'setInterval(');
+  const full = between(index, 'async function checkInventoryFull(', 'guardedInterval(');
   assert.match(full, /countUsableNearHome\(\["chest"\]\) < 1[\s\S]*makeHomeChest\(handle\)/,
     'the full-inventory check makes a chest when there is no usable one at home');
 });

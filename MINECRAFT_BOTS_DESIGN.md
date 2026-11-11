@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.42.0
+**Version:** 2.43.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -110,8 +110,16 @@ Python client has mineflayer's maturity.
 
 | File | Job |
 |---|---|
-| `index.js` | The bot: connection, chat pipeline, goal loop, every idle-tick check, role priority functions, Mayor curriculum |
-| `actions.js` | Every physical verb (`performAction`), chest/furnace/gear helpers, pathfinding-adjacent constants |
+| `index.js` | The bot: connection, startup, the goal loop and goal runners, every idle-tick check, Buzz handlers, Mayor curriculum |
+| `chat.js` | `classifyIntent`, the chat reply, narration, what gets remembered |
+| `planning.js` | `runAction`, the goal-step parser, `planNextStep`, goal-conflict arbitration |
+| `priorities.js` | What to work on next: survival, tool-upgrade, shelter-reface, builder and soldier priorities; communal shelter checks |
+| `home-scan.js` | Counting blocks near home; finding and judging shelters; the residence plan |
+| `self-defense.js` | Fight or flee, last-resort attack/flee, threat memory, squad response, rally points (`installSelfDefense()`) |
+| `pathfinding.js` | The pathfinder setup: costs, unbreakable blocks, search limits, path diagnostics (`setupPathfinding()`) |
+| `faults.js` | `guardedInterval()` for every periodic check; the process-wide uncaught-error handler |
+| `actions.js` | `performAction` and its dispatch table, plus the chest/furnace/gear/bed helpers the actions share |
+| `actions/*.js` | One file per action verb (41), each exporting its handler |
 | `arbiter.js` | Coherence arbiter — who may hold the body, by urgency tier |
 | `roles.js` | Role taxonomy + per-bot assignment (data, not behavior) |
 | `goals.js` | Persistent per-bot goal state, `actionsTaken`, failure counters |
@@ -121,6 +129,22 @@ Python client has mineflayer's maturity.
 | `swim-movements.js` | `Movements` subclass: water handling + `MAX_DIG_LABOR_COST` cap |
 | `memory.js` / `buzz.js` / `persona.js` / `router.js` | Thin clients, one job each |
 | `matrix.js` | Legacy, optional room watcher from before Buzz; only runs when a bot has a `MATRIX_ACCESS_TOKEN` |
+
+**Split to fit self-repair (2026-11-10).** The self-repair pipeline rewrites one whole file and
+refuses any over 40000 chars, so a bug in a 400k+ file could never be fixed by it. Every file
+above is under that limit except `index.js` (436k) and `actions.js` (248k), which keep shrinking
+as more of them moves out. The split modules read `bot`, `USERNAME` and other `index.js` state
+back through ES live bindings; a variable they must change goes through a setter `index.js`
+exports (an imported binding is read-only), and code that has to run at startup (listeners,
+ticks, constants that read `index.js` state) runs from that module's `install*()` call, placed
+where the code used to be, so the startup order is unchanged. `tests/link-check.mjs` (part of
+`tests/run.sh unit`) links every module without running any of it, so a missing import or
+export fails a test, not a bot.
+
+**Faults.** A periodic check that throws is logged as one line naming the error and its
+`file:line`, and the next tick runs; any other uncaught error is logged the same way and the
+process exits for systemd to restart. Both lines match triage's `crash` pattern, so the bridge is
+handed a location, not just a message.
 
 **Channels.** Buzz agent `mc-<persona>`, topics `minecraft` and `minecraft-coordination` —
 bot-to-bot only. A (re)started bot starts reading each topic at its newest message (`newestSeq`

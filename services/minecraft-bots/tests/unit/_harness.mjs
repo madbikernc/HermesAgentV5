@@ -1,4 +1,10 @@
-// Version: 1.0.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-10): `index` also carries chat.js, planning.js, home-scan.js and priorities.js;
+// `indexOnly` is index.js alone.
+// 1.2.0 (2026-11-10): `index` also carries self-defense.js (index.js 2.140.0).
+//
+// 1.1.0 (2026-11-10): actionFn carries the actions/*.js handlers (actions.js 2.0.0).
 //
 // Shared harness for the unit checks in this directory (split out of ../unit.test.mjs on
 // 2026-11-10): the module sources every check slices, the V3/bot/context() stubs, and check().
@@ -6,13 +12,21 @@
 
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import vm from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const root = fileURLToPath(new URL('../../', import.meta.url));
 export const actions = await readFile(root + 'actions.js', 'utf8');
-export const index = await readFile(root + 'index.js', 'utf8');
+// index.js plus the modules split out of it (self-defense.js, chat.js, planning.js, home-scan.js, priorities.js, 2026-11-10), so a check that slices a
+// function by its markers finds it wherever it now lives.
+export const indexOnly = await readFile(root + 'index.js', 'utf8');
+export const selfDefenseSrc = await readFile(root + 'self-defense.js', 'utf8');
+export const chatSrc = await readFile(root + 'chat.js', 'utf8');
+export const planningSrc = await readFile(root + 'planning.js', 'utf8');
+export const homeScanSrc = await readFile(root + 'home-scan.js', 'utf8');
+export const prioritiesSrc = await readFile(root + 'priorities.js', 'utf8');
+export const index = [indexOnly, selfDefenseSrc, chatSrc, planningSrc, homeScanSrc, prioritiesSrc].join(String.fromCharCode(10));
 export const equipment = await readFile(root + 'equipment.js', 'utf8');
 export const skills = await readFile(root + 'skills.js', 'utf8');
 export const swim = await readFile(root + 'swim-movements.js', 'utf8');
@@ -39,7 +53,33 @@ export function between(source, start, end) {
   assert(to > from, end);
   return source.slice(from, to).replace(/export /g, '');
 }
-export const actionFn = between(actions, 'const LOST_CONTROL');
+// actions.js 2.0.0: each action is its own file under actions/, dispatched by ACTION_HANDLERS.
+// Their source, imports dropped, is appended to every slice that runs performActionAs, so the
+// handlers are plain functions in the same context, the way the switch's cases used to be.
+const actionFiles = (await readdir(root + 'actions')).filter((f) => f.endsWith('.js')).sort();
+export const actionHandlerSrc = (await Promise.all(actionFiles.map((f) => readFile(root + 'actions/' + f, 'utf8'))))
+  .map((s) => s.replace(/^import [^;]*;$/gm, '').replace(/export /g, '')).join(String.fromCharCode(10));
+const actionSources = Object.fromEntries(await Promise.all(actionFiles.map(async (f) =>
+  [f.replace(/\.js$/, '').replace(/-/g, '_'), await readFile(root + 'actions/' + f, 'utf8')])));
+// The source of one action's own file (what used to be its `case "<type>":` block).
+export const actionSource = (type) => { assert(actionSources[type], type); return actionSources[type]; };
+// The old performActionAs switch, rebuilt from the action files in ACTION_HANDLERS' order: each
+// file's function body under its `case "<type>": {` label(s). Checks that slice one case's text
+// (or wrap it back into a switch to run it) read it from here; the code is the real file's.
+const handlerTable = between(actions, '  const ACTION_HANDLERS = {', '  };');
+const caseOrder = [...handlerTable.matchAll(/^    (\w+): (\w+),$/gm)].map((m) => [m[1], m[2]]);
+const bodyOf = (fn) => {
+  const src = actionHandlerSrc.slice(actionHandlerSrc.indexOf(`async function ${fn}(`));
+  const lines = src.split(String.fromCharCode(10));
+  const end = lines.findIndex((l, i) => i > 0 && l === '}');
+  return lines.slice(3, end).map((l) => (l ? '    ' + l : l)).join(String.fromCharCode(10));
+};
+export const actionCases = caseOrder.map(([type, fn], i) => {
+  const next = caseOrder[i + 1];
+  const label = `    case "${type}":` + (next && next[1] === fn ? '' : ' {');
+  return next && next[1] === fn ? label : label + String.fromCharCode(10) + bodyOf(fn) + String.fromCharCode(10) + '    }';
+}).join(String.fromCharCode(10)) + String.fromCharCode(10) + '    default:';
+export const actionFn = between(actions, 'const LOST_CONTROL') + String.fromCharCode(10) + actionHandlerSrc;
 export const timeoutFn = between(actions, 'function withTimeout(', 'function simpleSourceFor(');
 
 export function makeBot() {
@@ -288,7 +328,7 @@ export function hungerWorld({ food = 10, items = [], lootGives = null, huntGives
     AUTONOMY_ENABLED: true, HUNGER_THRESHOLD: 18, CRITICAL_FOOD_LEVEL: 6, FOOD_NAMES: ['bread', 'carrot', 'beef'],
     heldCount: (test) => inv.filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
     routineBlocked: () => false, arbiter: { OWNERS: { ROUTINE: 1, HUNGER_CRITICAL: 2 }, requestControl: async () => ({ release() {} }) } });
-  vm.runInContext(between(index, 'const FOOD_FETCH_COUNT', 'setInterval(() => {'), c);
+  vm.runInContext(between(index, 'const FOOD_FETCH_COUNT', 'guardedInterval(() => {'), c);
   return { c, calls, inv };
 }
 

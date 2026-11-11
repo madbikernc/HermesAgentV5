@@ -1,4 +1,5 @@
-// Version: 2.0.0
+// Version: 2.1.0
+// 2.1.0 (2026-11-10): runs unit/faults.test.mjs (faults.js 1.0.0).
 // 2.0.0 (2026-11-10): split into per-area files under tests/unit/ (shared stubs in
 // tests/unit/_harness.mjs), each under 40000 chars so the self-repair pipeline -- which rewrites a
 // whole file and refuses any over MAX_FILE_CHARS -- can add a test to one. This file now only runs
@@ -176,5 +177,6 @@ await import('./unit/services.test.mjs');
 await import('./unit/doors-1.test.mjs');
 await import('./unit/doors-2.test.mjs');
 await import('./unit/pathfinding.test.mjs');
+await import('./unit/faults.test.mjs');
 
 console.log(`${passedCount()} unit checks passed.`);

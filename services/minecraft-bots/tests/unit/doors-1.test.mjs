@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: doors and doorways (part 1 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -8,7 +10,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, swim, V3, between, actionFn, timeoutFn, makeBot, context, shelter, passed, check, doorBlock, doorFns, closerWorld, farmGoalSrc, closedIron, shelterFns, room, slice, passedCount } from './_harness.mjs';
+import { prioritiesSrc, indexOnly, homeScanSrc, actionCases, actions, index, swim, V3, between, actionFn, timeoutFn, makeBot, context, shelter, passed, check, doorBlock, doorFns, closerWorld, farmGoalSrc, closedIron, shelterFns, room, slice, passedCount } from './_harness.mjs';
 
 
 await check('Doors: an open door or gate is walkable, never a floor', async () => {
@@ -100,7 +102,7 @@ await check('Close behind: herd_to_pen holds doors open only while leading, with
   vm.runInContext(timeoutFn + actionFn, c);
   await c.performAction(bot, { type: 'herd_to_pen', species: 'cow' }, 'test');
   assert.equal(held, 0, 'no hold when there is nothing to lead');
-  const herd = actions.slice(actions.indexOf('case "herd_to_pen": {'), actions.indexOf('case "repair_terrain": {'));
+  const herd = actionCases.slice(actionCases.indexOf('case "herd_to_pen": {'), actionCases.indexOf('case "repair_terrain": {'));
   const [approach, hold, equip, backWall] = ['GoalNear(animal.position.x', 'holdDoorsOpen(bot)', 'bot.equip(foodItem', 'pen.center.z - 2']
     .map((t) => herd.indexOf(t));
   assert(approach > 0 && approach < hold && hold < equip && equip < backWall, 'walk out empty-handed, then hold + food, then lead to the back wall');
@@ -196,7 +198,7 @@ await check('Communal shelter: stone-or-better material, parameterized geometry,
   assert.deepEqual({ x: doorPos.x, y: doorPos.y, z: doorPos.z }, { x: 0, y: 64, z: 5 });
   assert.deepEqual([...c.communalRoomCells(2, 1)].map((p) => [...p]), [[0, 0], [1, 0]]);
 
-  const communalBuild = actions.slice(actions.indexOf('case "build_communal_shelter": {'), actions.indexOf('case "build_pen": {'));
+  const communalBuild = actionCases.slice(actionCases.indexOf('case "build_communal_shelter": {'), actionCases.indexOf('case "build_pen": {'));
   assert.match(communalBuild, /isCommunalShelterMaterial/, 'uses the stricter material check, not the individual-shelter baseline');
   assert.match(communalBuild, /if \(!width \|\| !depth\) return fail/, 'refuses to guess a size if none was given');
   // Same door-first-craft/door-last-placement order as "build" -- see that case's own header for
@@ -216,7 +218,7 @@ await check('Shelter patch: takes an explicit hole list, never a door, never its
   // "build_communal_shelter" above do, which is what lets it work on a shelter of any size or
   // shape. holesIn() already excludes every doorway cell from its own output, so there is
   // structurally never a door to craft or place here.
-  const patchBody = actions.slice(actions.indexOf('case "patch_shelter": {'), actions.indexOf('case "build_communal_shelter": {'));
+  const patchBody = actionCases.slice(actionCases.indexOf('case "patch_shelter": {'), actionCases.indexOf('case "build_communal_shelter": {'));
   assert(patchBody.length > 0, 'the case exists');
   assert(!/doorItemFor|doorPlaced|doorAlready/.test(patchBody), 'never touches a door -- holesIn() already excludes doorway cells');
   assert.match(patchBody, /action\.holes \|\| \[\]/, 'takes an explicit hole list from the caller');
@@ -239,7 +241,7 @@ await check('Shelters: a doorless shell near home is found again, not abandoned 
     const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
       SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24 });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
-      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+      (between(homeScanSrc, 'const shelterGeometryPositions') + between(prioritiesSrc, 'const TOOL_NAME', 'const BUILDER_ITEM_STALL_LIMIT')), h);
     return h.unfinishedShelterNearHome();
   };
   const far = new V3(41, 65, -30), near = new V3(10, 65, 0);

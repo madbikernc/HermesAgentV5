@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: beds and sleeping (part 1 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -7,7 +9,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, swim, V3, between, context, shelter, sleep, check, longterm, bedWorld, farmGoalSrc, bedFns, bedSiteWorld, shelterFns, room, slice, passedCount } from './_harness.mjs';
+import { actionCases, actionHandlerSrc, actions, index, swim, V3, between, context, shelter, sleep, check, longterm, bedWorld, farmGoalSrc, bedFns, bedSiteWorld, shelterFns, room, slice, passedCount } from './_harness.mjs';
 
 
 await check('Survival (Tier 1): weapon, then her own sheltered bed, then food, then armor, then null', async () => {
@@ -172,9 +174,9 @@ await check('Beds: "bed" is crafted in the colour she has 3 wool of, white when 
   assert.equal(c.bedItemFor(inv([])), 'white_bed');
   assert.equal(c.bedItemFor(inv([{ name: 'red_wool', count: 2 }, { name: 'blue_wool', count: 4 }])), 'blue_bed');
   assert.equal(c.bedItemFor(inv([{ name: 'red_wool', count: 2 }, { name: 'red_wool', count: 1 }])), 'red_bed', 'stacks add up');
-  assert.match(actions, /if \(action\.item === "bed" \|\| action\.item === "beds"\) action = \{ \.\.\.action, item: bedItemFor\(bot\) \};/);
-  assert.match(actions, /const group = action\.item === "wool"/, 'loot "wool" takes any colour');
-  const craftCase = actions.slice(actions.indexOf('case "craft": {'), actions.indexOf('case "loot": {') > actions.indexOf('case "craft": {') ? actions.indexOf('case "loot": {') : undefined);
+  assert.match(actionHandlerSrc, /if \(action\.item === "bed" \|\| action\.item === "beds"\) action = \{ \.\.\.action, item: bedItemFor\(bot\) \};/);
+  assert.match(actionHandlerSrc, /const group = action\.item === "wool"/, 'loot "wool" takes any colour');
+  const craftCase = actionCases.slice(actionCases.indexOf('case "craft": {'), actionCases.indexOf('case "loot": {') > actionCases.indexOf('case "craft": {') ? actionCases.indexOf('case "loot": {') : undefined);
   // Searched from the make step: "here" (2026-10-30) places a carried table earlier in the case too.
   const makeTable = craftCase.indexOf('{ type: "craft", item: "crafting_table", count: 1 }');
   const placeTable = craftCase.indexOf('{ type: "place", item: "crafting_table" }', makeTable);
@@ -199,7 +201,7 @@ await check('Beds: a bed spot is two open, supported cells with room to stand be
 
 
 await check('Beds: bed goals are recognised; going to bed and bedrock are not', async () => {
-  const c = vm.createContext({ setInterval() {}, Date });
+  const c = vm.createContext({ setInterval() {}, guardedInterval() {}, Date });
   vm.runInContext(farmGoalSrc(), c);
   assert.equal(c.farmTaskFor('go home and set up more beds there -- we have 0, need at least 9'), 'bed');
   assert.equal(c.farmTaskFor('Amy, craft a bed and store your gear in a chest'), 'bed');

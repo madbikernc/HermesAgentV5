@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: shelter detection, building and repair (part 1 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -7,7 +9,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, swim, arbiter, V3, between, context, shelter, sleep, passed, check, farmGoalSrc, shelterFns, shelterWorld, room, slice, passedCount } from './_harness.mjs';
+import { prioritiesSrc, indexOnly, homeScanSrc, actionCases, actions, index, swim, arbiter, V3, between, context, shelter, sleep, passed, check, farmGoalSrc, shelterFns, shelterWorld, room, slice, passedCount } from './_harness.mjs';
 
 
 await check('Communal shelter: fleet-wide iron-tool evidence, never a bare claim', async () => {
@@ -88,7 +90,7 @@ await check('Shelters: any mix of plain building blocks; never sand, gravel, val
   // 2026-10-30: Babs held 2 spruce (first slot) beside 6 birch -- "spruce_door" failed all night.
   assert.equal(c.doorItemFor({ inventory: { items: () => [{ name: 'spruce_planks', count: 2 }, { name: 'dirt', count: 9 },
     { name: 'birch_planks', count: 6 }, { name: 'oak_planks', count: 1 }] } }), 'birch_door', 'the wood she has the most planks of');
-  const build = actions.slice(actions.indexOf('case "build": {'), actions.indexOf('case "build_pen": {'));
+  const build = actionCases.slice(actionCases.indexOf('case "build": {'), actionCases.indexOf('case "build_pen": {'));
   assert.match(build, /buildMovements\.scafoldingBlocks = \[\];/, 'no scaffolding: she pillared up inside her own shelter');
   assert.match(build, /buildMovements\.allow1by1towers = false;/);
   assert.match(build, /finally \{\s+if \(bot\.pathfinder\.movements === buildMovements\) bot\.pathfinder\.setMovements\(sharedMovements\);/);
@@ -151,7 +153,7 @@ await check('checkShelterIntegrity (unified, general) repairs the first damaged 
       performAction: async (_bot, action) => { calls.push(action); return { ok: true, text: 'patched the shelter.' }; },
       bot: { spawnPoint: new V3(0, 64, 0) }, USERNAME: 'Test', console: { log() {}, error() {} },
     });
-    vm.runInContext(between(index, 'async function checkShelterIntegrity() {', 'setInterval(() => {'), c);
+    vm.runInContext(between(index, 'async function checkShelterIntegrity() {', 'guardedInterval(() => {'), c);
     return c;
   };
   const complete = { inside: new Set(['0,64,0']), shell: new Set(), holes: new Set() };
@@ -215,7 +217,7 @@ await check('Shelters: a crowded core still finds a site farther out once maxRad
 
 
 await check('Shelters: shelter goals are recognised, and the shelter check finds one a block above spawn', async () => {
-  const c = vm.createContext({ setInterval() {}, Date });
+  const c = vm.createContext({ setInterval() {}, guardedInterval() {}, Date });
   vm.runInContext(farmGoalSrc(), c);
   assert.equal(c.farmTaskFor('go home and build a small shelter there'), 'shelter');
   assert.equal(c.farmTaskFor("No roof over my head yet... I'm building a quick shelter nearby"), 'shelter');
@@ -261,7 +263,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
       // slice already needs from outside it (SHELTER_ROOM above).
       BUILDER_PRIORITY_RADIUS: 24 });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
-      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+      (between(homeScanSrc, 'const shelterGeometryPositions') + between(prioritiesSrc, 'const TOOL_NAME', 'const BUILDER_ITEM_STALL_LIMIT')), h);
     return h.hasShelterNearHome();
   };
   const base = new V3(0, 65, 0);
@@ -282,7 +284,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
       // slice already needs from outside it (SHELTER_ROOM above).
       BUILDER_PRIORITY_RADIUS: 24 });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
-      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+      (between(homeScanSrc, 'const shelterGeometryPositions') + between(prioritiesSrc, 'const TOOL_NAME', 'const BUILDER_ITEM_STALL_LIMIT')), h);
     return h.hasOwnShelterWithBed();
   };
   assert.equal(ownShelterCheck(shelterBot(full, { doorAt: doorPos })), false,
@@ -317,7 +319,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
       // slice already needs from outside it (SHELTER_ROOM above).
       BUILDER_PRIORITY_RADIUS: 24 });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
-      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+      (between(homeScanSrc, 'const shelterGeometryPositions') + between(prioritiesSrc, 'const TOOL_NAME', 'const BUILDER_ITEM_STALL_LIMIT')), h);
     return h.findShelterNearHome();
   };
   const damaged = findCheck(shelterBot(full2));
@@ -398,7 +400,7 @@ await check('Shelters: shelter goals are recognised, and the shelter check finds
     const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
       SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24 });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
-      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), h);
+      (between(homeScanSrc, 'const shelterGeometryPositions') + between(prioritiesSrc, 'const TOOL_NAME', 'const BUILDER_ITEM_STALL_LIMIT')), h);
     return h.countQualifyingSheltersNearHome();
   };
   const multiSpawn = new V3(0, 64, 0);

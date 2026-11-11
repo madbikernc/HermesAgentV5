@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: farming, food and ranching.
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -8,7 +10,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, arbiter, V3, between, actionFn, timeoutFn, makeBot, context, shelter, check, longterm, hungerWorld, farmGoalSrc, farmGoalWorld, passedCount } from './_harness.mjs';
+import { actionCases, actionHandlerSrc, actions, index, arbiter, V3, between, actionFn, timeoutFn, makeBot, context, shelter, check, longterm, hungerWorld, farmGoalSrc, farmGoalWorld, passedCount } from './_harness.mjs';
 
 
 await check('MB-16 EXPLORE <feature> parses to scouting; plain EXPLORE still gathers', async () => {
@@ -57,9 +59,9 @@ await check('Survival (Tier 1): survivalPriorityItemSatisfied re-checks real sta
 
 await check('MB-12 heartbeat re-announces the goal and expires silent peers', async () => {
   const sent = []; const otherBotGoals = new Map([['mc-bob', 'mine'], ['mc-nell', 'farm']]);
-  const c = vm.createContext({ console: { log() {} }, USERNAME: 'Mayor', Date, otherBotGoals, setInterval() {},
+  const c = vm.createContext({ console: { log() {} }, USERNAME: 'Mayor', Date, otherBotGoals, setInterval() {}, guardedInterval() {},
     currentGoal: { description: 'coordinate' }, broadcastGoalState: (...a) => { sent.push(a); } });
-  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, '// goal every GOAL_HEARTBEAT_MS', 'setInterval(goalHeartbeatTick'), c);
+  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, '// goal every GOAL_HEARTBEAT_MS', 'guardedInterval(goalHeartbeatTick'), c);
   const now = 10_000_000;
   vm.runInContext(`otherBotGoalSeenAt.set("mc-bob", ${now - 60_000}); otherBotGoalSeenAt.set("mc-nell", ${now - 3_600_000});`, c);
   c.goalHeartbeatTick(now);
@@ -82,7 +84,7 @@ await check('Food: a failed fetch backs off instead of failing "eat" every 15 se
 
 
 await check('Farm goals: farming and ranching goals are recognised; iron farms and wool are not', async () => {
-  const c = vm.createContext({ setInterval() {}, Date });
+  const c = vm.createContext({ setInterval() {}, guardedInterval() {}, Date });
   vm.runInContext(farmGoalSrc(), c);
   const t = (d) => c.farmTaskFor(d);
   assert.equal(t('start a farm and bring back some real food from it -- till ground, plant seeds'), 'farm');
@@ -189,15 +191,15 @@ await check('Ripe crops: a failed routine harvest backs off 15 minutes; a cancel
     farmStatus: () => ({ ripe: 3, growing: 0 }), routineBlocked: () => false,
     arbiter: { OWNERS: { ROUTINE: 1 }, requestControl: async () => ({ release() {} }) },
     performAction: async (b, a) => { calls.push(a); return reply; } });
-  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'setInterval(() => {'), c);
+  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'guardedInterval(() => {'), c);
   await c.checkRipeCrops(); await c.checkRipeCrops();
   assert.equal(calls.length, 1, 'backing off after the failure');
   assert.deepEqual({ ...calls[0] }, { type: 'harvest', onlyRipe: true });
   const c2 = vm.createContext({ ...c, performAction: async (b, a) => { calls.push(a); return { ok: false, cancelled: true, text: 'stopped' }; } });
-  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'setInterval(() => {'), c2);
+  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'guardedInterval(() => {'), c2);
   await c2.checkRipeCrops(); await c2.checkRipeCrops();
   assert.equal(calls.length, 3, 'an interrupted harvest is retried');
-  assert.match(actions, /if \(total\) await collectDrops/, 'drops are collected only after a real harvest');
+  assert.match(actionHandlerSrc, /if \(total\) await collectDrops/, 'drops are collected only after a real harvest');
 });
 
 
@@ -320,7 +322,7 @@ await check('gather_seeds: breaks grass near her and picks up the seeds that dro
     goals: { GoalNear: class {} }, withTimeout: (p) => p, ACTION_TIMEOUT_MS: 1000, SEED_GRASS: ['short_grass', 'grass'],
     GATHER_SEEDS_MAX_DIGS: 64, ok: (text) => ({ ok: true, text }), fail: (text) => ({ ok: false, text }),
     collectDrops: async () => { inv.push({ name: 'wheat_seeds', count: 1 }); } });
-  const src = between(actions, '    case "gather_seeds": {', '\n    case "');
+  const src = between(actionCases, '    case "gather_seeds": {', '\n    case "');
   vm.runInContext(`async function run(action, token) { switch (action.type) {${src}} }`, c);
   const r = await c.run({ type: 'gather_seeds', count: 1 }, { cancelled: false });
   assert.equal(dug.length, 3, 'all three grass blocks broken');
@@ -359,7 +361,7 @@ await check('Ranch goals: a species whose animals are gone is chosen again; with
   goal.ranchSpecies = null;
   const step = await c.ranchStep(goal, null);
   assert.equal(calls.at(-1), 'explore', `no animals in sight: she walks out to find some -- ${step.text}`);
-  assert.match(between(actions, '    case "herd_to_pen": {', '\n    case "'), /<= HERD_SEARCH_RADIUS\)/, 'herd_to_pen looks HERD_SEARCH_RADIUS out');
+  assert.match(between(actionCases, '    case "herd_to_pen": {', '\n    case "'), /<= HERD_SEARCH_RADIUS\)/, 'herd_to_pen looks HERD_SEARCH_RADIUS out');
   assert.match(actions, /const HERD_SEARCH_RADIUS = 64;/);
 });
 

@@ -1,5 +1,10 @@
-// Version: 1.107.0
+// Version: 2.0.0
 //
+// 2.0.0 (2026-11-10): every action moved unchanged out of performActionAs()'s switch into its own
+// file under actions/ (41 files, the largest 12k), dispatched by ACTION_HANDLERS -- so self-repair,
+// which rewrites one whole file under 40000 chars, can fix an action. The helpers the actions share
+// stay here, now exported; the no-op try/finally that only existed to avoid re-indenting the switch
+// is gone.
 // 1.107.0 (2026-11-07): every chest search (loot, the chest-first fallback, store, consolidation)
 // reaches CHEST_SEARCH_RADIUS, 128 blocks (was 32); a chest beyond 40 is walked to in hops (hopToward).
 // 1.106.0 (2026-11-07): "store" picks the chest already holding that item or its kind (rankStoreChests,
@@ -1183,8 +1188,49 @@ import { listState, setState } from "./memory.js";
 import { holdDoorsOpen, isDoorway } from "./swim-movements.js";
 import { bedHalves, chestHalves, wouldBlockAccess, findAccessObstructions, isLivingSpaceWall,
          ACCESS_SCAN_RADIUS, shelterInteriorsNear, posKey } from "./shelter.js";
+import { stopAction } from "./actions/stop.js";
+import { gotoAction } from "./actions/goto.js";
+import { followAction } from "./actions/follow.js";
+import { mineAction } from "./actions/mine.js";
+import { exploreAction } from "./actions/explore.js";
+import { craftAction } from "./actions/craft.js";
+import { lootAction } from "./actions/loot.js";
+import { attackAction } from "./actions/attack.js";
+import { fleeAction } from "./actions/flee.js";
+import { eatAction } from "./actions/eat.js";
+import { huntAction } from "./actions/hunt.js";
+import { gatherSeedsAction } from "./actions/gather-seeds.js";
+import { fishAction } from "./actions/fish.js";
+import { giveAction } from "./actions/give.js";
+import { gohomeAction } from "./actions/gohome.js";
+import { sleepAction } from "./actions/sleep.js";
+import { smeltAction } from "./actions/smelt.js";
+import { placeAction } from "./actions/place.js";
+import { placeHomeAction } from "./actions/place-home.js";
+import { lightAreaAction } from "./actions/light-area.js";
+import { clearAccessAction } from "./actions/clear-access.js";
+import { buildAction } from "./actions/build.js";
+import { patchShelterAction } from "./actions/patch-shelter.js";
+import { refaceShelterAction } from "./actions/reface-shelter.js";
+import { buildCommunalShelterAction } from "./actions/build-communal-shelter.js";
+import { buildPenAction } from "./actions/build-pen.js";
+import { herdToPenAction } from "./actions/herd-to-pen.js";
+import { repairTerrainAction } from "./actions/repair-terrain.js";
+import { storeAction } from "./actions/store.js";
+import { consolidateChestsAction } from "./actions/consolidate-chests.js";
+import { tradeAction } from "./actions/trade.js";
+import { recoverAction } from "./actions/recover.js";
+import { harvestAction } from "./actions/harvest.js";
+import { plantSaplingAction } from "./actions/plant-sapling.js";
+import { breedAction } from "./actions/breed.js";
+import { harvestHiveAction } from "./actions/harvest-hive.js";
+import { getWoolAction } from "./actions/get-wool.js";
+import { placeBedAction } from "./actions/place-bed.js";
+import { shearAction } from "./actions/shear.js";
+import { milkAction } from "./actions/milk.js";
+import { enchantAction } from "./actions/enchant.js";
 
-const { goals } = pathfinderPkg;
+export const { goals } = pathfinderPkg;
 
 // 2026-09-08 ("the bots just stand around most of the time"): raised 60s -> 90s. Real evidence:
 // wanderAndRetryFind() now takes up to 3 wander hops (its own 2026-09-08 fix, see its header
@@ -1195,21 +1241,21 @@ const { goals } = pathfinderPkg;
 // real cancellation via withTimeout's required onTimeout callback, so a larger ceiling doesn't
 // add a new risk class -- it just means a genuinely stuck action takes a bit longer to be
 // force-cancelled.
-const ACTION_TIMEOUT_MS = 90_000;
+export const ACTION_TIMEOUT_MS = 90_000;
 // A real Minecraft night (or the wait for it to naturally pass while sleeping) runs several
 // real-world minutes even at normal speed -- ACTION_TIMEOUT_MS (60s) would abort a perfectly
 // normal night's sleep as a "failure." This is a safety backstop for something going genuinely
 // wrong (a stuck day/night cycle, a disabled gamerule), not the expected case.
-const SLEEP_TIMEOUT_MS = 15 * 60_000;
+export const SLEEP_TIMEOUT_MS = 15 * 60_000;
 // Vanilla's bite timer is randomized per cast (roughly 5-30s unenchanted, longer is possible) --
 // generous headroom over the realistic range rather than a tight bound, same reasoning as
 // SLEEP_TIMEOUT_MS above. A cast that genuinely never bites (bad water, e.g. too shallow/enclosed)
 // should time out and get reported as a real failure, not hang the action loop indefinitely.
-const FISH_TIMEOUT_MS = 90_000;
+export const FISH_TIMEOUT_MS = 90_000;
 // Vanilla smelts one item per 10 real-world seconds with normal fuel/speed -- generous headroom
 // per item rather than a tight bound, consistent with this being local compute with no per-call
 // cost to economize on.
-const SMELT_TIMEOUT_MS = 3 * 60_000;
+export const SMELT_TIMEOUT_MS = 3 * 60_000;
 
 // Exported (2026-09-10) so "light_area" (its own real bug fix -- see that case's own header) and
 // index.js's checkLighting()/checkHomeLighting() share exactly one definition instead of two
@@ -1321,11 +1367,11 @@ export const FOOD_NAMES = [
 // What "hunt" goes after: each drops a raw meat in FOOD_NAMES.
 export const HUNTABLE_ANIMALS = new Set(["cow", "mooshroom", "pig", "sheep", "rabbit", "chicken"]);
 // 32 found nothing around home on 2026-11-01; 64 found 15 chickens.
-const HUNT_RANGE = 64;
+export const HUNT_RANGE = 64;
 
 // Suffix-matched, same convention as equipment.js -- what's worth pulling out of a chest.
 // Food/blocks/misc items are left behind; this is specifically about gearing up.
-const GEAR_SUFFIXES = [
+export const GEAR_SUFFIXES = [
   "_helmet", "_chestplate", "_leggings", "_boots", "_sword", "_axe", "_pickaxe", "_shovel", "_hoe",
 ];
 
@@ -1337,7 +1383,7 @@ const GEAR_SUFFIXES = [
 // real armor-point/mining-level math (gold in particular is inconsistent in actual vanilla rules
 // between tools and armor) -- good enough to answer "would she end up worse than before," which
 // is all this check needs.
-const GEAR_TIER_RANK = {
+export const GEAR_TIER_RANK = {
   wood: 0, wooden: 0, leather: 0,
   golden: 1, gold: 1,
   stone: 2, chainmail: 2,
@@ -1348,7 +1394,7 @@ const GEAR_TIER_RANK = {
 
 // Returns -1 for an unrecognized material (e.g. a modded item) rather than guessing -- callers
 // treat that as "no tier data, don't block on quality" and fall back to the has-one/has-none check.
-function gearTierRank(itemName, suffix) {
+export function gearTierRank(itemName, suffix) {
   const material = itemName.slice(0, itemName.length - suffix.length);
   return material in GEAR_TIER_RANK ? GEAR_TIER_RANK[material] : -1;
 }
@@ -1365,7 +1411,7 @@ function gearTierRank(itemName, suffix) {
 // that isn't armor/a weapon/a tool. Doesn't prefer the best tier if a chest happens to hold more
 // than one -- tryTakeFromThisChest() takes whichever matches first, same as it always has; gear
 // is near-universally requested one at a time, so "any real instance" is enough to satisfy this.
-function gearCategoryNames(bot, itemName) {
+export function gearCategoryNames(bot, itemName) {
   const suffix = GEAR_SUFFIXES.find((s) => itemName.endsWith(s));
   if (!suffix) return [itemName];
   return Object.keys(bot.registry.itemsByName).filter((name) => name.endsWith(suffix));
@@ -1419,7 +1465,7 @@ export const SKILL_ACTION_VERBS = new Set([
 // needed an ingot and having no way to get one beyond hoping a chest had it). Keyed by the
 // item the bot names (the OUTPUT, same convention as ACTION CRAFT), each mapping to the raw
 // materials that smelt into it, checked against her inventory in order.
-const SMELT_RECIPES = {
+export const SMELT_RECIPES = {
   iron_ingot: ["raw_iron", "iron_ore", "deepslate_iron_ore"],
   copper_ingot: ["raw_copper", "copper_ore", "deepslate_copper_ore"],
   gold_ingot: ["raw_gold", "gold_ore", "deepslate_gold_ore", "nether_gold_ore"],
@@ -1435,7 +1481,7 @@ const SMELT_RECIPES = {
 // still valid fuel and a reasonable fallback since they're often what's actually on hand).
 const FUEL_PREFERENCE = ["coal", "charcoal", "coal_block", "lava_bucket", "blaze_rod"];
 
-function pickFuel(bot) {
+export function pickFuel(bot) {
   for (const name of FUEL_PREFERENCE) {
     const item = bot.inventory.items().find((i) => i.name === name);
     if (item) return item;
@@ -1502,7 +1548,7 @@ const GENERIC_BLOCK_ALIASES = {
   lapis_lazuli: "lapis_ore", redstone: "redstone_ore",
 };
 
-function resolveBlockFamily(bot, requestedName) {
+export function resolveBlockFamily(bot, requestedName) {
   const name = GENERIC_BLOCK_ALIASES[requestedName] || requestedName;
 
   const oreFamily = ORE_FAMILIES.find((family) => family.includes(name));
@@ -1615,8 +1661,8 @@ const EXPLORE_TIMEOUT_MS = 15_000;
 // many blocks away gets ONE unhopped bot.collectBlock.collect() pathfind straight to it, not a
 // hop-capped walk -- kept well under bot.pathfinder.searchRadius's own 48-block OOM ceiling (this
 // file's own established caution, see EXPLORE_DISTANCE's header above) even when raised.
-const MINE_SEARCH_RADIUS = parseInt(process.env.MC_MINE_SEARCH_RADIUS || "32", 10);
-const EXPLORE_SEARCH_RADIUS = parseInt(process.env.MC_EXPLORE_SEARCH_RADIUS || "32", 10);
+export const MINE_SEARCH_RADIUS = parseInt(process.env.MC_MINE_SEARCH_RADIUS || "32", 10);
+export const EXPLORE_SEARCH_RADIUS = parseInt(process.env.MC_EXPLORE_SEARCH_RADIUS || "32", 10);
 // Review MB-16: blocks that only (or overwhelmingly) occur at a given feature -- what EXPLORE
 // <feature> scouts for. Keys are the feature words the planner/classifier may pass.
 export const SCOUT_FEATURE_BLOCKS = {
@@ -1690,7 +1736,7 @@ export async function findRememberedLocation(resourceName, from = null) {
 
 // The local-scan-empty fallback every caller shares: walk to the nearest remembered spot, rescan
 // from there, and forget the spot if the rescan still comes up empty.
-async function visitRememberedSpot(bot, token, resourceName, rescan) {
+export async function visitRememberedSpot(bot, token, resourceName, rescan) {
   const remembered = await findRememberedLocation(resourceName, bot.entity.position).catch(() => null);
   if (!remembered) return [];
   await gotoRememberedSpot(bot, token, remembered);
@@ -1709,11 +1755,11 @@ async function visitRememberedSpot(bot, token, resourceName, rescan) {
 // Direct request, 2026-11-07: "expand the range of 'nearby chests' from 32 to 128 -- you keep using
 // 32 as 'nearby' and keep learning that it's too small a range." Every chest search (loot, the
 // chest-first fallback for mine/craft, store, consolidation) looks this far.
-const CHEST_SEARCH_RADIUS = 128;
+export const CHEST_SEARCH_RADIUS = 128;
 
 // A chest up to CHEST_SEARCH_RADIUS away is walked to in EXPLORE_DISTANCE hops, the way
 // wanderAndRetryFind walks toward its beacon, before the final short GoalNear to it.
-async function hopToward(bot, token, pos) {
+export async function hopToward(bot, token, pos) {
   for (let hop = 0; hop < MAX_DIRECTED_HOPS && !token.cancelled; hop++) {
     const here = bot.entity.position;
     const dx = pos.x - here.x, dz = pos.z - here.z;
@@ -1743,7 +1789,7 @@ async function gotoRememberedSpot(bot, token, pos) {
   }
 }
 
-async function wanderAndRetryFind(bot, token, findOptions) {
+export async function wanderAndRetryFind(bot, token, findOptions) {
   if (token.cancelled) return [];
   // Callers only reach here after their own initial findBlocks(findOptions) already came up
   // empty -- no need to repeat that exact same scan.
@@ -1788,7 +1834,7 @@ async function wanderAndRetryFind(bot, token, findOptions) {
 // "scan a wider radius" to beacon off, only "walk somewhere new and look again." A few random
 // short hops, same distance/timeout "explore" already uses to look around, before genuinely
 // giving up.
-async function wanderAndRetryForSheep(bot, token) {
+export async function wanderAndRetryForSheep(bot, token) {
   const nearestSheep = () => Object.values(bot.entities)
     .filter((e) => e.name === "sheep" && e.position.distanceTo(bot.entity.position) <= 32)
     .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
@@ -1835,7 +1881,7 @@ function findBoatItem(bot) {
 // which DOES need a crafting table (the personal grid is only 2x2), confirmed after an initial
 // version of this wrongly assumed otherwise and failed live. Same tableBlock-lookup pattern the
 // "craft" action already uses.
-async function ensureBoat(bot) {
+export async function ensureBoat(bot) {
   const existing = findBoatItem(bot);
   if (existing) return existing;
   const planks = bot.inventory.items().find((i) => i.name.endsWith("_planks") && i.count >= 5);
@@ -1940,7 +1986,7 @@ async function tryLaunchBoat(bot, token, boatItem, launch) {
   }
 }
 
-async function attemptBoatCrossing(bot, token, target) {
+export async function attemptBoatCrossing(bot, token, target) {
   const boatItem = await ensureBoat(bot);
   if (!boatItem) return false;
 
@@ -2014,7 +2060,7 @@ function gearSignature(bot) {
   return JSON.stringify([carried, worn, bot.heldItem?.name ?? "-"]);
 }
 
-async function refreshGear(bot) {
+export async function refreshGear(bot) {
   const signature = gearSignature(bot);
   if (lastGearSignature.get(bot) === signature) return;
   try {
@@ -2039,7 +2085,7 @@ async function refreshGear(bot) {
 // is required now specifically so every call site cancels the real underlying work (pathfinder
 // goal, collectBlock task, or pvp target) the moment the timeout fires, not just how this
 // function's own caller interprets the result.
-function withTimeout(promise, ms, onTimeout) {
+export function withTimeout(promise, ms, onTimeout) {
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
@@ -2094,7 +2140,7 @@ const COLLECT_THINK_TIMEOUT_MS = 3000;
 const COLLECT_PATH_RETRIES = 2;
 const COLLECT_DIG_SETTLE_MS = 10_000;
 
-async function collectBlocks(bot, token, blocks) {
+export async function collectBlocks(bot, token, blocks) {
   const savedThink = bot.pathfinder.thinkTimeout;
   bot.pathfinder.thinkTimeout = Math.max(savedThink, COLLECT_THINK_TIMEOUT_MS);
   try {
@@ -2177,7 +2223,7 @@ function recipeInputs(recipe) {
 // is, check whether the shortfall is one of the common intermediates above and, if so, craft
 // that first before retrying. depth guards against a pathological cycle; the known chains above
 // are acyclic in practice (stick/table <- planks <- log) so this rarely recurses past 1.
-async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
+export async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
   const itemDef = bot.registry.itemsByName[itemName];
   if (!itemDef) throw new Error(`unknown item "${itemName}"`);
 
@@ -2263,7 +2309,7 @@ async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
 // "never place a block that impedes access to a chest" rule needs the same two positions to
 // decide whether a placement would CREATE this condition, and two copies of a double-chest
 // pairing convention drifting apart is exactly what extracting this helper avoided the first time.
-function chestObstructed(bot, chestBlock) {
+export function chestObstructed(bot, chestBlock) {
   return chestHalves(bot, chestBlock).some((half) => bot.blockAt(half.offset(0, 1, 0))?.boundingBox === "block");
 }
 
@@ -2289,7 +2335,7 @@ const CHEST_MISS_TTL_MS = 60_000;
 const CHEST_MISS_RADIUS = 16;
 const chestMisses = new Map(); // sorted item names -> { at, pos }
 
-async function tryTakeFromNearbyChest(bot, token, itemNames, wantCount) {
+export async function tryTakeFromNearbyChest(bot, token, itemNames, wantCount) {
   const missKey = [...itemNames].sort().join(",");
   const miss = chestMisses.get(missKey);
   if (miss && Date.now() - miss.at < CHEST_MISS_TTL_MS && bot.entity?.position.distanceTo(miss.pos) <= CHEST_MISS_RADIUS) {
@@ -2353,7 +2399,7 @@ async function searchChestsFor(bot, token, itemNames, wantCount) {
 // remembered-chest fallback share exactly one open/withdraw/snapshot implementation rather than
 // two independently-drifting copies. Returns the withdrawal result object, "cancelled" (caller
 // should stop entirely), or null (this specific chest didn't have enough -- try another).
-async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount) {
+export async function tryTakeFromThisChest(bot, token, chestBlock, itemNames, wantCount) {
   await hopToward(bot, token, chestBlock.position);
   if (token.cancelled) return "cancelled";
   try {
@@ -2450,9 +2496,9 @@ const BOT_PROXIMITY_AVOID_DISTANCE = 6;
 // close to another bot still leaves enough real candidates -- findBlocks' own `count` caps
 // results BEFORE this filter can run, so asking for only the bare minimum up front would silently
 // defeat this the moment the nearest few happen to be the contested ones.
-const CONTENTION_SEARCH_OVERFETCH = 3;
+export const CONTENTION_SEARCH_OVERFETCH = 3;
 
-function filterAwayFromOtherBots(bot, positions) {
+export function filterAwayFromOtherBots(bot, positions) {
   const otherPositions = [...OTHER_BOT_USERNAMES]
     .filter((name) => name !== bot.username)
     .map((name) => bot.players[name]?.entity?.position)
@@ -2474,7 +2520,7 @@ function filterAwayFromOtherBots(bot, positions) {
 // that genuinely doesn't need an entry -- an oak_log block drops an oak_log item, same name.
 // Small and deliberately curated, same pragmatic scope as SMELT_RECIPES/FUEL_PREFERENCE above,
 // not an attempt at exhaustive coverage of every block in the game.
-const MINE_DROPS = {
+export const MINE_DROPS = {
   coal_ore: "coal", deepslate_coal_ore: "coal",
   iron_ore: "raw_iron", deepslate_iron_ore: "raw_iron",
   copper_ore: "raw_copper", deepslate_copper_ore: "raw_copper",
@@ -2489,7 +2535,7 @@ const MINE_DROPS = {
 // species, or both the stone- and deepslate-layer variant of one ore) to the real item name(s)
 // that would already satisfy the same need if sitting in a chest, deduplicated since a whole ore
 // family usually collapses to one drop item.
-function itemNamesForMinedBlocks(bot, blockIds) {
+export function itemNamesForMinedBlocks(bot, blockIds) {
   const names = blockIds.map((id) => {
     const blockName = bot.registry.blocks[id]?.name;
     return blockName ? (MINE_DROPS[blockName] || blockName) : null;
@@ -2503,7 +2549,7 @@ function itemNamesForMinedBlocks(bot, blockIds) {
 // Vanilla doesn't stop a player from using a bed next to water/lava, so this is a check nothing
 // upstream enforces. Scans a generous box around the bed rather than just the block it's on,
 // since the actual sleeping/wake-up position can land a block or two off the bed block itself.
-function bedNearHazard(bot, bedPos) {
+export function bedNearHazard(bot, bedPos) {
   for (let dx = -2; dx <= 2; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
       for (let dz = -2; dz <= 2; dz++) {
@@ -2538,7 +2584,7 @@ function looksLikeBuilding(block) {
 
 // radius=6, direct request 2026-09-09 ("'near a building' is defined as 6 blocks") -- was 3
 // (a guess) until specified exactly.
-function nearBuilding(bot, pos, radius = 6) {
+export function nearBuilding(bot, pos, radius = 6) {
   for (let dx = -radius; dx <= radius; dx++) {
     for (let dy = -1; dy <= 2; dy++) {
       for (let dz = -radius; dz <= radius; dz++) {
@@ -2555,7 +2601,7 @@ function nearBuilding(bot, pos, radius = 6) {
 // around center's own Y, not just center's exact level, to find the actual ground surface.
 // Skips the immediate trunk area (radius < 2) so the sapling doesn't get crammed right against
 // the tree it's supposed to be planted "near," not "inside."
-function findPlantableSpotNear(bot, center, radius) {
+export function findPlantableSpotNear(bot, center, radius) {
   const groundIds = [bot.registry.blocksByName.grass_block?.id, bot.registry.blocksByName.dirt?.id]
     .filter((id) => id !== undefined);
   for (let dx = -radius; dx <= radius; dx++) {
@@ -2583,7 +2629,7 @@ function findPlantableSpotNear(bot, center, radius) {
 // independently-drifting copy of which food tempts which species.
 // 2026-11-06: 32 blocks found no chicken near Dale's new pen 20 times running; the animals that
 // made pickRanchSpecies() choose chickens were up to 48 from the pen.
-const HERD_SEARCH_RADIUS = 64;
+export const HERD_SEARCH_RADIUS = 64;
 
 const BREEDING_FOOD = {
   cow: ["wheat"], sheep: ["wheat"], pig: ["carrot", "potato", "beetroot"],
@@ -2613,7 +2659,7 @@ async function loadPenLocation() {
   }
 }
 
-async function savePenLocation(center, gate) {
+export async function savePenLocation(center, gate) {
   try {
     await mkdir(path.dirname(PEN_FILE), { recursive: true });
     await writeFile(PEN_FILE, JSON.stringify({
@@ -2629,9 +2675,9 @@ async function savePenLocation(center, gate) {
 // fetches some -- index.js checkHunger) or "seeds" (anything harvest can plant).
 export const SEED_NAMES = ["wheat_seeds", "carrot", "potato", "beetroot_seeds"];
 // What "gather_seeds" breaks: each drops wheat seeds about one time in eight.
-const SEED_GRASS = ["short_grass", "grass", "tall_grass", "fern", "large_fern"];
-const GATHER_SEEDS_MAX_DIGS = 64;
-const LOOT_GROUPS = { food: FOOD_NAMES, seeds: SEED_NAMES };
+export const SEED_GRASS = ["short_grass", "grass", "tall_grass", "fern", "large_fern"];
+export const GATHER_SEEDS_MAX_DIGS = 64;
+export const LOOT_GROUPS = { food: FOOD_NAMES, seeds: SEED_NAMES };
 
 // Verified achievements -- recorded by the action that actually did the thing (harvest picked a ripe
 // crop, herd_to_pen got an animal into the pen, breed saw a baby appear), never by a planner's claim.
@@ -2723,7 +2769,7 @@ const FARM_PLOT_SIZE = 8;
 const TILLABLE = new Set(["dirt", "grass_block", "dirt_path", "rooted_dirt"]);
 const CLEAR_ABOVE = new Set(["short_grass", "grass", "tall_grass", "fern", "large_fern", "dead_bush",
   ...BREEDING_FOOD.bee]);
-function tillableAt(bot, pos) {
+export function tillableAt(bot, pos) {
   const ground = bot.blockAt(pos), above = bot.blockAt(pos.offset(0, 1, 0));
   return !!ground && TILLABLE.has(ground.name) && !!above && (above.name === "air" || CLEAR_ABOVE.has(above.name));
 }
@@ -2786,9 +2832,9 @@ export function bedItemFor(bot) {
 // the busy-loop, short enough to retry if the world genuinely changes later (a floor gets filled
 // in, chunks catch up after a fresh join).
 const BED_SPOT_REFUSAL_TTL_MS = 30 * 60_000;
-const refusedBedSpots = new Map(); // "x,y,z" -> refused-at timestamp
-const bedSpotKey = (p) => `${p.x},${p.y},${p.z}`;
-function isRecentlyRefusedBedSpot(p) {
+export const refusedBedSpots = new Map(); // "x,y,z" -> refused-at timestamp
+export const bedSpotKey = (p) => `${p.x},${p.y},${p.z}`;
+export function isRecentlyRefusedBedSpot(p) {
   const at = refusedBedSpots.get(bedSpotKey(p));
   return at !== undefined && Date.now() - at < BED_SPOT_REFUSAL_TTL_MS;
 }
@@ -2800,7 +2846,7 @@ function isRecentlyRefusedBedSpot(p) {
 const BED_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 // Something standing in a cell (a bot, a mob): the server refuses a bed there. The bots crowd around
 // spawn, and two of them retried the same spot beside it six times (live, 2026-09-26).
-function cellOccupied(bot, p) {
+export function cellOccupied(bot, p) {
   return Object.values(bot.entities).some((e) => e !== bot.entity && e.position &&
     Math.floor(e.position.x) === p.x && Math.floor(e.position.z) === p.z && Math.abs(e.position.y - p.y) < 2);
 }
@@ -3097,7 +3143,7 @@ export const CROP_MAX_AGE = { wheat: 7, carrots: 7, potatoes: 7, beetroots: 3 };
 // Breaking a crop (or the grass on a plot) from 2 blocks away leaves its drops on the ground -- the
 // harvested wheat never reached her inventory (live test, 2026-09-25). Walk over what's lying around
 // the spots she worked, nearest first, for at most maxMs.
-async function collectDrops(bot, token, spots, maxMs = 10_000) {
+export async function collectDrops(bot, token, spots, maxMs = 10_000) {
   const deadline = Date.now() + maxMs;
   for (let tries = 0; tries < 12 && Date.now() < deadline && !token.cancelled; tries++) {
     const drop = Object.values(bot.entities)
@@ -3143,7 +3189,7 @@ function chestKey(position) {
   return `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}`;
 }
 
-async function loadKnownChests() {
+export async function loadKnownChests() {
   try {
     return JSON.parse(await readFile(KNOWN_CHESTS_FILE, "utf8"));
   } catch {
@@ -3171,7 +3217,7 @@ async function saveKnownChests(data) {
 // can pass over a chest already known to be full. When this chest shares a kind of item with
 // another known chest nearby, the move that would bring them together is left for
 // takeConsolidationHint() (2026-11-07).
-async function recordChestSnapshot(position, items, slotCount) {
+export async function recordChestSnapshot(position, items, slotCount) {
   const known = await loadKnownChests();
   const contents = {};
   for (const item of items) contents[item.name] = (contents[item.name] || 0) + item.count;
@@ -3205,7 +3251,7 @@ export function itemFamily(name) {
   return suffix ?? name;
 }
 
-const STORE_CANDIDATE_LIMIT = 5;
+export const STORE_CANDIDATE_LIMIT = 5;
 
 // Where to put itemName: chests already holding it first, then ones holding its family, then empty
 // or never-opened ones, then the rest; a chest last seen full goes behind all of those. Nearest
@@ -3265,7 +3311,7 @@ export function findConsolidation(known, point, { involving } = {}) {
 }
 
 // Walk to a chest and open it: { chest }, { cancelled: true }, or { error }.
-async function openChestAt(bot, token, position) {
+export async function openChestAt(bot, token, position) {
   await hopToward(bot, token, position);
   if (token.cancelled) return { cancelled: true };
   try {
@@ -3309,7 +3355,7 @@ export function takeConsolidationHint() {
 // else since its last recorded snapshot simply won't be found again until its own next open
 // re-snapshots it -- the same eventual-consistency tradeoff recordChestSnapshot's own comment
 // already accepts.
-async function findKnownChestWithItem(bot, itemName, wantCount) {
+export async function findKnownChestWithItem(bot, itemName, wantCount) {
   const known = await loadKnownChests();
   let best = null, bestDist = Infinity;
   for (const entry of Object.values(known)) {
@@ -3566,7 +3612,7 @@ export async function holdsGuardAnchor(bot, isLiveSoldier) {
 // this is now just every usable bed (one entry per bed, its head block), nearest to `near` first.
 // bot.sleep() itself is what actually tells a real occupied bed apart from a free one (its own
 // specific "occupied" rejection); this is just the candidate order "sleep" tries them in.
-function nearbyBeds(bot, near) {
+export function nearbyBeds(bot, near) {
   const seen = [];
   for (const pos of bot.findBlocks({ matching: (block) => bot.isABed(block), maxDistance: 32, count: 64 })) {
     const block = bot.blockAt(pos);
@@ -3614,7 +3660,7 @@ const LOST_CONTROL = Object.freeze({ ok: false, cancelled: true, text: "somethin
 // further out was never tried. A block with an open face comes first now, and one that just
 // failed "No path" sits out MINE_UNREACHABLE_MS so the next attempt picks another.
 const MINE_UNREACHABLE_MS = 10 * 60_000;
-const MINE_RANKING_FETCH = 64;
+export const MINE_RANKING_FETCH = 64;
 const mineUnreachableUntil = new Map();
 const MINE_FACES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 
@@ -3622,14 +3668,14 @@ function hasOpenFace(bot, pos) {
   return MINE_FACES.some(([dx, dy, dz]) => bot.blockAt(pos.offset(dx, dy, dz))?.boundingBox === "empty");
 }
 
-function rankMineTargets(bot, positions) {
+export function rankMineTargets(bot, positions) {
   const now = Date.now();
   const reachable = positions.filter((pos) => (mineUnreachableUntil.get(`${pos.x},${pos.y},${pos.z}`) ?? 0) <= now);
   const open = reachable.filter((pos) => hasOpenFace(bot, pos));
   return [...open, ...reachable.filter((pos) => !open.includes(pos))];
 }
 
-function noteMineUnreachable(bot, blocks) {
+export function noteMineUnreachable(bot, blocks) {
   const until = Date.now() + MINE_UNREACHABLE_MS;
   for (const b of blocks) {
     if (bot.blockAt(b.position)?.type === b.type) mineUnreachableUntil.set(`${b.position.x},${b.position.y},${b.position.z}`, until);
@@ -3662,3087 +3708,55 @@ function logOutcome(bot, action, startedAt, result, refused = false) {
 }
 
 // `token` is the caller's live ownership token; nested sub-actions pass it straight through.
-async function performActionAs(bot, action, speaker, token) {
-  // Direct request, 2026-09-10 (Phase 2 of the approved coherence-arbiter plan). Real bug caught
-  // live while migrating the first reflex handler: `current` must actually clear once THIS call
-  // is done, for a caller that acquired it here (the common, not-yet-migrated case -- goalTick,
-  // runAction, every routine idle-tick check still call performAction() with no prior
-  // requestControl()) -- otherwise arbiter.isBusy() would report true forever after the very
-  // first action any bot ever runs, permanently short-circuiting stopCurrent()'s own
-  // cancel-before-every-new-action behavior for every action after that one. `alreadyHeld`
-  // records whether a caller had ALREADY acquired legitimate control (via requestControl(), e.g.
-  // checkSelfDefense) before calling in -- if so, releasing here would be wrong: that caller owns
-  // release via its own handle.release(), not this function. The try/finally wraps the whole
-  // switch below WITHOUT re-indenting it, a deliberate, minimal-diff choice over reformatting
-  // ~1400 existing lines for a change that doesn't touch any of their own logic.
-  // (2026-09-24: acquisition/release moved to the performAction() wrapper above; this finally
-  // is now a no-op kept only to avoid re-indenting the switch.)
-  const ok = (text) => ({ ok: true, text });
-  const fail = (text) => ({ ok: false, text });
-
-  try {
-  switch (action.type) {
-    case "stop":
-      return ok("stopped.");
-
-    case "goto": {
-      const target = bot.players[speaker]?.entity;
-      if (!target) return fail(`I can't see ${speaker} nearby.`);
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(target, 2)), ACTION_TIMEOUT_MS,
-                           () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way.");
-        return fail(`couldn't reach ${speaker}: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      return token.cancelled ? ok("stopped on the way.") : ok(`reached ${speaker}.`);
-    }
-
-    case "follow": {
-      const target = bot.players[speaker]?.entity;
-      if (!target) return fail(`I can't see ${speaker} nearby.`);
-      bot.pathfinder.setGoal(new goals.GoalFollow(target, 2), true); // dynamic: keeps tracking
-      return ok(`following ${speaker} now.`);
-    }
-
-    case "mine": {
-      const blockIds = resolveBlockFamily(bot, action.block);
-      if (!blockIds.length) return fail(`I don't recognize the block "${action.block}".`);
-      // Direct request, 2026-09-08 ("make sure it is not a functional block like a bed or a
-      // furnace... before they dig or destroy a block"). resolveBlockFamily()'s own raw
-      // single-name fallback will resolve ANY real block name, functional ones included --
-      // checked here, not inside that function, so it stays a pure "does this name exist"
-      // resolver and every caller decides for itself what's off-limits.
-      if (blockIds.some((id) => isProtectedBlockName(bot.registry.blocks[id]?.name))) {
-        return fail(`won't mine ${action.block} -- that's a placed/crafted block, not a raw resource.`);
-      }
-
-      const wantCount = action.count || 1;
-      // Direct request, 2026-09-08 ("if a resource is in a nearby chest, they should not mine
-      // it"). Checks the REAL resulting item (itemNamesForMinedBlocks/MINE_DROPS above), not the
-      // block name itself -- a chest holds raw_iron, not iron_ore.
-      //
-      // Real bug found live 2026-10-13 (direct report: "building and tooling do not [work]"): a
-      // chest holding FEWER than wantCount was still treated as fully satisfying the request --
-      // Babs looped for 20+ minutes on "found 1 ... already in a chest, no need to mine it"
-      // (wanted more) immediately followed by a craft that needed the full count and failed every
-      // time, with nothing ever mining the shortfall. Takes whatever a chest has and mines the
-      // rest herself instead of calling a partial match done.
-      const chestMatch = await tryTakeFromNearbyChest(bot, token,
-        itemNamesForMinedBlocks(bot, blockIds), wantCount);
-      if (chestMatch && chestMatch.count >= wantCount) {
-        await refreshGear(bot);
-        return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to mine it.`);
-      }
-      const stillNeed = wantCount - (chestMatch?.count ?? 0);
-
-      // Fetched wide enough for rankMineTargets() to find an exposed face beyond the nearest few.
-      const findOptions = { matching: blockIds, maxDistance: MINE_SEARCH_RADIUS,
-        count: Math.max(stillNeed * CONTENTION_SEARCH_OVERFETCH, MINE_RANKING_FETCH) };
-      let positions = bot.findBlocks(findOptions);
-      // Direct request, 2026-09-11 ("each bot uses the global world memory to gather a resource
-      // it needs, if it's not in their immediate vicinity"): a remembered position -- her own
-      // earlier scan, or another bot's, either written directly or in response to a "scout"
-      // broadcast (see index.js's noteNearbyResources()/the "scout" Buzz payload) -- is worth
-      // trying BEFORE the blind extended wander below: cheap (one RAG query, no movement) and,
-      // when it hits, a direct trip instead of a directionless search. A stale/wrong note just
-      // falls through to the exact same wander fallback that already existed, no worse off than
-      // before this existed.
-      if (!positions.length) positions = await visitRememberedSpot(bot, token, action.block, () => bot.findBlocks(findOptions));
-      if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
-      if (!positions.length) return fail(`couldn't find any ${action.block} nearby, even after looking around.`);
-      // Direct request, 2026-10-07 ("recognize walls around living spaces... do not knock holes
-      // in them"): "mine cobblestone 16" standing in the shared base is a perfectly reasonable
-      // step whose nearest 16 matches are the shelter's own walls. Filtered rather than refused
-      // -- the same cobblestone a few blocks further out is a fine answer, and refusing the whole
-      // action would turn a solvable goal step into a dead end. shelter.js's shell is deliberately
-      // not consulted for a DELIBERATE target the way pathfinder's own digging is; this is the one
-      // place a bot picks its own target by name, with no idea what it's pointing at.
-      const inWall = positions.filter((pos) => isLivingSpaceWall(bot, pos)).length;
-      if (inWall) {
-        positions = positions.filter((pos) => !isLivingSpaceWall(bot, pos));
-        console.log(`[${bot.username}] mine: skipped ${inWall} ${action.block} in a shelter wall`);
-        if (!positions.length) {
-          return fail(`the only ${action.block} nearby is part of a shelter wall -- not digging that out.`);
-        }
-      }
-      positions = rankMineTargets(bot, positions);
-      if (!positions.length) {
-        return fail(`every ${action.block} nearby is one I just couldn't path to -- trying elsewhere later.`);
-      }
-      positions = filterAwayFromOtherBots(bot, positions).slice(0, stillNeed);
-      const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
-      // Report what she actually found/collected, not just the name she was originally given --
-      // asked for "oak_log" but the only trees around were spruce, this should say so rather than
-      // claiming oak_log when resolveBlockFamily is what actually made that substitution work.
-      const collectedNames = [...new Set(blocks.map((b) => b.name))].join(", ");
-
-      // Direct request, 2026-09-07 ("build the water crossing mechanic" -> "do 1,2,4,5" -> a
-      // tech-tier check, following external research on how Voyager avoids wasted mining
-      // attempts by sequencing wood -> stone -> iron -> diamond tools explicitly instead of
-      // letting a model free-associate a target each cycle). Real data, not a hand-typed tier
-      // table that could drift from whatever this server's actual version considers correct:
-      // block.harvestTools (minecraft-data, confirmed live against this exact server's registry
-      // -- e.g. iron_ore requires copper/stone/iron/diamond/netherite pickaxe, gold pickaxe is
-      // deliberately absent from that list despite mining faster, matching real vanilla) is
-      // undefined for a block with no tool requirement at all (coal/wood need nothing) and a
-      // real {itemId: true} lookup otherwise. Checking her whole inventory, not just whatever's
-      // currently held, since mineflayer-tool's own equipForBlock() (already wired via
-      // mineflayer-collectblock) re-equips the best tool she owns before actually digging --
-      // this only needs to answer "does she own ANY tool that would work," not which one.
-      const toolReq = blocks[0]?.harvestTools;
-      if (toolReq && !bot.inventory.items().some((item) => toolReq[item.type])) {
-        const needed = Object.keys(toolReq).map((id) => bot.registry.items[id]?.name).filter(Boolean);
-        return fail(`need a better tool for ${collectedNames} -- one of: ${needed.join(", ")}.`);
-      }
-
-      try {
-        await withTimeout(collectBlocks(bot, token, blocks), ACTION_TIMEOUT_MS,
-                           () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
-      } catch (err) {
-        if (token.cancelled) return ok("stopped mining early.");
-        if (err.name === "NoPath" || /no path/i.test(err.message)) noteMineUnreachable(bot, blocks);
-        return fail(`had trouble mining ${collectedNames}: ${err.message}`);
-      } finally {
-        if (!token.cancelled) await refreshGear(bot); // may have picked up something worth wearing/wielding
-      }
-      if (token.cancelled) return ok("stopped mining early.");
-      return ok(chestMatch ? `took ${chestMatch.count} ${chestMatch.name} from a chest and collected some ${collectedNames}.`
-        : `collected some ${collectedNames}.`);
-    }
-
-    case "explore": {
-      // Direct request, 2026-09-08 ("if they can't craft, they should explore, and find
-      // resources for later"). For when a specific target isn't known -- CRAFT failed on a
-      // missing ingredient with nothing obvious nearby, but there's no one named block worth a
-      // dedicated "mine" attempt. Scans broadly for ANY common raw material (every log species,
-      // every ore family -- the same real id sets resolveBlockFamily() already resolves for a
-      // single request) instead of one target, reusing the same directed extended-search
-      // wandering wanderAndRetryFind() already relies on for "mine." Gathers a full batch of
-      // whatever's found first, not just enough for right now -- the travel is the real cost
-      // here, not the extra inventory slots, so "find resources for later" means actually
-      // stockpiling while she's already out looking, not just solving today's shortage.
-      // Review MB-16, 2026-09-24: EXPLORE used to succeed on the spot whenever a nearby chest held
-      // any common resource -- Wade could "explore" by withdrawing home stock, and a "find a
-      // village" goal was satisfied by a stocked chest. Chest withdrawal is LOOT's job, so that
-      // shortcut is gone. `action.feature` (EXPLORE <feature>) is a separate scouting mode that
-      // only succeeds when a block unique to that feature is actually found.
-      if (action.feature) {
-        const featureBlocks = SCOUT_FEATURE_BLOCKS[action.feature];
-        if (!featureBlocks) return fail(`don't know how to recognize a ${action.feature}.`);
-        const ids = featureBlocks.map((name) => bot.registry.blocksByName[name]?.id).filter((id) => id !== undefined);
-        const scoutOptions = { matching: ids, maxDistance: EXPLORE_SEARCH_RADIUS * 2, count: 1 };
-        let found = bot.findBlocks(scoutOptions);
-        if (!found.length) found = await wanderAndRetryFind(bot, token, scoutOptions);
-        if (token.cancelled) return ok("stopped scouting early.");
-        if (!found.length) return fail(`scouted around but found no sign of a ${action.feature}.`);
-        const at = found[0].floored?.() ?? found[0];
-        return ok(`found a ${action.feature} (${bot.blockAt(found[0])?.name ?? "landmark"} at ${at.x}, ${at.y}, ${at.z})`);
-      }
-
-      const blockIds = getResourceBlockNames(bot)
-        .map((name) => bot.registry.blocksByName[name]?.id)
-        .filter((id) => id !== undefined);
-
-      const EXPLORE_BATCH_COUNT = 8;
-
-      const findOptions = { matching: blockIds, maxDistance: EXPLORE_SEARCH_RADIUS, count: EXPLORE_BATCH_COUNT * CONTENTION_SEARCH_OVERFETCH };
-      let positions = bot.findBlocks(findOptions);
-      if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
-      if (!positions.length) return fail("didn't find anything useful nearby, even after looking around.");
-      positions = filterAwayFromOtherBots(bot, positions).slice(0, EXPLORE_BATCH_COUNT);
-      const blocks = positions.map((pos) => bot.blockAt(pos)).filter(Boolean);
-      const collectedNames = [...new Set(blocks.map((b) => b.name))].join(", ");
-
-      // Same tool-tier gate "mine" already applies -- no point starting a collect on ore she
-      // can't yet break, same real block.harvestTools data.
-      const toolReq = blocks[0]?.harvestTools;
-      if (toolReq && !bot.inventory.items().some((item) => toolReq[item.type])) {
-        return fail(`found ${collectedNames} but don't have a good enough tool for it yet.`);
-      }
-
-      try {
-        await withTimeout(collectBlocks(bot, token, blocks), ACTION_TIMEOUT_MS,
-                           () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
-      } catch (err) {
-        if (token.cancelled) return ok("stopped exploring early.");
-        return fail(`found ${collectedNames} but had trouble gathering it: ${err.message}`);
-      } finally {
-        if (!token.cancelled) await refreshGear(bot);
-      }
-      return token.cancelled ? ok("stopped exploring early.") : ok(`explored and found some ${collectedNames}.`);
-    }
-
-    case "craft": {
-      if (action.item === "bed" || action.item === "beds") action = { ...action, item: bedItemFor(bot) }; // beds come in colours
-      const itemDef = bot.registry.itemsByName[action.item];
-      if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
-
-      // Direct report, 2026-09-08 ("they keep creating crafting tables, even when there is a
-      // number of them nearby"). Real gap: the "does this need a table" check just below only
-      // ever asks whether crafting THIS item needs a DIFFERENT existing table/furnace as a
-      // station -- crafting_table's own recipe needs no table at all (4 planks, fits the
-      // personal 2x2 grid), so that check always says "no" for it and falls straight through to
-      // making a brand new one, never once checking whether an instance of what she's ABOUT TO
-      // MAKE already exists in reach. Same real gap applies to furnace (also craftable without a
-      // table, also commonly over-made). Reusable utility blocks -- unlike a personal tool or a
-      // piece of armor, there's no reason to own a SECOND one when the first is right there.
-      // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 2 -- "a bot about to make any of these
-      // checks shared world-memory... not just her own immediate 32-block view, before spending
-      // materials on a duplicate"): extends the local-only check above with the SAME fleet-wide
-      // findRememberedLocation() fallback tableWouldHelp's own workbench search already uses
-      // (below) -- a table or furnace someone else placed out of this bot's own 32-block view,
-      // or one she saw earlier and wandered away from, is exactly as worth remembering as a
-      // resource vein. Chest deliberately excluded from this list: unlike a table or furnace, a
-      // chest can legitimately need a second one once the first is full, so "one exists
-      // somewhere" isn't by itself a reason to skip making another -- bedItemFor/findBedSites and
-      // the shelter_capacity checklist item already have their own, fuller-aware "don't duplicate"
-      // logic for beds and shelters respectively.
-      const REUSABLE_UTILITY_BLOCKS = ["crafting_table", "furnace"];
-      if (REUSABLE_UTILITY_BLOCKS.includes(action.item)) {
-        const existingType = bot.registry.blocksByName[action.item];
-        const findExisting = () => existingType ? bot.findBlocks({ matching: existingType.id, maxDistance: 32, count: 1 }) : [];
-        let existing = findExisting();
-        if (!existing.length) existing = await visitRememberedSpot(bot, token, action.item, findExisting);
-        if (existing.length) {
-          return ok(`already have a ${action.item} nearby, no need to make another.`);
-        }
-      }
-
-      // Direct request, 2026-09-08 ("the duplicate crafting check should be for all resources as
-      // well as utilities like crafting tables"). Generalizes the check above beyond just
-      // crafting_table/furnace (placed WORLD blocks) to any item at all, checked against nearby
-      // CHESTS instead -- no reason to spend raw materials crafting something that's already
-      // sitting in a container within reach. gearCategoryNames() (2026-09-18) broadens this to
-      // ANY tier of the same equipment when action.item is gear -- a chest with an iron_pickaxe
-      // satisfies a "craft wooden_pickaxe" goal just as well, no reason to craft (or overlook)
-      // one just because it's not the exact material she happened to name.
-      const chestMatch = await tryTakeFromNearbyChest(bot, token,
-        gearCategoryNames(bot, action.item), action.count);
-      if (chestMatch) {
-        await refreshGear(bot);
-        return ok(`found ${chestMatch.count} ${chestMatch.name} already in a chest, no need to craft it.`);
-      }
-
-      // Does this need a table? Real bug found live 2026-10-09 (direct report: bots "repeatedly
-      // complain about crafting tables," yet never try to make one, never notice two standing
-      // right next to them, and never remember either's location). Root cause, confirmed against
-      // live logs: this used to call recipesFor(), which -- unlike recipesAll() -- filters to
-      // recipes she can afford with her CURRENT inventory. With zero planks/sticks on hand (the
-      // ordinary state before her first trip for wood), BOTH the no-table and with-table lookups
-      // came back empty regardless of what the item's real recipe needs, tableWouldHelp was
-      // always false, and the entire table search/remember/auto-make-and-place block below never
-      // ran at all. Confirmed live: Nell's "craft wooden_pickaxe" failed in 78ms -- far too fast
-      // to have pathfound anywhere or placed anything -- landing straight in craftItem()'s own
-      // generic "don't have the ingredients (might need a crafting table)" guess, which several
-      // bots then took at face value and self-proposed "gather wood to craft a crafting table"
-      // for, even though a table was never actually the blocker. recipesAll() (the same call
-      // craftItem's own fallback chain just below, and ensureBoat's own header, already use for
-      // exactly this) answers the real, inventory-independent question instead -- does crafting
-      // this item EVER need a table -- `true` satisfies its requiresTable check without needing a
-      // real Block reference yet, confirmed against mineflayer's own craft.js source; this is
-      // only checking whether a table would help, not using one.
-      //
-      // First live run of the above (2026-10-09) found a second, narrower real bug the unit tests
-      // never could: "craft red_bed" (wool + planks, needs a table) STILL skipped the table search,
-      // this time with noTableRecipes genuinely non-empty -- a colored bed ALSO has a real, no-table
-      // *recycling* recipe (dye + an existing bed of another colour, confirmed live against this
-      // server's own recipe data), so "!noTableRecipes.length" was simply the wrong question for any
-      // item with more than one path to it. The real question is whether a table unlocks recipes she
-      // doesn't have without one, not whether EVERY path happens to need one.
-      const noTableRecipes = bot.recipesAll(itemDef.id, null, null);
-      const withTableRecipes = bot.recipesAll(itemDef.id, null, true);
-      const tableWouldHelp = withTableRecipes.length > noTableRecipes.length;
-      let tableBlock = null;
-      if (tableWouldHelp) {
-        const tableType = bot.registry.blocksByName.crafting_table;
-        const findTables = () => tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
-        let positions = findTables();
-        // 2026-10-30: action.here -- an urgent craft (a weapon, with mobs about) puts a carried table
-        // down beside her instead of walking up to 32 blocks to one. Babs' wooden sword was
-        // cancelled ten times in a row on the walk to a table, each time by a mob she had to flee.
-        if (action.here && bot.inventory.items().some((i) => i.name === "crafting_table") &&
-            !positions.some((p) => p.distanceTo(bot.entity.position) <= 4)) {
-          const placed = await performActionAs(bot, { type: "place", item: "crafting_table" }, speaker, token);
-          if (token.cancelled) return ok("stopped setting down a crafting table.");
-          if (placed.ok) positions = findTables(); // nearest first: the one she just put down
-        }
-        // Direct request, 2026-09-13 ("extend resource sharing memory and scouting to *any*
-        // resource or crafted object"): same local-search-first-remembered-location-second
-        // pattern "mine" already uses -- a crafting table someone else placed (or one this bot
-        // saw earlier and wandered away from) is exactly as worth remembering as an iron vein.
-        if (!positions.length) positions = await visitRememberedSpot(bot, token, "crafting_table", findTables);
-        if (!positions.length && action.item !== "crafting_table") {
-          // 2026-09-26 (fresh world, live test): with no table anywhere yet, every table recipe --
-          // a bed, a pickaxe, fences -- just failed. Make one (2x2, no table needed) and set it down.
-          // 2026-10-29: one she already carries goes down first -- Babs had 11 in her pocket, each
-          // made from planks the bed she was crafting then didn't have.
-          const carried = bot.inventory.items().some((i) => i.name === "crafting_table");
-          const made = carried ? { ok: true }
-            : await performActionAs(bot, { type: "craft", item: "crafting_table", count: 1 }, speaker, token);
-          if (made.ok && !token.cancelled) {
-            const placed = await performActionAs(bot, { type: "place", item: "crafting_table" }, speaker, token);
-            if (placed.ok) positions = tableType ? bot.findBlocks({ matching: tableType.id, maxDistance: 32, count: 1 }) : [];
-          }
-        }
-        if (!positions.length) return fail(`need a crafting table nearby for ${action.item}.`);
-        tableBlock = bot.blockAt(positions[0]);
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(tableBlock.position.x,
-            tableBlock.position.y, tableBlock.position.z, 2)), ACTION_TIMEOUT_MS,
-            () => bot.pathfinder.setGoal(null));
-        } catch (err) {
-          if (token.cancelled) return ok("stopped on the way to a crafting table.");
-          noteUtilityOutcome("crafting_table", tableBlock.position, false);
-          return fail(`couldn't reach a crafting table: ${err.message}`);
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) return ok("stopped on the way to a crafting table.");
-        // Reach success is the only clean usability signal here -- craftItem() can still fail
-        // right after this for reasons that have nothing to do with the table (missing
-        // ingredients), which must never be read as "this table is broken."
-        noteUtilityOutcome("crafting_table", tableBlock.position, true);
-      }
-
-      try {
-        await craftItem(bot, action.item, action.count, tableBlock);
-      } catch (err) {
-        return fail(`couldn't craft ${action.item}: ${err.message}`);
-      } finally {
-        if (!token.cancelled) await refreshGear(bot); // a freshly-crafted tool/weapon/armor piece should get equipped
-        // Direct request, 2026-09-17 ("if they craft armor or weapons or tools, they should
-        // equip them"): refreshGear's own equipBestArmor/equipBestWeapon already cover armor and
-        // sword/axe-class weapons (this comment's own claim above was only ever half true) -- but
-        // pickaxe/shovel/hoe aren't weapon-classed, so a freshly-crafted mining/digging/farming
-        // tool just sat unequipped in inventory until some later action happened to reach for
-        // one. Equips the SPECIFIC item just crafted, not a tier comparison against whatever's
-        // already held -- she made it on purpose, presumably to use it soon. See "attack"'s own
-        // 2026-09-17 note for why holding a tool instead of a weapon right after this is safe:
-        // combat now re-equips the best weapon for itself before engaging, regardless of what
-        // was held a moment before.
-        const TOOL_SUFFIXES = ["_pickaxe", "_shovel", "_hoe"];
-        if (TOOL_SUFFIXES.some((s) => action.item.endsWith(s))) {
-          const freshTool = bot.inventory.items().find((i) => i.name === action.item);
-          if (freshTool) {
-            try {
-              await bot.equip(freshTool, "hand");
-            } catch (err) {
-              console.error(`craft: failed to equip freshly-crafted ${action.item}:`, err.message);
-            }
-          }
-        }
-      }
-      return ok(`crafted ${action.count} ${action.item}.`);
-    }
-
-    case "loot": {
-      const chestType = bot.registry.blocksByName.chest;
-      const trappedType = bot.registry.blocksByName.trapped_chest;
-      const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
-      if (!matchIds.length) return fail("don't know how to recognize a chest here.");
-      // Real gap found live (2026-09-07): this used to fetch only the single NEAREST chest --
-      // if that one chest is permanently obstructed or otherwise unopenable, findBlocks(count:1)
-      // deterministically returns the exact same bad chest on every future attempt, and the bot
-      // can never loot ANYTHING again even with dozens of other chests nearby. Now tries up to
-      // MAX_CANDIDATES in distance order, skipping to the next on any per-chest failure
-      // (obstructed, unreachable, won't open) instead of giving up after the first one.
-      const MAX_CANDIDATES = 3;
-      const lootFindOptions = { matching: matchIds, maxDistance: CHEST_SEARCH_RADIUS, count: MAX_CANDIDATES };
-      let positions = bot.findBlocks(lootFindOptions);
-      if (!positions.length) positions = await wanderAndRetryFind(bot, token, lootFindOptions);
-      if (!positions.length) return fail("couldn't find any chests nearby, even after looking around.");
-
-      // Direct request, 2026-09-17 ("they loot EVERYTHING instead of what they need... take only
-      // the mats they need"): this used to sweep every stack in the chest (capped at one per
-      // distinct tool, otherwise a full stack) regardless of whether any of it was actually
-      // wanted. Now genuinely need-based: action.item names exactly what she's after, reusing
-      // tryTakeFromThisChest -- the SAME open/withdraw/snapshot helper "mine"/"craft"'s own
-      // chest-first fallback already relies on, so there is only ever one implementation of
-      // "take up to <count> of <item> from a chest," not two that could quietly drift apart.
-      if (action.item) {
-        const group = action.item === "wool" // any colour (2026-09-26)
-          ? Object.keys(bot.registry.itemsByName).filter((n) => n.endsWith("_wool"))
-          : LOOT_GROUPS[action.item]; // "food", "seeds" (2026-09-25)
-        if (!group && !bot.registry.itemsByName[action.item]) return fail(`I don't recognize the item "${action.item}".`);
-        // gearCategoryNames() (2026-09-18, "pick up ONE of those pieces... and abandon the quest
-        // to craft it"): broadens an equipment request to ANY tier of the same category, not
-        // just the exact material she named -- a chest's diamond_pickaxe satisfies "LOOT
-        // wooden_pickaxe" just as well.
-        const wantedNames = group || gearCategoryNames(bot, action.item);
-        let sawObstruction = false;
-        for (const pos of positions) {
-          if (token.cancelled) return ok("stopped on the way to a chest.");
-          const chestBlock = bot.blockAt(pos);
-          if (!chestBlock) continue;
-          if (chestObstructed(bot, chestBlock)) {
-            noteUtilityOutcome("chest", chestBlock.position, false);
-            sawObstruction = true;
-            continue;
-          }
-          const result = await tryTakeFromThisChest(bot, token, chestBlock, wantedNames, action.count);
-          if (result === "cancelled") return ok("stopped on the way to a chest.");
-          if (result) {
-            await refreshGear(bot);
-            return ok(`found ${result.count} ${result.name} in a chest.`);
-          }
-          // else: reachable and openable, just didn't have any -- try the next local candidate
-        }
-        // Local search came up empty for this specific item -- consult the shared known-chests
-        // registry (same "local first, remembered second" pattern tryTakeFromNearbyChest's own
-        // callers already use for MINE/CRAFT's chest-first fallback) before giving up outright.
-        // findKnownChestWithItem() only ever checks one exact name per call (unlike
-        // tryTakeFromThisChest's own array-of-names shape), so a gear-broadened search means
-        // trying each real tier name in turn -- same loop shape tryTakeFromNearbyChest's own
-        // remembered-chest fallback already uses for exactly this reason.
-        let known = null;
-        for (const name of wantedNames) {
-          known = await findKnownChestWithItem(bot, name, action.count);
-          if (known) break;
-        }
-        if (known && !token.cancelled) {
-          try {
-            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(known.position.x,
-              known.position.y, known.position.z, 3)), ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-            const chestBlock = bot.blockAt(known.position);
-            if (chestBlock && chestObstructed(bot, chestBlock)) {
-              noteUtilityOutcome("chest", chestBlock.position, false);
-            } else if (chestBlock) {
-              const result = await tryTakeFromThisChest(bot, token, chestBlock, wantedNames, action.count);
-              if (result === "cancelled") return ok("stopped on the way to a chest.");
-              if (result) {
-                await refreshGear(bot);
-                return ok(`found ${result.count} ${result.name} in a remembered chest.`);
-              }
-            }
-          } catch {
-            // couldn't reach the remembered chest -- fall through to the normal failure below
-          } finally {
-            if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-          }
-        }
-        return fail(sawObstruction
-          ? `found chests nearby, but they're all obstructed, and no remembered chest has ${action.item} either.`
-          : `checked nearby chests, no ${action.item} in any of them.`);
-      }
-
-      // No item named -- this is a plain inspection, not a withdrawal: open the nearest reachable
-      // chest, snapshot its real contents into known_chests.json for the whole fleet to see
-      // (§19/§27's own "remembering and redacting are the same operation" design), and take
-      // nothing. This is now the ONLY case that opens a chest without a specific target in mind.
-      let sawObstruction = false;
-      for (const pos of positions) {
-        if (token.cancelled) return ok("stopped on the way to a chest.");
-        const chestBlock = bot.blockAt(pos);
-        if (!chestBlock) continue;
-        if (chestObstructed(bot, chestBlock)) {
-          noteUtilityOutcome("chest", chestBlock.position, false);
-          sawObstruction = true;
-          continue;
-        }
-
-        await hopToward(bot, token, chestBlock.position);
-        if (token.cancelled) return ok("stopped on the way to a chest.");
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
-            chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
-            () => bot.pathfinder.setGoal(null));
-        } catch (err) {
-          noteUtilityOutcome("chest", chestBlock.position, false);
-          if (token.cancelled) return ok("stopped on the way to a chest.");
-          continue; // couldn't reach this one -- try the next candidate
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) return ok("stopped on the way to a chest.");
-
-        try {
-          const chest = await bot.openChest(chestBlock);
-          noteUtilityOutcome("chest", chestBlock.position, true);
-          // Real bug found live (2026-09-06): Window.items() returns itemsRange(inventoryStart,
-          // inventoryEnd) -- the PLAYER'S OWN inventory slots within the combined window, not the
-          // container's. containerItems() (itemsRange(0, inventoryStart)) is the actual
-          // container-only view.
-          const contents = chest.containerItems();
-          console.log(`[loot] chest contents: ${contents.map((i) => `${i.name}x${i.count}`).join(", ") || "(empty)"}`);
-          await recordChestSnapshot(chestBlock.position, contents, chest.inventoryStart);
-          await chest.close();
-          return ok(contents.length
-            ? `checked a chest -- has ${contents.map((i) => `${i.count} ${i.name}`).join(", ")}.`
-            : "checked a chest, it's empty.");
-        } catch (err) {
-          noteUtilityOutcome("chest", chestBlock.position, false);
-          continue; // couldn't open this one (e.g. windowOpen timeout) -- try the next candidate
-        }
-      }
-      return fail(sawObstruction
-        ? "found chests nearby, but they're all obstructed."
-        : "found chests nearby, but couldn't reach or open any of them.");
-    }
-
-    case "attack": {
-      // Real live bug, 2026-09-08: checkSelfDefense() already finds a specific real entity
-      // (nearestHostile(bot, SELF_DEFENSE_RANGE)) before calling here -- re-deriving it a second
-      // time via a fresh nearestHostile(bot) call raced against that exact entity moving out of
-      // range or despawning in the gap between detection and this call (checkSelfDefense's own
-      // force-cancel-then-wait sequence can take up to 3s). Confirmed live: Mark spammed "threat
-      // detected" -> "no hostile mobs nearby" every 2s for 90+ seconds straight, never landing a
-      // single hit, because the second lookup kept missing what the first one had already found.
-      // action.target (when a caller already has the real entity in hand) is now used directly,
-      // no re-derivation -- goal-directed callers with no known entity still fall back to a fresh
-      // search exactly as before.
-      const target = action.target || nearestHostile(bot);
-      if (!target) return fail("no hostile mobs nearby.");
-      // Direct request, 2026-09-17 ("if they craft armor or weapons or tools, they should equip
-      // them"): a real gap this surfaced -- nothing here ever re-equipped a weapon before
-      // engaging, only refreshGear() in the finally block AFTER the fight ends ("mob drops may
-      // include something worth wearing/wielding"). Combat has always just used whatever
-      // happened to already be held, and now that a freshly-crafted tool deliberately stays held
-      // after "craft" (this same file's own new note there), a bot could otherwise walk into a
-      // fight holding a pickaxe. equipBestWeapon() here guarantees combat always starts
-      // weapon-in-hand regardless of what was held a moment before, whether that's a fresh tool,
-      // a fishing rod, or held food.
-      await equipBestWeapon(bot);
-      // Real gap found by reading mineflayer-pvp's own source (PVP.js), 2026-09-07: it already
-      // fully automates shield use during combat -- blocking a creeper's explosion, and an
-      // active-block-then-attack cadence on every swing (hasShield()/checkExplosion()/
-      // attemptAttack()) -- but ALL of it is conditional on a shield already sitting in the
-      // off-hand slot, which nothing in this codebase ever put there. Equipping one here (if
-      // she's carrying one) is the entire fix; everything downstream is already handled
-      // internally with no further changes needed.
-      const shield = bot.inventory.items().find((i) => i.name.includes("shield"));
-      const offHandSlot = bot.getEquipmentDestSlot("off-hand");
-      if (shield && bot.inventory.slots[offHandSlot]?.name !== shield.name) {
-        try {
-          await bot.equip(shield, "off-hand");
-        } catch (err) {
-          console.error("attack: failed to equip shield:", err.message);
-        }
-      }
-      // Real live bug found 2026-09-10 (direct report: "they're still not fighting back or
-      // running"), confirmed by reading the actually-installed mineflayer-pvp 1.3.2 source
-      // (lib/PVP.js) directly: the comment this replaces was WRONG for this version --
-      // bot.pvp.attack() does NOT wait for the target to die or be lost. It only sets
-      // this.target and a fresh pathfinder GoalFollow, then returns almost immediately; the real
-      // attacking (chase + swing) runs separately, forever, off the library's own internal
-      // physicTick listener.
-      //
-      // A FIRST fix attempt (waiting on the library's own 'stoppedAttacking' event instead) was
-      // ALSO wrong, confirmed live a second time: that event fires for ANY stop() call, including
-      // arbiter.js's own cancelPhysical() -- called unconditionally and fire-and-forget at the top
-      // of every requestControl() acquisition, even a same-owner reacquisition against the SAME
-      // still-alive target. That prior cycle's own cleanup stop() was still asynchronously
-      // in-flight (it awaits the pathfinder's own 'path_stop' event internally) when this fight's
-      // fresh listener attached a moment later, so its STALE emission -- completely unrelated to
-      // this fight -- was mistaken for "the fight just ended," reproducing the exact same
-      // instant-"took care of it" symptom as the original bug.
-      //
-      // Polling the target's own real, unambiguous state -- is it still a tracked entity at all --
-      // sidesteps both promises entirely, matching the "don't infer from a shared/ambiguous event"
-      // approach every OTHER cancellable action in this file already uses (token.cancelled checked
-      // directly against real pathfinder/collectBlock rejection, never guessed at). Also aborts
-      // promptly on a genuine higher-priority preemption (token.cancelled) rather than only on the
-      // full ACTION_TIMEOUT_MS ceiling.
-      // Direct request, 2026-09-21 ("re-evaluate the entire defense scheme"), root-caused from a
-      // live mass-death incident: EMERGENCY-tier combat (bot.on("health"), index.js) commits to
-      // "attack" unconditionally once health is critical, with no way to reconsider if the fight
-      // simply isn't going well -- and until now that meant riding out the FULL ACTION_TIMEOUT_MS
-      // (90s) with nothing able to preempt it (HEALTH_CRITICAL sits above every other tier except
-      // the cancel-only TELEPORT_HOME). Confirmed live: Wade logged "yielded to (HEALTH_CRITICAL)"
-      // for over 20 straight seconds -- a single stuck emergency attack holding control that whole
-      // time while he stayed at critical health with no way out. `action.maxDurationMs` lets a
-      // caller give a MUCH shorter leash for exactly this situation (see index.js's own EMERGENCY
-      // handler, which now bails to flee if this returns non-ok) -- defaults to the normal
-      // ACTION_TIMEOUT_MS for every other caller, unchanged.
-      //
-      // Review MB-01, 2026-09-24: the 1.42.0 rewrite above replaced
-      // `await withTimeout(bot.pvp.attack(target), ...)` with the polling loop below but dropped
-      // the bot.pvp.attack() call itself -- nothing started the chase-and-swing, so every fight
-      // since 2026-09-10 just waited out its timer (the root of 2.86.0-2.88.0's "they just stand
-      // there" reports). attack() is started here, fire-and-forget (it resolves once the chase is
-      // set up), and re-issued if the library drops the target while it still exists. A kill is
-      // now only claimed on the server's own entityDead status for THIS target; the entity merely
-      // unloading (out of range, despawned) is reported as losing track, not a kill.
-      // Direct report, 2026-10-22 (attack_win_rate collapsed 0.846 baseline -> 0.099 measured):
-      // root-caused from real spark journals, not guessed -- Luke and Mark (the two Soldiers,
-      // SELF_DEFENSE_RANGE=20 and decideFightType()'s "a Soldier always fights" rule, never
-      // flees) logged 5,901 and 1,718 path_update status=noPath results in 24h, 7-20x Amy/Babs/
-      // Mayor's 298-832, almost certainly the fresh 2026-10-08 world reset putting their guard
-      // posts near terrain their wide detection range can sense across but the pathfinder can't
-      // route through (water/elevation/gaps). A Soldier who can't flee and can't reach the
-      // target just polled this loop for the full 90s ACTION_TIMEOUT_MS every single time --
-      // 206-266 such losses per bot per day, each one holding SELF_DEFENSE-tier arbiter control
-      // the entire span. FLEE_ONLY_MOBS already exists for the identical shape of problem with
-      // flying mobs ("a melee attack can never land, don't commit to it"); nothing gave melee an
-      // equivalent escape when the target is sensed but genuinely unpathable. Same burst-
-      // detection shape this file's own dig_error handler already uses (index.js,
-      // DIG_ERROR_BURST_THRESHOLD=4 within DIG_ERROR_BURST_WINDOW_MS=3000) -- a handful of real,
-      // persistent noPath results in a few seconds is strong evidence of structural
-      // unreachability, not a single transient blip (a door about to open, a teammate's hitbox
-      // briefly in the way) that a lower threshold would wrongly abandon.
-      const FIGHT_POLL_MS = 250;
-      const NOPATH_BURST_THRESHOLD = 4;
-      const NOPATH_BURST_WINDOW_MS = 3000;
-      const deadline = Date.now() + (action.maxDurationMs ?? ACTION_TIMEOUT_MS);
-      let killed = false;
-      let unreachable = false;
-      let noPathTimestamps = [];
-      const onDead = (entity) => { if (entity?.id === target.id) killed = true; };
-      const onPathUpdate = (r) => {
-        if (r.status !== "noPath") { noPathTimestamps = []; return; }
-        const now = Date.now();
-        noPathTimestamps = [...noPathTimestamps.filter((t) => now - t < NOPATH_BURST_WINDOW_MS), now];
-        if (noPathTimestamps.length >= NOPATH_BURST_THRESHOLD) unreachable = true;
-      };
-      const startAttack = () => {
-        Promise.resolve(bot.pvp.attack(target))
-          .catch((err) => console.error("attack: pvp.attack failed:", err.message));
-      };
-      bot.on("entityDead", onDead);
-      bot.on("path_update", onPathUpdate);
-      try {
-        if (!token.cancelled) startAttack();
-        while (!killed && !unreachable && bot.entities[target.id] && !token.cancelled && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, FIGHT_POLL_MS));
-          if (!killed && !token.cancelled && bot.entities[target.id] && bot.pvp.target !== target) startAttack();
-        }
-      } finally {
-        bot.removeListener("entityDead", onDead);
-        bot.removeListener("path_update", onPathUpdate);
-        // A preemptor's own cancelPhysical() already stopped PvP; only the owner cleans up.
-        if (!token.cancelled) {
-          if (bot.pvp.target) bot.pvp.stop();
-          await refreshGear(bot); // mob drops may include something worth wearing/wielding
-        }
-      }
-      if (token.cancelled) return ok("broke off the fight.");
-      if (killed) return ok("took care of it.");
-      // Deliberately its own outcome, excluded from attack_win_rate's loss count the same way
-      // "broke off the fight" already is (tests/baseline.mjs) -- this was never a fight with any
-      // chance of landing a hit, the same reasoning that already excludes FLEE_ONLY_MOBS from
-      // ever entering one. Tracked separately by unreachable_target_bailouts_per_bot_day so the
-      // underlying terrain/range problem stays visible rather than just vanishing from the ratio.
-      if (unreachable) return fail("couldn't reach it -- no path through.");
-      if (!bot.entities[target.id]) return fail("lost track of it.");
-      return fail("gave up on the fight -- took too long.");
-    }
-
-    case "flee": {
-      // Fourth of five scoped enhancements ("what other logic enhancements are available" ->
-      // self-defense). GoalInvert negates the wrapped goal's heuristic, so pathfinder actively
-      // maximizes distance from the threat instead of closing it -- confirmed against
-      // mineflayer-pathfinder's own goals.js (heuristic() returns -goal.heuristic(); isEnd()
-      // returns !goal.isEnd(), so the flee goal is "reached" once genuinely outside the wrapped
-      // GoalFollow's own radius, not an arbitrary duration this code has to guess at).
-      // Same fix as "attack" above -- use the already-found entity when the caller has one
-      // instead of racing a second nearestHostile(bot) lookup against it moving/despawning.
-      const target = action.target || nearestHostile(bot);
-      if (!target) return ok("nothing to flee from.");
-      // Direct request, 2026-09-18 ("run towards safety, run towards golems, or soldiers"):
-      // index.js's checkSelfDefense/checkSleepingThreat/respondToSquadCall compute this (golem >
-      // nearby Soldier teammate > home, in that priority -- see their own nearestRallyPoint())
-      // since they're the ones with role/teammate-position knowledge; this action just heads
-      // there instead of blindly maximizing distance with no destination in mind. Deliberately no
-      // path-safety check between here and the rally point (same best-effort level as the rest of
-      // self-defense) -- a rally point is only ever picked when it's a real place to go, not a
-      // guarantee the route there is threat-free.
-      const rally = action.rallyPoint;
-      // Direct live observation, 2026-09-21 ("none of them fight back including the soldiers...
-      // if the bots are inside a building with a zombie, they seem to act as if they are
-      // trapped"). Root-caused live: fleeing shares the same canDig-enabled Movements every
-      // other action uses (never explicitly set, so it's at mineflayer-pathfinder's own
-      // default). In a small enclosed room, the only path that "increases distance" can require
-      // digging through a wall -- when that dig fails, pathfinder recomputes the IDENTICAL
-      // best-cost path (same dig step) and fails again immediately, forever: confirmed live via
-      // path_reset: dig_error firing dozens of times a SECOND with an unchanged nodes/cost
-      // signature, holding control the whole time while she's still being hit and (critically,
-      // this is EMERGENCY/self-defense's own flee, which never attacks) never fights back
-      // either. Disabling digging for just this one pathfind forces pathfinder to either find a
-      // real walkable escape route or fail cleanly and fast, instead of spinning on an
-      // impossible one until death.
-      // Review MB-02 follow-up (2026-09-24): flee used to flip canDig on the ONE Movements object
-      // every owner shares and restore it in finally -- after a preemption that restore landed in
-      // the middle of the new owner's route. Flee now runs on its own shallow copy and only puts
-      // the original back if its copy is still the active one.
-      const sharedMovements = bot.pathfinder.movements;
-      const fleeMovements = Object.assign(Object.create(Object.getPrototypeOf(sharedMovements)), sharedMovements);
-      fleeMovements.canDig = false;
-      bot.pathfinder.setMovements(fleeMovements);
-      try {
-        const goal = rally
-          ? new goals.GoalNear(rally.x, rally.y, rally.z, 3)
-          : new goals.GoalInvert(new goals.GoalFollow(target, 16));
-        await withTimeout(bot.pathfinder.goto(goal), ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped fleeing.");
-        return fail(`couldn't get away: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        if (bot.pathfinder.movements === fleeMovements) bot.pathfinder.setMovements(sharedMovements);
-      }
-      if (token.cancelled) return ok("stopped fleeing.");
-      return ok(rally ? "made it to safety." : "got some distance from it.");
-    }
-
-    case "eat": {
-      // Direct request, 2026-09-07: hunger management. Built on mineflayer's own core
-      // consume() (confirmed against inventory.js source: requires the food already equipped
-      // to hand -- bot.equip() first, the same pattern already used for fuel/tools elsewhere in
-      // this file).
-      // Review MB-15: best-first by FOOD_NAMES order (cooked before raw), golden apples saved for last
-      // -- not whatever inventory slot happens to come first.
-      // 2026-10-30: action.lastResort also allows rotten flesh -- starving with nothing else, its 4
-      // food points beat its chance of Hunger.
-      const edible = (name) => FOOD_NAMES.includes(name) || (action.lastResort && name === "rotten_flesh");
-      const eatRank = (name) => (name === "rotten_flesh" ? 2000 : 0) + (name.includes("golden_apple") ? 1000 : 0) + FOOD_NAMES.indexOf(name);
-      const foodItem = bot.inventory.items().filter((i) => edible(i.name))
-        .sort((a, b) => eatRank(a.name) - eatRank(b.name))[0];
-      if (!foodItem) return fail("don't have anything to eat.");
-      try {
-        await bot.equip(foodItem, "hand");
-        await bot.consume();
-      } catch (err) {
-        return fail(`couldn't eat: ${err.message}`);
-      } finally {
-        if (!token.cancelled) await refreshGear(bot); // consume() leaves the food item held -- get a real weapon back
-      }
-      return ok(`ate some ${foodItem.name}.`);
-    }
-
-    case "hunt": {
-      // 2026-10-30: Babs sat at food 0 for hours -- every chest near home empty of food, no rod --
-      // with nothing left to try. Raw beef/pork/mutton/rabbit are already edible (FOOD_NAMES).
-      // A species' last two nearby are left alone: they're someone's breeding pair, or will be.
-      const near = (e) => e.position.distanceTo(bot.entity.position) <= HUNT_RANGE;
-      const herd = (name) => Object.values(bot.entities).filter((e) => e.name === name && near(e)).length;
-      const prey = () => Object.values(bot.entities)
-        .filter((e) => HUNTABLE_ANIMALS.has(e.name) && near(e) && herd(e.name) > 2)
-        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-      const food = () => bot.inventory.items().filter((i) => FOOD_NAMES.includes(i.name)).reduce((n, i) => n + i.count, 0);
-      const before = food();
-      let sawPrey = false;
-      for (let tries = 0; tries < 3 && food() === before && !token.cancelled; tries++) {
-        const animal = prey();
-        if (!animal) break;
-        sawPrey = true;
-        const got = await performActionAs(bot, { type: "attack", target: animal }, speaker, token);
-        if (token.cancelled) return ok("stopped hunting.");
-        if (!got.ok) continue;
-        await collectDrops(bot, token, [bot.entity.position.clone()], 6000);
-      }
-      if (food() > before) return ok(`hunted: now carrying ${food()} food.`);
-      return fail(sawPrey ? "hunted, but came away with no food." : `no animals to spare within ${HUNT_RANGE} blocks to hunt.`);
-    }
-
-    case "gather_seeds": {
-      // 2026-11-01: a bot standing in for a missing Farmer or Herder could only get seeds from a
-      // chest, and every chest was empty. Grass and ferns drop wheat seeds about one time in eight.
-      const want = action.count ?? 8;
-      const seeds = () => bot.inventory.items().filter((i) => i.name === "wheat_seeds").reduce((n, i) => n + i.count, 0);
-      const start = seeds();
-      const grassIds = SEED_GRASS.map((name) => bot.registry.blocksByName[name]?.id).filter((id) => id !== undefined);
-      const spots = bot.findBlocks({ matching: grassIds, maxDistance: 32, count: GATHER_SEEDS_MAX_DIGS });
-      if (!spots.length) return fail("no grass nearby to gather seeds from.");
-      let broken = 0;
-      let dug = [];
-      for (const pos of spots) {
-        if (token.cancelled || seeds() - start >= want) break;
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-        } catch {
-          continue;
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) break;
-        const block = bot.blockAt(pos);
-        if (!block || !grassIds.includes(block.type)) continue;
-        try {
-          await withTimeout(bot.dig(block), ACTION_TIMEOUT_MS, () => bot.stopDigging());
-        } catch {
-          continue;
-        }
-        broken++;
-        dug.push(pos);
-        if (dug.length >= 6) {
-          await bot.waitForTicks(4); // the drop lands a few ticks after the block breaks
-          await collectDrops(bot, token, dug, 5000);
-          dug = [];
-        }
-      }
-      if (dug.length && !token.cancelled) {
-        await bot.waitForTicks(4);
-        await collectDrops(bot, token, dug, 5000);
-      }
-      if (token.cancelled) return ok("stopped gathering seeds.");
-      const gained = seeds() - start;
-      if (gained > 0) return ok(`gathered ${gained} wheat seeds from the grass (now carrying ${seeds()}).`);
-      return fail(broken ? `broke ${broken} grass, and no seeds dropped.` : "couldn't reach any of the grass nearby.");
-    }
-
-    case "fish": {
-      // Direct request, 2026-09-07 ("do 1-3" -> "and 4"): a passive, low-risk food source for
-      // when there's no food on hand and no crops/animals nearby to harvest/breed. Built on
-      // mineflayer's own core fish() (confirmed against fishing.js source: casts via
-      // activateItem(), waits for the real bobber-splash particle event, then reels in itself --
-      // no dedicated timing guess needed). fish() only resolves on an actual bite; it has no
-      // built-in timeout of its own, so like every other open-ended wait in this file it's
-      // wrapped in withTimeout, whose onTimeout calls activateItem() a second time to reel in
-      // and cancel cleanly (confirmed: this is exactly how a real player aborts a cast, and the
-      // plugin's own entity_destroy handler treats it as a clean cancellation, not an error).
-      const rod = bot.inventory.items().find((i) => i.name === "fishing_rod");
-      if (!rod) return fail("don't have a fishing rod.");
-
-      const waterType = bot.registry.blocksByName.water;
-      if (!waterType) return fail("don't know how to recognize water here.");
-      let positions = bot.findBlocks({ matching: waterType.id, maxDistance: 32, count: 5 });
-      if (!positions.length) positions = await wanderAndRetryFind(bot, token,
-        { matching: waterType.id, maxDistance: 32, count: 5 });
-      if (!positions.length) return fail("couldn't find any water nearby, even after looking around.");
-      const waterPos = positions[0];
-
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(waterPos.x, waterPos.y, waterPos.z, 3)),
-          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to the water.");
-        return fail(`couldn't reach the water: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("stopped on the way to the water.");
-
-      try {
-        await bot.equip(rod, "hand");
-        await bot.lookAt(waterPos.offset(0.5, 1, 0.5));
-        await withTimeout(bot.fish(), FISH_TIMEOUT_MS, () => bot.activateItem());
-      } catch (err) {
-        if (token.cancelled) return ok("stopped fishing.");
-        return fail(`fishing didn't pan out: ${err.message}`);
-      } finally {
-        if (!token.cancelled) await refreshGear(bot); // fish() leaves the rod held -- get a real weapon back
-      }
-      return ok("caught something.");
-    }
-
-    case "give": {
-      // Direct request, 2026-09-07: bot-to-bot help. General enough to also work for a human
-      // asking directly ("give me some bread") -- classifyIntent resolves the target to the
-      // speaker for that case; the autonomous cross-bot request flow (index.js) names the other
-      // bot's real in-game username explicitly. Built on mineflayer's own core toss() (drops the
-      // item at her own feet -- confirmed against simple_inventory.js source -- so she has to
-      // actually be standing next to the recipient first for it to be picked up, same
-      // path-then-act pattern as every other action here).
-      const target = bot.players[action.player]?.entity;
-      if (!target) return fail(`I can't see ${action.player} nearby.`);
-      const itemDef = bot.registry.itemsByName[action.item];
-      if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
-      const have = bot.inventory.count(itemDef.id, null);
-      if (!have) return fail(`don't have any ${action.item} to give.`);
-      const giveCount = Math.min(action.count, have);
-
-      // Direct request, 2026-09-19 ("Mayor/Leader missions, if they would effectively DOWNGRADE a
-      // bot's equipment or status, should be rejected by the bot"). Real, already-confirmed
-      // failure shape (§34/MINECRAFT_BOTS_DESIGN.md): Mark was gifted a sword twice by teammates
-      // responding to a request, yet a give this blind can just as easily strip the GIVER bare --
-      // "give" never checked whether complying would leave her without a weapon/armor/tool she
-      // still needs, whoever asked. Sword and axe are treated as one interchangeable "weapon"
-      // category (matching equipment.js's own hasWeapon() definition); armor/tool suffixes are
-      // each their own category (a spare pickaxe doesn't cover for giving away her only shovel).
-      //
-      // Direct follow-up, 2026-09-19 ("must also reject if... the quality of their equipment
-      // [would be] reduced"): going to zero was only half of it -- giving away her BEST piece in
-      // a category while a worse one stays behind is a downgrade too, even though she'd technically
-      // "still have one." Checks the highest GEAR_TIER_RANK she'd be left with in this exact
-      // category against the tier of what's being given away.
-      const giveSuffix = GEAR_SUFFIXES.find((s) => action.item.endsWith(s));
-      if (giveSuffix) {
-        const isWeapon = giveSuffix === "_sword" || giveSuffix === "_axe";
-        const category = isWeapon ? ["_sword", "_axe"] : [giveSuffix];
-        const categoryItems = bot.inventory.items().filter((i) => category.some((s) => i.name.endsWith(s)));
-        const totalOfCategory = categoryItems.reduce((sum, i) => sum + i.count, 0);
-        const remainingAfterGive = totalOfCategory - giveCount;
-
-        const givingSuffix = category.find((s) => action.item.endsWith(s));
-        const givingTier = gearTierRank(action.item, givingSuffix);
-        const bestRemainingTier = categoryItems.reduce((best, i) => {
-          const remaining = i.name === action.item ? i.count - giveCount : i.count;
-          if (remaining <= 0) return best;
-          const s = category.find((suf) => i.name.endsWith(suf));
-          return Math.max(best, gearTierRank(i.name, s));
-        }, -1);
-
-        const wouldZeroOut = remainingAfterGive <= 0;
-        const wouldDowngradeQuality = !wouldZeroOut && givingTier >= 0 && givingTier > bestRemainingTier;
-        if (wouldZeroOut || wouldDowngradeQuality) {
-          const label = isWeapon ? "weapon" : giveSuffix.slice(1);
-          const reason = wouldZeroOut ? `that's my only ${label}`
-            : `it's my best ${label} and I'd be left with a worse one`;
-          return fail(`won't give away my ${action.item} -- ${reason}, and that would leave me ` +
-            `worse off than before.`);
-        }
-      }
-
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(target, 2)), ACTION_TIMEOUT_MS,
-          () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way.");
-        return fail(`couldn't reach ${action.player}: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("stopped on the way.");
-
-      try {
-        await bot.toss(itemDef.id, null, giveCount);
-      } catch (err) {
-        return fail(`couldn't give the ${action.item}: ${err.message}`);
-      }
-      return ok(`gave ${giveCount} ${action.item} to ${action.player}.`);
-    }
-
-    case "gohome": {
-      // Direct request, 2026-09-07: "bots should pay attention to the time of day, and try to
-      // return 'home' before full dark." bot.spawnPoint (confirmed against mineflayer's own
-      // spawn_point.js source: populated from the server's own spawn_position packet -- her bed
-      // if she's claimed one, otherwise the world spawn) is the same real "home" reference the
-      // teleport-when-stuck mechanism already uses -- one shared notion of home, not a second one.
-      const dest = bot.spawnPoint;
-      if (!dest || (dest.x === 0 && dest.y === 0 && dest.z === 0)) {
-        return fail("don't know where home is yet.");
-      }
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 3)),
-          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped heading home.");
-        // Direct request, 2026-09-07 ("build the water crossing mechanic"): a normal walking
-        // route failing (timeout/no-path) is exactly the shape water-blocked routes take --
-        // worth one real attempt at a boat crossing before giving up outright, rather than
-        // stranding her every dusk a lake happens to sit between here and spawn.
-        if (await attemptBoatCrossing(bot, token, dest)) {
-          try {
-            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(dest.x, dest.y, dest.z, 3)),
-              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-            return ok("made it home before dark (by boat).");
-          } catch {
-            return ok("got most of the way home by boat, on foot from here.");
-          } finally {
-            if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-          }
-        }
-        return fail(`couldn't make it home: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      return token.cancelled ? ok("stopped heading home.") : ok("made it home before dark.");
-    }
-
-    case "sleep": {
-      // Direct request, 2026-09-07: bots should know to go to bed at night. Built entirely on
-      // mineflayer's own bed.js plugin (core, no extra plugin load needed) -- bot.sleep()
-      // already handles the real vanilla rules (night-or-thunderstorm window, occupied bed,
-      // monsters nearby, reach distance) and throws a specific reason for each, so this only
-      // needs to find a bed and try it, same multi-candidate pattern as "loot" (1.8.2) since one
-      // bad bed (occupied, monsters nearby right there) shouldn't block trying another.
-      if (bot.isSleeping) return ok("already asleep.");
-
-      // Direct request, 2026-10-18: no bed ownership -- "any bed not already occupied," trying the
-      // next one until she finds one free, rather than a short, priority-banded candidate list
-      // (her own claimed bed, then unclaimed, then others' as a last resort). nearbyBeds() (above)
-      // is now just every usable bed nearest-first; bot.sleep()'s own real "occupied" rejection is
-      // what actually tells a free bed from a taken one, caught and skipped below same as always.
-      let candidates = nearbyBeds(bot, null);
-      if (!candidates.length) {
-        // 2026-10-27 (direct request: "seeking out a bed should not be limited to 'nearby'...
-        // if it's a known resource that can be reached, they should use it to sleep"): same
-        // local-then-remembered pattern mine/craft already use for crafting_table/furnace -- a
-        // bed registered elsewhere on the server (runBedGoal's own writeMemoryNote, index.js) is
-        // exactly as worth a trip as a remembered resource vein. A stale/wrong note just falls
-        // through to the normal "couldn't find a bed nearby" failure below, no worse off.
-        // 2026-10-28: ...and is forgotten, so the next attempt tries the next-nearest bed instead.
-        candidates = await visitRememberedSpot(bot, token, "bed", () => nearbyBeds(bot, null));
-      }
-      if (!candidates.length) return fail("couldn't find a bed nearby.");
-
-      for (const pos of candidates) {
-        if (token.cancelled) return ok("stopped on the way to bed.");
-        const bedBlock = bot.blockAt(pos);
-        if (!bedBlock) continue;
-        if (bedNearHazard(bot, bedBlock.position)) {
-          console.log(`[sleep] skipping bed at ${bedBlock.position}: water/lava nearby.`);
-          continue; // a bad bed to bond her respawn point to -- try the next candidate
-        }
-
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(bedBlock.position.x,
-            bedBlock.position.y, bedBlock.position.z, 2)), ACTION_TIMEOUT_MS,
-            () => bot.pathfinder.setGoal(null));
-        } catch (err) {
-          if (token.cancelled) return ok("stopped on the way to bed.");
-          // Real gap found live (2026-09-07): this used to swallow the reason silently -- when
-          // every candidate failed, the only visible result was "couldn't use any of them,"
-          // giving no way to diagnose why after the fact. Logging each per-candidate reason now,
-          // same lesson already learned once today for the goal loop's own transitions.
-          console.log(`[sleep] couldn't reach bed at ${bedBlock.position}: ${err.message}`);
-          continue; // couldn't reach this bed -- try the next candidate
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) return ok("stopped on the way to bed.");
-
-        try {
-          await bot.sleep(bedBlock);
-        } catch (err) {
-          console.log(`[sleep] couldn't use bed at ${bedBlock.position}: ${err.message}`);
-          continue; // this bed didn't work (occupied, monsters nearby, too far, etc) -- try next
-        }
-        // Asleep now. Wait for the real 'wake' event (fires when day comes, or when everyone
-        // sleeping lets the server skip the night) rather than guessing a duration -- a plain
-        // safety timeout forces a wake only if something has gone genuinely wrong (SLEEP_TIMEOUT_MS
-        // is well beyond a real night's length).
-        await new Promise((resolve) => {
-          let settled = false;
-          const finish = () => { if (!settled) { settled = true; resolve(); } };
-          bot.once("wake", finish);
-          setTimeout(() => {
-            if (!settled && bot.isSleeping) bot.wake().catch(() => {});
-            finish();
-          }, SLEEP_TIMEOUT_MS);
-        });
-        return ok("slept through the night.");
-      }
-      return fail("found beds nearby, but couldn't use any of them.");
-    }
-
-    case "smelt": {
-      // Direct request, 2026-09-07: "they can't seem to find the furnaces" -- most of tonight's
-      // goal failures were bots correctly reasoning they needed an ingot and having no way to
-      // get one beyond hoping a chest had it (craft/mine alone were never enough; see index.js's
-      // planNextStep comments). Built on mineflayer's own openFurnace() (core, no extra plugin).
-      //
-      // Real gap found live minutes after shipping: the prompt says <item_id> is the OUTPUT
-      // (e.g. "copper_ingot"), but the planner sometimes names the INPUT raw material instead
-      // ("raw_copper"). Cheap and always-safe to just accept either rather than keep tightening
-      // prompt wording for something this easy to normalize -- if the named item isn't a known
-      // output, check whether it's actually a known input for one and use that recipe instead.
-      let outputItem = action.item;
-      if (!SMELT_RECIPES[outputItem]) {
-        const matched = Object.entries(SMELT_RECIPES).find(([, inputs]) => inputs.includes(outputItem));
-        if (matched) outputItem = matched[0];
-      }
-      const inputCandidates = SMELT_RECIPES[outputItem];
-      if (!inputCandidates) return fail(`don't know how to smelt "${action.item}".`);
-      const inputItem = bot.inventory.items().find((i) => inputCandidates.includes(i.name));
-      if (!inputItem) return fail(`don't have anything to smelt into ${outputItem}.`);
-      const smeltCount = Math.min(action.count, inputItem.count);
-
-      const fuelItem = pickFuel(bot);
-      if (!fuelItem) return fail("don't have any fuel to smelt with.");
-
-      const furnaceNames = ["furnace", "blast_furnace", "smoker"];
-      const matchIds = furnaceNames.map((n) => bot.registry.blocksByName[n]?.id)
-        .filter((id) => id !== undefined);
-      if (!matchIds.length) return fail("don't know how to recognize a furnace here.");
-      const furnaceFindOptions = { matching: matchIds, maxDistance: 32, count: 3 };
-      let positions = bot.findBlocks(furnaceFindOptions);
-      if (!positions.length) positions = await wanderAndRetryFind(bot, token, furnaceFindOptions);
-      if (!positions.length) return fail("couldn't find a furnace nearby, even after looking around.");
-
-      for (const pos of positions) {
-        if (token.cancelled) return ok("stopped on the way to a furnace.");
-        const furnaceBlock = bot.blockAt(pos);
-        if (!furnaceBlock) continue;
-
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(furnaceBlock.position.x,
-            furnaceBlock.position.y, furnaceBlock.position.z, 2)), ACTION_TIMEOUT_MS,
-            () => bot.pathfinder.setGoal(null));
-        } catch (err) {
-          if (token.cancelled) return ok("stopped on the way to a furnace.");
-          console.log(`[smelt] couldn't reach furnace at ${furnaceBlock.position}: ${err.message}`);
-          noteUtilityOutcome("furnace", furnaceBlock.position, false);
-          continue; // couldn't reach this furnace -- try the next candidate
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) return ok("stopped on the way to a furnace.");
-
-        let furnace;
-        try {
-          furnace = await bot.openFurnace(furnaceBlock);
-          noteUtilityOutcome("furnace", furnaceBlock.position, true);
-          // Real gap found live (2026-09-07): the same 3 furnaces failed "destination full"
-          // across several separate goal attempts -- logging what's actually sitting in each
-          // slot on open, so a repeat is diagnosable (someone else's items? a stuck previous
-          // attempt of our own?) instead of just "full" with no further evidence.
-          const slot = (item) => item ? `${item.name}x${item.count}` : "empty";
-          console.log(`[smelt] furnace at ${furnaceBlock.position} slots: ` +
-            `input=${slot(furnace.inputItem())} fuel=${slot(furnace.fuelItem())} output=${slot(furnace.outputItem())}`);
-        } catch (err) {
-          console.log(`[smelt] couldn't open furnace at ${furnaceBlock.position}: ${err.message}`);
-          noteUtilityOutcome("furnace", furnaceBlock.position, false);
-          continue; // couldn't open this one -- try the next candidate
-        }
-
-        try {
-          // Direct request, 2026-09-21 ("I want real confirmation they can use the crafting
-          // table and furnace"). Investigating turned up a real, severe, already-live bug: a
-          // fleet-wide 24h log sweep found ZERO successful smelts, every single attempt failing
-          // "found furnaces nearby, but couldn't use any of them." This codebase's own per-
-          // furnace slot logging (2026-09-07) caught the real cause directly: furnace at
-          // (94,63,64) had 63 coal_block already sitting in its fuel slot (coal_block smelts 800
-          // items each -- decades of fuel) plus 16 iron_ingot stranded in output, uncollected;
-          // furnace at (94,63,63) had exactly 64 coal_block, the hard per-slot cap. putFuel() was
-          // called UNCONDITIONALLY on every single attempt regardless of how much fuel a furnace
-          // already had -- once a slot maxes out, every future putFuel() throws "destination
-          // full" and the whole smelt aborted right there, before ever reaching putInput, even
-          // though the furnace already had more than enough fuel to actually smelt with.
-          //
-          // Fix, two parts: (1) collect any output already sitting there first -- recovers
-          // whatever a prior successful smelt (ours or another bot's) left stranded, and frees
-          // the slot; (2) treat a failed putFuel() as "already has fuel," not fatal -- log it and
-          // fall through to putInput using whatever's already in the fuel slot, rather than
-          // aborting the entire attempt over a top-up that was never actually needed.
-          const existingOutput = furnace.outputItem();
-          if (existingOutput && existingOutput.count > 0) {
-            await furnace.takeOutput();
-          }
-          try {
-            // One fuel item per item smelted is a generous overestimate for any fuel type (coal
-            // alone smelts 8 per item) -- errs toward "definitely enough fuel" over precision.
-            await furnace.putFuel(fuelItem.type, null, Math.min(fuelItem.count, smeltCount));
-          } catch (fuelErr) {
-            console.log(`[smelt] furnace at ${furnaceBlock.position} already has fuel, ` +
-              `skipping top-up: ${fuelErr.message}`);
-          }
-          await furnace.putInput(inputItem.type, null, smeltCount);
-
-          // furnace.js has no built-in "wait until done" -- poll its own 'update' event (fired
-          // on every server progress packet) for a non-empty output, with a safety timeout.
-          const outputReady = await new Promise((resolve) => {
-            let settled = false;
-            const check = () => {
-              const out = furnace.outputItem();
-              if (out && out.count > 0 && !settled) { settled = true; resolve(true); }
-            };
-            furnace.on("update", check);
-            check();
-            setTimeout(() => { if (!settled) resolve(false); }, SMELT_TIMEOUT_MS);
-          });
-          furnace.removeAllListeners("update");
-
-          let smelted = 0;
-          if (outputReady) {
-            const out = await furnace.takeOutput();
-            smelted = out?.count ?? 0;
-          }
-          await furnace.close();
-          if (!smelted) return fail("waited at the furnace but nothing came out -- may be out of fuel.");
-          await refreshGear(bot); // a freshly-smelted ingot might feed straight into new gear
-          return ok(`smelted ${smelted} ${outputItem}.`);
-        } catch (err) {
-          try { await furnace.close(); } catch { /* already closed or never opened cleanly */ }
-          console.log(`[smelt] furnace at ${furnaceBlock.position} failed: ${err.message}`);
-          continue; // this furnace didn't work out -- try the next candidate
-        }
-      }
-      return fail("found furnaces nearby, but couldn't use any of them.");
-    }
-
-    case "place": {
-      // Direct request, 2026-09-07: bots could craft a furnace or crafting table but had no way
-      // to actually use one they made themselves, only ones already sitting in the world -- a
-      // real dead end hit live tonight. Deliberately narrow: ONE utility block, right next to
-      // herself, not a general building capability -- structure placement stays explicitly out
-      // of scope (see this file's own header). Built on mineflayer's own placeBlock() (core, no
-      // extra plugin).
-      const heldCandidate = bot.inventory.items().find((i) => i.name === action.item);
-      if (!heldCandidate) return fail(`don't have a ${action.item} to place.`);
-
-      try {
-        await bot.equip(heldCandidate, "hand");
-      } catch (err) {
-        return fail(`couldn't hold the ${action.item} to place it: ${err.message}`);
-      }
-      if (token.cancelled) return ok("stopped before placing it.");
-
-      // 2026-11-04 (residences): `at`, one named cell -- a residence's chest goes in its room, not
-      // wherever she stands. Walk within reach, then the same access check every placement makes.
-      if (action.at) {
-        const at = new Vec3(action.at.x, action.at.y, action.at.z);
-        const ground = bot.blockAt(at.offset(0, -1, 0));
-        if (ground?.boundingBox !== "block") return fail(`nothing to set the ${action.item} on at ${at}.`);
-        if (bot.blockAt(at)?.boundingBox === "block") return fail(`something already stands at ${at}.`);
-        const shuts = wouldBlockAccess(bot, at, action.item);
-        if (shuts) return fail(`a ${action.item} at ${at} would block ${shuts.reason} the ${shuts.fixture} at ${shuts.at}.`);
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(at.x, at.y, at.z, 2)), ACTION_TIMEOUT_MS,
-            () => bot.pathfinder.setGoal(null));
-        } catch (err) {
-          if (token.cancelled) return ok("stopped on the way.");
-          return fail(`couldn't get to ${at} to place the ${action.item}: ${err.message}`);
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null);
-        }
-        try {
-          await bot.equip(heldCandidate, "hand");
-          await clearCellForPlacement(bot, at);
-          await bot.placeBlock(ground, new Vec3(0, 1, 0));
-        } catch (err) {
-          return fail(`couldn't place the ${action.item} at ${at}: ${err.message}`);
-        }
-        return ok(`placed a ${action.item} at ${at}.`);
-      }
-
-      // A cardinal-adjacent spot with solid ground and clear air above it -- simpler and more
-      // robust than assuming the block directly below her own feet works, since that's
-      // literally where she's standing.
-      //
-      // Direct request, 2026-10-07 ("never drop or place a block that will impede access to a
-      // chest or bed or door"): four candidate spots were already being tried in order, so the
-      // access check costs nothing but a skip -- a furnace set down in front of the shelter door
-      // picks the next side instead. Only the LAST spot being blocked is a real refusal, and it
-      // says which fixture it would have shut in rather than "no clear spot nearby" (which was
-      // already this action's only failure message and would have been a lie here).
-      const feet = bot.entity.position.floored();
-      let referenceBlock = null;
-      let wouldShutIn = null;
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const ground = bot.blockAt(feet.offset(dx, -1, dz));
-        const space = bot.blockAt(feet.offset(dx, 0, dz));
-        if (!(ground?.boundingBox === "block" && space && space.boundingBox !== "block")) continue;
-        const shuts = wouldBlockAccess(bot, feet.offset(dx, 0, dz), action.item);
-        if (shuts) { wouldShutIn = wouldShutIn || shuts; continue; }
-        referenceBlock = ground;
-        break;
-      }
-      if (!referenceBlock) {
-        return fail(wouldShutIn
-          ? `nowhere to put the ${action.item} that wouldn't block ${wouldShutIn.reason} ` +
-            `the ${wouldShutIn.fixture} at ${wouldShutIn.at}.`
-          : "no clear spot nearby to place it.");
-      }
-
-      try {
-        await clearCellForPlacement(bot, referenceBlock.position.offset(0, 1, 0));
-        await bot.placeBlock(referenceBlock, new Vec3(0, 1, 0));
-      } catch (err) {
-        return fail(`couldn't place the ${action.item}: ${err.message}`);
-      }
-      return ok(`placed a ${action.item}.`);
-    }
-
-    // Review MB-08 follow-up (2026-09-24): the Builder's checklist items ("go home and place a
-    // furnace there") as one deterministic action -- walk home, then place -- instead of hoping
-    // the planner sequences GOHOME and PLACE correctly. goalTick uses it directly (see
-    // runBuilderPlacement); "gohome"/"place" do the actual work, sharing this call's token.
-    case "place_home": {
-      if (!bot.inventory.items().some((i) => i.name === action.item)) {
-        return fail(`don't have a ${action.item} to place.`);
-      }
-      const home = await performActionAs(bot, { type: "gohome" }, speaker, token);
-      if (token.cancelled) return home;
-      if (!home.ok) return fail(`couldn't get home to place the ${action.item}: ${home.text}`);
-      const placed = await performActionAs(bot, { type: "place", item: action.item }, speaker, token);
-      return placed.ok ? ok(`placed a ${action.item} at home.`) : placed;
-    }
-
-    case "light_area": {
-      // Direct request, 2026-09-10 ("fix the lighting logic"), following a real live incident:
-      // 1260+ deaths in ~26h traced to the shared base sitting in pitch dark (light=0 at ground
-      // level, confirmed live) with an uncapped nightly mob buildup (dozens of hostiles counted
-      // within 80 blocks at once) -- self-defense fighting one threat at a time was never going
-      // to survive an actual swarm. The existing "place a torch" logic (checkLighting, index.js)
-      // only ever reacted to wherever a bot personally happened to be standing at the moment its
-      // own tile went dark -- nothing ever proactively lit up the AREA bots actually live in.
-      // This is that: walks to each dark, mob-spawn-capable spot near a real anchor point
-      // (action.near -- checkHomeLighting's own claimed-bed position) and places a torch there.
-      // Self-limiting by construction, no cross-bot coordination needed: a placed torch persists
-      // in the world and clears that spot for every bot's next sweep, not just this one's -- five
-      // bots independently sweeping the same shared base converges on "fully lit," it doesn't
-      // duplicate work forever.
-      const torchLit = bot.inventory.items().find((i) => i.name === "torch");
-      if (!torchLit) return fail("don't have any torches to light the area with.");
-
-      const LIGHT_AREA_RADIUS = 10;
-      const LIGHT_AREA_BATCH_LIMIT = 6;
-      const positions = bot.findBlocks({
-        point: action.near,
-        // 2026-11-04: a position-less palette block (findBlocks' section pre-check) gets the cheap
-        // test -- rejecting it skipped every section, so no dark spot was ever found.
-        matching: (block) => {
-          if (!block || block.boundingBox === "block") return false;
-          if (!block.position) return true;
-          if (block.light === undefined || block.light >= DARK_LIGHT_LEVEL) return false;
-          const below = bot.blockAt(block.position.offset(0, -1, 0));
-          return !!below && below.boundingBox === "block" && !isProtectedBlockName(below.name);
-        },
-        maxDistance: LIGHT_AREA_RADIUS,
-        count: LIGHT_AREA_BATCH_LIMIT,
-      });
-      if (!positions.length) return ok("area's already lit up -- nothing dark found nearby.");
-
-      let placed = 0;
-      for (const pos of positions) {
-        if (token.cancelled) break;
-        const current = bot.inventory.items().find((i) => i.name === "torch");
-        if (!current) break; // ran out of torches partway through the sweep
-
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-        } catch {
-          if (token.cancelled) break;
-          continue; // couldn't reach this one -- try the next dark spot
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) break;
-
-        // Re-check: another bot (or this one, via an earlier iteration) may have already lit
-        // this exact spot since the batch was found.
-        const ground = bot.blockAt(pos.offset(0, -1, 0));
-        const spaceNow = bot.blockAt(pos);
-        if (!ground || ground.boundingBox !== "block" || spaceNow?.light >= DARK_LIGHT_LEVEL) continue;
-
-        try {
-          await bot.equip(current, "hand");
-          await bot.placeBlock(ground, new Vec3(0, 1, 0));
-          placed++;
-        } catch (err) {
-          console.error(`light_area: failed to place a torch at ${pos}:`, err.message);
-        }
-      }
-
-      if (!placed) return token.cancelled ? ok("stopped lighting the area.") : fail("found dark spots but couldn't light any of them.");
-      return ok(`lit up ${placed} dark spot(s)${token.cancelled ? ", stopped early" : ""}.`);
-    }
-
-    case "clear_access": {
-      // Direct request, 2026-10-07: "allow them to destroy a block that impedes access to a bed
-      // or chest or door." The companion to the refusals above -- those stop a bot creating the
-      // condition, this one undoes it, whether a bot caused it (a pre-fix placement, a filled pit,
-      // a dropped sand column) or the world did (gravel falling into a doorway, a creeper's
-      // crater refilled by a landslide).
-      //
-      // Which cells count, which fixtures are off-limits to dig, and the two restraints on a
-      // doorway built into solid ground all live in shelter.js's findAccessObstructions -- the
-      // same geometry the placement refusals use, read the other way round. action.targets is the
-      // caller's already-scanned list (index.js's checkAccessObstructions, matching
-      // repair_terrain's own shape); bare, it scans for itself, which is what makes it a usable
-      // SKILL_ACTION_VERB where repair_terrain isn't.
-      const CLEAR_ACCESS_BATCH_LIMIT = 6;
-      const targets = (action.targets?.length
-        ? action.targets.map((t) => ({ ...t, position: new Vec3(t.position.x, t.position.y, t.position.z) }))
-        : findAccessObstructions(bot, bot.entity.position, action.radius || ACCESS_SCAN_RADIUS,
-                                 (name) => !isProtectedBlockName(name)))
-        .slice(0, CLEAR_ACCESS_BATCH_LIMIT);
-      if (!targets.length) return ok("nothing's blocking a chest, bed or door around here.");
-
-      let cleared = 0;
-      const stillThere = [];
-      for (const target of targets) {
-        if (token.cancelled) break;
-        // Re-check: another bot may have cleared this one since the scan, and a stale target from
-        // action.targets may describe a block that's already gone.
-        const block = bot.blockAt(target.position);
-        if (!block || block.boundingBox !== "block" || isProtectedBlockName(block.name)) continue;
-
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 3)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-        } catch {
-          if (token.cancelled) break;
-          stillThere.push(`${block.name} at ${target.position}`);
-          continue; // couldn't get to this one -- try the next
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) break;
-
-        try {
-          // collectBlock, not bot.dig: the block comes back into inventory instead of being left
-          // on the floor to despawn, and it equips the right tool itself -- the same reasoning
-          // "mine" already relies on. withTimeout/stopDigging per this file's own 2026-09-08 note
-          // on untimed digs.
-          await withTimeout(bot.collectBlock.collect(block, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
-                            () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
-          cleared++;
-          console.log(`[${bot.username}] cleared a ${block.name} at ${target.position} blocking the ${target.fixture}`);
-        } catch (err) {
-          if (token.cancelled) break;
-          stillThere.push(`${block.name} at ${target.position} (${err.message})`);
-        }
-      }
-      if (!token.cancelled) await refreshGear(bot);
-
-      if (token.cancelled) return ok(`stopped clearing access (${cleared} cleared).`);
-      // Nothing cleared and nothing left in the way means another bot got there first -- nine bots
-      // scan the same shared base, so this is the common case, not a failure. Reporting it as one
-      // would put a steady stream of phantom failures into action_failure_rate.
-      if (!cleared) {
-        return stillThere.length
-          ? fail(`couldn't clear what's blocking access: ${stillThere.join("; ")}.`)
-          : ok("whatever was blocking a chest, bed or door is already gone.");
-      }
-      const fixtures = [...new Set(targets.map((t) => t.fixture))].join(", ");
-      return ok(`cleared ${cleared} block(s) blocking access to ${fixtures}` +
-        (stillThere.length ? `, ${stillThere.length} still in the way` : "") + ".");
-    }
-
-    case "build": {
-      // A small fixed shelter (3x3, walls three high with a doorway, a roof). Rebuilt 2026-09-26:
-      // any mix of plain building blocks (isShelterMaterial), only the blocks not already solid
-      // count toward what she needs, and action.at puts it on a chosen site (a shelter goal's
-      // findShelterSite) rather than wherever she stood. No site: around her, as before.
-      const base = action.at ? new Vec3(action.at.x, action.at.y, action.at.z).floored() : bot.entity.position.floored();
-      const buildOrder = shelterPositions(base);
-      const missing = () => buildOrder.filter((pos) => bot.blockAt(pos)?.boundingBox !== "block").length;
-      const needed = missing();
-      const have = shelterMaterialCount(bot);
-      if (needed && have < needed) {
-        return { ...fail(`need ${needed} building blocks (dirt, cobblestone, planks...) for a small shelter, only have ${have}.`),
-          short: needed - have };
-      }
-
-      // Pathfinder's default scaffolding blocks are dirt and cobblestone -- the shelter's own
-      // materials -- so reaching for the roof she pillared up inside it and filled the interior
-      // (live test, 2026-09-26). Build on a copy with no scaffolding and no pillaring (flee's
-      // pattern), and reach 4 so the roof can be placed from the ground.
-      const sharedMovements = bot.pathfinder.movements;
-      const buildMovements = Object.assign(Object.create(Object.getPrototypeOf(sharedMovements)), sharedMovements);
-      buildMovements.scafoldingBlocks = [];
-      buildMovements.allow1by1towers = false;
-      bot.pathfinder.setMovements(buildMovements);
-
-      // Direct report, 2026-10-11 ("a real door, not an opening or arch"). Two real bugs found
-      // live, not one: (1) getting the door ITEM has to happen before the generic wall/roof/floor
-      // loop below -- oak_planks (or any species) counts as ordinary isShelterMaterial() too, so
-      // letting that loop run first spent every plank she carried on walls (dirt/cobblestone work
-      // just as well there) before the door, which has no substitute, ever got a turn: 20 planks
-      // in hand, all gone to walls, "don't have the ingredients" for the door. (2) PLACING the
-      // door, though, has to happen AFTER the walls -- confirmed live, placing it into open air
-      // before any neighbouring wall exists gave it an east/west `facing` instead of north/south,
-      // and doorPassageSides() (shelter.js) then protected the WALL cells beside the door as "the
-      // way through" it instead of the cells actually in front of/behind it, so every one of
-      // those walls refused to place. (No door held -> craft one; needs a table, which
-      // craftItem's own fixed tableWouldHelp check, 1.83.1, already handles finding/making.)
-      // 2026-10-30: correction to (2) -- a door's facing is the way SHE faces as it goes down, not
-      // anything about its neighbours; see the placement below. A door already set in the doorway
-      // the wrong way round comes out first, and goes back in the right way.
-      const doorPos = doorwayPosition(base);
-      let doorAlready = isShelterDoor(bot.blockAt(doorPos));
-      if (!doorAlready && isDoorway(bot.blockAt(doorPos)) && !token.cancelled) {
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(doorPos.x, doorPos.y, doorPos.z, 3)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-          if (!token.cancelled) await bot.dig(bot.blockAt(doorPos));
-          // Pick the door back up, for the placement below -- its item entity shows up a moment
-          // after dig() resolves, and collectDrops() gives up at once if there's nothing yet.
-          const dropDeadline = Date.now() + 2000;
-          while (Date.now() < dropDeadline && !token.cancelled &&
-                 !Object.values(bot.entities).some((e) => e.name === "item" && e.position.distanceTo(doorPos) <= 2)) {
-            await new Promise((r) => setTimeout(r, 100));
-          }
-          if (!token.cancelled) await collectDrops(bot, token, [doorPos], 6000);
-        } catch (err) {
-          console.error(`build: couldn't take out the wrong-way door at ${doorPos}:`, err.message);
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-      }
-      if (!doorAlready && !token.cancelled && !bot.inventory.items().some((i) => i.name.endsWith("_door"))) {
-        await performActionAs(bot, { type: "craft", item: doorItemFor(bot), count: 1 }, speaker, token);
-      }
-      let doorPlaced = doorAlready;
-
-      if (!needed && doorAlready) return { ...ok("the shelter is already standing."), built: true };
-
-      let placed = 0;
-      let shutIn = 0; // declared out here: the try block below is a real scope, and the result text reads it
-      try {
-      for (const pos of buildOrder) {
-        if (token.cancelled) break;
-        if (bot.blockAt(pos)?.boundingBox === "block") continue; // terrain already solid here
-        // 2026-10-07: a shelter site is only checked for fixtures INSIDE its own 4x4 footprint
-        // (findShelterSite's own clear() test); a chest or door just outside it can still fall in
-        // a wall's access cell. A gap in the wall beats a chest nobody can open, and the 80%
-        // completion bar below already tolerates a few missing blocks.
-        const shuts = wouldBlockAccess(bot, pos);
-        if (shuts) {
-          shutIn++;
-          console.log(`build: left ${pos} open -- a wall there would block ${shuts.reason} the ${shuts.fixture}`);
-          continue;
-        }
-
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 4)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-        } catch {
-          if (token.cancelled) break;
-          continue; // couldn't get near this spot -- an imperfect shelter beats abandoning it
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) break;
-        await clearCellForPlacement(bot, pos); // a flower in the wall line refuses every placement
-
-        let refBlock = null, face = null;
-        for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
-          const neighbor = bot.blockAt(pos.offset(dx, dy, dz));
-          if (neighbor?.boundingBox === "block") {
-            refBlock = neighbor;
-            face = new Vec3(-dx, -dy, -dz);
-            break;
-          }
-        }
-        if (!refBlock) continue; // nothing solid to place against yet -- the second pass below catches it
-
-        const item = bot.inventory.items().filter((i) => isShelterMaterial(i.name)).sort((a, b) => b.count - a.count)[0];
-        if (!item) break; // ran out mid-build
-        try {
-          await bot.equip(item, "hand");
-          await bot.placeBlock(refBlock, face);
-          placed++;
-        } catch (err) {
-          console.error(`build: placement failed at ${pos}:`, err.message);
-        }
-      }
-      } finally {
-        if (bot.pathfinder.movements === buildMovements) bot.pathfinder.setMovements(sharedMovements);
-      }
-      await refreshGear(bot);
-
-      // Placing the door itself, now that the walls flanking it exist (see this step's own
-      // header comment above for why that order matters for its facing).
-      if (!doorAlready && !token.cancelled) {
-        const doorItem = bot.inventory.items().find((i) => i.name.endsWith("_door"));
-        const floorBelow = bot.blockAt(doorPos.offset(0, -1, 0));
-        if (doorItem && floorBelow?.boundingBox === "block") {
-          try {
-            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(doorPos.x, doorPos.y, doorPos.z, 4)),
-              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-            if (!token.cancelled) {
-              await bot.equip(doorItem, "hand");
-              // Facing straight out through the doorway (away from the room, +z) -- her OWN x,
-              // not doorPos's, so the look vector has zero x component regardless of exactly
-              // where GoalNear(..., 4) left her standing (a diagonal vector can still round to
-              // the wrong cardinal direction). 2026-10-30: a point +z of HER, not of the door --
-              // GoalNear can leave her farther out than doorPos.z + 3, and looking back at that
-              // point faced her north.
-              await clearCellForPlacement(bot, doorPos);
-              await clearCellForPlacement(bot, doorPos.offset(0, 1, 0));
-              await bot.lookAt(bot.entity.position.offset(0, bot.entity.height, 5), true);
-              // The look only reaches the server on the next physics tick; placed before that, the
-              // door took her old facing (west, from inside the room, in the live test).
-              await bot.waitForTicks(2);
-              // placeBlock turns her to look at the floor block first, undoing the look above --
-              // the door then faced wherever she stood relative to it. forceLook "ignore" keeps it.
-              await bot._placeBlockWithOptions(floorBelow, new Vec3(0, 1, 0), { swingArm: "right", forceLook: "ignore" });
-              doorPlaced = isShelterDoor(bot.blockAt(doorPos));
-            }
-          } catch (err) {
-            console.error(`build: door placement failed at ${doorPos}:`, err.message);
-          } finally {
-            if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-          }
-        }
-        // No door item (craft above failed -- genuinely out of planks) or no floor under the
-        // doorway yet: nothing to place against this pass -- a later call catches up, same as
-        // any other still-missing piece.
-      }
-
-      // A cell left open on purpose still counts as missing, and against index.js's own
-      // hasShelterNearHome() -- the two must not disagree about whether a shelter stands. It's
-      // named in the result instead, so a site that keeps coming out partial for this reason is
-      // visible rather than a mystery.
-      const openedFor = shutIn ? ` (${shutIn} left open so a neighbouring fixture stays reachable)` : "";
-      if (token.cancelled) return ok(`stopped building (${placed} placed, ${missing()} still missing)${openedFor}.`);
-      const left = missing();
-      if (!placed && left && !doorPlaced) return fail(`couldn't place any of the shelter (${left} blocks still missing)${openedFor}.`);
-      // 2026-10-11: 100%, not the old 80% -- a shelter with a gap in it (or no real door) isn't
-      // sealed, and a half-sealed shelter is exactly what this fix exists to stop calling "done."
-      const built = left === 0 && doorPlaced;
-      return { ...(built ? ok(`built a small shelter (${placed} blocks placed, sealed with a door)${openedFor}.`)
-        : fail(`built part of a shelter: ${placed} placed, ${left} still missing` +
-               `${doorPlaced ? "" : ", no door yet"}${openedFor}.`)), built };
-    }
-
-    case "patch_shelter": {
-      // Direct request, 2026-10-22, generalizing S42's fix: a shelter of ANY shape or size --
-      // shelter.js's shelterRoomsNear()/holesIn() already found exactly which positions are
-      // missing, from the real structure as it stands, not a predetermined geometry -- so unlike
-      // "build"/"build_communal_shelter" above, this never computes its own position list. Door-
-      // free by construction: holesIn() excludes every doorway cell, so there is never a door to
-      // craft or place here, only the plain wall/floor/roof blocks a hole actually needs.
-      // 2026-11-02: never fill a cell that keeps a door, bed or chest usable -- every other placer
-      // already asks; this one didn't, and clear_access then dug the block straight back out.
-      const holes = (action.holes || []).map((p) => new Vec3(p.x, p.y, p.z)).filter((pos) => !wouldBlockAccess(bot, pos));
-      const missing = () => holes.filter((pos) => bot.blockAt(pos)?.boundingBox !== "block");
-      const needed = missing();
-      if (!needed.length) return { ...ok("no holes left to patch."), built: true };
-      const have = shelterMaterialCount(bot);
-      if (have < needed.length) {
-        return { ...fail(`need ${needed.length} building blocks (dirt, cobblestone, planks...) to patch ` +
-          `${needed.length} hole(s), only have ${have}.`), short: needed.length - have };
-      }
-
-      const sharedMovements = bot.pathfinder.movements;
-      const buildMovements = Object.assign(Object.create(Object.getPrototypeOf(sharedMovements)), sharedMovements);
-      buildMovements.scafoldingBlocks = [];
-      buildMovements.allow1by1towers = false;
-      bot.pathfinder.setMovements(buildMovements);
-
-      let placed = 0;
-      try {
-        for (const pos of needed) {
-          if (token.cancelled) break;
-          if (bot.blockAt(pos)?.boundingBox === "block") continue; // another bot (or this same pass) already closed it
-          try {
-            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 4)),
-              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-          } catch {
-            if (token.cancelled) break;
-            continue; // couldn't get near this one -- patch whatever else is reachable
-          } finally {
-            if (!token.cancelled) bot.pathfinder.setGoal(null);
-          }
-          if (token.cancelled) break;
-          await clearCellForPlacement(bot, pos);
-
-          let refBlock = null, face = null;
-          for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
-            const neighbor = bot.blockAt(pos.offset(dx, dy, dz));
-            if (neighbor?.boundingBox === "block") { refBlock = neighbor; face = new Vec3(-dx, -dy, -dz); break; }
-          }
-          if (!refBlock) continue; // a hole with no solid neighbour left at all -- too damaged for this pass
-
-          const item = bot.inventory.items().filter((i) => isShelterMaterial(i.name)).sort((a, b) => b.count - a.count)[0];
-          if (!item) break;
-          try {
-            await bot.equip(item, "hand");
-            await bot.placeBlock(refBlock, face);
-            placed++;
-          } catch (err) {
-            console.error(`patch_shelter: placement failed at ${pos}:`, err.message);
-          }
-        }
-      } finally {
-        if (bot.pathfinder.movements === buildMovements) bot.pathfinder.setMovements(sharedMovements);
-      }
-      await refreshGear(bot);
-
-      const left = missing().length;
-      if (token.cancelled) return ok(`stopped patching the shelter (${placed} placed, ${left} hole(s) still open).`);
-      if (!placed && left) return fail(`couldn't patch any of the shelter (${left} hole(s) still open).`);
-      return { ...(left === 0 ? ok(`patched the shelter (${placed} hole(s) filled).`)
-        : fail(`patched part of the shelter: ${placed} filled, ${left} hole(s) still open.`)), built: left === 0 };
-    }
-
-    case "reface_shelter": {
-      // Direct request, 2026-10-28 ("once they have safe shelter to sleep in, they should
-      // gradually replace the earth shelter with stone"): each given wall/roof/floor cell that
-      // isn't stone-tier is dug out and immediately refilled with a stone-tier block
-      // (isCommunalShelterMaterial), one cell at a time, so the shelter is never open by more
-      // than one block. Same no-scaffolding movements as "patch_shelter". A floor cell she is
-      // standing on is skipped -- digging it would drop her into the hole.
-      const cells = (action.cells || []).map((p) => new Vec3(p.x, p.y, p.z));
-      const stone = () => bot.inventory.items().filter((i) => isCommunalShelterMaterial(i.name)).sort((a, b) => b.count - a.count)[0];
-      if (!stone()) return fail("don't have any stone to reinforce the shelter with.");
-
-      const sharedMovements = bot.pathfinder.movements;
-      const buildMovements = Object.assign(Object.create(Object.getPrototypeOf(sharedMovements)), sharedMovements);
-      buildMovements.scafoldingBlocks = [];
-      buildMovements.allow1by1towers = false;
-      buildMovements.canDig = false; // never tunnel through her own walls to reach a cell
-      bot.pathfinder.setMovements(buildMovements);
-
-      let refaced = 0;
-      try {
-        for (const pos of cells) {
-          if (token.cancelled) break;
-          const current = bot.blockAt(pos);
-          if (!current || isCommunalShelterMaterial(current.name) || current.boundingBox !== "block") continue;
-          const item = stone();
-          if (!item) break;
-          try {
-            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
-              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-          } catch {
-            if (token.cancelled) break;
-            continue;
-          } finally {
-            if (!token.cancelled) bot.pathfinder.setGoal(null);
-          }
-          if (token.cancelled) break;
-          if (bot.entity.position.floored().offset(0, -1, 0).equals(pos)) continue;
-          try {
-            await withTimeout(bot.dig(current, true), 10_000, () => bot.stopDigging());
-          } catch (err) {
-            console.error(`reface_shelter: couldn't dig ${current.name} at ${pos}:`, err.message);
-            continue;
-          }
-          let refBlock = null, face = null;
-          for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
-            const neighbor = bot.blockAt(pos.offset(dx, dy, dz));
-            if (neighbor?.boundingBox === "block") { refBlock = neighbor; face = new Vec3(-dx, -dy, -dz); break; }
-          }
-          try {
-            if (!refBlock) throw new Error("no solid neighbour to place against");
-            await bot.equip(item, "hand");
-            await bot.placeBlock(refBlock, face);
-            refaced++;
-          } catch (err) {
-            // The hole she just dug must not stay open: put back whatever plain block she has.
-            console.error(`reface_shelter: placement failed at ${pos}:`, err.message);
-            const fallback = bot.inventory.items().find((i) => isShelterMaterial(i.name));
-            if (refBlock && fallback) {
-              try { await bot.equip(fallback, "hand"); await bot.placeBlock(refBlock, face); } catch { /* checkShelterIntegrity patches it */ }
-            }
-          }
-        }
-      } finally {
-        if (bot.pathfinder.movements === buildMovements) bot.pathfinder.setMovements(sharedMovements);
-      }
-      await refreshGear(bot);
-      if (token.cancelled) return { ...ok(`stopped reinforcing the shelter (${refaced} block(s) swapped for stone).`), refaced };
-      if (!refaced) return { ...fail("couldn't swap any of the shelter's blocks for stone."), refaced };
-      return { ...ok(`reinforced the shelter: ${refaced} block(s) swapped for stone.`), refaced };
-    }
-
-    case "build_communal_shelter": {
-      // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a), sized per the
-      // operator's own rule (2026-10-12: "large enough for beds to suit all active bots"). Same
-      // door-first-craft, wall-loop, door-last-placement shape as "build" above (see its own
-      // header for the two real bugs that order fixes) -- just the bigger, parameterized
-      // communalShelterPositions()/communalDoorwayPosition() geometry and the stricter
-      // isCommunalShelterMaterial() (stone or better, no planks/dirt) instead of the individual
-      // shelter's permissive baseline. action.width/action.depth come from index.js's own
-      // runner, which is the one place that actually knows the fleet size -- not guessed here.
-      const base = action.at ? new Vec3(action.at.x, action.at.y, action.at.z).floored() : bot.entity.position.floored();
-      const { width, depth } = action;
-      if (!width || !depth) return fail("don't know how big to build the communal shelter.");
-      const buildOrder = communalShelterPositions(base, width, depth);
-      const missing = () => buildOrder.filter((pos) => bot.blockAt(pos)?.boundingBox !== "block").length;
-      const needed = missing();
-      const have = communalShelterMaterialCount(bot);
-      if (needed && have < needed) {
-        return { ...fail(`need ${needed} stone-or-better building blocks (stone, cobblestone, stone ` +
-          `bricks, deepslate...) for the communal shelter, only have ${have}.`), short: needed - have };
-      }
-
-      const sharedMovements = bot.pathfinder.movements;
-      const buildMovements = Object.assign(Object.create(Object.getPrototypeOf(sharedMovements)), sharedMovements);
-      buildMovements.scafoldingBlocks = [];
-      buildMovements.allow1by1towers = false;
-      bot.pathfinder.setMovements(buildMovements);
-
-      const doorPos = communalDoorwayPosition(base, depth);
-      let doorAlready = isDoorway(bot.blockAt(doorPos));
-      if (!doorAlready && !token.cancelled && !bot.inventory.items().some((i) => i.name.endsWith("_door"))) {
-        await performActionAs(bot, { type: "craft", item: doorItemFor(bot), count: 1 }, speaker, token);
-      }
-      let doorPlaced = doorAlready;
-
-      if (!needed && doorAlready) return { ...ok("the communal shelter is already standing."), built: true };
-
-      let placed = 0;
-      let shutIn = 0;
-      try {
-      for (const pos of buildOrder) {
-        if (token.cancelled) break;
-        if (bot.blockAt(pos)?.boundingBox === "block") continue;
-        const shuts = wouldBlockAccess(bot, pos);
-        if (shuts) {
-          shutIn++;
-          console.log(`build_communal_shelter: left ${pos} open -- a wall there would block ${shuts.reason} the ${shuts.fixture}`);
-          continue;
-        }
-
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 4)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-        } catch {
-          if (token.cancelled) break;
-          continue;
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null);
-        }
-        if (token.cancelled) break;
-        await clearCellForPlacement(bot, pos);
-
-        let refBlock = null, face = null;
-        for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]) {
-          const neighbor = bot.blockAt(pos.offset(dx, dy, dz));
-          if (neighbor?.boundingBox === "block") {
-            refBlock = neighbor;
-            face = new Vec3(-dx, -dy, -dz);
-            break;
-          }
-        }
-        if (!refBlock) continue;
-
-        const item = bot.inventory.items().filter((i) => isCommunalShelterMaterial(i.name)).sort((a, b) => b.count - a.count)[0];
-        if (!item) break;
-        try {
-          await bot.equip(item, "hand");
-          await bot.placeBlock(refBlock, face);
-          placed++;
-        } catch (err) {
-          console.error(`build_communal_shelter: placement failed at ${pos}:`, err.message);
-        }
-      }
-      } finally {
-        if (bot.pathfinder.movements === buildMovements) bot.pathfinder.setMovements(sharedMovements);
-      }
-      await refreshGear(bot);
-
-      if (!doorAlready && !token.cancelled) {
-        const doorItem = bot.inventory.items().find((i) => i.name.endsWith("_door"));
-        const floorBelow = bot.blockAt(doorPos.offset(0, -1, 0));
-        if (doorItem && floorBelow?.boundingBox === "block") {
-          try {
-            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(doorPos.x, doorPos.y, doorPos.z, 4)),
-              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-            if (!token.cancelled) {
-              await bot.equip(doorItem, "hand");
-              // Same facing fix as "build"'s door (2026-10-30): look +z of her, then place
-              // without placeBlock's own look at the floor.
-              await clearCellForPlacement(bot, doorPos);
-              await clearCellForPlacement(bot, doorPos.offset(0, 1, 0));
-              await bot.lookAt(bot.entity.position.offset(0, bot.entity.height, 5), true);
-              await bot.waitForTicks(2); // the look reaches the server a tick later (see "build")
-              await bot._placeBlockWithOptions(floorBelow, new Vec3(0, 1, 0), { swingArm: "right", forceLook: "ignore" });
-              doorPlaced = isDoorway(bot.blockAt(doorPos));
-            }
-          } catch (err) {
-            console.error(`build_communal_shelter: door placement failed at ${doorPos}:`, err.message);
-          } finally {
-            if (!token.cancelled) bot.pathfinder.setGoal(null);
-          }
-        }
-      }
-
-      const openedFor = shutIn ? ` (${shutIn} left open so a neighbouring fixture stays reachable)` : "";
-      if (token.cancelled) return ok(`stopped building the communal shelter (${placed} placed, ${missing()} still missing)${openedFor}.`);
-      const left = missing();
-      if (!placed && left && !doorPlaced) return fail(`couldn't place any of the communal shelter (${left} blocks still missing)${openedFor}.`);
-      const built = left === 0 && doorPlaced;
-      return { ...(built ? ok(`built the communal shelter (${placed} blocks placed, sealed with a door)${openedFor}.`)
-        : fail(`built part of the communal shelter: ${placed} placed, ${left} still missing` +
-               `${doorPlaced ? "" : ", no door yet"}${openedFor}.`)), built };
-    }
-
-    case "build_pen": {
-      // Direct request, 2026-09-11 (§15.11 follow-up -- pen/fence containment for bred animals).
-      // Deliberately one fixed, small shape, same philosophy as "build"'s own shelter above: a
-      // 5x5 fence perimeter (open top -- fences already block ground-bound animals without
-      // needing a roof) with ONE fence_gate replacing a perimeter block so she isn't sealing
-      // anything in without a way through. Not a general planner -- even "build" above isn't
-      // one, see this file's own header on why.
-      const fence = bot.inventory.items().find((i) => i.name.endsWith("_fence") && !i.name.endsWith("_fence_gate"));
-      const gate = bot.inventory.items().find((i) => i.name.endsWith("_fence_gate"));
-      if (!fence) return fail("don't have any fence blocks for a pen.");
-      if (!gate) return fail("don't have a fence gate for a pen.");
-
-      const base = action.at ? new Vec3(action.at.x, action.at.y, action.at.z).floored() : bot.entity.position.floored();
-      const perimeter = [];
-      // 2026-09-25: 7x7 (5x5 inside), was 5x5 -- a tempted animal stops ~2.5 blocks from her, so in a
-      // 3x3 pen there was nowhere inside for it to stop.
-      for (let dx = -3; dx <= 3; dx++) {
-        for (let dz = -3; dz <= 3; dz++) {
-          if (Math.abs(dx) !== 3 && Math.abs(dz) !== 3) continue; // interior -- open pen floor, no fence here
-          perimeter.push(base.offset(dx, 0, dz));
-        }
-      }
-      const gatePos = base.offset(0, 0, 3); // south edge, middle -- the gate, matching "build"'s own doorway convention
-      const fencePositions = perimeter.filter((p) => !(p.x === gatePos.x && p.y === gatePos.y && p.z === gatePos.z));
-      const PEN_TOTAL = perimeter.length; // small fixed shape -- no extra batch cap needed
-
-      let placed = 0;
-      async function placeAt(pos, item) {
-        const existing = bot.blockAt(pos);
-        if (existing?.boundingBox === "block") { placed++; return true; }
-        // 2026-10-07: a pen perimeter is laid out from where she stands with no site survey at
-        // all (unlike "build", which has findShelterSite) -- it is the placement most likely to
-        // run a fence straight across the shelter door. A gap in a pen leaks animals; a fenced-in
-        // door strands the whole fleet, so the gap wins.
-        const shuts = wouldBlockAccess(bot, pos, item.name);
-        if (shuts) {
-          console.log(`build_pen: skipped ${pos} -- a ${item.name} there would block ${shuts.reason} the ${shuts.fixture}`);
-          return false;
-        }
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 3)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-        } catch {
-          return false; // couldn't reach this one -- skip, matches "build"'s own tolerance for gaps
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) return false;
-        const below = bot.blockAt(pos.offset(0, -1, 0));
-        if (!below || below.boundingBox !== "block") return false; // no ground to reference off yet
-        const current = bot.inventory.items().find((i) => i.name === item.name);
-        if (!current) return false;
-        try {
-          await clearCellForPlacement(bot, pos);
-          await bot.equip(current, "hand");
-          await bot.placeBlock(below, new Vec3(0, 1, 0));
-          placed++;
-          return true;
-        } catch (err) {
-          console.error(`build_pen: placement failed at ${pos}:`, err.message);
-          return false;
-        }
-      }
-
-      for (const pos of fencePositions) {
-        if (token.cancelled) break;
-        await placeAt(pos, fence);
-      }
-      const gatePlaced = token.cancelled ? false : await placeAt(gatePos, gate);
-
-      if (token.cancelled) return ok(`stopped building the pen (${placed}/${PEN_TOTAL} placed).`);
-      if (!placed) return fail("couldn't place any of the pen.");
-      // Direct request, 2026-09-11 ("fix the pen herding"): only remember this pen's location if
-      // the GATE specifically went in -- herd_to_pen needs a real, known entry point, and a
-      // fence-without-a-gate isn't a usable pen regardless of how many wall segments landed.
-      if (gatePlaced) await savePenLocation(base, gatePos);
-      return ok(`built a small pen out of ${fence.name} with a ${gate.name} (${placed}/${PEN_TOTAL} placed).` +
-        (gatePlaced ? "" : " gate didn't go in -- not usable for herding yet."));
-    }
-
-    case "herd_to_pen": {
-      // Direct request, 2026-09-11 ("fix the pen herding"): build_pen (above) only ever placed
-      // the STRUCTURE -- the design doc's own §15.8 flagged this as a real, separate gap the day
-      // it shipped ("build_pen places the structure but doesn't move an animal INTO it"). Reuses
-      // a real vanilla mechanic rather than inventing one: an adult animal already follows
-      // whoever's holding its tempting food (vanilla's own TemptGoal AI) once close enough --
-      // exactly the same food/BREEDING_FOOD relationship "breed" already leans on, just used for
-      // movement instead of feeding. Walks toward the pen in short, bounded hops (not one long
-      // goto) specifically so the animal's own AI has a real chance to keep pace -- covering the
-      // whole distance in one pathfinder goal would very likely outrun her and break the tempt
-      // range partway there, with no way to notice until arrival.
-      const pen = await loadPenLocation();
-      if (!pen) return fail("no pen built yet -- build one first.");
-
-      const foods = BREEDING_FOOD[action.species];
-      if (!foods) return fail(`don't know what tempts a ${action.species}.`);
-      const foodItem = bot.inventory.items().find((i) => foods.includes(i.name));
-      if (!foodItem) return fail(`don't have the right food to lure a ${action.species} (need ${foods[0]}).`);
-
-      const animal = Object.values(bot.entities)
-        .filter((e) => e.name === action.species &&
-          !(Math.abs(e.position.x - (pen.center.x + 0.5)) < 2.6 && Math.abs(e.position.z - (pen.center.z + 0.5)) < 2.6) && // not already penned
-          e.position.distanceTo(bot.entity.position) <= HERD_SEARCH_RADIUS)
-        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-      if (!animal) return fail(`no loose ${action.species} nearby to herd.`);
-
-      // Walk up to it empty-handed; the food comes out once she's there (below).
-      try {
-        await withTimeout(
-          bot.pathfinder.goto(new goals.GoalNear(animal.position.x, animal.position.y, animal.position.z, 3)),
-          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped before reaching the animal.");
-        return fail(`couldn't reach the ${action.species}: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("stopped before herding.");
-
-      // 2026-09-25 (live test): the food comes out only now that she's at the animal -- held from the
-      // start, the one already in the pen followed her out -- and the gate is held open only while
-      // she leads (performAction used to hold it for the whole action, walk out included).
-      const releaseDoors = holdDoorsOpen(bot);
-      try {
-        return await (async () => {
-      try {
-        await bot.equip(foodItem, "hand");
-      } catch (err) {
-        return fail(`couldn't hold the ${foodItem.name}: ${err.message}`);
-      }
-
-
-      const HERD_STEP_DISTANCE = 3;
-      // 2026-11-06: enough steps for the distance -- 15 steps of 3 blocks stopped 45 blocks short of a
-      // pen 64 away, the radius she now looks in.
-      const HERD_MAX_STEPS = Math.min(40, Math.max(15, Math.ceil(animal.position.distanceTo(pen.gate) / HERD_STEP_DISTANCE) + 5));
-      const HERD_FOLLOW_RANGE = 8; // generous margin over vanilla TemptGoal's own real tempt radius
-      const waitForAnimal = async (done, ms) => {
-        for (let waited = 0; waited < ms && !token.cancelled && !done(); waited += 250) {
-          await new Promise((r) => setTimeout(r, 250));
-        }
-      };
-      let steps = 0;
-      while (steps < HERD_MAX_STEPS) {
-        if (token.cancelled) return ok(`stopped herding partway (${steps} steps).`);
-        // Real, checked distance every step -- never assumed still-following just because the
-        // bot itself kept moving toward the pen.
-        const liveAnimal = bot.entities[animal.id];
-        if (!liveAnimal) return fail(`lost track of the ${action.species} -- it may have died or unloaded.`);
-        if (liveAnimal.position.distanceTo(bot.entity.position) > HERD_FOLLOW_RANGE) {
-          return fail(`the ${action.species} stopped following -- fell too far behind (${steps} steps in).`);
-        }
-
-        const toGate = pen.gate.minus(bot.entity.position);
-        const dist = toGate.norm();
-        if (dist < 1.5) break; // reached the gate
-
-        const target = bot.entity.position.plus(toGate.normalize().scale(Math.min(HERD_STEP_DISTANCE, dist)));
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 1)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-        } catch {
-          if (token.cancelled) return ok(`stopped herding partway (${steps} steps).`);
-          // couldn't complete this one short step -- not necessarily fatal, the animal-distance
-          // check at the top of the next iteration is the real judge of whether to keep going
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        steps++;
-        // 2026-09-25 (live test): a tempted animal walks slower than she does -- let it catch up
-        // before the next step instead of outrunning it.
-        await waitForAnimal(() => bot.entities[animal.id]?.position.distanceTo(bot.entity.position) <= 4, 3000);
-      }
-
-      // Final leg: through the gate to the pen's back wall. A tempted animal stops ~2.5 blocks short of
-      // her, so leading only to the middle left it standing in the gateway (live test, 2026-09-25).
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalBlock(pen.center.x, pen.center.y, pen.center.z - 2)),
-          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-      } catch {
-        // best effort -- the real success check below decides regardless of how this leg went
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-
-      // It trails her in through the gate: wait for it to be inside the pen, not merely near it.
-      const inPen = (e) => !!e && Math.abs(e.position.x - (pen.center.x + 0.5)) < 2.6 &&
-        Math.abs(e.position.z - (pen.center.z + 0.5)) < 2.6;
-      await waitForAnimal(() => inPen(bot.entities[animal.id]), 15_000);
-      const finalAnimal = bot.entities[animal.id];
-      if (!inPen(finalAnimal)) {
-        return fail(`reached the pen, but the ${action.species} didn't follow all the way in.`);
-      }
-
-      // Close the gate behind her -- only toggle if it's actually open, never blind-toggle one
-      // that's already shut (activateBlock on a fence gate flips its open/closed state).
-      const gateBlock = bot.blockAt(pen.gate);
-      if (gateBlock?.getProperties?.().open) {
-        try {
-          await bot.activateBlock(gateBlock);
-        } catch (err) {
-          console.error("herd_to_pen: couldn't close the gate:", err.message);
-        }
-      }
-
-      await recordAchievement(bot, `penned:${action.species}`);
-      return ok(`herded a ${action.species} into the pen.`);
-        })();
-      } finally {
-        releaseDoors();
-        await refreshGear(bot); // put the food away, or the animal follows her back out
-      }
-    }
-
-    case "repair_terrain": {
-      // §15.10: fills action.position (the pit's lowest empty spot, as {x, y, z, targetY} --
-      // index.js's checkTerrainDamage() found and validated this, not decided here) one block at
-      // a time, bottom-up, up to targetY -- the fleet's own home-level grade.
-      const { x, y, z, targetY } = action.position;
-      const PIT_FILL_BATCH_LIMIT = 8;
-      const columnBase = new Vec3(x, y, z);
-
-      // Material: an explicit override (action.material) wins -- checkTerrainDamage sets this
-      // only when the spot needs to stay plantable (§15.10's "guided by function" case).
-      // Otherwise sample the solid blocks immediately surrounding the pit's rim and fill with
-      // whichever is most common -- cosmetic repair blends into what's already there.
-      let materialName = action.material;
-      if (!materialName) {
-        const rimOffsets = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1],
-                             [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1]];
-        const counts = new Map();
-        for (const [dx, dy, dz] of rimOffsets) {
-          const block = bot.blockAt(columnBase.offset(dx, dy, dz));
-          if (block?.boundingBox === "block" && !isProtectedBlockName(block.name)) {
-            counts.set(block.name, (counts.get(block.name) || 0) + 1);
-          }
-        }
-        let bestCount = 0;
-        for (const [name, count] of counts) {
-          if (count > bestCount) { materialName = name; bestCount = count; }
-        }
-      }
-      if (!materialName) return fail("couldn't tell what material belongs here -- no solid neighbors to match.");
-
-      const materialItem = bot.inventory.items().find((i) => i.name === materialName);
-      if (!materialItem) return fail(`need ${materialName} to fill this in -- don't have any.`);
-
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(x, y, z, 3)), ACTION_TIMEOUT_MS,
-                           () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to the repair site.");
-        return fail(`couldn't reach the spot to repair: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("stopped before repairing.");
-
-      let placed = 0;
-      for (let dy = 0; dy <= targetY - y && placed < PIT_FILL_BATCH_LIMIT; dy++) {
-        if (token.cancelled) break;
-        const pos = columnBase.offset(0, dy, 0);
-        const existing = bot.blockAt(pos);
-        if (existing?.boundingBox === "block") continue; // already solid -- a lower layer, or someone beat her to it
-        // 2026-10-07: terrain repair fills bottom-up toward the surrounding grade, which is
-        // exactly how a pit dug right next to a chest gets filled back in over the top of it.
-        // Stop the column here rather than skipping the layer -- everything above it would be
-        // left unsupported anyway (see the `below` check just under this).
-        const shuts = wouldBlockAccess(bot, pos, materialName);
-        if (shuts) {
-          console.log(`repair_terrain: stopped at ${pos} -- filling it would block ${shuts.reason} the ${shuts.fixture}`);
-          break;
-        }
-
-        const below = bot.blockAt(pos.offset(0, -1, 0));
-        if (!below || below.boundingBox !== "block") break; // nothing to reference off yet -- next visit catches it once the layer below is filled
-
-        const item = bot.inventory.items().find((i) => i.name === materialName);
-        if (!item) break; // ran out mid-fill
-        try {
-          await clearCellForPlacement(bot, pos);
-          await bot.equip(item, "hand");
-          await bot.placeBlock(below, new Vec3(0, 1, 0));
-          placed++;
-        } catch (err) {
-          console.error(`repair_terrain: placement failed at ${pos}:`, err.message);
-          break;
-        }
-      }
-
-      if (token.cancelled) return ok(`stopped repairing (${placed} block(s) filled).`);
-      if (!placed) return fail("couldn't fill in the damage -- nothing placed.");
-      return ok(`filled in ${placed} block(s) of damage with ${materialName}.`);
-    }
-
-    case "store": {
-      // Direct request, 2026-09-07 ("do all" -> base/chest storage): the inverse of "loot" --
-      // deposit an item into the nearest chest instead of withdrawing from it. Same multi-
-      // candidate + obstruction-check pattern (chestObstructed(), extracted from loot for this).
-      const itemDef = bot.registry.itemsByName[action.item];
-      if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
-      const have = bot.inventory.count(itemDef.id, null);
-      if (!have) return fail(`don't have any ${action.item} to store.`);
-      const storeCount = Math.min(action.count, have);
-
-      const chestType = bot.registry.blocksByName.chest;
-      const trappedType = bot.registry.blocksByName.trapped_chest;
-      const matchIds = [chestType?.id, trappedType?.id].filter((id) => id !== undefined);
-      if (!matchIds.length) return fail("don't know how to recognize a chest here.");
-      // Direct request, 2026-09-09 ("after any crafting activity, surplus materials should be
-      // stored in a chest as close to their sleeping home as possible"). action.near (optional):
-      // search FROM that point instead of the bot's own current position -- confirmed against
-      // mineflayer's own findBlocks() source (blocks.js): `point` (default bot.entity.position)
-      // is the real reference every result is sorted by distance to, not a cosmetic option.
-      // storeNearHome() (index.js) is the one caller that sets this, to her own claimed bed
-      // position; every other "store" caller (checkInventoryFull/Insurance) omits it and keeps
-      // the original "nearest to wherever I am right now" behavior, which is what they actually
-      // want (get rid of it quickly, not necessarily near home).
-      // 2026-11-07: candidates are ranked by what the fleet knows each chest holds (rankStoreChests),
-      // so an item joins its own kind instead of going into whichever chest is nearest.
-      const storeFindOptions = { matching: matchIds, maxDistance: CHEST_SEARCH_RADIUS, count: 8, point: action.near };
-      const searchPoint = action.near ? new Vec3(action.near.x, action.near.y, action.near.z) : bot.entity.position;
-      const known = await loadKnownChests();
-      let ranked = rankStoreChests(known, bot.findBlocks(storeFindOptions), action.item, searchPoint);
-      if (!ranked.length) ranked = rankStoreChests(known, await wanderAndRetryFind(bot, token, storeFindOptions), action.item, searchPoint);
-      if (!ranked.length) return fail("couldn't find a chest nearby, even after looking around.");
-
-      for (const { position: pos, tier } of ranked.slice(0, STORE_CANDIDATE_LIMIT)) {
-        if (token.cancelled) return ok("stopped on the way to a chest.");
-        const chestBlock = bot.blockAt(pos);
-        if (chestBlock && !matchIds.includes(chestBlock.type)) {
-          console.log(`[store] skipping remembered chest at ${pos}: it's ${chestBlock.name} now.`);
-          continue;
-        }
-        if (chestBlock && tier <= 1) {
-          console.log(`[store] ${action.item} -> chest at ${pos}, which already holds ${tier === 0 ? "some" : "the same kind"}.`);
-        }
-        // Real live gap, found 2026-10-07 investigating spark's own store_failure_rate baseline
-        // (0.781, already the worst metric in the fleet): this candidate was still as silent as
-        // the other two the 2026-09-09 fix closed -- blockAt() returning nothing for a position
-        // findBlocks() just reported (stale/unloaded chunk) left zero trace, same undiagnosable
-        // shape as the obstruction and deposit-failure cases just below.
-        if (!chestBlock) {
-          console.log(`[store] skipping chest at ${pos}: blockAt() returned nothing (unloaded chunk?).`);
-          continue;
-        }
-        // Real live gap, 2026-09-09: this and the pathfinder catch just below were exactly as
-        // silent as the deposit failure right after them ("found chests nearby, but couldn't
-        // store anything in any of them" with zero clue why) -- a real occurrence of this
-        // failure showed no deposit-failure log at all, meaning it was skipped here or below
-        // instead, neither of which said so. Logged for the same reason.
-        if (chestObstructed(bot, chestBlock)) {
-          console.log(`[store] skipping chest at ${chestBlock.position}: obstructed (blocked above).`);
-          noteUtilityOutcome("chest", chestBlock.position, false);
-          continue;
-        }
-
-        await hopToward(bot, token, chestBlock.position);
-        if (token.cancelled) return ok("stopped on the way to a chest.");
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(chestBlock.position.x,
-            chestBlock.position.y, chestBlock.position.z, 2)), ACTION_TIMEOUT_MS,
-            () => bot.pathfinder.setGoal(null));
-        } catch (err) {
-          if (token.cancelled) return ok("stopped on the way to a chest.");
-          console.log(`[store] couldn't reach chest at ${chestBlock.position}: ${err.message}`);
-          noteUtilityOutcome("chest", chestBlock.position, false);
-          continue; // couldn't reach this one -- try the next candidate
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) return ok("stopped on the way to a chest.");
-
-        try {
-          const chest = await bot.openChest(chestBlock);
-          noteUtilityOutcome("chest", chestBlock.position, true);
-          await chest.deposit(itemDef.id, null, storeCount);
-          // Direct request, 2026-09-13 ("remember what is in chests when someone opens it") --
-          // a deposit is exactly as real a change to this chest's contents as a withdrawal.
-          await recordChestSnapshot(chestBlock.position, chest.containerItems(), chest.inventoryStart);
-          await chest.close();
-        } catch (err) {
-          // Real live gap found 2026-09-09 (storeSurplusNearHome's own post-craft cleanup
-          // failed twice, live, with zero visibility into why): silently swallowing this per-
-          // candidate reason meant "found chests nearby, but couldn't store anything in any of
-          // them" was undiagnosable from the log alone -- same lesson "sleep" already learned
-          // once (2026-09-07) for its own multi-candidate loop, never applied here until now.
-          console.log(`[store] couldn't deposit into chest at ${chestBlock.position}: ${err.message}`);
-          noteUtilityOutcome("chest", chestBlock.position, false);
-          continue; // couldn't open/deposit into this one -- try the next candidate
-        }
-        return ok(`stored ${storeCount} ${action.item} in a chest.`);
-      }
-      return fail("found chests nearby, but couldn't store anything in any of them.");
-    }
-
-    case "consolidate_chests": {
-      // Direct request, 2026-11-07: one kind of item split between two chests is brought together
-      // in full stacks. action.plan is findConsolidation()'s move (a snapshot just found it);
-      // without one she works out her own from what the fleet knows of the chests around her.
-      const plan = action.plan ?? findConsolidation(await loadKnownChests(), bot.entity.position);
-      if (!plan) return ok("no two chests near here hold the same kind of thing.");
-      const names = Object.keys(plan.from.items);
-      const freeSlots = () => bot.inventory.emptySlotCount();
-      if (freeSlots() < 2) return fail("no free slots to carry anything between chests.");
-
-      // 1. Take the family out of the chest that holds less of it, as many stacks as she can carry
-      // and the other chest has room for (one inventory slot kept free).
-      const source = await openChestAt(bot, token, plan.from.position);
-      if (source.cancelled) return ok("stopped on the way to a chest.");
-      if (source.error) return fail(`couldn't open the chest at ${plan.from.position}: ${source.error}`);
-      // Counts come from each open window -- its containerItems() and its own copy of her inventory
-      // (items()); bot.inventory doesn't see a withdrawal until the window closes (live, 2026-11-07:
-      // counted from there, only 30 of 70 birch logs went in). Item objects change under a
-      // withdraw, so each count is copied out before anything moves.
-      const totals = (items, wanted) => {
-        const byType = new Map();
-        for (const { type, name, count, stackSize } of items) {
-          if (!wanted(type, name)) continue;
-          const entry = byType.get(type) ?? { name, count: 0, slots: 0, stackSize: stackSize ?? 64 };
-          entry.count += count;
-          entry.slots++;
-          byType.set(type, entry);
-        }
-        return byType;
-      };
-      const heldIn = (window, type) => window.items().filter((i) => i.type === type).reduce((n, i) => n + i.count, 0);
-      const own = new Map(); // type -> { name, mine }: what she held herself beforehand is never moved
-      let carried = 0;
-      try {
-        let room = Math.min(freeSlots() - 1, plan.to.freeSlots ?? Infinity);
-        for (const [type, { name, count, stackSize }] of totals(source.chest.containerItems(), (_, name) => names.includes(name))) {
-          if (token.cancelled || room < 1) break;
-          const take = Math.min(count, room * stackSize);
-          own.set(type, { name, mine: heldIn(source.chest, type) });
-          await source.chest.withdraw(type, null, take);
-          carried += take;
-          room -= Math.ceil(take / stackSize);
-        }
-        await recordChestSnapshot(plan.from.position, source.chest.containerItems(), source.chest.inventoryStart);
-      } catch (err) {
-        console.log(`[consolidate] couldn't take from chest at ${plan.from.position}: ${err.message}`);
-      } finally {
-        try { await source.chest.close(); } catch { /* already closed */ }
-      }
-      if (token.cancelled) return ok("stopped while moving chest items.");
-      if (!carried) return fail(`the chest at ${plan.from.position} had none of its ${plan.family} left to move.`);
-
-      // 2. Into the chest that holds more. What it already has of these items comes out first, so
-      // putting it all back fills whole stacks instead of leaving several part-filled ones.
-      const target = await openChestAt(bot, token, plan.to.position);
-      if (target.cancelled) return ok("stopped on the way to a chest.");
-      if (target.error) return fail(`took ${carried} ${plan.family} but couldn't open the chest at ${plan.to.position}: ${target.error}`);
-      let stored = 0;
-      try {
-        for (const [type, { count, slots, stackSize }] of totals(target.chest.containerItems(), (type) => own.has(type))) {
-          const stacks = Math.ceil(count / stackSize);
-          if (slots === stacks || freeSlots() < stacks) continue; // already in whole stacks, or no room to lift them
-          await target.chest.withdraw(type, null, count);
-        }
-        for (const [type, { name, mine }] of own) {
-          const put = heldIn(target.chest, type) - mine;
-          if (put < 1) continue;
-          try {
-            await target.chest.deposit(type, null, put);
-            stored += put;
-          } catch (err) {
-            console.log(`[consolidate] couldn't put ${name} into chest at ${plan.to.position}: ${err.message}`);
-            break; // destination full -- the rest stays with her for the next store
-          }
-        }
-        await recordChestSnapshot(plan.to.position, target.chest.containerItems(), target.chest.inventoryStart);
-      } catch (err) {
-        console.log(`[consolidate] couldn't sort chest at ${plan.to.position}: ${err.message}`);
-      } finally {
-        try { await target.chest.close(); } catch { /* already closed */ }
-      }
-      if (!stored) return fail(`took ${carried} ${plan.family} but couldn't put them in with the rest.`);
-      return ok(`moved ${carried} ${plan.family} from the chest at ${plan.from.position} in with the rest at ${plan.to.position}.`);
-    }
-
-    case "trade": {
-      // Direct request, 2026-09-07 ("do all" -> villager trading): a whole real mechanic (trade
-      // UI, emeralds) untouched until now. Built on mineflayer's own openVillager()/trade()
-      // (core) -- confirmed against villager.js source: trades expose .outputs[0].type, .inputs
-      // (1-2 required items), .tradeDisabled (out of uses). <item> is the OUTPUT she wants, not
-      // a trade index or price she'd have to already know -- this finds a matching, currently-
-      // affordable, not-disabled trade herself. Deliberately direct-command only, not wired into
-      // the goal planner's own vocabulary -- villager availability is unpredictable enough that
-      // adding it there risks another hallucination surface rather than real capability.
-      const villagerEntity = bot.nearestEntity((e) => e.name === "villager" &&
-        e.position.distanceTo(bot.entity.position) <= 16);
-      if (!villagerEntity) return fail("no villager nearby.");
-
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(villagerEntity, 2)), ACTION_TIMEOUT_MS,
-          () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to the villager.");
-        return fail(`couldn't reach the villager: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("stopped on the way to the villager.");
-
-      let villager;
-      try {
-        villager = await bot.openVillager(villagerEntity);
-      } catch (err) {
-        return fail(`couldn't open trading with the villager: ${err.message}`);
-      }
-
-      try {
-        const wantedId = bot.registry.itemsByName[action.item]?.id;
-        const tradeIndex = (villager.trades ?? []).findIndex((t) =>
-          !t.tradeDisabled && t.outputs[0]?.type === wantedId &&
-          t.inputs.every((ing) => bot.inventory.count(ing.type, null) >= ing.count));
-        if (tradeIndex < 0) {
-          await villager.close();
-          return fail(`this villager doesn't have a usable trade for ${action.item}.`);
-        }
-        await bot.trade(villager, tradeIndex, 1);
-        await villager.close();
-      } catch (err) {
-        try { await villager.close(); } catch { /* already closed or never opened cleanly */ }
-        return fail(`couldn't complete the trade: ${err.message}`);
-      }
-      await refreshGear(bot);
-      return ok(`traded with a villager for ${action.item}.`);
-    }
-
-    case "recover": {
-      // Direct request, 2026-09-07 ("do all" -> death/respawn handling). Vanilla drops
-      // everything at the death location on a 5-minute despawn timer (unless keepInventory is
-      // on) -- worth trying to get back before it's gone. Picking items up is automatic on
-      // proximity, no dedicated mineflayer API needed -- just getting there is the whole job.
-      // action.position is a plain {x,y,z} (index.js's own captured bot.entity.position at the
-      // moment of death), not a real action verb a player/planner would ever construct by hand.
-      const { position } = action;
-      if (!position) return fail("don't know where I died.");
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(position.x, position.y, position.z, 1)),
-          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("gave up heading back.");
-        return fail(`couldn't get back to where I died: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("gave up heading back.");
-      // Give auto-pickup a moment to actually register nearby items before reporting done.
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      await refreshGear(bot);
-      return ok("made it back to recover what I could.");
-    }
-
-    case "harvest": {
-      // Direct request, 2026-09-07 (farming), rebuilt 2026-09-25 from a day of logs: the old
-      // start-a-farm branch tilled the 8 nearest dirt blocks wherever they were, counted a till that
-      // silently failed (grass on top), ignored water, and never said why it failed. action.near:
-      // work around this spot (a farm goal's plot). action.onlyRipe: harvest ripe crops or nothing
-      // -- the ripe-crop routine uses it so it never starts a farm on its own.
-      const CROP_REPLANT = { wheat: "wheat_seeds", carrots: "carrot", potatoes: "potato", beetroots: "beetroot_seeds" };
-      const HARVEST_BATCH_LIMIT = 8;
-      const cropIds = Object.keys(CROP_MAX_AGE).map((n) => bot.registry.blocksByName[n]?.id)
-        .filter((id) => id !== undefined);
-      if (!cropIds.length) return fail("don't know how to recognize any crops here.");
-      const near = action.near ? new Vec3(action.near.x, action.near.y, action.near.z) : null;
-
-      const positions = bot.findBlocks({ matching: cropIds, maxDistance: 32, count: 64, ...(near ? { point: near } : {}) });
-      const matureBlocks = positions.map((pos) => bot.blockAt(pos))
-        .filter((block) => block && Number(block.getProperties?.().age) === CROP_MAX_AGE[block.name])
-        .slice(0, HARVEST_BATCH_LIMIT);
-
-      if (!matureBlocks.length) {
-        if (action.onlyRipe) return fail("nothing ripe to harvest.");
-        const hoe = bot.inventory.items().find((i) => i.name.endsWith("_hoe"));
-        if (!hoe) return { ...fail("couldn't find any ripe crops, and don't have a hoe to start a new farm."), missing: "hoe" };
-        if (!bot.inventory.items().some((i) => SEED_NAMES.includes(i.name))) {
-          return { ...fail("couldn't find any ripe crops, and don't have any seeds to start a new farm."), missing: "seeds" };
-        }
-        const site = chooseFarmPlot(bot, near);
-        if (!site) return fail("couldn't find any ripe crops or open ground to start a new farm.");
-
-        let tilled = 0, planted = 0;
-        const problems = [];
-        for (const pos of site.plot) {
-          if (token.cancelled) break;
-          if (!tillableAt(bot, pos) && bot.blockAt(pos)?.name !== "farmland") continue; // changed since chosen
-          try {
-            await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 2)),
-              ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-          } catch {
-            if (token.cancelled) break;
-            problems.push("unreachable");
-            continue;
-          } finally {
-            if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-          }
-          if (token.cancelled) break;
-
-          const above = bot.blockAt(pos.offset(0, 1, 0));
-          if (above && above.name !== "air") {
-            try {
-              await withTimeout(bot.dig(above), ACTION_TIMEOUT_MS, () => bot.stopDigging()); // grass often drops seeds
-            } catch {
-              problems.push(`couldn't clear the ${above.name}`);
-              continue;
-            }
-          }
-          if (bot.blockAt(pos)?.name !== "farmland") {
-            try {
-              const currentHoe = bot.inventory.items().find((i) => i.name.endsWith("_hoe"));
-              if (!currentHoe) { problems.push("hoe broke"); break; }
-              await bot.equip(currentHoe, "hand");
-              await bot.activateBlock(bot.blockAt(pos));
-            } catch (err) {
-              problems.push(`tilling: ${err.message}`);
-              continue;
-            }
-            await new Promise((r) => setTimeout(r, 250)); // the block update lands a tick or two later
-            if (bot.blockAt(pos)?.name !== "farmland") {
-              problems.push(`the ${bot.blockAt(pos)?.name ?? "block"} didn't turn to farmland`);
-              continue;
-            }
-          }
-          tilled++;
-          const seed = bot.inventory.items().find((i) => SEED_NAMES.includes(i.name));
-          if (!seed) { problems.push("ran out of seeds"); continue; }
-          try {
-            await bot.equip(seed, "hand");
-            await bot.placeBlock(bot.blockAt(pos), new Vec3(0, 1, 0));
-          } catch (err) {
-            problems.push(`planting: ${err.message}`);
-            continue;
-          }
-          if (cropIds.includes(bot.blockAt(pos.offset(0, 1, 0))?.type)) planted++;
-          else problems.push("the seed didn't take");
-        }
-        await collectDrops(bot, token, site.plot); // seeds from the cleared grass
-        await refreshGear(bot);
-        const why = problems.length ? ` (${[...new Set(problems)].slice(0, 3).join("; ")})` : "";
-        if (!planted && !token.cancelled) return fail(`couldn't start a farm: tilled ${tilled}, planted 0${why}.`);
-        const result = ok(`started a farm plot${site.hydrated ? " by water" : " (no water nearby, it'll grow slowly)"}: ` +
-          `tilled ${tilled}, planted ${planted}${token.cancelled ? ", stopped early" : ""}${why}.`);
-        return { ...result, tilled, planted, plot: { x: site.center.x, y: site.center.y, z: site.center.z } };
-      }
-
-      const harvestedCounts = {};
-      const missed = []; // why each ripe crop wasn't picked (live, 2026-09-25: failures said nothing)
-      const emptied = []; // harvested with no seed in hand yet -- replanted after picking up the drops
-      let replantedCount = 0;
-      let stoppedEarly = false;
-
-      for (const cropBlock of matureBlocks) {
-        if (token.cancelled) {
-          stoppedEarly = true;
-          break;
-        }
-        const current = bot.blockAt(cropBlock.position);
-        if (!current || Number(current.getProperties?.().age) !== CROP_MAX_AGE[current.name]) continue;
-
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(current.position.x,
-            current.position.y, current.position.z, 2)), ACTION_TIMEOUT_MS,
-            () => bot.pathfinder.setGoal(null));
-        } catch (err) {
-          if (token.cancelled) { stoppedEarly = true; break; }
-          missed.push(`can't reach the one at ${current.position} (${err.message})`);
-          continue; // couldn't reach this one -- move on to the next rather than abandon the batch
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) { stoppedEarly = true; break; }
-
-        const farmlandPos = current.position.offset(0, -1, 0); // the crop sits on this block
-        try {
-          await withTimeout(bot.dig(current), ACTION_TIMEOUT_MS, () => bot.stopDigging());
-        } catch (err) {
-          if (token.cancelled) { stoppedEarly = true; break; }
-          missed.push(`couldn't break the one at ${current.position} (${err.message})`);
-          continue; // this one failed -- still worth trying the rest of the batch
-        }
-        harvestedCounts[current.name] = (harvestedCounts[current.name] || 0) + 1;
-
-        const seedName = CROP_REPLANT[current.name];
-        const seedItem = bot.inventory.items().find((i) => i.name === seedName);
-        if (!seedItem) emptied.push({ farmlandPos, seedName });
-        if (seedItem) {
-          try {
-            await bot.equip(seedItem, "hand");
-            await bot.placeBlock(bot.blockAt(farmlandPos), new Vec3(0, 1, 0));
-            replantedCount++;
-          } catch (err) {
-            console.error(`harvest: replant failed:`, err.message); // this harvest still counts
-          }
-        }
-      }
-
-      const total = Object.values(harvestedCounts).reduce((a, b) => a + b, 0);
-      if (total) await collectDrops(bot, token, matureBlocks.map((b) => b.position));
-      // The seeds come out of the crop she just broke, so on a farm she didn't plant herself there
-      // were none in hand at replant time (live: "harvested 8 wheat (0 replanted)"). Second pass.
-      for (const { farmlandPos, seedName } of emptied) {
-        if (token.cancelled) break;
-        const seedItem = bot.inventory.items().find((i) => i.name === seedName);
-        if (!seedItem) continue;
-        if (bot.blockAt(farmlandPos)?.name !== "farmland" || bot.blockAt(farmlandPos.offset(0, 1, 0))?.name !== "air") continue;
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(farmlandPos.x, farmlandPos.y, farmlandPos.z, 2)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-          await bot.equip(seedItem, "hand");
-          await bot.placeBlock(bot.blockAt(farmlandPos), new Vec3(0, 1, 0));
-          replantedCount++;
-        } catch (err) {
-          console.error("harvest: late replant failed:", err.message);
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-      }
-      await refreshGear(bot);
-      if (!total) {
-        return stoppedEarly ? ok("stopped harvesting.")
-          : fail(`couldn't harvest any of the ${matureBlocks.length} ripe crops found: ${missed.slice(0, 2).join("; ") || "they changed"}.`);
-      }
-      for (const crop of Object.keys(harvestedCounts)) await recordAchievement(bot, `harvested:${crop}`);
-      const summary = Object.entries(harvestedCounts).map(([name, n]) => `${n} ${name}`).join(", ");
-      return { ...ok(`harvested ${summary} (${replantedCount} replanted)${stoppedEarly ? ", stopped early" : ""}.`),
-        harvested: harvestedCounts };
-    }
-
-    case "plant_sapling": {
-      // Direct request, 2026-09-09: "when they find saplings, they should plant them (1) near
-      // other trees of the same variety if they can (2) in any free soil not directly adjacent
-      // to a building if they can't." action.item is the specific sapling name (e.g.
-      // "oak_sapling") -- checkSaplings() (index.js) is the one caller, picking whichever
-      // sapling she's actually carrying, never invented.
-      const saplingItem = bot.inventory.items().find((i) => i.name === action.item);
-      if (!saplingItem) return fail(`don't have a ${action.item} to plant.`);
-
-      const SAPLING_PLANT_BATCH_LIMIT = 4;
-      const treeName = action.item.replace("_sapling", "_log"); // oak_sapling -> oak_log
-      const treeLogId = bot.registry.blocksByName[treeName]?.id;
-      const groundIds = [bot.registry.blocksByName.grass_block?.id, bot.registry.blocksByName.dirt?.id]
-        .filter((id) => id !== undefined);
-
-      let planted = 0;
-      for (let i = 0; i < SAPLING_PLANT_BATCH_LIMIT; i++) {
-        if (token.cancelled) break;
-        const current = bot.inventory.items().find((it) => it.name === action.item);
-        if (!current) break; // ran out of this sapling type
-
-        // Rule 1: near an existing tree of the same species, if one's reachable.
-        let targetPos = null;
-        if (treeLogId !== undefined) {
-          const treePositions = bot.findBlocks({ matching: [treeLogId], maxDistance: 32, count: 5 });
-          for (const treePos of treePositions) {
-            targetPos = findPlantableSpotNear(bot, treePos, 4);
-            if (targetPos) break;
-          }
-        }
-        // Rule 2: fall back to any free soil not directly adjacent to a building.
-        if (!targetPos) {
-          // Real live gap found 2026-09-09, minutes after this first deployed: Luke and Mayor
-          // both failed to find ANY spot, every single retry, for the entire 25-minute window --
-          // rule 2 only ever checked within a fixed 32 blocks of wherever the bot currently
-          // stood, with no fallback if that came up empty (unlike "mine"/"store"/harvest's own
-          // till-from-scratch fallback, all of which already reach for wanderAndRetryFind()).
-          // Near a base, most nearby open ground legitimately IS near a building by design
-          // (that's the whole point of a base) -- this needs the same directed-wander capability
-          // every other search-based action already has to reach open, unclaimed ground beyond
-          // the immediate settled area.
-          const groundFindOptions = {
-            // Real live crash, 2026-09-09: a findBlocks() matcher candidate can have a null
-            // .position despite the block itself being non-null -- the exact same mineflayer
-            // edge case findNearestShore() (index.js) already found and guarded against; this
-            // matcher hit it too ("sapling check failed: Cannot read properties of null
-            // (reading 'offset')", repeating every idle tick for any bot carrying a sapling).
-            // Also tightened here to real "air" (not just a non-solid bounding box) -- a
-            // pre-existing sapling/tall-grass/flower already occupying that space isn't "block"
-            // either, and a real live placement failure ("Server refused to place
-            // dark_oak_sapling ... the block is still dark_oak_sapling") traced to exactly that.
-            matching: (block) => {
-              if (!block || !groundIds.includes(block.type)) return false;
-              if (!block.position) return true; // findBlocks' palette pre-check (2026-11-04)
-              if (bot.blockAt(block.position.offset(0, 1, 0))?.name !== "air") return false;
-              return !nearBuilding(bot, block.position);
-            },
-            maxDistance: 32, count: 1,
-          };
-          let positions = bot.findBlocks(groundFindOptions);
-          if (!positions.length) positions = await wanderAndRetryFind(bot, token, groundFindOptions);
-          targetPos = positions[0] || null;
-        }
-        if (!targetPos) break; // nowhere good found -- stop, don't force a bad spot
-
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 2)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-        } catch {
-          if (token.cancelled) break;
-          break; // couldn't reach this one -- don't keep hunting for spots this call
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) break;
-
-        try {
-          await bot.equip(current, "hand");
-          await bot.placeBlock(bot.blockAt(targetPos), new Vec3(0, 1, 0));
-          planted++;
-        } catch (err) {
-          console.error(`plant_sapling: failed to plant at ${targetPos}:`, err.message);
-          break; // an unexpected placement failure -- don't loop on the same problem
-        }
-      }
-
-      if (!planted) return token.cancelled ? ok("stopped planting.") : fail(`couldn't find anywhere good to plant the ${action.item}.`);
-      return ok(`planted ${planted} ${action.item}${token.cancelled ? ", stopped early" : ""}.`);
-    }
-
-    case "breed": {
-      // Direct request, 2026-09-07 ("what else can we add" -> animal breeding, the other half
-      // of a sustainable food source). Built on mineflayer's own activateEntity() (core --
-      // confirmed against inventory.js source: right-clicks the entity while holding whatever's
-      // equipped, exactly vanilla's own feed-to-breed mechanic, no dedicated "breed" API needed).
-      // BREEDING_FOOD hoisted to module scope 2026-09-11 -- see its own comment above.
-      const foods = BREEDING_FOOD[action.species];
-      if (!foods) return fail(`don't know how to breed a ${action.species}.`);
-      const foodItem = bot.inventory.items().find((i) => foods.includes(i.name));
-      if (!foodItem) return fail(`don't have the right food to breed a ${action.species} (need ${foods[0]}).`);
-
-      // action.near (a ranch goal's pen centre): breed the pair inside the pen, not two strays.
-      const near = action.near ? new Vec3(action.near.x + 0.5, action.near.y, action.near.z + 0.5) : null;
-      const kin = () => Object.values(bot.entities).filter((e) => e.name === action.species &&
-        (near ? e.position.distanceTo(near) <= 3.6 : e.position.distanceTo(bot.entity.position) <= 24));
-      const before = kin().length;
-      const animals = kin().slice(0, 2);
-      if (animals.length < 2) {
-        return fail(`need two ${action.species}s nearby to breed, only found ${animals.length}.`);
-      }
-
-      try {
-        await bot.equip(foodItem, "hand");
-      } catch (err) {
-        return fail(`couldn't hold the ${foodItem.name}: ${err.message}`);
-      }
-
-      let fed = 0;
-      for (const animal of animals) {
-        if (token.cancelled) return ok("stopped breeding.");
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(animal, 2)), ACTION_TIMEOUT_MS,
-            () => bot.pathfinder.setGoal(null));
-          await bot.activateEntity(animal);
-          fed++;
-        } catch (err) {
-          console.error(`breed: couldn't feed one ${action.species}:`, err.message);
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-      }
-      await refreshGear(bot);
-      if (!fed) return fail(`couldn't get close enough to feed any ${action.species}s.`);
-      // 2026-09-25: success used to be "fed some" -- a pair already on cooldown, or one fed twice,
-      // looked the same. A baby appearing within ~10s is the real result.
-      let bred = false;
-      for (let waited = 0; waited < 10_000 && !token.cancelled; waited += 500) {
-        await new Promise((r) => setTimeout(r, 500));
-        if (kin().length > before) { bred = true; break; }
-      }
-      if (!bred) return fail(`fed ${fed} ${action.species}${fed > 1 ? "s" : ""}, but no baby came of it (on cooldown, or too young?).`);
-      await recordAchievement(bot, `bred:${action.species}`);
-      return { ...ok(`bred a baby ${action.species}.`), bred: action.species };
-    }
-
-    case "harvest_hive": {
-      // Direct request, 2026-09-11 ("bee nests/hives") -- honey output for the Herder role,
-      // narrowing (not closing -- pen/fence containment for other animals is still open, §15.11)
-      // the gap that section flagged. Real vanilla beehive/bee_nest interaction has no dedicated
-      // mineflayer API, same as "harvest"'s own tilling step above -- bot.activateBlock() while
-      // holding the right item is the same "simulate a real client interaction" primitive.
-      //
-      // Direct follow-up, same day ("nest" again -> "honeycomb via shears too"): action.tool
-      // picks the real tradeoff explicitly rather than hiding it -- "bottle" (default, honey)
-      // never angers the bees at full honey_level; "shears" (honeycomb, the ONLY path to enough
-      // honeycomb to ever craft a NEW beehive -- see the "craft"/"place" cases above, both
-      // already fully generic, no code change needed there) always does, regardless of level.
-      // Defaulting to bottle keeps every self-directed hive visit calm unless a caller
-      // specifically needs honeycomb badly enough to accept the risk.
-      const useShears = action.tool === "shears";
-      const toolName = useShears ? "shears" : "glass_bottle";
-      const tool = bot.inventory.items().find((i) => i.name === toolName);
-      if (!tool) {
-        return fail(`don't have ${useShears ? "shears" : "a glass bottle"} to collect ` +
-          `${useShears ? "honeycomb" : "honey"} with.`);
-      }
-
-      const hiveIds = [bot.registry.blocksByName.beehive?.id, bot.registry.blocksByName.bee_nest?.id]
-        .filter((id) => id !== undefined);
-      if (!hiveIds.length) return fail("don't know how to recognize a beehive here.");
-
-      const positions = bot.findBlocks({ matching: hiveIds, maxDistance: 32, count: 10 });
-      const fullHive = positions.map((pos) => bot.blockAt(pos))
-        .find((block) => block && Number(block.getProperties?.().honey_level) >= 5);
-      if (!fullHive) return fail("no full beehive/bee nest nearby -- nothing ready to collect yet.");
-
-      try {
-        await withTimeout(
-          bot.pathfinder.goto(new goals.GoalNear(fullHive.position.x, fullHive.position.y, fullHive.position.z, 2)),
-          ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to the hive.");
-        return fail(`couldn't reach the hive: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("stopped before collecting.");
-
-      try {
-        await bot.equip(tool, "hand");
-        await bot.activateBlock(bot.blockAt(fullHive.position));
-      } catch (err) {
-        return fail(`couldn't collect ${useShears ? "honeycomb" : "honey"}: ${err.message}`);
-      }
-      await refreshGear(bot);
-      return ok(useShears
-        ? "took honeycomb from the hive -- might have upset the bees."
-        : "collected a bottle of honey from the hive.");
-    }
-
-    case "get_wool": {
-      // Wool for a bed (2026-09-26): shear a sheep with shears, otherwise take it the hard way --
-      // a killed sheep drops one wool -- and pick up what drops. Until she holds action.count of
-      // one colour, a handful of sheep at most.
-      const want = action.count ?? 3;
-      const best = () => Math.max(0, ...Object.values(woolCounts(bot)));
-      const startedWith = best();
-      // 2026-10-28 (direct report: shelters finished, never a bed): no sheep anywhere near home on
-      // this seed -- Babs and Dale failed "no sheep nearby" 32+ times each -- while Babs carried 45
-      // string from the spiders she fights every night. Four string craft one white wool (2x2, no
-      // table), so string she already holds comes before a long, often fruitless sheep hunt.
-      const whiteShort = want - (woolCounts(bot).white ?? 0);
-      const string = bot.inventory.items().filter((i) => i.name === "string").reduce((n, i) => n + i.count, 0);
-      if (best() < want && string >= whiteShort * 4) {
-        const crafted = await performActionAs(bot, { type: "craft", item: "white_wool", count: whiteShort }, speaker, token);
-        if (token.cancelled) return ok("stopped gathering wool.");
-        if (best() >= want) return ok(`crafted wool from string: now have ${best()} of one colour.`);
-        console.log(`[${bot.username}] get_wool: crafting wool from string didn't work: ${crafted.text}`);
-      }
-      for (let tries = 0; tries < 6 && best() < want && !token.cancelled; tries++) {
-        let sheep = Object.values(bot.entities)
-          .filter((e) => e.name === "sheep" && e.position.distanceTo(bot.entity.position) <= 32)
-          .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-        // Real bug found live 2026-10-10: this used to just break here -- an instant give-up the
-        // moment no sheep happened to be in her current 32-block radius, never once walking
-        // anywhere to actually look. wanderAndRetryForSheep() is a single attempt (it already
-        // fails fast if the wander itself turns up nothing), so this can only extend the loop by
-        // one real search, not six.
-        if (!sheep) sheep = await wanderAndRetryForSheep(bot, token);
-        if (!sheep) break;
-        const shears = bot.inventory.items().some((i) => i.name === "shears");
-        const got = await performActionAs(bot, shears ? { type: "shear" } : { type: "attack", target: sheep }, speaker, token);
-        if (token.cancelled) return ok("stopped gathering wool.");
-        if (!got.ok) continue;
-        await collectDrops(bot, token, [bot.entity.position.clone()], 6000);
-      }
-      if (best() >= want) return ok(`gathered wool: now have ${best()} of one colour.`);
-      const gained = best() - startedWith;
-      return fail(gained > 0 ? `got ${gained} wool, still short of ${want} of one colour.`
-        : "no sheep nearby to get wool from, even after looking around.");
-    }
-
-    case "place_bed": {
-      // 2026-09-26: "place" put a bed down like any one-block item, next to wherever she stood --
-      // a bed needs two free, supported cells the way she faces, and nothing checked it appeared.
-      const bedItem = bot.inventory.items().find((i) => i.name.endsWith("_bed"));
-      if (!bedItem) return fail("don't have a bed to place.");
-      // 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a): an optional target, same shape as
-      // "store"'s own action.near -- without it, unchanged (her claimed-bed/spawn "home", via
-      // "gohome"). The communal shelter's own runner passes its site here instead, so a bed meant
-      // for the communal room doesn't end up scattered wherever findBedSites' generic "nearest
-      // covered spot near home" scoring happens to prefer.
-      const target = action.near ? new Vec3(action.near.x, action.near.y, action.near.z) : null;
-      // 2026-10-30: action.cells, optional -- the bed must stand in these cells (a shelter goal
-      // passes its own room). Babs placed two beds "near" her shelter that landed elsewhere
-      // nearby, so her shelter stayed bedless and she went for wool for a third.
-      const within = action.cells ? new Set(action.cells.map(posKey)) : null;
-      const home = target
-        ? await (async () => {
-            try {
-              await withTimeout(bot.pathfinder.goto(new goals.GoalNear(target.x, target.y, target.z, 3)),
-                ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-              return ok("made it to the target site.");
-            } catch (err) {
-              return token.cancelled ? ok("stopped heading to the target site.") : fail(`couldn't reach the target site: ${err.message}`);
-            } finally {
-              if (!token.cancelled) bot.pathfinder.setGoal(null);
-            }
-          })()
-        : await performActionAs(bot, { type: "gohome" }, speaker, token);
-      if (token.cancelled) return home;
-      if (!home.ok) return fail(`couldn't get to the bed site: ${home.text}`);
-      // Up to 4 spots, best first: a refusal (someone stepped into it, a stale view) moves on to the
-      // next instead of retrying the same one. A bed that appeared despite an error still counts.
-      const tried = [];
-      const unreachable = []; // in `tried` too, but never offered to the server
-      let site = null;
-      for (let attempt = 0; attempt < 4 && !token.cancelled && !site; attempt++) {
-        // 2026-10-07: a bed is two solid blocks, so it impedes access exactly like any other
-        // placement -- and findBedSites prefers the shelter room, which is where the chests and
-        // the door are. Judged inside the predicate, not recorded in `tried`: the four attempts
-        // each re-read the world, and a spot that is blocked now may not be on the next pass
-        // (someone moves a chest, another bot clears the way) -- unlike a spot the SERVER
-        // refused, which is what `tried` is for.
-        const candidate = findBedSites(bot, target ?? bot.spawnPoint ?? bot.entity.position, within)
-          .find((c) => !tried.some((t) => t.equals(c.foot)) &&
-            !wouldBlockAccess(bot, c.foot) && !wouldBlockAccess(bot, c.head) &&
-            !isRecentlyRefusedBedSpot(c.foot));
-        if (!candidate) break;
-        tried.push(candidate.foot);
-        try {
-          await withTimeout(bot.pathfinder.goto(new goals.GoalBlock(candidate.stand.x, candidate.stand.y, candidate.stand.z)),
-            ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-        } catch {
-          if (token.cancelled) return ok("stopped on the way to the bed spot.");
-          unreachable.push(candidate.foot);
-          continue; // unreachable -- next spot
-        } finally {
-          if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-        }
-        if (token.cancelled) return ok("stopped before placing the bed.");
-        if (cellOccupied(bot, candidate.foot) || cellOccupied(bot, candidate.head)) continue; // someone walked in
-        const bedNow = bot.inventory.items().find((i) => i.name.endsWith("_bed"));
-        if (!bedNow) break;
-        try {
-          await clearCellForPlacement(bot, candidate.foot);
-          await clearCellForPlacement(bot, candidate.head);
-          await bot.equip(bedNow, "hand");
-          await bot.placeBlock(bot.blockAt(candidate.foot.offset(0, -1, 0)), new Vec3(0, 1, 0));
-        } catch (err) {
-          refusedBedSpots.set(bedSpotKey(candidate.foot), Date.now());
-          console.log(`[${bot.username}] place_bed: ${candidate.foot} refused (${err.message}) -- trying another spot`);
-        }
-        await new Promise((r) => setTimeout(r, 250)); // the head half's update lands a tick later
-        if (bot.isABed(bot.blockAt(candidate.foot)) && bot.isABed(bot.blockAt(candidate.head))) site = candidate;
-      }
-      await refreshGear(bot);
-      if (token.cancelled) return ok("stopped placing the bed.");
-      if (!site) {
-        // 2026-10-30: two 90s path timeouts read "the server refused the bed" for hours, with no
-        // refusal ever logged -- the real problem (a door the pathfinder couldn't get through) hid.
-        const refused = tried.filter((t) => !unreachable.includes(t));
-        return fail(refused.length ? `the server refused the bed at ${refused.length} spot(s) near home (${refused.join(", ")}).`
-          : tried.length ? `couldn't reach where she'd stand to place the bed at ${tried.length} spot(s) (${tried.join(", ")}).`
-          : within ? "couldn't find room for a bed inside the shelter's own room."
-          : "couldn't find two free, flat blocks in a row near home for a bed.");
-      }
-      return { ...ok(`placed a ${bedItem.name} at home.`), bedAt: { x: site.foot.x, y: site.foot.y, z: site.foot.z } };
-    }
-
-    case "shear": {
-      // Direct request, 2026-09-11 (§15.11 follow-up -- "shear/milk verb for non-bee animals").
-      // Real vanilla shearing has no dedicated mineflayer API beyond the generic right-click
-      // primitive -- bot.activateEntity() (core, the same primitive "breed" already uses to feed
-      // an animal) simulates it here too. No pre-check for "already sheared, wool hasn't regrown
-      // yet" -- mineflayer's own entity-metadata index for that flag isn't confirmed stable
-      // across versions, so this just tries and lets the server be the source of truth, same
-      // discipline "breed" already applies to a cooldown it also doesn't pre-check.
-      const shears = bot.inventory.items().find((i) => i.name === "shears");
-      if (!shears) return fail("don't have shears.");
-
-      const sheep = Object.values(bot.entities)
-        .filter((e) => e.name === "sheep" && e.position.distanceTo(bot.entity.position) <= 24)
-        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-      if (!sheep) return fail("no sheep nearby to shear.");
-
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(sheep, 2)), ACTION_TIMEOUT_MS,
-          () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to the sheep.");
-        return fail(`couldn't reach the sheep: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("stopped before shearing.");
-
-      try {
-        await bot.equip(shears, "hand");
-        await bot.activateEntity(sheep);
-      } catch (err) {
-        return fail(`couldn't shear the sheep: ${err.message}`);
-      }
-      await refreshGear(bot);
-      return ok("sheared a sheep for wool.");
-    }
-
-    case "milk": {
-      // Same primitive as "shear" just above, different tool/species -- an empty bucket
-      // right-clicked on a cow (core bot.activateEntity()) returns a filled milk_bucket, real
-      // vanilla mechanic, no dedicated API.
-      const bucket = bot.inventory.items().find((i) => i.name === "bucket");
-      if (!bucket) return fail("don't have an empty bucket.");
-
-      const cow = Object.values(bot.entities)
-        .filter((e) => e.name === "cow" && e.position.distanceTo(bot.entity.position) <= 24)
-        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-      if (!cow) return fail("no cow nearby to milk.");
-
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalFollow(cow, 2)), ACTION_TIMEOUT_MS,
-          () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to the cow.");
-        return fail(`couldn't reach the cow: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("stopped before milking.");
-
-      try {
-        await bot.equip(bucket, "hand");
-        await bot.activateEntity(cow);
-      } catch (err) {
-        return fail(`couldn't milk the cow: ${err.message}`);
-      }
-      await refreshGear(bot);
-      return ok("milked a cow.");
-    }
-
-    case "enchant": {
-      // Direct request, 2026-09-07 ("what else can we add" -> enchanting, a real mechanic
-      // untouched until now). Built on mineflayer's own openEnchantmentTable() (core) --
-      // confirmed against its source: putTargetItem()/putLapis() move items in, enchant(choice)
-      // picks one of the 3 offered options. Picks the first AFFORDABLE option by real XP level
-      // (see the affordability check further down) rather than always the cheapest slot.
-      const itemDef = bot.registry.itemsByName[action.item];
-      if (!itemDef) return fail(`I don't recognize the item "${action.item}".`);
-      const targetItem = bot.inventory.items().find((i) => i.type === itemDef.id);
-      if (!targetItem) return fail(`don't have a ${action.item} to enchant.`);
-      const lapisItem = bot.inventory.items().find((i) => i.name === "lapis_lazuli");
-      if (!lapisItem) return fail("don't have any lapis lazuli to enchant with.");
-
-      const tableType = bot.registry.blocksByName.enchanting_table;
-      if (!tableType) return fail("don't know how to recognize an enchanting table here.");
-      const enchFindOptions = { matching: tableType.id, maxDistance: 32, count: 1 };
-      let positions = bot.findBlocks(enchFindOptions);
-      if (!positions.length) positions = await wanderAndRetryFind(bot, token, enchFindOptions);
-      if (!positions.length) return fail("couldn't find an enchanting table nearby, even after looking around.");
-      const tableBlock = bot.blockAt(positions[0]);
-
-      try {
-        await withTimeout(bot.pathfinder.goto(new goals.GoalNear(tableBlock.position.x,
-          tableBlock.position.y, tableBlock.position.z, 2)), ACTION_TIMEOUT_MS,
-          () => bot.pathfinder.setGoal(null));
-      } catch (err) {
-        if (token.cancelled) return ok("stopped on the way to the enchanting table.");
-        return fail(`couldn't reach the enchanting table: ${err.message}`);
-      } finally {
-        if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
-      }
-      if (token.cancelled) return ok("stopped on the way to the enchanting table.");
-
-      let table;
-      try {
-        table = await bot.openEnchantmentTable(tableBlock);
-        await table.putTargetItem(targetItem);
-        await table.putLapis(lapisItem);
-        if (!table.enchantments.some((e) => e.level > -1)) {
-          await withTimeout(new Promise((resolve) => table.once("ready", resolve)), 5000, () => {});
-        }
-        // Real gap found by reading enchantment_table.js's own source, 2026-09-07: .level on
-        // each slot IS the real XP-level cost the server will charge (confirmed: it's populated
-        // directly from the same window-property packet vanilla uses to show that number to a
-        // real player), and enchant() has no affordability check of its own -- it just sends the
-        // packet and awaits an inventory update that may never come if the server silently
-        // rejects an unaffordable choice, hanging this action instead of failing it. Picking the
-        // first AFFORDABLE option (mineflayer's own anvil.js uses the identical bot.experience.
-        // level comparison for repair costs) avoids both problems at once.
-        const available = table.enchantments.filter((e) => e.level > -1);
-        const optionIndex = table.enchantments.findIndex((e) => e.level > -1 && e.level <= bot.experience.level);
-        if (optionIndex < 0) {
-          await table.takeTargetItem().catch(() => {});
-          await table.close();
-          return fail(available.length
-            ? `can't afford any enchantment offered (cheapest needs level ` +
-              `${Math.min(...available.map((e) => e.level))}, only have ${bot.experience.level}).`
-            : "no enchantments available right now (maybe needs more bookshelves or levels).");
-        }
-        await table.enchant(optionIndex);
-        await table.takeTargetItem();
-        await table.close();
-      } catch (err) {
-        try { await table?.close(); } catch { /* already closed or never opened cleanly */ }
-        return fail(`couldn't enchant the ${action.item}: ${err.message}`);
-      }
-      await refreshGear(bot);
-      return ok(`enchanted the ${action.item}.`);
-    }
-
-    default:
-      return fail("not sure how to do that yet.");
-  }
-  } finally {
-    // Release moved to the performAction() wrapper (2026-09-24).
-  }
+export async function performActionAs(bot, action, speaker, token) {
+  // Every action is its own file under actions/ (2.0.0, 2026-11-10); ACTION_HANDLERS maps
+  // action.type to it. Built here, at call time, so a test slice of this file that never
+  // calls performActionAs needs none of the handlers. Control acquisition and release live in
+  // the performAction() wrapper above (2026-09-24).
+  const ACTION_HANDLERS = {
+    stop: stopAction,
+    goto: gotoAction,
+    follow: followAction,
+    mine: mineAction,
+    explore: exploreAction,
+    craft: craftAction,
+    loot: lootAction,
+    attack: attackAction,
+    flee: fleeAction,
+    eat: eatAction,
+    hunt: huntAction,
+    gather_seeds: gatherSeedsAction,
+    fish: fishAction,
+    give: giveAction,
+    gohome: gohomeAction,
+    sleep: sleepAction,
+    smelt: smeltAction,
+    place: placeAction,
+    place_home: placeHomeAction,
+    light_area: lightAreaAction,
+    clear_access: clearAccessAction,
+    build: buildAction,
+    patch_shelter: patchShelterAction,
+    reface_shelter: refaceShelterAction,
+    build_communal_shelter: buildCommunalShelterAction,
+    build_pen: buildPenAction,
+    herd_to_pen: herdToPenAction,
+    repair_terrain: repairTerrainAction,
+    store: storeAction,
+    consolidate_chests: consolidateChestsAction,
+    trade: tradeAction,
+    recover: recoverAction,
+    harvest: harvestAction,
+    plant_sapling: plantSaplingAction,
+    breed: breedAction,
+    harvest_hive: harvestHiveAction,
+    get_wool: getWoolAction,
+    place_bed: placeBedAction,
+    shear: shearAction,
+    milk: milkAction,
+    enchant: enchantAction,
+  };
+  const handler = ACTION_HANDLERS[action.type];
+  if (!handler) return { ok: false, text: "not sure how to do that yet." };
+  return await handler(bot, action, speaker, token);
 }

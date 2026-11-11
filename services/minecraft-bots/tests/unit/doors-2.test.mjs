@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: doors and doorways (part 2 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -7,7 +9,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, swim, V3, between, actionFn, timeoutFn, context, shelter, check, bedFns, shelterFns, blockWorld, shelterLivingSpace, smallRoom, room, passedCount } from './_harness.mjs';
+import { prioritiesSrc, indexOnly, homeScanSrc, actionCases, actions, index, swim, V3, between, actionFn, timeoutFn, context, shelter, check, bedFns, shelterFns, blockWorld, shelterLivingSpace, smallRoom, room, passedCount } from './_harness.mjs';
 
 
 await check('Beds: the first choice is a spot under a roof -- the shelter room, entered from its doorway', async () => {
@@ -160,7 +162,7 @@ await check('Protected blocks: a pen fence is never dug through, like its gate',
 
 
 await check('Placement: every shelter, door, bed and fill placement clears its cell before placing', async () => {
-  const caseSrc = (name) => between(actions, `    case "${name}": {`, '\n    case "');
+  const caseSrc = (name) => between(actionCases, `    case "${name}": {`, '\n    case "');
   const before = (src, clear, place, what) =>
     assert(src.indexOf(clear) >= 0 && src.indexOf(clear) < src.indexOf(place), what);
   for (const name of ['build', 'build_communal_shelter', 'patch_shelter']) {
@@ -202,7 +204,7 @@ await check('Doors: a shelter door faces through its doorway; a wrong-way one is
       SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24 });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') +
       between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
-      between(index, 'const shelterGeometryPositions', 'const BUILDER_ITEM_STALL_LIMIT'), c);
+      (between(homeScanSrc, 'const shelterGeometryPositions') + between(prioritiesSrc, 'const TOOL_NAME', 'const BUILDER_ITEM_STALL_LIMIT')), c);
     return { complete: c.hasShelterNearHome(), unfinished: c.unfinishedShelterNearHome() };
   };
   assert.equal(complete('south').complete, true, 'door facing out: complete');
@@ -211,13 +213,13 @@ await check('Doors: a shelter door faces through its doorway; a wrong-way one is
   assert.equal(JSON.stringify(west.unfinished), JSON.stringify(base), 'so the shelter goal hands it to "build"');
 
   // "build" takes a wrong-way door out before anything else, and places without placeBlock's own look.
-  const build = between(actions, '    case "build": {', '\n    case "');
+  const build = between(actionCases, '    case "build": {', '\n    case "');
   assert.match(build, /let doorAlready = isShelterDoor\(bot\.blockAt\(doorPos\)\)/);
   assert(build.indexOf('await bot.dig(bot.blockAt(doorPos))') >= 0 &&
     build.indexOf('await bot.dig(bot.blockAt(doorPos))') < build.indexOf('type: "craft", item: doorItemFor(bot)'),
     'the wrong-way door comes out before a new one would be crafted');
   for (const name of ['build', 'build_communal_shelter']) {
-    const src = between(actions, `    case "${name}": {`, '\n    case "');
+    const src = between(actionCases, `    case "${name}": {`, '\n    case "');
     assert.match(src, /bot\._placeBlockWithOptions\(floorBelow, new Vec3\(0, 1, 0\), \{ swingArm: "right", forceLook: "ignore" \}\)/,
       `${name}: the door keeps the look set just before it`);
     assert.match(src, /bot\.lookAt\(bot\.entity\.position\.offset\(0, bot\.entity\.height, 5\), true\);\s*(\/\/.*\n\s*)*await bot\.waitForTicks\(2\);/,

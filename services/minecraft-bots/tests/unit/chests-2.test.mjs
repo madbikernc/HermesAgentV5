@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: chest memory, storing, looting and consolidation (part 2 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -43,7 +45,7 @@ await check('Torches: she tops up from coal she carries, falls back to a chest, 
     needsTorches: t.needsTorches, torchCount: t.torchCount, TORCH_CARRY_MIN: vm.runInContext('TORCH_CARRY_MIN', t),
     heldCount: (test) => inv.filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
     performAction: async (b, a) => { calls.push(a); return reply; } });
-  vm.runInContext(between(index, 'const TORCH_SUPPLY_CHECK_MS', 'setInterval(() => {\n  checkTorchSupply'), c);
+  vm.runInContext(between(index, 'const TORCH_SUPPLY_CHECK_MS', 'guardedInterval(() => {\n  checkTorchSupply'), c);
 
   await c.checkTorchSupply();
   assert.deepEqual(calls.map((a) => `${a.type}:${a.item}`), ['craft:torch'], 'coal and a log on hand: make them');
@@ -101,7 +103,7 @@ await check('Inventory: full, with every chest at home full -- plain surplus is 
     performAction: async (_b, a) => { calls.push(`${a.type} ${a.item}`); return { ok: true, text: 'done' }; },
     writeMemoryNote: async () => {}, PERSONA_NAME: 'babs',
     TOOL_RANK: { wooden: 0, golden: 0, stone: 1, iron: 2, diamond: 3, netherite: 4 } });
-  vm.runInContext(between(index, 'async function makeHomeChest', 'setInterval(() => {\n  checkInventoryFull'), c);
+  vm.runInContext(between(index, 'async function makeHomeChest', 'guardedInterval(() => {\n  checkInventoryFull'), c);
   await c.checkInventoryFull();
   const total = (name) => tossed.filter(([n]) => n === name).reduce((n, [, k]) => n + k, 0);
   assert.equal(total('bow'), 9, 'nine bows go');
@@ -240,7 +242,7 @@ await check('Trash: a near-broken weapon and rotten flesh go into visible lava; 
     arbiter: { OWNERS: { ROUTINE: 'routine' }, requestControl: async () => ({ release() {} }), holdsControl: () => true },
     TOOL_RANK: { wooden: 0, golden: 0, stone: 1, iron: 2, diamond: 3, netherite: 4 } });
   vm.runInContext(slice(index, 'const DROP_DISTANCE', 'const EXTRA_CHEST_RETRY_MS') +
-    slice(index, '// Trash into lava', 'setInterval(() => {\n  checkTrash'), c);
+    slice(index, '// Trash into lava', 'guardedInterval(() => {\n  checkTrash'), c);
   await c.checkTrash();
   assert.deepEqual(tossed.sort(), ['iron_sword', 'rotten_flesh'], 'the spent sword (a good one stays) and the flesh');
   assert.equal(walked.length, 1, 'she walks beside the lava first');

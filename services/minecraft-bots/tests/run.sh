@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-11-10): unit and all also run tests/link-check.mjs where node_modules exists -- every
+# import of index.js and the modules split out of it resolves, checked without running a bot.
 #
 # Minecraft bot test runner -- see tests/README.md.
 #   tests/run.sh unit        offline fix-validation checks (runs anywhere with node)
@@ -46,13 +49,16 @@ server_up() {
   [ -d node_modules/mineflayer ] && timeout 3 bash -c "</dev/tcp/${MC_HOST:-192.168.1.221}/${MC_PORT:-25580}" 2>/dev/null
 }
 
+linkcheck() { if [ -d node_modules ]; then run linkcheck node --experimental-vm-modules --no-warnings tests/link-check.mjs; else echo "=== linkcheck: skipped (no node_modules)"; fi; }
+
 case "$suite" in
-  unit)     run unit node tests/unit.test.mjs "$@"; run triage python3 tests/test_triage.py; run ragserver python3 tests/test_rag_server.py ;;
+  unit)     run unit node tests/unit.test.mjs "$@"; linkcheck; run triage python3 tests/test_triage.py; run ragserver python3 tests/test_rag_server.py ;;
   live)     if server_up; then run live node tests/live.test.mjs "$@"; else echo "=== live: skipped (no node_modules or bot server unreachable from $host)"; fi ;;
   livebot)  if server_up; then run livebot node tests/live-bot.test.mjs "$@"; else echo "=== livebot: skipped (no node_modules or bot server unreachable from $host)"; fi ;;
   baseline) run baseline node tests/baseline.mjs "$@"; run monitoring node tests/monitoring.mjs ;;
   all)
     run unit node tests/unit.test.mjs
+    linkcheck
     run triage python3 tests/test_triage.py
     run ragserver python3 tests/test_rag_server.py
     if server_up; then

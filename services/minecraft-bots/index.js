@@ -1,4 +1,23 @@
-// Version: 2.138.0
+// Version: 2.144.0
+//
+// 2.144.0 (2026-11-10): the priority lists (survival, tools, shelter reface, builder, soldier) and
+// the communal shelter checks moved unchanged to priorities.js.
+//
+// 2.143.0 (2026-11-10): home scanning (blocks near home, shelter and residence detection) moved
+// unchanged to home-scan.js.
+//
+// 2.142.0 (2026-11-10): planning (runAction, parseGoalStep, planNextStep, arbitrateGoalConflict)
+// moved unchanged to planning.js; its two writes to this file's state go through new setters.
+//
+// 2.141.0 (2026-11-10): chat and intent (classifyIntent, the chat reply, narration, what gets
+// remembered) moved unchanged to chat.js.
+//
+// 2.140.0 (2026-11-10): self-defense, threat memory, squad response and rally points moved unchanged
+// to self-defense.js; installSelfDefense() registers its health listener and tick where they were.
+//
+// 2.139.0 (2026-11-10): every periodic check runs through faults.js's guardedInterval() -- an error
+// in one tick is logged with its file:line and the next tick runs, instead of ending the process --
+// and installFatalHandlers() logs any other uncaught error the same way before exiting.
 //
 // 2.138.0 (2026-11-10): the pathfinder setup (movement costs, unbreakable blocks, search limits,
 // path_update/path_reset diagnostics, dig_error burst guard) moved unchanged to pathfinding.js's
@@ -1768,20 +1787,27 @@ import { equipBestArmor, equipBestWeapon, describeGear, hasWeapon, installEnchan
 import { loadGoal, saveGoal, clearGoal, newGoal, logStep, loadStuckState, saveStuckState } from "./goals.js";
 import { isDoorway } from "./swim-movements.js";
 import { setupPathfinding } from "./pathfinding.js";
+import { guardedInterval, installFatalHandlers } from "./faults.js";
+import { SELF_DEFENSE_RANGE, SQUAD_ASSIST_RANGE, SQUAD_RESPONDER, attackAsLastResort, checkSelfDefense, decideFightType, fleeAsLastResort, installSelfDefense, lastKnownThreat, nearestRallyPoint, noteThreatSeen, pickThreat, respondToSquadCall, squadResponseInFlight } from "./self-defense.js";
 import { refreshLivingSpace, findAccessObstructions, wouldBlockAccess, ACCESS_SCAN_RADIUS,
   shelterRoomsNear } from "./shelter.js";
 import { installTorchTrail, needsTorches, torchCount, TORCH_CARRY_MIN } from "./tunneling.js";
 import { findSkill, runSkill, recordSkillOutcome, authorSkillFromGoal } from "./skills.js";
 import { ROLES, BOT_ROLES } from "./roles.js";
+import { classifyIntent, generateReply, installChat, maybeRemember, narrateAction } from "./chat.js";
+import { arbitrateGoalConflict, parseGoalStep, planNextStep, runAction } from "./planning.js";
+import { BUILDER_PRIORITY_RADIUS, SHELTER_SITE_RADIUS, completeSheltersNearHome, countNearHome, countUsableNearHome, findShelterNearHome, residenceChestCell, residenceDirective, residencePlan, shelterGeometryPositions, shelterHasBed, unfinishedShelterNearHome } from "./home-scan.js";
+import { SHELTER_REFACE_BATCH, TOOL_RANK, builderPriorityCandidates, builderPriorityItemSatisfied, communalShelterSatisfied, communalShelterSize, findCommunalShelterNearHome, nextBuilderPriority, nextSoldierPriority, nextSurvivalPriority, nextToolUpgrade, noteIronToolEvidence, shelterCellsToReface, survivalPriorityItemSatisfied } from "./priorities.js";
 import { Vec3 } from "vec3";
 
-const { pathfinder, goals } = pathfinderPkg;
+export const { pathfinder, goals } = pathfinderPkg;
 
 const HOST = process.env.MC_HOST || "192.168.1.221";
 const PORT = parseInt(process.env.MC_PORT || "25580", 10);
-const USERNAME = process.env.MC_BOT_USERNAME || "Babs";
-const PERSONA_NAME = process.env.MC_BOT_PERSONA || USERNAME.toLowerCase();
-const MAX_CHAT_LEN = 200;
+export const USERNAME = process.env.MC_BOT_USERNAME || "Babs";
+installFatalHandlers(USERNAME); // faults.js: log an uncaught error with where it came from, then exit
+export const PERSONA_NAME = process.env.MC_BOT_PERSONA || USERNAME.toLowerCase();
+export const MAX_CHAT_LEN = 200;
 
 // "The Boss" is a role a persona file can reference (see agents/minecraft-babs/PROMPT.md's
 // Behavioral Modifiers) without the persona file itself needing to know a real username --
@@ -1793,7 +1819,7 @@ const BOSS_USERNAMES = (process.env.MC_BOSS_USERNAMES || "CanisLupisM,@phone1:sp
   .map((s) => s.trim())
   .filter(Boolean);
 
-function isBoss(speaker) {
+export function isBoss(speaker) {
   return BOSS_USERNAMES.includes(speaker);
 }
 
@@ -1810,11 +1836,11 @@ function isBoss(speaker) {
 // role... create [more] so every role has at least one bot") -- same "harmless for bots not
 // actually running yet, keeps this list in sync with roles.js's own BOT_ROLES rather than
 // silently drifting" reasoning as Bob's own addition to this list.
-const BOT_USERNAMES = new Set(
+export const BOT_USERNAMES = new Set(
   (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor,Bob,Nell,Wade,Dale").split(",").map((s) => s.trim()).filter(Boolean),
 );
 
-function isAnotherBot(speaker) {
+export function isAnotherBot(speaker) {
   return BOT_USERNAMES.has(speaker) || speaker.startsWith("@mc-"); // Matrix bot identities
 }
 
@@ -1836,7 +1862,7 @@ function isMayor(speaker) {
 // and a tick interval for actually working a goal. Since everything here runs on local compute
 // with no per-call cost (direct instruction, 2026-09-06), 45s errs toward checking in often and
 // reasoning carefully each time rather than stretching the interval to save calls.
-const AUTONOMY_ENABLED = (process.env.MC_AUTONOMY_ENABLED ?? "true") !== "false";
+export const AUTONOMY_ENABLED = (process.env.MC_AUTONOMY_ENABLED ?? "true") !== "false";
 const SELF_PROPOSE_GOALS = (process.env.MC_SELF_PROPOSE_GOALS ?? "true") !== "false";
 const GOAL_TICK_MS = parseInt(process.env.MC_GOAL_TICK_MS || "45000", 10);
 const IDLE_BEFORE_SELF_GOAL_MS = parseInt(process.env.MC_IDLE_SELF_GOAL_MS || "600000", 10); // 10 min
@@ -1856,22 +1882,22 @@ const MATRIX_ROOM_ID = process.env.MATRIX_ROOM_ID || "!2rXcMwykUS2yVNTLGw:spark"
 // the hermes-memory agent id so the same name means the same thing everywhere this bot shows
 // up. One conv_id per speaker: a bot's memory of "the conversation with CanisLupisM" spans
 // both public chat and whispers, rather than splitting by channel for no real benefit.
-const AGENT_ID = `mc-${PERSONA_NAME}`;
-const TASK_ID = `${AGENT_ID}-chat`;
-const HISTORY_TURNS = 8;
+export const AGENT_ID = `mc-${PERSONA_NAME}`;
+export const TASK_ID = `${AGENT_ID}-chat`;
+export const HISTORY_TURNS = 8;
 
-function convId(speaker) {
+export function convId(speaker) {
   return `${AGENT_ID}:${speaker}`;
 }
 
-const persona = loadPersona(PERSONA_NAME);
+export const persona = loadPersona(PERSONA_NAME);
 console.log(`[${USERNAME}] loaded persona '${PERSONA_NAME}' (${persona.length} chars)`);
 
 // §15.4: this bot's own role entry, or null for a bot not yet in BOT_ROLES. Looked up once at
 // startup, matching persona's own load-once pattern -- a role reassignment means editing
 // roles.js and restarting, the same "edit the file, restart the process" model every other piece
 // of per-bot config here already uses.
-const myRole = BOT_ROLES[PERSONA_NAME] || null;
+export const myRole = BOT_ROLES[PERSONA_NAME] || null;
 
 // §15.5(a): additive text folded into proposeOwnGoal()'s freeform prompt -- a lean, not a hard
 // filter. Empty string for a bot with no role entry yet, so this is a no-op until every bot has
@@ -1934,7 +1960,7 @@ function roleBiasNote() {
     `${priorityListNote(myRole.primary)}${priorityListNote(myRole.secondary)}`;
 }
 
-const bot = mineflayer.createBot({
+export const bot = mineflayer.createBot({
   host: HOST,
   port: PORT,
   username: USERNAME,
@@ -2022,7 +2048,7 @@ bot.once("spawn", async () => {
 // at a steady ~4-5 MB/s from very early in the process's life -- not obviously tied to any one
 // action. Logging memory + loaded-chunk-column count every 15s to find which subsystem is
 // actually leaking before changing anything else. Remove once root-caused.
-setInterval(() => {
+guardedInterval(() => {
   const mem = process.memoryUsage();
   const columns = bot.world?.getColumns ? bot.world.getColumns().length : "n/a";
   console.log(`[${USERNAME}] mem rss=${(mem.rss / 1048576).toFixed(1)}MB ` +
@@ -2044,7 +2070,7 @@ let busy = false;
 // arbiter.js's own header) -- arbiter.isBusy()/requestControl()/release() is the one remaining
 // source of truth for "is something physically happening right now," replacing 20+ independent
 // reads of a bare boolean with a single, testable, priority-ordered module.
-let currentGoal = null;
+export let currentGoal = null;
 // Updated on every real chat/whisper/Matrix line and every goal set by a player -- the goal
 // loop only ever proposes her own goal after this has been quiet a while (IDLE_BEFORE_SELF_GOAL_MS).
 let lastActivityAt = Date.now();
@@ -2095,7 +2121,7 @@ function recordGoalOutcome(description, outcome, reason) {
 // roster, each new Buzz message would just overwrite it, silently losing track of every OTHER
 // bot's goal except whichever one posted most recently. Keyed by from_agent instead, so it
 // scales to however many bots are actually running.
-const otherBotGoals = new Map(); // from_agent -> last-known active goal description
+export const otherBotGoals = new Map(); // from_agent -> last-known active goal description
 
 // Direct request, 2026-09-11 ("adaptive role-leaning" -- a research pass into Project Sid found
 // its key specialization finding: role differentiation required agents to track OTHER agents'
@@ -2140,7 +2166,7 @@ function settleGiveClaims() {
 // Shared by planNextStep and proposeOwnGoal (previously two near-identical inline blocks, one
 // per singular `otherBotGoal` -- now one function over the Map, listing every other bot with an
 // active goal instead of assuming there's only ever one).
-function otherGoalsNote(intro) {
+export function otherGoalsNote(intro) {
   if (!otherBotGoals.size) return "";
   const lines = [...otherBotGoals.entries()].map(([agent, desc]) => `- ${agent}: ${desc}`).join("\n");
   return `\n\n${intro}\n${lines}`;
@@ -2172,8 +2198,8 @@ async function broadcastGoalState(status, description, item = null, heartbeat = 
 // a bot that disconnected mid-goal stayed "busy" forever. Every bot now re-announces its current
 // goal every GOAL_HEARTBEAT_MS, and peers expire an entry not heard for GOAL_LEASE_MS.
 const GOAL_HEARTBEAT_MS = 2 * 60_000;
-const GOAL_LEASE_MS = GOAL_HEARTBEAT_MS * 3 + 30_000;
-const otherBotGoalSeenAt = new Map(); // from_agent -> Date.now() of their last "active" broadcast
+export const GOAL_LEASE_MS = GOAL_HEARTBEAT_MS * 3 + 30_000;
+export const otherBotGoalSeenAt = new Map(); // from_agent -> Date.now() of their last "active" broadcast
 
 function goalHeartbeatTick(now = Date.now()) {
   if (currentGoal) broadcastGoalState("active", currentGoal.description, null, true);
@@ -2183,12 +2209,12 @@ function goalHeartbeatTick(now = Date.now()) {
     if (otherBotGoals.delete(agent)) console.log(`[${USERNAME}] ${agent}'s goal lease expired -- treating as idle`);
   }
 }
-setInterval(goalHeartbeatTick, GOAL_HEARTBEAT_MS);
+guardedInterval(goalHeartbeatTick, GOAL_HEARTBEAT_MS);
 
 // Item #6 of "fix all the above" (squad response for Mark/Luke). Same best-effort broadcast
 // pattern as broadcastGoalState -- see checkSelfDefense's own call site for the cooldown that
 // keeps one drawn-out fight from spamming this every 2s.
-async function broadcastThreatAlert(threatName) {
+export async function broadcastThreatAlert(threatName) {
   try {
     await buzzPublish(AGENT_ID, "minecraft-coordination", JSON.stringify({
       type: "threat", name: threatName,
@@ -2296,1542 +2322,10 @@ loadGoal(PERSONA_NAME).then((g) => {
   }
 }).catch((err) => console.error(`[${USERNAME}] failed to load saved goal:`, err.message));
 
-// One dispatch call classifies relevance AND detects an action request together, replacing
-// the old plain YES/NO relevance check -- same "keep it to one cheap call" efficiency
-// discipline the rest of this file already follows (maybeRemember, the old isRelevant this
-// replaces). Real verbs only (actions.js): navigate, gather, fight -- no building/placement,
-// a deliberately separate, much bigger feature not attempted here.
-//
-// Real bug found live (2026-09-06): a message addressed to Babs by name also made Amy start
-// mining -- each bot's own classifier only ever knew about itself, with no way to recognize
-// "this names a DIFFERENT bot" and stand down. OTHER_BOTS below fixes that. Same incident also
-// surfaced a second bug: both bots mined "stone" despite neither being asked for it -- with no
-// instruction covering "no specific block was actually named," the classifier had to invent
-// *something* for ACTION MINE's required <block_id> rather than falling back to CHAT.
-const OTHER_BOTS = [...BOT_USERNAMES].filter((n) => n !== USERNAME);
-
-async function classifyIntent(speaker, message) {
-  const otherBotsNote = OTHER_BOTS.length
-    ? ` Other bots who may also be in this chat: ${OTHER_BOTS.join(", ")} -- if the message ` +
-      `clearly names one of them instead of ${USERNAME}, respond NONE even if it looks like an ` +
-      `action request.`
-    : "";
-  // S34 fix (2026-10-21): handleIncoming()'s own isAnotherBot()/isActingCoordinator() gate
-  // (above, before classifyIntent() is ever called) already guarantees that whenever
-  // isAnotherBot(speaker) is true here, it's a verified bot coordinator -- Mayor's real
-  // directive, or Mark's fallback-coordinator directive -- never an arbitrary other bot's
-  // chatter and never a player's text, since isAnotherBot() checks the authenticated mineflayer
-  // `speaker`, never the message body. proposeDirectiveForOthers()/proposeFallbackDirective()
-  // already mark their own generation calls analysis:true ("bot-to-bot message, no player
-  // input"); this was the one place the matching receive side still took the full-screening
-  // path, and Layer 2 blocked 8 of Mayor's real directives at 0.970 on 2026-10-13
-  // (IMPLEMENTATION_PLAN.md S34). Layer 1 still runs and still blocks regardless of this flag --
-  // hermes-router.py's analysis mode only ever relaxes Layer 2's hard block, per its own S27f
-  // doctrine that the router has no bearer auth and must never trust a caller's identity claim
-  // on its own; the actual verification happens here, upstream, against the real speaker.
-  const fromVerifiedBot = isAnotherBot(speaker);
-  const reply = await callRole(
-    "dispatch",
-    [
-      {
-        role: "system",
-        content:
-          `You are an intent classifier for a Minecraft bot named ${USERNAME}, who has real ` +
-          `in-game abilities: moving, following, mining/gathering blocks, fighting hostile ` +
-          `mobs, checking chests for gear, and crafting items.${otherBotsNote} Given one chat ` +
-          `message from another player, respond with EXACTLY ONE line, no explanation, no ` +
-          `extra punctuation, in one of these forms:\n` +
-          `NONE - not directed at ${USERNAME}, no response needed\n` +
-          `CHAT - directed at ${USERNAME} but just conversation, not a request to do something\n` +
-          `ACTION GOTO - asks ${USERNAME} to come to the speaker\n` +
-          `ACTION FOLLOW - asks ${USERNAME} to follow the speaker\n` +
-          `ACTION STOP - asks ${USERNAME} to stop what she is doing\n` +
-          `ACTION MINE <block_id> <count> - asks ${USERNAME} to gather/mine a resource, ONLY ` +
-          `if a specific resource/block was actually named or clearly implied. <block_id> must ` +
-          `be the exact modern Minecraft block id (e.g. oak_log, stone, iron_ore, cobblestone). ` +
-          `For a general material class rather than one exact species/color (any wood, any ` +
-          `wool, any ore), naming ANY real example of that class is enough -- she'll ` +
-          `automatically gather whatever matching variant is actually nearby, not just that ` +
-          `exact one. <count> is a small positive integer, default 4 if unstated. If no ` +
-          `specific block is named, respond CHAT instead -- never invent a block.\n` +
-          `ACTION ATTACK - asks ${USERNAME} to fight a nearby hostile mob\n` +
-          `ACTION FLEE - asks ${USERNAME} to run away from a nearby hostile mob instead of fighting it\n` +
-          `ACTION LOOT <item_id> <count> - asks ${USERNAME} to check a nearby chest for a ` +
-          `SPECIFIC item, ONLY if one was actually named or clearly implied (e.g. "check the ` +
-          `chest for arrows" or "see if there's a sword in there"). <count> is a small positive ` +
-          `integer, default 1 if unstated. She takes up to that many and no more -- never ` +
-          `everything in the chest. If no item was named (e.g. "check that chest" with no ` +
-          `specifics), omit both parameters -- she'll inspect it and remember what's inside for ` +
-          `the whole fleet without taking anything.\n` +
-          `ACTION SLEEP - asks ${USERNAME} to go find a bed and sleep (only makes sense at ` +
-          `night or during a thunderstorm)\n` +
-          `ACTION EAT - asks ${USERNAME} to eat some food from her inventory\n` +
-          `ACTION FISH - asks ${USERNAME} to fish at nearby water with a fishing rod\n` +
-          `ACTION GIVE <item_id> <count> - asks ${USERNAME} to give the speaker some of an item ` +
-          `she's carrying (e.g. "give me some bread"). <count> is a small positive integer, ` +
-          `default 1 if unstated.\n` +
-          `ACTION STORE <item_id> <count> - asks ${USERNAME} to put some of an item she's ` +
-          `carrying into a nearby chest. <count> is a small positive integer, default all of it ` +
-          `if unstated.\n` +
-          `ACTION TRADE <item_id> - asks ${USERNAME} to trade with a nearby villager for a ` +
-          `specific item she wants\n` +
-          `ACTION HARVEST - asks ${USERNAME} to pick a ripe crop nearby and replant it, or, if ` +
-          `nothing is ripe yet, till open ground and plant seeds she's carrying to start a new ` +
-          `farm\n` +
-          `ACTION EXPLORE - asks ${USERNAME} to go looking for any useful raw material (wood, ` +
-          `ore) when no specific one was named. No parameters.\n` +
-          `ACTION BREED <species> - asks ${USERNAME} to breed two nearby animals of the same ` +
-          `kind (e.g. cow, sheep, pig, chicken, bee) using the right food\n` +
-          `ACTION HARVEST_HIVE <tool> - asks ${USERNAME} to collect from a nearby full beehive/` +
-          `bee nest. <tool> is "bottle" (default, honey, calm) or "shears" (honeycomb, but ` +
-          `angers the bees) -- only use shears if honeycomb was specifically asked for.\n` +
-          `ACTION SHEAR - asks ${USERNAME} to shear a nearby sheep for wool, if she has shears\n` +
-          `ACTION MILK - asks ${USERNAME} to milk a nearby cow, if she has an empty bucket\n` +
-          `ACTION BUILD_PEN - asks ${USERNAME} to fence in a small pen (with a gate) around ` +
-          `herself, if she has fence blocks and a fence gate. No parameters.\n` +
-          `ACTION HERD_TO_PEN <species> - asks ${USERNAME} to lure a nearby loose animal (e.g. ` +
-          `cow, sheep, pig, chicken) into the already-built pen using the right food. Only if a ` +
-          `pen already exists and she has that food.\n` +
-          `ACTION ENCHANT <item_id> - asks ${USERNAME} to enchant an item she's carrying at a ` +
-          `nearby enchanting table (needs lapis lazuli)\n` +
-          `ACTION CRAFT <item_id> <count> - asks ${USERNAME} to craft/make an item, ONLY if a ` +
-          `specific item was actually named or clearly implied. <item_id> must be the exact ` +
-          `modern Minecraft item id (e.g. stick, oak_planks, wooden_pickaxe, crafting_table). ` +
-          `<count> is a small positive integer, default 1 if unstated. If no specific item is ` +
-          `named, respond CHAT instead -- never invent one.\n` +
-          `ACTION SMELT <item_id> <count> - asks ${USERNAME} to smelt ore into an ingot (or ` +
-          `similar) at a furnace, ONLY if a specific output was actually named or clearly ` +
-          `implied (e.g. iron_ingot, copper_ingot, gold_ingot, glass, stone). <count> is a small ` +
-          `positive integer, default 1 if unstated.\n` +
-          `ACTION PLACE <item_id> - asks ${USERNAME} to place ONE block she's carrying right next ` +
-          `to herself (e.g. a furnace or crafting_table she crafted). For a single utility block, ` +
-          `not a structure -- use ACTION BUILD for that instead.\n` +
-          `ACTION BUILD - asks ${USERNAME} to build a small shelter (walls, a doorway, a roof) ` +
-          `around herself using whatever solid block she has the most of. No parameters.\n` +
-          `ACTION GOAL <description> - gives ${USERNAME} a standing objective to keep working ` +
-          `on by herself over time (not a single one-off task), e.g. "get full iron armor" or ` +
-          `"stock up on wood". Only use this if the speaker is clearly assigning an ongoing ` +
-          `objective, not just asking for one immediate thing. <description> is a short phrase.`,
-      },
-      { role: "user", content: `<${speaker}> ${message}` },
-    ],
-    { maxTokens: 16, temperature: 0, analysis: fromVerifiedBot },
-  );
-  const trimmed = reply.trim().toUpperCase();
-  if (trimmed.startsWith("ACTION")) {
-    const parts = trimmed.split(/\s+/);
-    const verb = parts[1];
-    if (verb === "GOTO") return { type: "action", action: { type: "goto" } };
-    if (verb === "FOLLOW") return { type: "action", action: { type: "follow" } };
-    if (verb === "STOP") return { type: "action", action: { type: "stop" } };
-    if (verb === "ATTACK") return { type: "action", action: { type: "attack" } };
-    if (verb === "FLEE") return { type: "action", action: { type: "flee" } };
-    if (verb === "EAT") return { type: "action", action: { type: "eat" } };
-    if (verb === "FISH") return { type: "action", action: { type: "fish" } };
-    if (verb === "LOOT") {
-      const item = (parts[2] || "").toLowerCase();
-      const count = parseInt(parts[3], 10);
-      return { type: "action", action: { type: "loot", item: item || null, count: count > 0 ? count : 1 } };
-    }
-    if (verb === "SLEEP") return { type: "action", action: { type: "sleep" } };
-    if (verb === "CRAFT") {
-      const item = (parts[2] || "").toLowerCase();
-      const count = parseInt(parts[3], 10);
-      if (item) return { type: "action", action: { type: "craft", item, count: count > 0 ? count : 1 } };
-    }
-    if (verb === "SMELT") {
-      const item = (parts[2] || "").toLowerCase();
-      const count = parseInt(parts[3], 10);
-      if (item) return { type: "action", action: { type: "smelt", item, count: count > 0 ? count : 1 } };
-    }
-    if (verb === "PLACE") {
-      const item = (parts[2] || "").toLowerCase();
-      if (item) return { type: "action", action: { type: "place", item } };
-    }
-    if (verb === "GIVE") {
-      const item = (parts[2] || "").toLowerCase();
-      const count = parseInt(parts[3], 10);
-      if (item) return { type: "action", action: { type: "give", player: speaker, item, count: count > 0 ? count : 1 } };
-    }
-    if (verb === "STORE") {
-      const item = (parts[2] || "").toLowerCase();
-      const count = parseInt(parts[3], 10);
-      // Unlike every other count default (1), this defaults to "all of it" -- performAction's
-      // "store" already caps at however much she actually has via Math.min().
-      if (item) return { type: "action", action: { type: "store", item, count: count > 0 ? count : Infinity } };
-    }
-    if (verb === "TRADE") {
-      const item = (parts[2] || "").toLowerCase();
-      if (item) return { type: "action", action: { type: "trade", item } };
-    }
-    if (verb === "HARVEST") return { type: "action", action: { type: "harvest" } };
-    if (verb === "BUILD") return { type: "action", action: { type: "build" } };
-    if (verb === "EXPLORE") {
-      const feature = (parts[2] || "").toLowerCase();
-      return { type: "action", action: SCOUT_FEATURE_BLOCKS[feature] ? { type: "explore", feature } : { type: "explore" } };
-    }
-    if (verb === "BREED") {
-      const species = (parts[2] || "").toLowerCase();
-      if (species) return { type: "action", action: { type: "breed", species } };
-    }
-    if (verb === "HARVEST_HIVE") {
-      const tool = (parts[2] || "bottle").toLowerCase();
-      return { type: "action", action: { type: "harvest_hive", tool } };
-    }
-    if (verb === "SHEAR") return { type: "action", action: { type: "shear" } };
-    if (verb === "MILK") return { type: "action", action: { type: "milk" } };
-    if (verb === "BUILD_PEN") return { type: "action", action: { type: "build_pen" } };
-    if (verb === "HERD_TO_PEN") {
-      const species = (parts[2] || "").toLowerCase();
-      if (species) return { type: "action", action: { type: "herd_to_pen", species } };
-    }
-    if (verb === "ENCHANT") {
-      const item = (parts[2] || "").toLowerCase();
-      if (item) return { type: "action", action: { type: "enchant", item } };
-    }
-    if (verb === "MINE") {
-      const block = (parts[2] || "").toLowerCase();
-      const count = parseInt(parts[3], 10);
-      if (block) return { type: "action", action: { type: "mine", block, count: count > 0 ? count : 4 } };
-    }
-    if (verb === "GOAL") {
-      // Re-extracted from the original (non-uppercased) reply so the description keeps its
-      // natural casing/spacing rather than the all-caps, single-spaced tokens `parts` has.
-      const match = reply.trim().match(/^ACTION\s+GOAL\s+(.+)$/i);
-      const description = match ? match[1].trim() : "";
-      if (description) return { type: "action", action: { type: "goal", description } };
-    }
-    return { type: "chat" }; // unparseable ACTION line -- fall back to a normal reply
-  }
-  if (trimmed.startsWith("CHAT")) return { type: "chat" };
-  return { type: "none" };
-}
-
-// Short in-character line for an action's start/outcome -- same persona voice as a normal
-// chat reply, just a much shorter, single-purpose prompt (no history/long-term recall: an
-// action's own result text is already all the context worth having).
-async function narrateAction(text) {
-  const reply = await callRole(
-    "muse",
-    [
-      { role: "system", content: `${persona}\n\n---\n\nYou are chatting in Minecraft's in-game ` +
-          `chat, in character. State the following in one short sentence, in your own voice, ` +
-          `without changing its meaning: "${text}"` },
-      { role: "user", content: text },
-    ],
-    { maxTokens: 40, temperature: 0.9, analysis: true },   // narrateAction: the bot's own action text
-  );
-  return reply.trim().slice(0, MAX_CHAT_LEN) || text;
-}
-
-// Direct request, 2026-09-11 ("chat/action coherence fix" -- a research pass into Project Sid's
-// PIANO architecture surfaced this as the one real analog to a problem this codebase already
-// fixed elsewhere: Sid's Cognitive Controller broadcasts its own real decisions to "condition
-// talk-related modules," specifically to stop agents promising things they never act on.
-// classifyIntent's ACTION/GOAL branches already ground chat in a real queued action; this file's
-// OTHER reply path -- generateReply(), for anything classifyIntent scores as plain CHAT -- had no
-// such grounding. A borderline request classifyIntent doesn't recognize as actionable could still
-// get an in-character "sure, I'll get right on that!" with no goal ever actually queued -- the
-// exact talk-vs-action mismatch Sid's own architecture exists to prevent, just never audited for
-// here until asked to look. currentActivityNote() (below) grounds every CHAT reply in the bot's
-// REAL, live goal state (or its real absence) the same way every other prompt in this file already
-// grounds itself in real gear/inventory rather than a remembered belief that could drift.
-const CHAT_INSTRUCTION =
-  "You are chatting in Minecraft's in-game chat, in character. Reply to the latest message " +
-  "in 1-2 short sentences suitable for game chat. Do not prefix your own name. This is a plain " +
-  "conversational reply -- no goal or action is queued by sending it. Never promise a specific " +
-  "future action (\"I'll get you that,\" \"I'll do that now,\" \"on it\") unless it's covered by " +
-  "what you're ACTUALLY doing right now (see below) -- if someone asks for something you're not " +
-  "already working on, acknowledge the ask honestly without implying it's already happening " +
-  "(e.g. \"ask me directly and I'll get started\").";
-
-function currentActivityNote() {
-  return currentGoal
-    ? `\n\nWhat you're actually doing right now: "${currentGoal.description}." Only imply you're ` +
-      `on something if this genuinely covers it.`
-    : "\n\nYou have no active goal right now -- don't imply you're already working on anything.";
-}
-
-async function generateReply(speaker, message) {
-  const conv = convId(speaker);
-  // S34: same verified-bot exemption as classifyIntent() above -- a non-action utterance from
-  // Mayor/Mark's fallback-coordinator path (isAnotherBot(speaker), already gated upstream in
-  // handleIncoming before generateReply is ever reached with a bot speaker) must not take the
-  // full-screening path either, same reasoning, same safety argument.
-  const fromVerifiedBot = isAnotherBot(speaker);
-
-  // Best-effort: record the incoming line, then read back recent history for this speaker
-  // (this call already includes the line just recorded, oldest-first -- see
-  // hermes-memory.py's _list_turns). A hermes-memory outage degrades to a single-message
-  // reply rather than failing the interaction -- never a hard dependency for chatting at all.
-  let history = [{ role: "user", content: `<${speaker}> ${message}` }];
-  try {
-    await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "user",
-                        raw: `<${speaker}> ${message}` });
-    const turns = await recentTurns({ agent: AGENT_ID, convId: conv, limit: HISTORY_TURNS });
-    if (turns.length) {
-      history = turns.map((t) => ({ role: t.role, content: t.raw }));
-    }
-  } catch (err) {
-    console.error(`[${USERNAME}] memory unavailable, replying without history:`, err.message,
-                  err.cause ?? "");
-  }
-
-  // Long-term recall (design doc §7): a handful of semantically relevant notes from the
-  // "minecraft" corpus -- both this bot's own personal memory and shared world facts, not
-  // filtered by scope here since the corpus is still small and an instruction-following model
-  // handles a little irrelevant context fine. Best-effort like everything else memory-related.
-  let memoryNote = "";
-  const hits = await searchMemory(message, { topK: 3 });
-  if (hits.length) {
-    memoryNote = "\n\nRelevant things you remember:\n" +
-      hits.map((h) => `- ${h.text}`).join("\n");
-  }
-
-  // muse's chat template rejects a second system-role message anywhere but position 0
-  // ("System message must be at the beginning") -- confirmed live, not assumed -- so persona,
-  // the per-call instruction, the Boss note (when it applies), and any recalled long-term
-  // memory are all merged into one system message, not sent separately.
-  const bossNote = isBoss(speaker)
-    ? ` The speaker (${speaker}) is The Boss -- respond accordingly to her Behavioral Modifiers.`
-    : "";
-  const text = await callRole(
-    "muse",
-    [{ role: "system", content:
-        `${persona}\n\n---\n\n${CHAT_INSTRUCTION}${bossNote}${memoryNote}${currentActivityNote()}` },
-     ...history],
-    { maxTokens: 80, temperature: 0.9, analysis: fromVerifiedBot },
-  );
-  const reply = text.slice(0, MAX_CHAT_LEN);
-
-  if (reply) {
-    try {
-      await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "assistant",
-                          raw: reply });
-    } catch (err) {
-      console.error(`[${USERNAME}] failed to record reply to memory:`, err.message, err.cause ?? "");
-    }
-  }
-  return reply;
-}
-
-// Runs after a reply has already been sent -- never on the critical path a player is waiting
-// on. Uses the same cheap `dispatch` tier the relevance check uses (design doc §6: dispatch is
-// for reactive classification, not creative generation), asking it to decide whether anything
-// in the exchange is worth long-term memory and, if so, whether it's a shared world fact or
-// personal to this bot. A hermes-rag outage here just means nothing gets remembered long-term
-// this turn -- never affects the chat itself.
-async function maybeRemember(speaker, message, reply) {
-  try {
-    const verdict = await callRole(
-      "dispatch",
-      [
-        {
-          role: "system",
-          content:
-            "Given this Minecraft chat exchange, is there a concrete fact worth remembering " +
-            "long-term (a discovery, location, stated preference, promise, or plan)? If yes, " +
-            "respond exactly as 'WORLD: <one-sentence fact>' for an objective fact about the " +
-            "world (locations, builds, shared knowledge), or 'PERSONAL: <one-sentence fact>' " +
-            "for something about this specific speaker. If nothing is worth remembering, " +
-            "respond exactly 'NONE'. Never explain, never add anything else.",
-        },
-        { role: "user", content: `<${speaker}> ${message}\n<bot reply> ${reply}` },
-      ],
-      { maxTokens: 60, temperature: 0 },
-    );
-    const trimmed = verdict.trim();
-    if (trimmed.toUpperCase().startsWith("WORLD:")) {
-      const fact = trimmed.slice(6).trim();
-      await writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: fact });
-      // Buzz coordination (design doc §9): other bots hear about a new world fact within one
-      // poll interval, not only whenever they next happen to searchMemory() something related.
-      try {
-        await buzzPublish(AGENT_ID, "minecraft", fact);
-      } catch (err) {
-        console.error(`[${USERNAME}] buzz publish failed:`, err.message);
-      }
-    } else if (trimmed.toUpperCase().startsWith("PERSONAL:")) {
-      await writeMemoryNote({ scope: "bot", persona: PERSONA_NAME,
-                              text: `(about ${speaker}) ${trimmed.slice(9).trim()}` });
-    }
-  } catch (err) {
-    console.error(`[${USERNAME}] maybeRemember failed:`, err.message);
-  }
-}
-
-// Runs an action in the background and reports back -- deliberately NOT inside the `busy`
-// window (see handleIncoming): a mine/follow/attack action can take up to ACTION_TIMEOUT_MS
-// (actions.js), and holding the classify/reply mutex for that whole span would make the bot
-// go unresponsive to chat while she works. `busy` only ever guards the fast classify step.
-async function runAction(action, speaker, message, send) {
-  // Real bug found live (2026-09-06): this used to record a generic "[requested action:
-  // mine]" label, discarding the actual message text and parsed params (block/count) -- when
-  // a mining request went to the wrong block, there was no way to tell from memory alone
-  // whether the classifier misheard the request or the player's own message was ambiguous.
-  // Recording the full parsed action alongside the original text fixes that for next time.
-  const actionDesc = action.type === "mine" ? `mine ${action.block} x${action.count}`
-    : action.type === "craft" ? `craft ${action.item} x${action.count}`
-    : action.type === "smelt" ? `smelt ${action.item} x${action.count}`
-    : action.type === "place" ? `place ${action.item}`
-    : action.type === "give" ? `give ${action.player} ${action.item} x${action.count}`
-    : action.type === "store" ? `store ${action.item}`
-    : action.type === "breed" ? `breed ${action.species}`
-    : action.type === "enchant" ? `enchant ${action.item}` : action.type;
-  // Coherence arbiter Phase 3 (2026-09-10): a live player asked for this by name, so it should
-  // win over any routine/goal-step activity but still legitimately yield to a genuine emergency
-  // (self-defense, health, drowning) already in flight -- OWNERS.DIRECT_COMMAND sits above
-  // ROUTINE/GOAL_STEP for exactly that "a live player command always wins immediately" reason
-  // (goalTick's own long-standing comment), while still ranking below the reflex tiers.
-  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.DIRECT_COMMAND,
-    { preemptEqual: !isAnotherBot(speaker) }); // MB-06: a newer PLAYER command replaces an older one
-  if (!handle) {
-    console.log(`[${USERNAME}] action '${action.type}' yielded to something more urgent ` +
-                `(${arbiter.currentOwner()})`);
-    send(`hang on, I'm dealing with something urgent first.`);
-    return;
-  }
-  // Same post-craft-cleanup trigger as goalTick's own -- see storeSurplusNearHome's header.
-  let craftedOk = false;
-  activeDirectSpeaker = speaker;
-  try {
-    const startLine = {
-      goto: `heading to ${speaker}.`, follow: `following ${speaker} now.`, stop: "stopping.",
-      mine: `off to gather some ${action.block}.`, attack: "engaging.", flee: "getting out of here!",
-      loot: action.item ? `checking a nearby chest for ${action.item}.` : "checking a nearby chest.",
-      craft: `let's see about crafting ${action.item}.`,
-      sleep: "heading to bed.", smelt: `time to smelt some ${action.item}.`,
-      place: `let's set up a ${action.item} here.`, eat: "grabbing a bite.", fish: "let's try fishing.",
-      give: `bringing you some ${action.item}.`, store: `putting away some ${action.item}.`,
-      trade: "let's see what the villager has.", harvest: "checking on the crops.",
-      breed: `let's get some ${action.species}s together.`, enchant: `let's enchant this ${action.item}.`,
-    }[action.type];
-    // Review MB-21, 2026-09-24: the body used to stay locked through BOTH narration model calls
-    // and the memory writes. The opening line is now narrated in parallel with the action, and
-    // control is released as soon as the physical action ends.
-    if (startLine) {
-      narrateAction(startLine).then(send)
-        .catch((err) => console.error(`[${USERNAME}] start narration failed:`, err.message));
-    }
-
-    const result = await performAction(bot, action, speaker, handle);
-    handle.release();
-    // Direct request, 2026-09-17 ("put any leftovers... in a chest"): a targeted loot that
-    // actually withdrew something (action.item set) is just as worth an immediate cleanup pass
-    // as a craft/smelt -- new inventory contents that might not all still be needed. A bare,
-    // item-less inspect-only loot never changes her inventory at all, so it's deliberately
-    // excluded here.
-    craftedOk = result.ok && (action.type === "craft" || action.type === "smelt" ||
-      (action.type === "loot" && action.item));
-    send(await narrateAction(result.text));
-
-    // Actions are conversational events too -- worth the same continuity as a chat exchange.
-    const conv = convId(speaker);
-    await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "user",
-                        raw: `<${speaker}> ${message} [parsed as: ${actionDesc}]` });
-    await recordTurn({ agent: AGENT_ID, taskId: TASK_ID, convId: conv, role: "assistant", raw: result.text });
-  } catch (err) {
-    console.error(`[${USERNAME}] action '${action.type}' failed:`, err.message);
-    send(`something went wrong trying to do that.`);
-  } finally {
-    handle.release();
-    if (activeDirectSpeaker === speaker) activeDirectSpeaker = null;
-    if (craftedOk) surplusCleanupDueAt = Date.now() + SURPLUS_CLEANUP_QUIET_MS; // MB-09: deferred
-  }
-}
-
-// Parses the goal planner's verdict -- deliberately separate from classifyIntent's own
-// ACTION-line parser above, even though they overlap: the goal loop's vocabulary is narrower
-// (no goto/follow/stop, which are speaker-relative and don't mean anything for a standing goal
-// pursued alone) and has two extra terminal states classifyIntent has no use for (DONE/BLOCKED).
-//
-// Real gap found live (2026-09-07): the first version required the WHOLE reply to start with a
-// known keyword, forcing a bare one-line answer with no room to reason -- dispatch is actually a
-// full 35B model (same family as muse, just the stock quant, confirmed against hermes-router.py's
-// own ROLES table), not a tiny classifier, but a one-line-only format meant it never connected
-// "craft failed, no ingredients" back to "mine the raw material first": a live goal ("get a chest
-// and some armor") burned all 3 retries on different CRAFT targets that all failed for the same
-// underlying reason (no logs at all) and gave up, when mining logs first would have worked.
-// Scanning from the LAST non-empty line for a known keyword lets the model reason for a
-// sentence first (planNextStep's prompt now explicitly invites that) while still parsing
-// reliably -- direct instruction: correctness/reasoning over minimizing tokens, since this all
-// runs on local compute with no per-call cost.
-function parseGoalStep(text) {
-  const lines = text.trim().split(/\n+/).map((l) => l.trim()).filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    const trimmed = line.toUpperCase();
-    if (trimmed.startsWith("DONE")) {
-      const item = (trimmed.split(/\s+/)[1] || "NONE").toLowerCase();
-      return { type: "done", item: item === "none" ? null : item };
-    }
-    if (trimmed.startsWith("BLOCKED")) return { type: "blocked", reason: line.slice(7).trim() || "stuck" };
-    if (trimmed.startsWith("ACTION")) {
-      const parts = trimmed.split(/\s+/);
-      const verb = parts[1];
-      // Direct request, 2026-09-17 ("they loot EVERYTHING instead of what they need"): item/
-      // count are now optional parameters, matching CRAFT/MINE/SMELT's own shape, instead of a
-      // bare no-argument verb -- see actions.js's own "loot" case (1.54.0) for what changed on
-      // the execution side. A bare "ACTION LOOT" (no item named) is still valid and means
-      // "just look" -- inspect the chest, snapshot its real contents into known_chests.json for
-      // the whole fleet, take nothing. Naming an item withdraws up to <count> of exactly that
-      // one, never more.
-      if (verb === "LOOT") {
-        const item = (parts[2] || "").toLowerCase();
-        const count = parseInt(parts[3], 10);
-        return { type: "step", action: { type: "loot", item: item || null, count: count > 0 ? count : 1 } };
-      }
-      if (verb === "ATTACK") return { type: "step", action: { type: "attack" } };
-      if (verb === "CRAFT") {
-        const item = (parts[2] || "").toLowerCase();
-        const count = parseInt(parts[3], 10);
-        if (item) return { type: "step", action: { type: "craft", item, count: count > 0 ? count : 1 } };
-      }
-      if (verb === "SMELT") {
-        const item = (parts[2] || "").toLowerCase();
-        const count = parseInt(parts[3], 10);
-        if (item) return { type: "step", action: { type: "smelt", item, count: count > 0 ? count : 1 } };
-      }
-      if (verb === "PLACE") {
-        const item = (parts[2] || "").toLowerCase();
-        if (item) return { type: "step", action: { type: "place", item } };
-      }
-      if (verb === "MINE") {
-        const block = (parts[2] || "").toLowerCase();
-        const count = parseInt(parts[3], 10);
-        if (block) return { type: "step", action: { type: "mine", block, count: count > 0 ? count : 4 } };
-      }
-      // Direct request, 2026-09-07 ("next set of autonomy" -> goal-planner vocabulary gap):
-      // harvest/breed/enchant/fish existed since the last two rounds but were only ever reachable
-      // via a direct player command -- classifyIntent had them, this parser (a standing goal
-      // reasoning on her own) never did, so a self-proposed goal could never actually choose to
-      // farm, breed, enchant, or fish. Same parsing shape as every verb above.
-      if (verb === "HARVEST") return { type: "step", action: { type: "harvest" } };
-      if (verb === "BUILD") return { type: "step", action: { type: "build" } };
-      if (verb === "EXPLORE") {
-        const feature = (parts[2] || "").toLowerCase();
-        return { type: "step", action: SCOUT_FEATURE_BLOCKS[feature] ? { type: "explore", feature } : { type: "explore" } };
-      }
-      // Review MB-08: Builder goals say "go home and place X" -- the planner needs the verb for it.
-      if (verb === "GOHOME") return { type: "step", action: { type: "gohome" } };
-      if (verb === "BREED") {
-        const species = (parts[2] || "").toLowerCase();
-        if (species) return { type: "step", action: { type: "breed", species } };
-      }
-      if (verb === "HARVEST_HIVE") {
-        const tool = (parts[2] || "bottle").toLowerCase();
-        return { type: "step", action: { type: "harvest_hive", tool } };
-      }
-      if (verb === "SHEAR") return { type: "step", action: { type: "shear" } };
-      if (verb === "MILK") return { type: "step", action: { type: "milk" } };
-      if (verb === "BUILD_PEN") return { type: "step", action: { type: "build_pen" } };
-      if (verb === "HERD_TO_PEN") {
-        const species = (parts[2] || "").toLowerCase();
-        if (species) return { type: "step", action: { type: "herd_to_pen", species } };
-      }
-      if (verb === "ENCHANT") {
-        const item = (parts[2] || "").toLowerCase();
-        if (item) return { type: "step", action: { type: "enchant", item } };
-      }
-      if (verb === "FISH") return { type: "step", action: { type: "fish" } };
-      // Not a "step" like the others above -- REQUEST never touches the game world, only Buzz,
-      // so goalTick handles it as its own sibling type rather than routing it through
-      // performAction (direct follow-up, 2026-09-07: "look for more ways to improve their
-      // autonomy" -> bot-to-bot help).
-      if (verb === "REQUEST") {
-        const item = (parts[2] || "").toLowerCase();
-        const count = parseInt(parts[3], 10);
-        if (item) return { type: "request", item, count: count > 0 ? count : 1 };
-      }
-    }
-  }
-  // Direct request, 2026-09-08 ("watch their behavior... look for misbehaviors"): this fallback
-  // still fired 4 times in one 25-minute live capture, across 4 different bots, even after the
-  // maxTokens bump to 500 (2026-09-07) meant to fix exactly this -- but nothing has ever logged
-  // the actual raw reply that failed to parse, so there was no way to tell whether that fix
-  // genuinely wasn't enough or something else entirely is going on. Logged here (truncated,
-  // real replies from a misbehaving planner could in principle be long) purely for future
-  // diagnosis -- this function still returns the same fallback either way.
-  console.log(`[${USERNAME}] unparseable planNextStep reply: ${text.slice(0, 300)}`);
-  return { type: "blocked", reason: "couldn't decide what to do next" };
-}
-
-// One dispatch call per tick, grounded in real state (describeGear -- never guessed) and the
-// goal's own recent log, not just the description -- so a repeated failure actually steers the
-// next choice instead of retrying the same dead end forever (MAX_CONSECUTIVE_FAILURES is the
-// hard backstop if reasoning alone doesn't catch it). maxTokens is deliberately generous (not
-// the old 24) -- see parseGoalStep's comment on why a one-line-only format was the real problem.
-async function planNextStep(goal) {
-  const gearNote = describeGear(bot);
-  const recentLog = goal.log.length ? goal.log.slice(-6).join("\n") : "(nothing done yet)";
-
-  // Environmental memory (direct follow-up, 2026-09-07: "look for more ways to improve their
-  // autonomy"). Real gap found live earlier tonight: "no oak_log nearby" got rediscovered from
-  // scratch, independently, by both bots, across many separate goal cycles -- that knowledge
-  // died with each goal instead of persisting. Reuses the EXISTING long-term memory (the same
-  // "minecraft" hermes-rag corpus generateReply already searches for chat), not a new store.
-  let environmentNote = "";
-  try {
-    const hits = await searchMemory(goal.description, { topK: 3 });
-    if (hits.length) {
-      environmentNote = "\n\nThings you remember about this area (may save you from repeating a " +
-        "dead end):\n" + hits.map((h) => `- ${h.text}`).join("\n");
-    }
-  } catch (err) {
-    console.error(`[${USERNAME}] memory recall for planning failed:`, err.message);
-  }
-
-  const otherGoalNote = otherGoalsNote(
-    "Other bots currently working on something (if your goal would mean competing for the " +
-    "same scarce thing, consider whether ACTION REQUEST -- ask one of them directly, she may " +
-    "already have some -- beats duplicating her work):");
-
-  const reply = await callRole(
-    "dispatch",
-    [
-      {
-        role: "system",
-        content:
-          `You are the planner for a Minecraft bot named ${USERNAME} working toward a standing ` +
-          `goal on her own, unprompted by anyone right now.\n\n` +
-          `Real limits on what she can do: she can craft via a crafting-table/hand-crafting grid ` +
-          `recipe (bot.craft), AND she can smelt at a furnace (ACTION SMELT) -- she is NOT stuck ` +
-          `without ingots. An item normally obtained by smelting (iron_ingot, copper_ingot, ` +
-          `gold_ingot, glass, stone from cobblestone) needs raw material first (raw_iron, ` +
-          `raw_copper, raw_gold, sand, cobblestone -- mine it if she doesn't have any), THEN ` +
-          `ACTION SMELT, not ACTION CRAFT -- crafting-table recipes can never produce a smelted ` +
-          `item. SMELT also needs FUEL (coal, charcoal, or any log/planks) -- if it fails for ` +
-          `lack of fuel and she has no coal/charcoal, mine a log (ACTION MINE oak_log or ` +
-          `whatever log is nearby) rather than repeating the same smelt attempt; any log works ` +
-          `as furnace fuel. If SMELT/CRAFT fails specifically because no furnace/crafting table ` +
-          `is reachable, check her inventory for a spare one first -- ACTION PLACE it rather than ` +
-          `giving up or looting, since placing a utility block she already made is faster and ` +
-          `more reliable than hoping a chest has what she needs. Only fall back to ACTION LOOT if ` +
-          `she has the raw material and fuel but SMELT still fails, or has no furnace reachable ` +
-          `and none to place.\n` +
-          `Common material chain: sticks and a crafting table both need planks; planks come from ` +
-          `logs. If a craft fails for missing ingredients, check whether she's missing the raw ` +
-          `material (e.g. no logs at all) rather than the item itself -- mine the raw material ` +
-          `first instead of retrying the same craft.\n` +
-          `She can place ONE utility block she's carrying (a furnace or crafting table, ACTION ` +
-          `PLACE) for her own use, AND she can build a small fixed shelter (walls, a doorway, a ` +
-          `roof -- ACTION BUILD, see its own entry below) out of whatever solid block she has ` +
-          `the most of -- this is a REAL, working capability, do not claim otherwise or respond ` +
-          `BLOCKED for a goal ACTION BUILD can satisfy. Only respond BLOCKED for building if the ` +
-          `goal genuinely needs something bigger or differently-shaped than that one fixed ` +
-          `shelter (a real house, a base, a custom wall layout) -- that specific kind of building ` +
-          `is what's actually out of scope, not building in general.\n\n` +
-          `Given the goal, her current gear/inventory, and what she's already tried below, you ` +
-          `may reason briefly first -- AT MOST one short sentence, no matter how confusing or ` +
-          `factually off the goal description sounds (reinterpret it charitably as the closest ` +
-          `realistic Minecraft objective rather than dwelling on why it's worded oddly) -- then ` +
-          `on its own final line you MUST respond with EXACTLY ONE of these forms, no exceptions:\n` +
-          `DONE <item_id or NONE> - the goal is already fully achieved given her current gear/` +
-          `inventory. <item_id> is the exact modern Minecraft item id she now owns or has ` +
-          `equipped that proves it (e.g. "bow", "iron_chestplate") -- never invent or assume one ` +
-          `is there without checking the inventory/gear given above. Use NONE only when the goal ` +
-          `genuinely isn't about owning one specific item (e.g. "explore the area").\n` +
-          `BLOCKED <short reason> - she cannot make progress right now and should give up\n` +
-          `ACTION MINE <block_id> <count> - gather a resource. <block_id> must be the exact ` +
-          `modern Minecraft block id -- never invent one. For a material class rather than one ` +
-          `exact species/color (any wood, any wool, any ore), any real example works -- she'll ` +
-          `automatically gather whatever matching variant is actually nearby. If she hasn't ` +
-          `already checked a chest THIS goal, try ACTION LOOT <that same item_id> <count> first ` +
-          `-- a nearby chest may already have exactly what she needs, saving a trip. Go straight ` +
-          `to MINE only once LOOT has already come up empty for this same need, or the recent ` +
-          `progress below already shows a LOOT attempt.\n` +
-          `ACTION CRAFT <item_id> <count> - craft an item via a crafting-table/grid recipe only. ` +
-          `<item_id> must be the exact modern Minecraft item id -- never invent one. She handles ` +
-          `simple intermediate steps herself automatically (logs into planks, planks into sticks ` +
-          `or a crafting_table) -- name the FINAL item you actually want, not the raw material; ` +
-          `no need to plan out "craft planks, then craft sticks" yourself first.\n` +
-          `ACTION EXPLORE <feature> - scout for a map feature instead of gathering; <feature> is ` +
-          `one of: ${Object.keys(SCOUT_FEATURE_BLOCKS).join(", ")}. Succeeds only if it's actually found.\n` +
-          `ACTION GOHOME - walk back to home (your bed or spawn point). Use it first whenever the ` +
-          `goal says to do something at or near home, before PLACE or BUILD.\n` +
-          `ACTION EXPLORE - go looking for any useful raw material (wood, ore) when CRAFT/MINE ` +
-          `failed because a needed resource isn't nearby and you don't have a more specific ` +
-          `block to try -- gathers whatever's found, worth doing before giving up or asking the ` +
-          `other bot for help.\n` +
-          `ACTION SMELT <item_id> <count> - smelt raw material into an ingot (or similar) at a ` +
-          `furnace. <item_id> is the OUTPUT (e.g. iron_ingot), the exact modern Minecraft item ` +
-          `id -- never invent one.\n` +
-          `ACTION PLACE <item_id> - place a furnace or crafting_table she's already carrying, ` +
-          `right next to herself. Use this both when SMELT/CRAFT needs one and none is reachable, ` +
-          `AND whenever a goal asks her to set one up in a specific spot (e.g. "at home") -- ` +
-          `crafting or already carrying the item is NOT the same as the goal being done if it ` +
-          `says to place it somewhere; that only happens once PLACE actually succeeds there.\n` +
-          `ACTION LOOT <item_id> <count> - check the nearest chest for a SPECIFIC item you ` +
-          `actually need right now for this goal. <item_id> must be the exact modern Minecraft ` +
-          `item id -- never invent one, and never a generic guess just to "see what's there." ` +
-          `<count> is exactly how many you need, not a full stack by default -- she takes up to ` +
-          `that many and no more, never sweeps the rest of the chest's contents. Whatever chest ` +
-          `she opens gets fully remembered for the whole fleet either way, so a miss still helps ` +
-          `later. Only omit both parameters if the goal genuinely isn't about one specific item ` +
-          `(rare) -- that inspects the chest and remembers its contents without taking anything.\n` +
-          `ACTION ATTACK - fight a nearby hostile mob\n` +
-          `ACTION HARVEST - pick a ripe crop nearby and replant it, or till open ground and plant ` +
-          `seeds to start a new farm if nothing is ripe yet, if the goal is about food or farming\n` +
-          `ACTION BREED <species> - breed two nearby animals of the same kind (cow, sheep, pig, ` +
-          `chicken, or bee) using the right food, if the goal is about animals or farming\n` +
-          `ACTION HARVEST_HIVE <tool> - collect from a nearby full beehive/bee nest, if the goal ` +
-          `is about honey/bees/beeswax. <tool> is "bottle" (default, honey, calm) or "shears" ` +
-          `(honeycomb -- needed to ever craft a NEW beehive -- but angers the bees).\n` +
-          `ACTION SHEAR - shear a nearby sheep for wool, if the goal is about wool and she has shears\n` +
-          `ACTION MILK - milk a nearby cow, if the goal is about milk/food and she has an empty bucket\n` +
-          `ACTION BUILD_PEN - fence in a small pen (with a gate) around herself, if the goal is ` +
-          `about containing/keeping animals and she has fence blocks and a fence gate\n` +
-          `ACTION HERD_TO_PEN <species> - lure a nearby loose animal into the already-built pen ` +
-          `using the right food, if the goal is about penning/containing that species\n` +
-          `ACTION ENCHANT <item_id> - enchant an item she's carrying at a nearby enchanting table ` +
-          `(needs lapis lazuli and enough XP levels), if the goal is about gear upgrades\n` +
-          `ACTION FISH - fish at nearby water with a fishing rod, if the goal is about food and ` +
-          `no crops/animals are a better fit\n` +
-          `ACTION BUILD - build a small shelter (walls, a doorway, a roof) around herself using ` +
-          `whatever solid block she has the most of, if the goal is about shelter/safety and she ` +
-          `hasn't got one nearby already\n` +
-          `ACTION REQUEST <item_id> <count> - ask the other bot (over Buzz) for an item she might ` +
-          `already have. Only after LOOT has already failed for the same need, or the item is ` +
-          `also fine to just ask for directly (e.g. borrowing fuel/food rather than gathering ` +
-          `your own from scratch).\n` +
-          `Pick the single most useful next step toward the goal. If the same step already ` +
-          `failed more than once in a row (see recent progress below), you must try a genuinely ` +
-          `different step that addresses the actual missing ingredient, or respond BLOCKED.`,
-      },
-      { role: "user", content: `Goal: ${goal.description}\n${gearNote}\nRecent progress:\n${recentLog}` +
-          `${environmentNote}${otherGoalNote}` },
-    ],
-    // Real bug found live (2026-09-07), TWICE -- once at 120 tokens, again at 220: the model
-    // does not reliably obey "at most one short sentence" and sometimes writes a long run-on
-    // reasoning sentence with parenthetical asides, getting cut off before its required final
-    // decision line -- parseGoalStep's fallback ("couldn't decide what to do next") then counts
-    // as a real strike toward MAX_CONSECUTIVE_FAILURES for a goal that was never actually given a
-    // fair evaluation. Fighting the model's verbosity with prompt wording alone hasn't held up
-    // twice in a row -- a genuinely generous budget is the robust fix instead of a third guess at
-    // a slightly bigger number. This runs on local compute with no per-call cost, so there's no
-    // real reason to be stingy here.
-    { maxTokens: 500, temperature: 0, analysis: true },   // planNextStep: goal + gear + the bot's own action log
-  );
-  return reply.trim();
-}
-
-// Fires once a bot has had no active goal and heard from no one (chat/whisper/Matrix/a goal
-// being set) for IDLE_BEFORE_SELF_GOAL_MS -- the "self-proposed" half of the operator's chosen
-// autonomy design (the alternative, user-assigned-only, was explicitly not chosen). Uses `muse`,
-// not `dispatch`: this is the one place autonomy calls for personality/creativity rather than
-// mechanical classification -- what a bot chooses to do with idle time should sound like her,
-// grounded in her real gear (never invented) and whatever long-term memory might suggest
-// something worth pursuing.
-// Direct request, 2026-09-07 ("what other behavior rules have any other sources published or
-// suggested" -> MINECRAFT_BOTS_DESIGN.md's own §6 table: "Cross-bot conflict arbitration (two
-// bots claim the same sub-goal) -> super (rare, not per-tick -- an occasional top-tier call, not
-// a standing cost)"). Decided and documented back when this was designed (2026-09-06), never
-// actually built -- what existed until tonight was only the soft otherGoalsNote() prompt nudge
-// below, which depends entirely on THIS bot's own model voluntarily noticing and avoiding a
-// collision, with nothing that actually resolves one if it doesn't. Only fires when there's
-// something to arbitrate (an active other-bot goal exists AND this bot is about to commit to a
-// new self-proposed one) -- rare by construction, matching the design doc's own "not per-tick."
-// Deliberately scoped to self-proposed goals only, not player-assigned ones (ACTION GOAL) -- a
-// human's direct instruction should never get silently overridden by an arbitration call.
-async function arbitrateGoalConflict(proposedDescription) {
-  if (!otherBotGoals.size) return proposedDescription;
-  const othersText = [...otherBotGoals.entries()].map(([agent, desc]) => `${agent}: ${desc}`).join("\n");
-  try {
-    const reply = await callRole("super", [
-      {
-        role: "system",
-        content:
-          "You arbitrate goal conflicts between autonomous Minecraft bots sharing one world " +
-          "and its scarce resources. Given one bot's proposed new goal and what other bots are " +
-          "already actively doing, decide whether it's a REAL conflict worth avoiding (both " +
-          "need the same scarce, limited resource or location right now), not just a loose " +
-          "topical overlap -- two bots both wanting \"some iron\" isn't automatically a " +
-          "conflict if iron ore is common. Respond in EXACTLY this format, two lines:\n" +
-          "CONFLICT: yes|no\n" +
-          "GOAL: <if yes, a different, still-concrete goal for this bot to pursue instead; if " +
-          "no, repeat the original goal unchanged>",
-      },
-      {
-        role: "user",
-        content: `This bot's proposed goal: "${proposedDescription}"\n\nOther bots already ` +
-          `active:\n${othersText}`,
-      },
-    ], { maxTokens: 100, temperature: 0, analysis: true });   // goal arbitration: bot-proposed goals
-    if (!/CONFLICT:\s*yes/i.test(reply)) return proposedDescription;
-    const goalMatch = reply.match(/GOAL:\s*(.+)/i);
-    const alternative = goalMatch ? goalMatch[1].trim().replace(/^["']|["']$/g, "").slice(0, 120) : "";
-    if (!alternative) return proposedDescription; // flagged a conflict but gave nothing usable -- don't block on it
-    console.log(`[${USERNAME}] goal conflict arbitrated: "${proposedDescription}" -> "${alternative}"`);
-    return alternative;
-  } catch (err) {
-    console.error(`[${USERNAME}] goal arbitration failed:`, err.message);
-    return proposedDescription; // arbitration is a refinement, not a hard gate -- never block a goal on it failing
-  }
-}
-
-// §15.6: Builder's own infrastructure priority ladder -- crafting table -> furnace -> chest ->
-// 6+ beds -> shelter, the operator's own specified order, checked via real bot.findBlocks()/
-// blockAt() world-state queries near bot.spawnPoint (the same "home" anchor gohome/
-// teleportToSpawn already use, not any one bot's own claimed bed -- claiming a bed depends on a
-// bed already existing, so this checklist is what gets the FIRST ones built). Same "check
-// reality, don't trust a self-report" discipline TECH_TREE_STAGES' own mayorHasStageItem()
-// already established for the fleet-wide curriculum, applied here to one role's own checklist.
-const BUILDER_PRIORITY_RADIUS = 24;
-
-function blockIdsByName(names) {
-  return names.map((n) => bot.registry.blocksByName[n]?.id).filter((id) => id !== undefined);
-}
-
-function countNearHome(names, filterFn) {
-  if (!bot.spawnPoint) return 0;
-  const ids = blockIdsByName(names);
-  if (!ids.length) return 0;
-  const positions = bot.findBlocks({ point: bot.spawnPoint, matching: ids, maxDistance: BUILDER_PRIORITY_RADIUS, count: 64 });
-  if (!filterFn) return positions.length;
-  return positions.filter((pos) => filterFn(bot.blockAt(pos))).length;
-}
-
-// Real bug found live, 2026-10-27: crafting_table/furnace/chest used to count as "done" the
-// moment one existed anywhere near home (countNearHome's own bare existence scan) -- never
-// checked reachability or usability, and nothing ever re-opened the item once satisfied. Two
-// real chests sat failing "No path to the goal!"/windowOpen timeouts for a full day while the
-// checklist called chest storage done. isUtilityUsable() (actions.js) tracks real interaction
-// outcomes from the smelt/craft/loot/store call sites that already exist -- this just plugs that
-// into countNearHome's own existing (previously unused) filterFn parameter, the same way
-// bedsNearHome already uses it. Only ever called with ONE name at a time (crafting_table,
-// furnace, or chest individually) -- unlike countNearHome, which some callers use with a whole
-// family of names (e.g. every *_bed variant) where "usability" of a single type wouldn't mean
-// anything.
-function countUsableNearHome(names) {
-  return countNearHome(names, (block) => isUtilityUsable(names[0], block.position));
-}
-
-// Mirrors (does not import -- a deliberate small duplication of pure position math, not worth a
-// cross-module refactor for one caller) actions.js's own "build" case geometry: a 3x3 footprint,
-// three walls tall, one doorway, a roof, a floor. Anchored at bot.spawnPoint since
-// nextBuilderPriority()'s own "shelter" directive always sends her home first via ACTION GOHOME
-// before ACTION BUILD, so a real attempt lands there.
-// Real bug found 2026-09-11 (direct request "fix the shelter check"): this used to check ONLY
-// bot.spawnPoint.floored() itself, but "gohome" (actions.js) walks to bot.spawnPoint via
-// GoalNear(..., 3) -- a 3-block-radius goal, not the exact block -- so a shelter actually built
-// right after "go home and build a small shelter there" (nextBuilderPriority's own directive) can
-// legitimately sit up to 3 blocks off spawnPoint. The old fixed-anchor check would then almost
-// always report "no shelter" even after a real, successful build, since it was checking the wrong
-// 3x3 footprint. Now slides the candidate anchor across a small search radius (matching gohome's
-// own tolerance plus a margin) and accepts the first one that passes.
-// 2026-09-27: the shape now comes from actions.js (shelterPositions) -- one definition for what
-// "build" builds and what this check accepts. The room must be 2x2 and clear two high (a bed in it
-// still counts): a shelter that can't fit a bed isn't enough.
-// Direct report, 2026-10-11 ("complete walls, ceiling, floor, and at least one door... no other
-// openings... with at least one bed"): this used to accept 80% solid, which is not "complete" by
-// any reading, and never checked for a door at all -- shelterPositions() left that whole column
-// out of the fill, so a bare, permanent gap passed every time. Tightened to require every wall/
-// roof/floor cell solid (100%, shelterPositions() now includes the floor too) AND a real door/gate
-// at the doorway. A fourth, separate "no connection to a cave system" check was never needed: once
-// every wall/roof/floor cell is solid and the one remaining opening holds a real door, there is no
-// other gap left for a cave to connect through -- satisfied by construction, not a new scan.
-const shelterGeometryPositions = shelterPositions;
-
-// 2026-11-04: a chest in the room is furniture too -- a residence has one (see residencePlan).
-function hasHollowInterior(base) {
-  return SHELTER_ROOM.every(([dx, dz]) => {
-    const floor = bot.blockAt(base.offset(dx, 0, dz)), above = bot.blockAt(base.offset(dx, 1, dz));
-    return (floor?.boundingBox !== "block" || bot.isABed(floor) || /^(trapped_)?chest$/.test(floor?.name ?? "")) &&
-      above?.boundingBox !== "block";
-  });
-}
-
-// Scans the same candidate grid hasShelterNearHome() always has, but returns the actual best
-// match instead of a bare boolean: `complete: true` once a real, fully-sealed shelter exists (what
-// callers that only care about "is there one" want), or `complete: false` with the base of the
-// MOST complete hollow-interior-shaped candidate found, as long as it's already at least half
-// solid -- a genuine, damaged (or half-built) shelter, not just an open-air pocket that happens to
-// be the right shape (hasHollowInterior() alone never checks for walls at all, and a cleared,
-// flat home site can easily have more than one open 2x2 pocket near it). Returns null only when
-// nothing shelter-shaped and at-least-half-real exists here at all.
-//
-// 2026-10-22: no longer checkShelterIntegrity()'s own repair target -- that check now uses
-// shelterRoomsNear()/holesIn() (shelter.js), shape- and count-agnostic, instead of this
-// function's fixed small-room geometry. This function and hasShelterNearHome()/
-// hasOwnShelterWithBed()/countQualifyingSheltersNearHome() below it still use that fixed
-// geometry on purpose, for a different job: deciding whether the fleet has built enough
-// qualifying shelters to progress, and where to site a brand-new one when none exists yet --
-// both need a concrete shape to build towards, which repairing a shelter that already exists,
-// whatever shape it turned out to be, does not.
-// Horizontal only, not vertical: gohome's GoalNear(..., 3) tolerance is 3D, but Y-slop near a
-// built-up home is usually just terrain-following, not meaningful horizontal wandering -- kept
-// to one dimension deliberately, matching this codebase's "bounded, not unbounded" search
-// philosophy rather than multiplying the already-real cost (81 candidate anchors x 30 blockAt
-// calls each) by a third axis for a much smaller real-world benefit.
-// 2026-10-27: rings outward the same way findShelterSite() (actions.js) now does, capped at
-// BUILDER_PRIORITY_RADIUS rather than findShelterSite's own 48 -- this function backs
-// hasShelterNearHome()/hasOwnShelterWithBed(), called from nextSurvivalPriority() on the hot
-// fleet-wide tick path (not once per goal, cached, the way a site pick is), so it stays
-// consistent with its own Tier-2 sibling countQualifyingSheltersNearHome(), which already scans
-// the full BUILDER_PRIORITY_RADIUS. Real regression this closes: findShelterSite() widening alone
-// would let a shelter get built beyond the old fixed 4-block window while this function stayed
-// blind to it -- shelterStep() would then report the build itself ok:true (resetting
-// consecutiveFailures) but done:false forever, a silent infinite loop with no escape, worse than
-// the bounded give-up/re-propose churn that existed before any of this.
-// 2026-10-28 (direct report: "they completed a few shelter buildings, but don't seem to realize
-// they can place a bed"): that exact loop happened anyway -- capping detection at 24 while
-// findShelterSite() searched to 48 left Babs' three finished shelters (~50 blocks out, doors at
-// (41,70,-27), (21,70,-45), (39,71,-35)) invisible: 328 "the shelter is already standing" steps,
-// each ok:true, never done. A full 48-ring block scan is far too slow for this hot path, but a
-// COMPLETE shelter always has a door at doorwayPosition(base), so completeSheltersNearHome() finds
-// doors first (findBlocks, palette-filtered -- cheap) and checks only the shelter each one would
-// close, across findShelterSite's whole SHELTER_SITE_RADIUS. The ring scan stays only for the
-// innermost "damaged, worth repairing" candidate, which has no door to anchor on.
-const SHELTER_SITE_RADIUS = 48;
-
-function completeSheltersNearHome() {
-  if (!bot.spawnPoint) return [];
-  const center = bot.spawnPoint.floored();
-  // findBlocks' maxDistance is a sphere; the site search is a square, so reach its corners and
-  // trim back to the square below.
-  // 2026-10-30: isShelterDoor, not isDoorway -- a door set the wrong way round blocks the way in,
-  // so that shelter isn't complete; unfinishedShelterNearHome() hands it to "build", which resets it.
-  const doors = bot.findBlocks({ point: center, matching: (block) => isShelterDoor(block),
-    maxDistance: Math.ceil(SHELTER_SITE_RADIUS * Math.SQRT2) + 3, count: 128 });
-  return doors.map((door) => door.offset(0, 0, -3)).filter((base) =>
-    Math.abs(base.x - center.x) <= SHELTER_SITE_RADIUS && Math.abs(base.z - center.z) <= SHELTER_SITE_RADIUS &&
-    Math.abs(base.y - center.y) <= SHELTER_SITE_RADIUS && hasHollowInterior(base) &&
-    shelterGeometryPositions(base).every((pos) => bot.blockAt(pos)?.boundingBox === "block"));
-}
-
-const shelterHasBed = (base) => SHELTER_ROOM.some(([dx, dz]) => bot.isABed(bot.blockAt(base.offset(dx, 0, dz))));
-
-// hasHollowInterior() alone isn't enough to call something "shelter-shaped": it only checks the
-// room's own 4 cells, nothing about walls ever having existed, so an ordinary open-air pocket
-// (plausible near a cleared home site) would match it too. Only worth returning as a repair
-// target once it's ALSO already mostly a real structure -- at least half its wall/roof/floor
-// cells genuinely solid -- the same real/coincidental distinction the old 80% tolerance was
-// trying to draw, just now gating "is this worth repairing" instead of "does this count as done."
-const DAMAGED_SOLID_FLOOR = 0.5;
-
-// trackDamaged is only ever true for the innermost ring: a half-built "repair this" candidate is
-// only meaningful right at home, not something picked up 16-24 blocks out purely because a wider
-// ring happened to scan past it (2026-09-26's own "also 2 blocks above/below spawn height" fix
-// was about terrain-following near home, not about finding distant rubble to repair).
-function scanShelterRing(center, radius, trackDamaged) {
-  let damaged = null, damagedSolid = -1;
-  for (let dx = -radius; dx <= radius; dx++) {
-    for (let dz = -radius; dz <= radius; dz++) {
-      for (let dy = -2; dy <= 2; dy++) {
-        const base = center.offset(dx, dy, dz);
-        if (!hasHollowInterior(base)) continue; // not shelter-shaped here at all
-        const positions = shelterGeometryPositions(base);
-        const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
-        const hasDoor = isShelterDoor(bot.blockAt(doorwayPosition(base)));
-        if (solid === positions.length && hasDoor) return { base, complete: true };
-        // Keep the MOST complete candidate seen, not just the first -- a real damaged shelter
-        // should outrank a coincidental half-empty pocket scanned earlier purely by iteration
-        // order.
-        if (trackDamaged && solid >= positions.length * DAMAGED_SOLID_FLOOR && solid > damagedSolid) {
-          damaged = base;
-          damagedSolid = solid;
-        }
-      }
-    }
-  }
-  return damaged ? { base: damaged, complete: false } : null;
-}
-
-function findShelterNearHome() {
-  if (!bot.spawnPoint) return null;
-  const center = bot.spawnPoint.floored();
-  // A damaged (incomplete) match from the innermost ring must NOT stop the search -- a real bug
-  // this exact fix would otherwise introduce: a half-built structure sitting right at home would
-  // make this return early as "found, but not complete," so a genuinely complete shelter built
-  // farther out (exactly the crowded-base scenario this widening exists for) would never even be
-  // looked for. Only a complete match short-circuits; a damaged one is remembered as a fallback
-  // and the search keeps widening, since a real shelter somewhere is always worth more than a
-  // repair candidate.
-  // 2026-10-28: complete shelters come from completeSheltersNearHome() (nearest first) -- a bedded
-  // one wins over an empty one, so a bot with a bed already in one shelter isn't sent to another.
-  const complete = completeSheltersNearHome();
-  const best = complete.find(shelterHasBed) ?? complete[0];
-  if (best) return { base: best, complete: true };
-  return scanShelterRing(center, 4, true);
-}
-
-function hasShelterNearHome() {
-  return findShelterNearHome()?.complete === true;
-}
-
-// 2026-10-28 (direct report: "there are no doors or beds, but she built two"): a shell with all
-// its walls/roof/floor but no door is invisible to completeSheltersNearHome() (it anchors on the
-// door), so once a shelter goal gave up, the next one picked a fresh site and built a second
-// shell. Nearest shell within SHELTER_SITE_RADIUS whose doorway is still open (or holds a door)
-// and is missing at most UNFINISHED_SHELL_MAX_MISSING blocks -- the build fills those. Only run
-// once per shelter goal (shelterStep caches its pick in goal.shelterAt), never on the hot tick
-// path; the missing-count bail keeps open air to a handful of block lookups per base.
-const UNFINISHED_SHELL_MAX_MISSING = 8;
-
-function unfinishedShelterNearHome() {
-  if (!bot.spawnPoint) return null;
-  const center = bot.spawnPoint.floored();
-  let best = null, bestDist = Infinity;
-  for (let dx = -SHELTER_SITE_RADIUS; dx <= SHELTER_SITE_RADIUS; dx++) {
-    for (let dz = -SHELTER_SITE_RADIUS; dz <= SHELTER_SITE_RADIUS; dz++) {
-      for (let dy = -2; dy <= 2; dy++) {
-        const dist = Math.hypot(dx, dz) + Math.abs(dy) * 0.5;
-        if (dist >= bestDist) continue;
-        const base = center.offset(dx, dy, dz);
-        if (!hasHollowInterior(base)) continue;
-        const door = bot.blockAt(doorwayPosition(base));
-        if (door?.boundingBox === "block" && !isDoorway(door)) continue;
-        let missing = 0;
-        for (const pos of shelterGeometryPositions(base)) {
-          if (bot.blockAt(pos)?.boundingBox !== "block" && ++missing > UNFINISHED_SHELL_MAX_MISSING) break;
-        }
-        if (missing <= UNFINISHED_SHELL_MAX_MISSING) { best = base; bestDist = dist; }
-      }
-    }
-  }
-  return best;
-}
-
-// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 1 item 2): "her own qualifying shelter,
-// with a bed in it" is a materially stronger claim than hasShelterNearHome() and the fleet's own
-// bed count checked separately -- confirmed live, the two are fully independent, so the fleet can
-// report both satisfied with nine beds scattered in the open and one shelter nowhere near most of
-// them. This is the real per-bot check: a complete shelter (same definition as hasShelterNearHome)
-// AND a bed actually standing in one of its own room cells.
-function hasOwnShelterWithBed() {
-  return completeSheltersNearHome().some(shelterHasBed);
-}
-
-// ---- residences (2026-11-04, direct request) -----------------------------------------------------
-// Replaces "every bot builds her own individual shelter": "a residence should consist of a bed, a
-// chest, at least one door, and enclosed walls/ceiling/floor ... a bed is needed for each resident
-// that is ACTIVE. 4 active bots means 4 beds ... if enough beds are not present, make and place a new
-// one in existing shelter (if room); if not enough room in existing shelters, start a new shelter."
-// A complete shelter (completeSheltersNearHome: every wall/roof/floor cell solid, a real door) is a
-// residence once it holds a bed and a chest. The 2x3 room fits one bed and one chest -- with a bed
-// in each column the chest would cut one of them off (fixtureBlockedBy's "last way up") -- so a
-// shelter has room for a bed while it has none. Order of work, fleet-wide and the same for every
-// bot: a bedded shelter's missing chest first (finishing a residence beats starting one), then beds
-// for the active bots, in an empty shelter first, else a new shelter.
-function activeBotCount() {
-  const online = new Set(Object.keys(bot.players ?? {}).map((name) => name.toLowerCase()));
-  return Math.max(1, [...BOT_USERNAMES].filter((name) => online.has(name.toLowerCase())).length);
-}
-
-const CHEST_NAME = /^(trapped_)?chest$/;
-const shelterBedCount = (base) =>
-  Math.ceil(SHELTER_ROOM.filter(([dx, dz]) => bot.isABed(bot.blockAt(base.offset(dx, 0, dz)))).length / 2);
-const shelterHasChest = (base) => SHELTER_ROOM.some(([dx, dz]) => CHEST_NAME.test(bot.blockAt(base.offset(dx, 0, dz))?.name ?? ""));
-
-// The room cell a chest can go in: free floor, not the door's way through, and not the last way
-// in to a bed (wouldBlockAccess). 2026-11-05: a shelter with a bed in each column has none -- the
-// only free cell is one bed's last approach -- and every bot asked for a chest there, refused
-// every time (1,500 refusals each in a few hours), with all lower work blocked behind it.
-function residenceChestCell(base) {
-  const doorRow = base.offset(0, 0, 2);
-  return SHELTER_ROOM.map(([dx, dz]) => base.offset(dx, 0, dz)).find((p) => !p.equals(doorRow) &&
-    bot.blockAt(p)?.boundingBox !== "block" && !bot.isABed(bot.blockAt(p)) && !wouldBlockAccess(bot, p, "chest")) ?? null;
-}
-
-function residencePlan() {
-  const shelters = completeSheltersNearHome();
-  const active = activeBotCount();
-  const beds = shelters.reduce((n, base) => n + shelterBedCount(base), 0);
-  // A shelter with no room for a chest (two beds) is a full residence as it stands.
-  const chestless = shelters.find((base) => shelterHasBed(base) && !shelterHasChest(base) && residenceChestCell(base));
-  if (chestless) return { kind: "chest", base: chestless, beds, active };
-  if (beds >= active) return { kind: "done", beds, active };
-  const empty = shelters.find((base) => !shelterHasBed(base));
-  return empty ? { kind: "bed", base: empty, beds, active } : { kind: "build", beds, active };
-}
-
-function residenceDirective(plan) {
-  const tally = `our residences have ${plan.beds} bed${plan.beds === 1 ? "" : "s"} for ${plan.active} ` +
-    `active bot${plan.active === 1 ? "" : "s"}`;
-  if (plan.kind === "chest") return "a residence near home has a bed but no chest -- make a chest and put it inside that shelter.";
-  if (plan.kind === "bed") return `${tally} -- make a bed and place it in the empty shelter near home.`;
-  return `${tally} and no shelter has room for another -- build a new shelter near home: a small ` +
-    "sealed room with complete walls, a roof, a floor and a real door, then a bed and a chest inside.";
-}
-
-// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1 -- "today's separate 'beds'
-// and 'shelter' checklist items merge into one, because satisfying them independently doesn't
-// actually get anyone a safe place to sleep"). Confirmed live: builderPriorityItemSatisfied's old
-// "beds" (a bare count) and "shelter" (hasShelterNearHome, a single nearest match) items are
-// fully independent -- nine beds scattered in the open and one small shelter nowhere near most of
-// them could report both satisfied. This counts actual qualifying structures (100% solid walls/
-// roof/floor, a real door, a bed inside) near home, same BUILDER_PRIORITY_RADIUS "near home"
-// every other Tier 2 item already uses -- wider than findShelterNearHome's own +/-4, since this
-// needs room for up to BOT_USERNAMES.size separate structures, not just the nearest one.
-//
-// Real shelters can't physically overlap (you can't wall over another shelter's own walls), so in
-// practice a shifted candidate base whose "room" clips a real wall just fails the hollow-interior
-// gate on its own. The `claimed` set below is a cheap extra safety net against double-counting,
-// not load-bearing for the common case.
-function countQualifyingSheltersNearHome() {
-  if (!bot.spawnPoint) return 0;
-  const center = bot.spawnPoint.floored();
-  const claimed = new Set();
-  const key = (p) => `${p.x},${p.y},${p.z}`;
-  let count = 0;
-  for (let dx = -BUILDER_PRIORITY_RADIUS; dx <= BUILDER_PRIORITY_RADIUS; dx++) {
-    for (let dz = -BUILDER_PRIORITY_RADIUS; dz <= BUILDER_PRIORITY_RADIUS; dz++) {
-      for (let dy = -2; dy <= 2; dy++) {
-        const base = center.offset(dx, dy, dz);
-        if (claimed.has(key(base)) || !hasHollowInterior(base)) continue;
-        const positions = shelterGeometryPositions(base);
-        if (positions.some((pos) => claimed.has(key(pos)))) continue;
-        const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
-        if (solid !== positions.length) continue;
-        if (!isShelterDoor(bot.blockAt(doorwayPosition(base)))) continue;
-        const bedCells = SHELTER_ROOM.map(([rx, rz]) => base.offset(rx, 0, rz));
-        if (!bedCells.some((p) => bot.isABed(bot.blockAt(p)))) continue;
-        count++;
-        for (const pos of [...positions, ...bedCells]) claimed.add(key(pos));
-      }
-    }
-  }
-  return count;
-}
-
-// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a -- "once the fleet's
-// progression reaches iron tools or better... checked the same verified way the existing
-// curriculum already checks tool tiers... not a new detection mechanism"). TECH_TREE_STAGES'
-// own fleet-wide evidence tracking (stageEvidence/stageProgress, below) is Mayor-only by design
-// (only Mayor ever credits it) -- reusing it here would mean only Mayor's own process could ever
-// see the communal shelter as unlocked, defeating the whole "any idle bot" point of Tier 2.
-// Instead: a small, UNGATED (every bot, not just Mayor) tracker fed by the exact same verified
-// evidence already flowing fleet-wide -- her own current gear, checked fresh every call, plus
-// whatever an incoming "goal"/"evidence" Buzz message's real item names reveal (see the incoming
-// handler below) -- never a bare claim, the same trust TECH_TREE_STAGES' own mayorHasStageItem()
-// already relies on. In-memory only (resets on restart), same low-stakes tradeoff
-// otherBotActivityAt already makes.
-const TOOL_NAME = /^(wooden|stone|iron|golden|diamond|netherite)_(pickaxe|axe|sword|shovel|hoe)$/;
-function isIronOrBetterTool(name) {
-  const m = TOOL_NAME.exec(name);
-  return !!m && TOOL_TIERS.indexOf(m[1]) >= TOOL_TIERS.indexOf("iron");
-}
-let fleetHasIronTool = false;
-function noteIronToolEvidence(itemNames) {
-  if (!fleetHasIronTool && itemNames?.some(isIronOrBetterTool)) fleetHasIronTool = true;
-}
-function fleetHasReachedIronTools() {
-  const mine = bot.inventory.items().map((i) => i.name)
-    .concat([5, 6, 7, 8, 45].map((s) => bot.inventory.slots[s]?.name).filter(Boolean));
-  noteIronToolEvidence(mine);
-  return fleetHasIronTool;
-}
-
-// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a), sized per the operator's
-// own rule (2026-10-12: "large enough for beds to suit all active bots... at least N+1 for N
-// bots"). No exact bed layout is pre-planned (see communalShelterPositions()'s own header,
-// actions.js) -- the room is just sized generously enough that findBedSites() can actually fit
-// the target count, called once per bed by runCommunalShelterGoal() below. Roughly 4 floor cells
-// per bed (a bed's own foot+head, plus room for the stand cell and a little aisle slack) keeps
-// the room squarish and not razor-thin for a large target.
-function communalShelterTargetBeds() {
-  return BOT_USERNAMES.size + 1;
-}
-function communalShelterSize() {
-  const side = Math.max(5, Math.ceil(Math.sqrt(communalShelterTargetBeds() * 4)));
-  return { width: side, depth: side };
-}
-
-// Mirrors findShelterNearHome()/hasHollowInterior() above, parameterized by width/depth instead
-// of the individual shelter's fixed SHELTER_ROOM -- same "100% solid walls/roof/floor, a real
-// door" completeness bar, just no bed-count check here (that's tracked separately below, since
-// the target is N+1 beds, not just one).
-function hasHollowCommunalInterior(base, width, depth) {
-  for (let dx = 0; dx < width; dx++) {
-    for (let dz = 0; dz < depth; dz++) {
-      const floor = bot.blockAt(base.offset(dx, 0, dz)), above = bot.blockAt(base.offset(dx, 1, dz));
-      if (!((floor?.boundingBox !== "block" || bot.isABed(floor)) && above?.boundingBox !== "block")) return false;
-    }
-  }
-  return true;
-}
-function findCommunalShelterNearHome() {
-  if (!bot.spawnPoint) return null;
-  const { width, depth } = communalShelterSize();
-  const center = bot.spawnPoint.floored();
-  let damaged = null, damagedSolid = -1;
-  for (let dx = -BUILDER_PRIORITY_RADIUS; dx <= BUILDER_PRIORITY_RADIUS; dx++) {
-    for (let dz = -BUILDER_PRIORITY_RADIUS; dz <= BUILDER_PRIORITY_RADIUS; dz++) {
-      for (let dy = -2; dy <= 2; dy++) {
-        const base = center.offset(dx, dy, dz);
-        if (!hasHollowCommunalInterior(base, width, depth)) continue;
-        const positions = communalShelterPositions(base, width, depth);
-        const solid = positions.filter((pos) => bot.blockAt(pos)?.boundingBox === "block").length;
-        const hasDoor = isDoorway(bot.blockAt(communalDoorwayPosition(base, depth)));
-        if (solid === positions.length && hasDoor) return { base, width, depth, complete: true };
-        if (solid >= positions.length * 0.5 && solid > damagedSolid) {
-          damaged = base;
-          damagedSolid = solid;
-        }
-      }
-    }
-  }
-  return damaged ? { base: damaged, width, depth, complete: false } : null;
-}
-function hasCommunalShelterStructure() {
-  return findCommunalShelterNearHome()?.complete === true;
-}
-// Real beds specifically inside the communal room's own footprint -- not a bare "near home"
-// count, which would also catch every individual shelter's own bed and over-report progress.
-function communalShelterBedCount(base, width, depth) {
-  let count = 0;
-  for (let dx = 0; dx < width; dx++) {
-    for (let dz = 0; dz < depth; dz++) {
-      if (bot.isABed(bot.blockAt(base.offset(dx, 0, dz)))) count++;
-    }
-  }
-  return Math.ceil(count / 2); // each bed is two cells (foot+head), both inside the same room
-}
-function communalShelterSatisfied() {
-  const found = findCommunalShelterNearHome();
-  return !!found?.complete && communalShelterBedCount(found.base, found.width, found.depth) >= communalShelterTargetBeds();
-}
-
-// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md §1, Tier 1 -- "survival needs... don't stop
-// applying to a Miner or a Farmer just because her role happens not to enforce them"). Mirrors
-// nextBuilderPriority()/nextSoldierPriority()'s own shape -- a deterministic, world-checked
-// ladder ahead of freeform self-propose -- but applies to EVERY bot regardless of role, checked
-// FIRST in proposeOwnGoal() (Tier 1 outranks Tier 2/3, so Builder's/Soldier's own remaining
-// role-specific items only run once this returns null). Weapon and armor move here from
-// nextSoldierPriority(), which drops both (now redundant: Tier 1 already intercepts first).
-//
-// Item 0 (shelter-integrity repair) isn't checked here: checkShelterIntegrity() (above) already
-// runs as its own fully autonomous periodic routine and repairs a breach directly, without
-// waiting on a goal to carry it -- nothing here would make that faster, only redundant.
-//
-// Item 3 (not trending toward starvation) deliberately escalates to a real goal only once the
-// existing reactive chore (checkHunger, below) has already tried and backed off -- that chore
-// already runs every 15s well before this would ever be checked, so jumping straight to a goal
-// before giving it a chance would just duplicate, not improve on, what it's already doing.
-function nextSurvivalPriority() {
-  if (!hasWeapon(bot)) {
-    return {
-      name: "weapon",
-      directive: "you have no sword or axe -- get one before anything else. Check a nearby or " +
-        "remembered chest first, ask the fleet if anyone has a spare to give you, and if neither " +
-        "works, gather materials and craft one.",
-    };
-  }
-  // 2026-11-04: the residence model (residencePlan) -- beds for the active bots, each in a
-  // residence with a chest -- replaces "her own shelter with a bed in it".
-  const residence = residencePlan();
-  if (residence.kind !== "done") return { name: "shelter", directive: residenceDirective(residence) };
-  if (bot.food < HUNGER_THRESHOLD && !hasFood() && !hasRod() && Date.now() < foodFetchBlockedUntil) {
-    return {
-      name: "food",
-      directive: "you're low on food, with nothing to eat nearby and no fishing rod -- go get " +
-        "some: hunt a nearby animal for meat, harvest a ripe crop, or head to a remembered food " +
-        "source.",
-    };
-  }
-  const wornPieces = [5, 6, 7, 8].filter((slot) => bot.inventory.slots[slot]).length;
-  if (wornPieces < 4 && Date.now() >= survivalArmorRetryAt) {
-    survivalArmorRetryAt = Date.now() + SURVIVAL_ARMOR_RETRY_MS;
-    return {
-      name: "armor",
-      directive: `you're only wearing ${wornPieces} of 4 armor pieces -- get a full set, any ` +
-        "tier: check nearby chests, ask the fleet for spares, or gather materials and craft them.",
-    };
-  }
-  const upgrade = nextToolUpgrade();
-  if (upgrade && Date.now() >= toolUpgradeRetryAt) {
-    toolUpgradeRetryAt = Date.now() + TOOL_UPGRADE_RETRY_MS;
-    return { name: "tools", directive: `upgrade your tools: craft a ${upgrade.replace("_", " ")}.` };
-  }
-  // 2026-11-04: not without a pickaxe -- stone is the whole job. Babs (no pickaxe) ran this goal
-  // ~1,140 times a day, every step "need a better tool for stone"; nextToolUpgrade() now asks for
-  // the wooden pickaxe first.
-  if (hasPickaxe() && shelterCellsToReface().length && Date.now() >= shelterUpgradeRetryAt) {
-    shelterUpgradeRetryAt = Date.now() + SHELTER_UPGRADE_RETRY_MS;
-    return { name: "shelter_upgrade", directive: "reinforce your home: swap some of its dirt and wood blocks for stone." };
-  }
-  return null;
-}
-const SURVIVAL_ARMOR_RETRY_MS = 30 * 60_000;
-let survivalArmorRetryAt = 0;
-
-// Direct request, 2026-10-28 ("their goals should evolve in shelter quality, just like in tools
-// quality... when they have the capability to easily mine stone, tools should be upgraded to
-// stone; when they can smelt metal, tools should upgrade to metal; once they have safe shelter to
-// sleep in, they should gradually replace the earth shelter with stone"). Operator's calls: all
-// five tools, and shelters stop at stone (an iron-block shelter is ~630 ingots). The two lowest
-// Tier 1 items, each behind a retry timer like armor so an upgrade that's stuck (no iron found
-// yet) never crowds out everything below it.
-//
-// Tools: the target tier is what she can make now -- stone once she holds any pickaxe (stone is
-// then minable), iron once she holds a stone-or-better pickaxe (iron ore needs one) AND a usable
-// furnace stands near home. Golden tools rank with wooden: softer than stone, they last no time.
-const UPGRADE_TOOLS = ["pickaxe", "axe", "sword", "shovel", "hoe"];
-const TOOL_RANK = { wooden: 0, golden: 0, stone: 1, iron: 2, diamond: 3, netherite: 4 };
-const TOOL_UPGRADE_RETRY_MS = 20 * 60_000;
-let toolUpgradeRetryAt = 0;
-
-function bestToolRank(tool) {
-  let best = -1;
-  for (const item of bot.inventory.items()) {
-    const m = TOOL_NAME.exec(item.name);
-    if (m && m[2] === tool) best = Math.max(best, TOOL_RANK[m[1]]);
-  }
-  return best;
-}
-
-function toolTargetTier() {
-  const pickaxe = bestToolRank("pickaxe");
-  if (pickaxe < 0) return null; // no pickaxe at all: toolStep's own wooden one comes first
-  return pickaxe >= TOOL_RANK.stone && countUsableNearHome(["furnace"]) >= 1 ? "iron" : "stone";
-}
-
-// 2026-11-04: with no pickaxe at all, a wooden one is the upgrade. toolTargetTier() has nothing to
-// offer then, and its "toolStep's own wooden one comes first" only ever ran for a Mayor-assigned
-// "get a pickaxe" -- nothing in Tier 1 ever got a pickaxe-less bot one.
-function nextToolUpgrade() {
-  if (bestToolRank("pickaxe") < 0) return "wooden_pickaxe";
-  const tier = toolTargetTier();
-  if (!tier) return null;
-  const tool = UPGRADE_TOOLS.find((name) => bestToolRank(name) < TOOL_RANK[tier]);
-  return tool ? `${tier}_${tool}` : null;
-}
-
-// Shelter: the cells of her own bedded shelter (walls, roof, floor) that aren't stone-tier yet --
-// isCommunalShelterMaterial() is already the codebase's "stone or better building block" test.
-const SHELTER_UPGRADE_RETRY_MS = 20 * 60_000;
-const SHELTER_REFACE_BATCH = 8;
-let shelterUpgradeRetryAt = 0;
-
-function ownBeddedShelter() {
-  return completeSheltersNearHome().find(shelterHasBed) ?? null;
-}
-
-function shelterCellsToReface() {
-  const base = ownBeddedShelter();
-  if (!base) return [];
-  return shelterGeometryPositions(base).filter((pos) => !isCommunalShelterMaterial(bot.blockAt(pos)?.name ?? ""));
-}
-
-// Same hallucinated-DONE problem builderPriorityItemSatisfied() already guards against (a model
-// claiming success the instant an item exists in inventory, regardless of whether the real-world
-// condition the directive actually asked for is true) -- "shelter" and "food" don't reduce to
-// "holds item X" the generic DONE check (parsed.item, below) already covers, so they need the
-// same kind of explicit re-check Builder's own items get. "weapon"/"armor" ARE already covered by
-// that generic check (an axe or a chestplate is a real inventory item), so they're included here
-// too only for a uniform guarantee, not because the generic path was found lacking for them.
-function survivalPriorityItemSatisfied(name) {
-  switch (name) {
-    case "weapon": return hasWeapon(bot);
-    case "shelter": return residencePlan().kind === "done";
-    case "food": return hasFood();
-    case "armor": return [5, 6, 7, 8].filter((slot) => bot.inventory.slots[slot]).length >= 4;
-    case "tools": return !nextToolUpgrade();
-    default: return true;
-  }
-}
-
-// Real bug found live 2026-09-12 (direct report the fleet is "still not functional," traced
-// through logs, not guessed): Amy self-proposed the IDENTICAL "go home and place a furnace
-// there" directive every single cycle for 6+ hours straight, zero progress, because
-// nextBuilderPriority() had no memory of past attempts -- a genuinely hard blocker (furnace
-// needs cobblestone needs a pickaxe needs an uninterrupted stretch) just re-picked the same
-// still-unmet item forever. Real, severe consequence, not just wasted cycles: beds (item #4)
-// never even got ATTEMPTED, so nobody could sleep, and phantoms -- a real vanilla mechanic
-// triggered by extended sleep deprivation -- swarmed the base (1473 threat-detections in 2
-// hours, the single largest hostile category, more than every other mob combined), on top of
-// ordinary dark-base zombie/spider/skeleton spawns from lighting also never landing
-// (checkHomeLighting requires a claimed bed to run at all, and zero beds meant zero claims).
-// New per-item stall counter: after BUILDER_ITEM_STALL_LIMIT consecutive cycles proposing the
-// SAME still-unmet item, it's temporarily skipped in favor of the next unmet one -- so a hard
-// blocker doesn't block strictly-easier later items (beds, chest) forever. Resets whenever a
-// DIFFERENT item gets proposed, so a skipped item gets retried later, not abandoned outright.
-const BUILDER_ITEM_STALL_LIMIT = 3;
-let builderStallItem = null;
-let builderStallCount = 0;
-
-// Split from nextBuilderPriority() 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 -- "ownable by
-// whichever bot is idle and able"): the pure "what's unmet" list, no stall-tracking or claiming,
-// so proposeOwnGoal() can try every candidate in order (skipping ones another bot already holds
-// a live claim on) instead of only ever seeing nextBuilderPriority()'s own single stall-aware
-// pick.
-function builderPriorityCandidates() {
-  const candidates = [];
-  if (countUsableNearHome(["crafting_table"]) < 1) {
-    candidates.push({ name: "crafting_table", directive: "go home and place a crafting table there" });
-  }
-  if (countUsableNearHome(["furnace"]) < 1) {
-    candidates.push({ name: "furnace", directive: "go home and place a furnace there" });
-  }
-  if (countUsableNearHome(["chest"]) < 1) {
-    candidates.push({ name: "chest", directive: "go home and place a chest there" });
-  }
-  // 2026-10-11: merged from two independent items ("beds": a bare count; "shelter":
-  // hasShelterNearHome, the single nearest match) into one real check -- confirmed live the two
-  // could both report satisfied with nine beds scattered in the open and one shelter nowhere near
-  // most of them. countQualifyingSheltersNearHome() (above) counts actual qualifying structures
-  // (complete, sealed, a bed inside); shelterCapacityNeeded() (below) has the target.
-  if (shelterCapacityNeeded()) {
-    candidates.push({ name: "shelter_capacity", directive: residenceDirective(residencePlan()) });
-  }
-  // Added 2026-09-11 ("nest" again -> "wire honey/wax into Builder's ... priority list"). Sits
-  // AFTER the operator's original five (crafting table/furnace/chest/beds/shelter) rather than
-  // among them -- a beehive is a nice-to-have sustainable resource, not core survival infra.
-  if (countNearHome(["beehive"]) < 1) {
-    candidates.push({ name: "beehive", directive: "craft a beehive (needs planks and honeycomb) and place it near home" });
-  }
-  // 2026-09-25: nothing ever asked for ranching. Last on the list: a pen near home with a breeding
-  // pair, done for good once she has bred an animal (a verified achievement, never a claim).
-  if (![...getAchievements(bot)].some((a) => a.startsWith("bred:"))) {
-    candidates.push({ name: "ranch", directive: "set up a ranch near home: build an animal pen, lead two animals of one kind into it, and breed them" });
-  }
-  // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a -- "once the fleet's
-  // progression reaches iron tools or better... building one single communal shelter becomes a
-  // Tier 2 goal, in addition to -- not instead of -- the individual shelters above"). Last on the
-  // list by design: §3's own Builder priority order has it AFTER the rest of the checklist, not
-  // blocking on every other item being 100% done first (the de-exclusive claim mechanism already
-  // lets a different bot work an earlier item while this one waits its turn).
-  if (fleetHasReachedIronTools() && !communalShelterSatisfied()) {
-    const target = communalShelterTargetBeds();
-    candidates.push({ name: "communal_shelter", directive: "lead the fleet's communal shelter near " +
-      `home: a single larger shelter built entirely from stone-tier material or better (no planks ` +
-      `or dirt), with real walls, a roof, a real door, and room for at least ${target} beds.` });
-  }
-  return candidates;
-}
-
-// 2026-11-04 (24h review): "We have 2, need at least 9" -- the target was the whole configured
-// roster, online or not, and its runner (shelterStep) built HER OWN shelter, so a bot who already
-// had one "completed" it on the spot and proposed it again: 209 false completions a day. Now the
-// residence plan's own count: beds for the bots in the game, each in a residence with a chest.
-function shelterCapacityNeeded() {
-  return residencePlan().kind !== "done";
-}
-
-function nextBuilderPriority(candidates = builderPriorityCandidates()) {
-  if (!candidates.length) {
-    builderStallItem = null;
-    builderStallCount = 0;
-    return null; // checklist complete -- proposeOwnGoal falls through to its normal freeform reasoning
-  }
-
-  const skip = builderStallCount > BUILDER_ITEM_STALL_LIMIT ? builderStallItem : null;
-  const pick = candidates.find((c) => c.name !== skip) || candidates[0];
-
-  if (pick.name === builderStallItem) builderStallCount++;
-  else { builderStallItem = pick.name; builderStallCount = 1; }
-
-  return pick;
-}
-
-// Real bug found live 2026-09-13 (direct report: bots "hallucinate their achievements"),
-// confirmed with hard evidence: "craft a beehive ... and place it near home" was announced
-// "goal complete" TWICE in the same 24h window, and EVERY builder-priority cycle before and
-// after each claim still found zero beehives near home. Root cause: parseGoalStep's own DONE
-// verification (2.43.0) checks whether the named item exists in inventory/equipped gear -- true
-// the moment she CRAFTS a beehive, regardless of whether she ever actually walked home and
-// placed it, since a crafted-but-unplaced item sits right there in her inventory satisfying that
-// check. Reuses the exact same real-world checks nextBuilderPriority() itself already trusts,
-// rather than a second, independently-drifting definition of "done" for these six items.
-function builderPriorityItemSatisfied(name) {
-  switch (name) {
-    case "crafting_table":
-    case "furnace":
-    case "chest":
-      // Must stay in lockstep with builderPriorityCandidates()'s own check just above, or the
-      // two diverge: a bot could see "furnace still needed" in the checklist while being told
-      // "yes, done" right after placing a 2nd furnace next to a broken 1st one.
-      return countUsableNearHome([name]) >= 1;
-    case "beehive":
-      return countNearHome([name]) >= 1;
-    case "shelter_capacity":
-      // 2026-10-11: replaces the old separate "beds"/"shelter" cases -- kept in lockstep with
-      // builderPriorityCandidates() through the one shared shelterCapacityNeeded() (2026-11-04),
-      // the same two-copies-of-the-same-number drift this function exists to prevent.
-      return !shelterCapacityNeeded();
-    case "communal_shelter":
-      return communalShelterSatisfied();
-    default:
-      return true; // not one of the six known items -- nothing real to re-check, don't block
-  }
-}
-
-// Direct request, 2026-09-13 ("soldier personas need to... prioritize a) getting a weapon...
-// b) killing monsters c) secondary roles"). Mirrors nextBuilderPriority()'s own deterministic,
-// world-checked-ahead-of-freeform shape (§15.6) instead of a third pattern -- a hostile either is
-// or isn't within patrol range on any given tick, nothing here can get "stuck" the way Builder's
-// multi-step blockers can, so no stall counter like Builder's either. Item (c), "secondary
-// roles," needs no code of its own here: returning null falls straight through to
-// proposeOwnGoal's normal freeform reasoning below, where roleBiasNote() already leans toward
-// myRole.secondary.
-//
-// 2026-10-11 (PRIORITIES_PROPOSAL.md -- "Narrowed: weapon/armor move to Tier 1"): both checks
-// this function used to run itself are gone. nextSurvivalPriority() (above), checked first for
-// EVERY bot in proposeOwnGoal(), already intercepts an unarmed or under-armored Soldier before
-// this function is ever reached -- keeping a second copy here would only risk the two drifting
-// apart (a different threshold, a different retry timer) rather than add any real coverage.
-const SOLDIER_PATROL_RANGE = 32; // wider than SELF_DEFENSE_RANGE -- a Soldier hunts, not just reacts
-
-// Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md §2a -- "with one, she patrols near home,
-// unchanged from today. With two or more, exactly one holds a claim to stay anchored near home
-// at all times; every other Soldier's priority becomes escort/rescue instead."). "Still a live
-// Soldier" reuses the SAME goal-heartbeat liveness signal goalHeartbeatTick's own peer-expiry
-// already trusts (otherBotGoalSeenAt/GOAL_LEASE_MS), rather than inventing a second one: a
-// Soldier's own ladder never returns null (always monster or guard/escort), so a genuinely
-// running Soldier is never idle long enough for her own lease to go stale.
-function isLiveSoldier(name) {
-  if (name === USERNAME) return true; // herself -- trivially live if this code is even running
-  if (BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER) return false; // demoted/reassigned
-  const seenAt = otherBotGoalSeenAt.get(`mc-${name.toLowerCase()}`);
-  return seenAt !== undefined && Date.now() - seenAt <= GOAL_LEASE_MS;
-}
-
-function liveSoldierNames() {
-  return [...BOT_USERNAMES].filter((name) => BOT_ROLES[name.toLowerCase()]?.primary === ROLES.SOLDIER && isLiveSoldier(name));
-}
-
-// One live Soldier: trivially the anchor, no claim contention at all -- today's unchanged
-// single-guard behavior. Two or more: holdsGuardAnchor() (actions.js) arbitrates, same shared-
-// claim shape as a bed claim, lower-sorted-name-wins on a genuine race.
-async function isGuardAnchor() {
-  if (liveSoldierNames().length <= 1) return true;
-  return holdsGuardAnchor(bot, isLiveSoldier);
-}
-
-async function nextSoldierPriority() {
-  // FLEE_ONLY_MOBS excluded deliberately -- checkSelfDefense/respondToSquadCall's own established
-  // fix already found that melee-attacking a flyer just hangs holding arbiter control for the
-  // full ACTION_TIMEOUT_MS with no real chance of landing a hit; proactively picking one as a
-  // self-propose target would walk straight into the same dead end.
-  const threat = nearestHostile(bot, SOLDIER_PATROL_RANGE);
-  if (threat && !FLEE_ONLY_MOBS.has(threat.name)) {
-    return { name: "monster", directive: `hunt down and kill the nearby ${threat.name}.` };
-  }
-  // Direct report, 2026-09-15 ("look for behavioral gaps"): a real, confirmed live violation of
-  // "Soldiers should not get tasks beyond equipping weapons and armor, and fighting off
-  // monsters" -- Mark self-proposed "Secure Luke's flank -- craft a pickaxe" during a window
-  // where both conditions above happened to be false (armed, nothing hostile in patrol range).
-  // Returning null here, like Builder's own checklist does once its infrastructure is built,
-  // was the bug: Builder graduates to unrestricted freeform once her one-time checklist is
-  // done, but a Soldier's job was never meant to have a "checklist complete" state to graduate
-  // out of (§21) -- standing guard is supposed to be ongoing, never "done." A Soldier-primary
-  // bot now never reaches the unrestricted freeform path at all.
-  if (await isGuardAnchor()) {
-    return { name: "guard", directive: "stand guard near home and keep watch for anything hostile." };
-  }
-  // Not holding the anchor: the squad-response arbiter tier already preempts either goal equally
-  // (SQUAD_RESPONSE outranks ROUTINE/GOAL_STEP regardless) -- what changes here is what she does
-  // BETWEEN calls. Deliberately not a standing goal like "guard": she stays mobile, not anchored
-  // to one spot, ready to move toward wherever she's actually needed. "Recover a teammate's
-  // dropped gear" (the proposal's other half of escort/rescue) is NOT included here: the
-  // existing RECOVERY/post-death logic only ever recovers the SAME bot's own death position, and
-  // nothing today broadcasts one bot's death location to the rest of the fleet -- a real,
-  // separate gap flagged for confirmation (not assumed) before promising it, not silently built.
-  return { name: "escort", directive: "patrol more broadly rather than anchoring in one spot -- " +
-    "stay ready to respond to a squad call or help a teammate before resuming your own patrol." };
-}
-
-async function proposeOwnGoal() {
+// Chat and intent: classifyIntent, the chat reply, narration and what gets remembered: in chat.js (split out 2026-11-10).
+installChat();
+// Priorities: in priorities.js (split out 2026-11-10).
+export async function proposeOwnGoal() {
   // PRIORITIES_PROPOSAL.md Tier 1: checked FIRST, for every bot regardless of role -- a weapon,
   // her own sheltered bed, not starving, and basic armor outrank every role-specific ladder below
   // (Builder's checklist, Soldier's monster/guard list) the same way those already outrank plain
@@ -4040,7 +2534,7 @@ function routineBlocked(name) {
   if (blocked) routineSkips[name] = (routineSkips[name] ?? 0) + 1;
   return blocked;
 }
-setInterval(() => {
+guardedInterval(() => {
   if (!Object.keys(routineSkips).length) return;
   console.log(`[${USERNAME}] ROUTINE_SKIPS ${JSON.stringify(routineSkips)}`);
   for (const k of Object.keys(routineSkips)) delete routineSkips[k];
@@ -4551,7 +3045,7 @@ async function runWeaponGoal(goal, takeControl, getHandle, replaced) {
   await failGoalStep(goal, step.text);
 }
 
-function hasPickaxe() {
+export function hasPickaxe() {
   return bot.inventory.items().some((i) => i.name.endsWith("_pickaxe"));
 }
 
@@ -4568,7 +3062,7 @@ function hasPickaxe() {
 // the tech tree. Text-matched (TOOL_WORDS), not a survivalPriorityItem tag, because unlike
 // weapon/shelter/food/armor this directive is Mayor-ASSIGNED free text, not self-proposed by this
 // bot's own structured Tier 1 ladder -- there is no creation-time moment to tag it the safe way.
-async function toolStep(goal, handle) {
+export async function toolStep(goal, handle) {
   if (hasPickaxe()) return { ok: true, text: "already have a pickaxe.", done: true };
   if (!goal.triedToolChest) {
     goal.triedToolChest = true;
@@ -5642,7 +4136,7 @@ async function runGoalTick() {
   if (goal && currentGoal === goal && goal.steps > stepsBefore) setTimeout(runGoalTick, GOAL_FOLLOWUP_MS);
 }
 
-setInterval(runGoalTick, GOAL_TICK_MS);
+guardedInterval(runGoalTick, GOAL_TICK_MS);
 
 // Mayor-only autonomous behavior, 2026-09-08 ("add another bot, Mayor, whose personality is to
 // be a leader and set goals for the others"). A no-op check (USERNAME !== MAYOR_USERNAME) makes
@@ -5674,7 +4168,7 @@ const MAYOR_DIRECTIVE_MS = parseInt(process.env.MC_MAYOR_DIRECTIVE_MS || "300000
 // sword". Each stage is now `requires`: groups that must ALL be satisfied, each by ANY one of its
 // items. Groups are tier-aware (better materials count toward a lower stage).
 const withTiers = (materials, piece) => materials.map((m) => `${m}_${piece}`);
-const TOOL_TIERS = ["wooden", "stone", "iron", "golden", "diamond", "netherite"];
+export const TOOL_TIERS = ["wooden", "stone", "iron", "golden", "diamond", "netherite"];
 const ARMOR_TIERS = ["leather", "chainmail", "iron", "golden", "diamond", "netherite"];
 const IRON_UP = ["iron", "diamond", "netherite"];
 const ARMOR_PIECES = ["helmet", "chestplate", "leggings", "boots"];
@@ -5958,7 +4452,7 @@ async function proposeDirectiveForOthers() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   proposeDirectiveForOthers().catch((err) => console.error(`[${USERNAME}] proposeDirectiveForOthers error:`, err.message));
 }, MAYOR_DIRECTIVE_MS);
 
@@ -6043,7 +4537,7 @@ async function proposeFallbackDirective() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   proposeFallbackDirective().catch((err) => console.error(`[${USERNAME}] proposeFallbackDirective error:`, err.message));
 }, MAYOR_DIRECTIVE_MS);
 
@@ -6110,7 +4604,7 @@ async function checkSleep() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkSleep().catch((err) => console.error(`[${USERNAME}] checkSleep error:`, err.message));
 }, SLEEP_CHECK_MS);
 
@@ -6175,453 +4669,19 @@ async function checkDusk() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkDusk().catch((err) => console.error(`[${USERNAME}] checkDusk error:`, err.message));
 }, DUSK_CHECK_MS);
 
-// Fourth of five scoped enhancements, direct follow-up to "what other logic enhancements are
-// available" -> self-defense. checkSelfDefense() itself is now a true mid-action interrupt
-// (2026-09-08, see its own header comment), not the idle-tick version this comment originally
-// described -- but real live testing of THAT fix found a second, separate gap worth fixing at
-// the same time: a zombie that spawned right next to Babs killed her in about 7 seconds, right
-// at the edge of this interval's own old 7000ms value, meaning the routine check may not have
-// gotten a single turn before she died, independent of the acting-gate bug. Lowered to 2000ms --
-// a melee mob hits roughly once a second at adjacent range, so this now gets at least 2-3
-// chances to react within a typical short encounter instead of maybe zero.
-const SELF_DEFENSE_CHECK_MS = parseInt(process.env.MC_SELF_DEFENSE_CHECK_MS || "2000", 10);
-// Out of a max of 20 -- flee rather than fight once she's below half health with a threat
-// actually nearby, same "correctness over guessing" reasoning as everywhere else tonight: an
-// exact threshold beats a vague "if hurt." Now env-configurable (direct request, 2026-09-07:
-// "ask Muse to spawn two more bots... military oriented profiles, priority towards arming
-// themselves and defending the spawn point") so a combat-postured bot (Mark/Luke) can run a
-// lower flee threshold and a wider detection range than the default -- same code, per-bot tuning
-// via each unit's own Environment= lines, no behavior change for Babs/Amy who don't set these.
-const SELF_DEFENSE_RANGE = parseInt(process.env.MC_SELF_DEFENSE_RANGE || "12", 10);
-
-// Direct request, 2026-09-21 ("if truly unable to flee, they should all fight. Soldiers fight
-// *always*, others fight when under half health"). Replaces the flat SELF_DEFENSE_FLEE_HEALTH
-// threshold (a single number, previously tuned per-bot only via each unit's own env override --
-// see the retired MC_SELF_DEFENSE_FLEE_HEALTH, now superseded) with an explicit role-based rule.
-// A Soldier's whole job is fighting, so health alone never sends her running; anyone else avoids
-// a fight while healthy (better spent doing her actual role) but stops retreating and finishes it
-// once she's already hurt badly enough for it to matter. FLEE_ONLY_MOBS and no-weapon still
-// override both roles -- those aren't a courage judgment call, they're a genuine inability to
-// land a hit (see FLEE_ONLY_MOBS's own header in actions.js).
-const HALF_HEALTH = 10; // out of a max of 20
-
-// Direct live follow-up, 2026-09-21 ("they still wont fight back when pressured... a single
-// zombie... systematically attacking them, with no reprisals"). Confirmed live: a healthy bot
-// (Mayor, 16-20 HP -- well above HALF_HEALTH) can get re-engaged by the SAME zombie every ~2s
-// (SELF_DEFENSE_CHECK_MS) in a cramped space, "successfully" fleeing every single time -- a few
-// blocks of separation isn't real safety when the zombie closes it again before the next check --
-// so she never takes enough CUMULATIVE damage to cross the health threshold above, and never
-// escalates, for minutes at a stretch. That is "truly unable to flee" in every way that actually
-// matters, even though each individual flee call itself reports ok=true. Tracks consecutive flee
-// decisions and escalates to fighting once they pile up, same reasoning as attackAsLastResort's
-// own header just below -- resets on any attack (the cycle's broken) or once enough real time has
-// passed since the last one that it's clearly a new, unrelated encounter, not the same standoff.
-const CONSECUTIVE_FLEE_ESCALATE_AFTER = 3;
-const CONSECUTIVE_FLEE_RESET_MS = 15_000;
-let consecutiveFleeCount = 0;
-let lastFleeDecisionAt = 0;
-// Fight-or-flee policy, decided 2026-09-25 (the review deferred it until combat worked). Live data
-// from the first ~8h with working combat: deaths fell from ~1,700 to 18 per 8h on spark,
-// emergency attacks mostly win, and the remaining mob deaths are pillagers/zombies. So an armed bot
-// still fights a single melee or ranged threat (closing on an archer beats running from arrows in
-// the open), but:
-//   - outnumbered at critical health (2+ hostiles within OUTNUMBERED_RADIUS) -> flee, any role
-//   - outnumbered by 3+ at any health -> flee, unless a Soldier
-//   - a creeper within CREEPER_FLEE_RANGE -> flee (meleeing it means eating the blast)
-// The threat itself is the mob that just hurt this bot when known (pickThreat), not merely the
-// nearest one. Measured by tests/baseline.mjs's deaths_per_bot_day and attack_win_rate.
-const OUTNUMBERED_RADIUS = 8;
-const CREEPER_FLEE_RANGE = 5;
-
-function hostilesWithin(radius) {
-  const here = bot.entity?.position;
-  if (!here) return 0;
-  return Object.values(bot.entities).filter((e) => HOSTILE_MOBS.has(e.name) &&
-    e.position.distanceTo(here) <= radius).length;
-}
-
-function decideFightType(threat) {
-  const threatName = threat.name;
-  if (FLEE_ONLY_MOBS.has(threatName) || !hasWeapon(bot)) return "flee";
-  if (threatName === "creeper" && bot.entity &&
-      threat.position.distanceTo(bot.entity.position) <= CREEPER_FLEE_RANGE) return "flee";
-  const nearby = hostilesWithin(OUTNUMBERED_RADIUS);
-  if (nearby >= 2 && bot.health <= EMERGENCY_HEALTH_THRESHOLD) return "flee";
-  if (nearby >= 3 && myRole?.primary !== ROLES.SOLDIER) return "flee";
-  // Direct report, 2026-10-10 ("they still aren't fighting back when even a single mob is
-  // attacking them"): this policy's own header above already says "an armed bot still fights a
-  // single melee or ranged threat," but the code never implemented that for a healthy
-  // non-Soldier -- nearby === 1 fell through to the consecutive-flee counter below, which starts
-  // at "flee" and only escalates after CONSECUTIVE_FLEE_ESCALATE_AFTER decisions, or sooner if
-  // CONSECUTIVE_FLEE_RESET_MS passes between unrelated single-mob encounters, resetting the count
-  // to zero before it ever gets there. Confirmed live (Bob, 2026-10-10): fled a single zombie at
-  // 11.8/20 health, clearly not outnumbered, not critical, not a Soldier -- exactly the
-  // "shouldn't even reach the counter" case. nearby <= 1 is a genuinely solo threat, no outnumbered
-  // judgment call to make, so it now attacks directly like the Soldier/low-health cases beside it.
-  if (nearby <= 1 || myRole?.primary === ROLES.SOLDIER || bot.health < HALF_HEALTH) {
-    consecutiveFleeCount = 0;
-    return "attack";
-  }
-  if (Date.now() - lastFleeDecisionAt > CONSECUTIVE_FLEE_RESET_MS) consecutiveFleeCount = 0;
-  if (consecutiveFleeCount >= CONSECUTIVE_FLEE_ESCALATE_AFTER) {
-    consecutiveFleeCount = 0;
-    return "attack";
-  }
-  consecutiveFleeCount++;
-  lastFleeDecisionAt = Date.now();
-  return "flee";
-}
-
-// Direct follow-up, same request ("if truly unable to flee, they should all fight"): a failed
-// flee (pathfinder genuinely couldn't create distance -- see actions.js 1.62.0's own dig-loop
-// fix, which makes this a fast, clean failure now instead of an infinite stuck retry) means
-// retreating just isn't working right now, independent of why "flee" was chosen in the first
-// place. Standing there and absorbing hits because running away didn't pan out is strictly worse
-// than fighting back -- including bare-handed: a no-weapon bot who genuinely cannot run is still
-// better off swinging her fists than standing still and taking every hit for free. Direct
-// follow-up, 2026-10-09 ("if no-one is armed, and they are under attack and for some reason
-// cannot run, they should still try to fight even if it's hopeless"): this used to also bail on
-// !hasWeapon(bot), the one case it exists for -- an unarmed bot who failed to flee just stood
-// there. decideFightType() above still tries fleeing FIRST whenever it's an option, armed or not
-// (running away beats a fistfight when running is actually possible); this only ever runs once
-// that's already failed. Deliberately still excludes FLEE_ONLY_MOBS -- a flyer or teleport-evader
-// is still unreachable no matter how desperate this gets, the exact doomed-melee shape
-// FLEE_ONLY_MOBS exists to prevent (actions.js); that's "can't reach it," not "won't try."
-async function attackAsLastResort(threat, label, handle) {
-  if (FLEE_ONLY_MOBS.has(threat.name)) return;
-  const result = await performAction(bot, { type: "attack", target: threat }, USERNAME, handle);
-  console.log(`[${USERNAME}] ${label}: couldn't get away, fighting instead -- ${result.text} ` +
-              `(ok=${result.ok})`);
-}
-
-// Direct request, 2026-09-21 ("re-evaluate the entire defense scheme"), the mirror image of
-// attackAsLastResort just above -- root-caused from a live mass-death incident where EMERGENCY's
-// own unconditional "fight, no matter what" rule at critical health had no escape hatch: once
-// committed to "attack," nothing short of the target actually dying (or the new short
-// EMERGENCY_ATTACK_TIMEOUT_MS below) would end it, riding out up to the full 90s ACTION_TIMEOUT_MS
-// at critical health with zero re-evaluation. That's fine when the fight is actually winnable --
-// it's exactly how a bot that's this hurt should behave -- but a fight that's CLEARLY not working
-// (still not dead after several real seconds of trying) means every additional second spent
-// swinging is a second closer to death with no upside. Symmetric with attackAsLastResort: fighting
-// is still the first choice at critical health (unchanged, direct request), this only fires when
-// that first choice has already had a fair, bounded shot and hasn't paid off.
-async function fleeAsLastResort(threat, label, handle) {
-  if (bot.health <= 0) return;
-  const rallyPoint = await nearestRallyPoint(bot);
-  const result = await performAction(bot, { type: "flee", target: threat, rallyPoint }, USERNAME, handle);
-  console.log(`[${USERNAME}] ${label}: fight wasn't working, fleeing instead -- ${result.text} ` +
-              `(ok=${result.ok})`);
-}
-
-// Item #6 of "fix all the above" (squad response). Real gap: self-defense was purely individual
-// -- Mark/Luke's own "military... defending the spawn point" framing (2026-09-07) implied a
-// squad that backs each other up, but nothing ever told a teammate someone else was under
-// attack. ANY bot broadcasts a threat alert (calling for help costs nothing and might as well be
-// universal), but only a SQUAD_RESPONDER actually drops what she's doing to go help -- Babs/Amy
-// abandoning a gathering run for a spider three biomes away would be a net loss, not backup.
-// Mirrors MC_SELF_DEFENSE_FLEE_HEALTH/RANGE's own "same code, per-bot tuning via each unit's own
-// Environment= lines" pattern, set true for Mark/Luke only.
-//
-// Direct request, 2026-09-13 ("soldier personas need to... be responsive to calls for help"): a
-// real, confirmed gap -- this used to be gated ONLY by the env var, structurally independent of
-// roles.js's own SOLDIER assignment. A bot could be given the Soldier role and still never
-// respond to a squad call unless someone separately remembered to also set
-// MC_SQUAD_RESPONDER=true on her unit file; today that happens to line up for Mark/Luke, but
-// nothing enforced it. Now derived from the role assignment itself (primary OR secondary --
-// backing up the fleet is exactly what a secondary-Soldier lean means) with the env var kept as
-// an explicit override for a non-Soldier bot the operator still wants on squad-response duty.
-const SQUAD_RESPONDER = process.env.MC_SQUAD_RESPONDER === "true" ||
-  myRole?.primary === ROLES.SOLDIER || myRole?.secondary === ROLES.SOLDIER;
-// No point racing across half the map for a fight that's very likely already over by the time
-// she'd arrive -- bounded to a real, reachable-in-time assist radius.
-const SQUAD_ASSIST_RANGE = 48;
-// Keeps one drawn-out fight from re-alerting every 2000ms (checkSelfDefense's own tick) for the
-// entire duration -- one call for help per fight is enough for a teammate to start moving.
-const SQUAD_ALERT_COOLDOWN_MS = 15_000;
-let lastSquadAlertAt = 0;
-let squadResponseInFlight = false;
-
-// Direct request, 2026-09-13 ("non-soldier bots need to call for help properly"). Real, confirmed
-// gap found while adding death-awareness below: checkSelfDefense's own idle-tick threat detection
-// was the ONLY place that ever called broadcastThreatAlert -- the two situations where a bot most
-// needs the fleet's help, the true health-critical emergency interrupt (bot.on("health") below)
-// and a hostile creeping up on her while she's asleep (checkSleepingThreat), never called for
-// help at all, they just handled it (or tried to) alone. All three threat-detection sites now
-// funnel through this one function instead of three drifting copies of the same cooldown check.
-// Also doubles as the source of truth for "who probably just killed her" (lastKnownThreat,
-// consumed by bot.on("death") below) -- freshness for that purpose is tracked independently of
-// the alert's own spam-prevention cooldown, since a recent sighting is still a good guess even if
-// an alert for it was suppressed a few seconds ago.
-let lastKnownThreat = null;
-function noteThreatSeen(threatName) {
-  lastKnownThreat = { name: threatName, at: Date.now() };
-  if (Date.now() - lastSquadAlertAt > SQUAD_ALERT_COOLDOWN_MS) {
-    lastSquadAlertAt = Date.now();
-    broadcastThreatAlert(threatName);
-  }
-}
-
-// Direct request, 2026-09-18 ("have the threatened bot run towards safety, run towards golems, or
-// soldiers") -- direct follow-up to confirming SQUAD_ASSIST_RANGE (48 blocks) leaves a fleeing bot
-// beyond it with no real help coming (the exact live incident that prompted this: Nell, alone and
-// critical, ~70 blocks from both Soldiers). "Flee" previously had no destination at all -- it just
-// maximized distance from the threat, which could just as easily run a bot deeper into danger as
-// out of it. Priority, cheapest/most-effective first: a nearby iron golem (fights hostiles near it
-// on its own vanilla AI -- real backup even with zero teammates in range) > a nearby Soldier
-// teammate whose entity this bot's own client currently has loaded (bot.players -- no new
-// broadcast infrastructure needed, this is just each bot's own already-tracked world state) > home
-// (always a safer place to end up than wherever the flee happened to start, even with nobody
-// there). Returns null only when none of the three are known at all, in which case "flee" falls
-// back to its original plain away-from-threat behavior.
-const RALLY_SEARCH_RANGE = 32;
-async function nearestRallyPoint(bot) {
-  const golem = nearestFriendlyGolem(bot, RALLY_SEARCH_RANGE);
-  if (golem) return golem.position;
-
-  let nearestSoldierPos = null;
-  let nearestSoldierDist = RALLY_SEARCH_RANGE;
-  for (const name of BOT_USERNAMES) {
-    if (name === USERNAME) continue;
-    if (BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER) continue;
-    const entity = bot.players[name]?.entity;
-    if (!entity) continue;
-    const dist = entity.position.distanceTo(bot.entity.position);
-    if (dist <= nearestSoldierDist) {
-      nearestSoldierPos = entity.position;
-      nearestSoldierDist = dist;
-    }
-  }
-  if (nearestSoldierPos) return nearestSoldierPos;
-
-  // Direct live report, 2026-09-21 ("zombie is in the building again, attacking the crowd of
-  // bots"): this fallback's own original assumption -- home is "always a safer place to end up...
-  // even with nobody there" -- breaks down completely for the exact incident this session keeps
-  // returning to: the threat is INSIDE home, and most of the fleet is already there. Confirmed
-  // live: every bot's own "self-defense: flee" attempt failed with "No path to the goal!" the
-  // whole time this was happening, fast failures (2-4ms) consistent with a genuinely unreachable
-  // GoalNear rather than a slow, exhausted search. A bed/spawnPoint that sits in a different room
-  // of the same structure than wherever she's currently cornered turns what should be "take one
-  // step toward any nearby exit" into "path all the way across the building to one specific
-  // point" -- far more likely to fail outright, and even when it succeeds, walks her TOWARD the
-  // same building the threat is already in rather than away from it. Only worth returning when it
-  // represents real progress toward a genuinely different, farther-away place -- close enough and
-  // she's arguably already home, in which case this fallback can only hurt, never help, and flee
-  // is better off falling through to its own plain maximize-distance goal below (no specific
-  // destination required, just any nearby improvement, exactly what a real doorway or gap needs).
-  const HOME_RALLY_MIN_DISTANCE = 20;
-  const home = bot.spawnPoint || null;
-  if (home && home.distanceTo(bot.entity.position) >= HOME_RALLY_MIN_DISTANCE) return home;
-  return null;
-}
-
-// Direct report, 2026-09-08 ("they still don't seem to react to a threatening creature"). Real,
-// confirmed gap: this used to be gated on !acting, same as every other idle-tick check here --
-// but `acting` now spans an entire physical action end-to-end (up to ACTION_TIMEOUT_MS, 90s
-// after tonight's own earlier raise), and goal-directed autonomy keeps a bot "acting" a large
-// fraction of the time. A threat that showed up mid-mine/mid-craft got NO response at all from
-// this check until the health-triggered TRUE interrupt (bot.on("health") below) finally fired --
-// and that one only engages at EMERGENCY_HEALTH_THRESHOLD (30% health), meaning she'd already
-// taken several real, avoidable hits first. This borrows that handler's own proven force-cancel-
-// then-wait-then-act sequence instead of the idle-tick gate every other routine check still
-// correctly uses (their own physical actions genuinely can wait; a live threat cannot) --
-// consistent with checkSleepingThreat's own precedent of bypassing busy/acting for exactly the
-// one case nothing else can reach in time.
-let selfDefenseInFlight = false;
-
-// Direct report, 2026-09-14 ("bots are generally stationary... 'route can't be resolved'/'can't
-// reach you' even with nothing in the way"). Root-caused from live evidence, not guessed: Mark
-// alone logged 268 self-defense triggers in a single hour (240 of them phantoms) and 1,608
-// pathfinder goal-resets over 15.5h -- a threat re-detected and re-force-cancelled roughly every
-// 13 seconds, almost entirely phantoms. The FLEE_ONLY_MOBS "flee" response only ever buys a few
-// blocks of distance from a flying mob that's faster on the wing than she is on foot, so it
-// re-enters SELF_DEFENSE_RANGE well within the next 2000ms tick almost every time -- she wasn't
-// stationary from being blocked, she was flinching in place, since EVERY real travel goal
-// (a goto/follow toward a player, walking to a chest or bed, terrain repair) kept getting
-// force-cancelled by the next tick's re-trigger before it could ever finish. A real melee threat
-// (zombie/spider/creeper) still gets the full, immediate 2000ms response every time -- only a
-// FLEE_ONLY_MOB's own re-trigger is throttled, since fleeing already bought real safety
-// (phantoms rarely land a hit on a moving target, and the separate health-critical emergency
-// handler below is untouched and still fires immediately regardless of this cooldown if one
-// somehow does) while repeating the full interrupt every 2s bought nothing further.
-const FLEE_MOB_RESPONSE_COOLDOWN_MS = 20_000;
-let lastFleeMobResponseAt = 0;
-
-// Direct request, 2026-09-10 ("write up a plan for that single arbiter..." -> the approved
-// per-bot coherence arbiter plan, Phase 2 of its migration). The old inline 4-primitive cancel +
-// busy||acting poll loop is now arbiter.requestControl() -- see arbiter.js's own header for why
-// this specific handler was one of the 4 duplicated, drifted copies this phase closes.
-// Attacker tracking (fight-or-flee policy, 2026-09-25): when this bot loses health, the hostile
-// in melee reach (else the nearest ranged mob with a shot) is remembered as the attacker for
-// ATTACKER_MEMORY_MS, and pickThreat() answers it instead of whatever mob happens to be nearest.
-// prependListener: this must run before the critical-health handler reads it for the same hit.
-const RANGED_MOBS = new Set(["skeleton", "stray", "pillager", "witch", "blaze", "ghast"]);
-const ATTACKER_MEMORY_MS = 6_000;
-let lastAttacker = null; // { id, at }
-let lastHealthSeen = 20;
-bot.prependListener("health", () => {
-  if (bot.entity && bot.health < lastHealthSeen) {
-    const here = bot.entity.position;
-    const near = (names, radius) => bot.nearestEntity((e) => names(e.name) && e.position.distanceTo(here) <= radius);
-    const attacker = near((n) => HOSTILE_MOBS.has(n), 3.5) || near((n) => RANGED_MOBS.has(n), 24);
-    if (attacker) lastAttacker = { id: attacker.id, at: Date.now() };
-  }
-  lastHealthSeen = bot.health;
-});
-
-// 2026-10-30: a spider in daylight leaves you alone unless you hit it (vanilla). Counting one as a
-// threat sent weaponless Babs fleeing again and again from the table her sword needed. One that
-// just hurt her is still lastAttacker, below, and still answered.
-const DAY_NEUTRAL_MOBS = new Set(["spider"]);
-
-function pickThreat(range) {
-  if (lastAttacker && Date.now() - lastAttacker.at <= ATTACKER_MEMORY_MS && bot.entity) {
-    const attacker = bot.entities[lastAttacker.id];
-    if (attacker && attacker.position.distanceTo(bot.entity.position) <= range) return attacker;
-  }
-  const threat = nearestHostile(bot, range);
-  if (threat && DAY_NEUTRAL_MOBS.has(threat.name) && bot.time?.isDay) {
-    const here = bot.entity.position;
-    return bot.nearestEntity((e) => HOSTILE_MOBS.has(e.name) && !DAY_NEUTRAL_MOBS.has(e.name) &&
-      e.position.distanceTo(here) <= range);
-  }
-  return threat;
-}
-
-async function checkSelfDefense() {
-  if (!AUTONOMY_ENABLED || selfDefenseInFlight || bot.isSleeping) return;
-  const threat = pickThreat(SELF_DEFENSE_RANGE);
-  if (!threat) return;
-  if (FLEE_ONLY_MOBS.has(threat.name) &&
-      Date.now() - lastFleeMobResponseAt < FLEE_MOB_RESPONSE_COOLDOWN_MS) {
-    return; // already fled one of these recently -- let real travel/goals actually run for a bit
-  }
-
-  selfDefenseInFlight = true;
-  console.log(`[${USERNAME}] self-defense: threat detected (${threat.name}) -- force-cancelling ` +
-              `current action to respond`);
-  noteThreatSeen(threat.name);
-
-  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.SELF_DEFENSE);
-  if (!handle) {
-    console.log(`[${USERNAME}] self-defense: yielded to something more urgent ` +
-                `(${arbiter.currentOwner()})`);
-    selfDefenseInFlight = false;
-    return;
-  }
-  try {
-    // Direct request, 2026-09-10 (direct report: "can't fight, or run from, phantoms" -- see
-    // actions.js's own FLEE_ONLY_MOBS header for the confirmed live root cause: melee-attacking
-    // a flyer can never actually land, holding SELF_DEFENSE-tier control for the full 90s
-    // ACTION_TIMEOUT_MS every single time and blocking everything else for that whole span).
-    // Checked ahead of the health threshold -- a flyer is never worth attacking regardless of
-    // how much health is left to spend on a doomed chase.
-    //
-    // Direct report, 2026-09-15 ("look for behavioral gaps"): the exact same doomed-timeout
-    // shape, found live -- Mark logged 909 "gave up on the fight -- took too long" results in
-    // 34 hours (~27/hour, against every hostile type, not just flyers) because he had no sword
-    // or axe the ENTIRE window. A bare-handed bot attacking anything is nearly as doomed as
-    // meleeing a flyer -- it just fails by timeout instead of by unreachability. Worse, this was
-    // self-reinforcing: constant SELF_DEFENSE-tier combat (always chosen over flee, since none
-    // of these mobs were FLEE_ONLY and health never dropped low enough to trigger the OTHER
-    // flee condition) never gave GOAL_STEP tier -- the tier her own "go get a weapon" directive
-    // runs under -- a long enough uninterrupted window to ever actually loot/craft/request one,
-    // which kept her bare-handed, which kept every future encounter doomed the same way. Now
-    // checked alongside the other two flee conditions: no weapon means flee, regardless of mob
-    // type or health, breaking the cycle by actually surviving long enough between encounters to
-    // get equipped. See decideFightType()'s own header for the current role/health rule.
-    const type = decideFightType(threat);
-    if (FLEE_ONLY_MOBS.has(threat.name)) lastFleeMobResponseAt = Date.now();
-    console.log(`[${USERNAME}] self-defense: ${type} (health=${bot.health}, threat=${threat.name})`);
-    const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
-    // action.target: the already-found entity, not re-derived -- see actions.js's own
-    // "attack"/"flee" 2026-09-08 changelog for the live thrash bug this closes.
-    const result = await performAction(bot, { type, target: threat, rallyPoint }, USERNAME, handle);
-    console.log(`[${USERNAME}] self-defense result: ${result.text} (ok=${result.ok})`);
-    if (type === "flee" && !result.ok && !result.cancelled) await attackAsLastResort(threat, "self-defense", handle);
-  } catch (err) {
-    console.error(`[${USERNAME}] self-defense check failed:`, err.message);
-  } finally {
-    handle.release();
-    selfDefenseInFlight = false;
-  }
-}
-
-setInterval(() => {
-  checkSelfDefense().catch((err) => console.error(`[${USERNAME}] checkSelfDefense error:`, err.message));
-}, SELF_DEFENSE_CHECK_MS);
-
-// Squad response (item #6 of "fix all the above"), the SQUAD_RESPONDER receiving side -- same
-// force-cancel-then-wait-then-act shape checkSelfDefense already uses, since a teammate under
-// attack is exactly as urgent as being under attack herself. Travels toward the alert's real
-// coordinates (a manual setTimeout-guarded goto, same pattern the shore-travel code above already
-// uses -- no shared withTimeout() to import, that helper is actions.js-private) and, once there,
-// runs the real self-defense attack against whatever hostile she can actually find -- the
-// original threat may already be dead by the time she arrives, in which case there's simply
-// nothing left to do, a good outcome, not a failure.
-const SQUAD_RESPONSE_TRAVEL_TIMEOUT_MS = 20_000;
-
-// Direct request, 2026-09-10 (coherence-arbiter Phase 2 -- see checkSelfDefense's own migration
-// note just above). The internal `bot.pathfinder.goto(...)` travel step's own manual
-// setTimeout/setGoal(null) pair is UNTOUCHED -- that's this action's own per-step timeout escape
-// hatch (the same pattern every actions.js case already uses for its own internal travel legs),
-// structurally unrelated to the outer "acquire control from whatever else is happening" problem
-// the arbiter solves.
-async function respondToSquadCall(payload) {
-  squadResponseInFlight = true;
-  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.SQUAD_RESPONSE);
-  if (!handle) {
-    console.log(`[${USERNAME}] squad response: yielded to something more urgent ` +
-                `(${arbiter.currentOwner()})`);
-    squadResponseInFlight = false;
-    return;
-  }
-  try {
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; if (arbiter.holdsControl(handle)) bot.pathfinder.setGoal(null); },
-      SQUAD_RESPONSE_TRAVEL_TIMEOUT_MS);
-    try {
-      await bot.pathfinder.goto(new goals.GoalNear(payload.x, payload.y, payload.z, 4));
-    } catch (err) {
-      if (!timedOut && !handle.token.cancelled) console.error(`[${USERNAME}] squad response travel failed:`, err.message);
-    } finally {
-      clearTimeout(timer);
-      if (arbiter.holdsControl(handle)) bot.pathfinder.setGoal(null); // MB-02: never clear a preemptor's path
-    }
-
-    const threat = pickThreat(SELF_DEFENSE_RANGE);
-    if (!threat) {
-      console.log(`[${USERNAME}] squad response: arrived, nothing left to fight.`);
-    } else if (FLEE_ONLY_MOBS.has(threat.name)) {
-      // See actions.js's own FLEE_ONLY_MOBS header -- attacking a flyer would just hang here
-      // for the full 90s ACTION_TIMEOUT_MS holding SQUAD_RESPONSE control the whole time,
-      // for no real chance of ever landing a hit.
-      console.log(`[${USERNAME}] squad response: arrived, but a ${threat.name} isn't worth chasing on foot.`);
-    } else if (!hasWeapon(bot)) {
-      // Direct report, 2026-09-15 ("look for behavioral gaps") -- same doomed-timeout shape as
-      // checkSelfDefense's own fix just above: a responder who arrives with no weapon of her own
-      // is exactly as unable to actually help as one facing a flyer, and committing to "attack"
-      // anyway would just hold SQUAD_RESPONSE control for the full 90s for nothing.
-      console.log(`[${USERNAME}] squad response: arrived, but no weapon to fight ${threat.name} with.`);
-    } else {
-      const result = await performAction(bot, { type: "attack", target: threat }, USERNAME, handle);
-      console.log(`[${USERNAME}] squad response result: ${result.text} (ok=${result.ok})`);
-    }
-  } finally {
-    handle.release();
-    squadResponseInFlight = false;
-  }
-}
+// Self-defense, threat memory and squad response are in self-defense.js (split out 2026-11-10).
+installSelfDefense();
 
 // Direct follow-up, 2026-09-07: "look for more ways to improve their autonomy" -> hunger. Same
 // idle-tick/busy-acting pattern as checkSleep/checkSelfDefense. Eats proactively (below full, not
 // only once it's a real problem) since a failed "nothing to eat" check is cheap and harmless --
 // correctness over minimizing calls, same standing instruction as everywhere else tonight.
 const HUNGER_CHECK_MS = parseInt(process.env.MC_HUNGER_CHECK_MS || "15000", 10);
-const HUNGER_THRESHOLD = 18; // out of a max of 20
+export const HUNGER_THRESHOLD = 18; // out of a max of 20
 
 // Review MB-15, 2026-09-24: hunger used to wait politely behind any model call or same-tier work,
 // with no escalation -- a bot doing back-to-back goal steps could starve. At or below this food
@@ -6635,9 +4695,9 @@ const CRITICAL_FOOD_LEVEL = 6; // vanilla: sprinting stops at 6, starvation dama
 // off, the check does nothing at all instead of logging another failed "eat".
 const FOOD_FETCH_COUNT = 8;
 const FOOD_FETCH_BACKOFF_MS = 5 * 60_000;
-let foodFetchBlockedUntil = 0;
-const hasFood = () => bot.inventory.items().some((i) => FOOD_NAMES.includes(i.name));
-const hasRod = () => bot.inventory.items().some((i) => i.name === "fishing_rod");
+export let foodFetchBlockedUntil = 0;
+export const hasFood = () => bot.inventory.items().some((i) => FOOD_NAMES.includes(i.name));
+export const hasRod = () => bot.inventory.items().some((i) => i.name === "fishing_rod");
 
 async function checkHunger() {
   if (!AUTONOMY_ENABLED || bot.isSleeping) return;
@@ -6686,7 +4746,7 @@ async function checkHunger() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkHunger().catch((err) => console.error(`[${USERNAME}] checkHunger error:`, err.message));
 }, HUNGER_CHECK_MS);
 
@@ -6715,7 +4775,7 @@ async function checkRipeCrops() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkRipeCrops().catch((err) => console.error(`[${USERNAME}] checkRipeCrops error:`, err.message));
 }, RIPE_CHECK_MS);
 
@@ -6764,7 +4824,7 @@ async function checkPendingGiveRequests() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkPendingGiveRequests().catch((err) =>
     console.error(`[${USERNAME}] checkPendingGiveRequests error:`, err.message));
 }, GIVE_CHECK_MS);
@@ -6879,13 +4939,15 @@ const STORE_NEAR_HOME_BATCH_LIMIT = 5;
 // once there's no active goal and nothing has been crafted for SURPLUS_CLEANUP_QUIET_MS.
 // KEEP_ITEM_NAMES / KEEP_ITEM_SUFFIXES are never "surplus": placeable infrastructure and
 // working tools a bot needs on hand regardless of goal.
-const SURPLUS_CLEANUP_QUIET_MS = 2 * 60_000;
+export const SURPLUS_CLEANUP_QUIET_MS = 2 * 60_000;
 const KEEP_ITEM_NAMES = new Set([
   "crafting_table", "furnace", "chest", "torch", "shield", "fishing_rod", "shears", "bucket",
   "water_bucket", "flint_and_steel", "bow", "arrow", "crossbow",
 ]);
 const KEEP_ITEM_SUFFIXES = ["_bed", "_boat"];
 let surplusCleanupDueAt = 0;
+// For modules split out of this file: an imported binding is read-only there.
+export function setSurplusCleanupDueAt(value) { surplusCleanupDueAt = value; }
 
 function isKeptItem(name) {
   return KEEP_ITEM_NAMES.has(name) || KEEP_ITEM_SUFFIXES.some((suffix) => name.endsWith(suffix));
@@ -6898,7 +4960,7 @@ async function checkDeferredSurplusCleanup() {
   await storeSurplusNearHome("post-craft cleanup");
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkDeferredSurplusCleanup().catch((err) =>
     console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
 }, 30_000);
@@ -6914,7 +4976,7 @@ async function checkSurplusSharing() {
   if (!AUTONOMY_ENABLED || currentGoal || routineBlocked("checkSurplusSharing") || bot.isSleeping) return;
   await storeSurplusNearHome("Tier 2: regular surplus check");
 }
-setInterval(() => {
+guardedInterval(() => {
   checkSurplusSharing().catch((err) =>
     console.error(`[${USERNAME}] surplus sharing check failed:`, err.message));
 }, SURPLUS_SHARING_CHECK_MS);
@@ -6931,7 +4993,7 @@ async function checkLocationSharing() {
   if (!AUTONOMY_ENABLED || !bot.entity) return;
   await noteNearbyResources("Tier 2: regular location sweep");
 }
-setInterval(() => {
+guardedInterval(() => {
   checkLocationSharing().catch((err) =>
     console.error(`[${USERNAME}] location sharing sweep failed:`, err.message));
 }, LOCATION_SHARING_CHECK_MS);
@@ -6956,7 +5018,7 @@ async function checkChestConsolidation() {
     handle.release();
   }
 }
-setInterval(() => {
+guardedInterval(() => {
   checkChestConsolidation().catch((err) =>
     console.error(`[${USERNAME}] chest consolidation check failed:`, err.message));
 }, CHEST_CONSOLIDATION_CHECK_MS);
@@ -7182,7 +5244,7 @@ async function checkInventoryFull() {
   await storeSurplusValuables("inventory management");
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkInventoryFull().catch((err) => console.error(`[${USERNAME}] checkInventoryFull error:`, err.message));
 }, INVENTORY_CHECK_MS);
 
@@ -7228,7 +5290,7 @@ async function checkTrash() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkTrash().catch((err) => console.error(`[${USERNAME}] checkTrash error:`, err.message));
 }, TRASH_CHECK_MS);
 
@@ -7255,7 +5317,7 @@ async function checkInventoryInsurance() {
   await storeSurplusValuables("inventory insurance");
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkInventoryInsurance().catch((err) =>
     console.error(`[${USERNAME}] checkInventoryInsurance error:`, err.message));
 }, INVENTORY_CHECK_MS);
@@ -7286,7 +5348,7 @@ async function checkSaplings() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkSaplings().catch((err) => console.error(`[${USERNAME}] checkSaplings error:`, err.message));
 }, SAPLING_CHECK_MS);
 
@@ -7322,7 +5384,7 @@ async function checkLighting() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkLighting().catch((err) => console.error(`[${USERNAME}] checkLighting error:`, err.message));
 }, LIGHTING_CHECK_MS);
 
@@ -7438,7 +5500,7 @@ async function lightHomeOnce() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkHomeLighting().catch((err) => console.error(`[${USERNAME}] checkHomeLighting error:`, err.message));
 }, HOME_LIGHTING_CHECK_MS);
 
@@ -7460,7 +5522,7 @@ const LIVING_SPACE_REPORT_MS = 10 * 60_000;
 let lastLivingSpaceReport = "";
 let lastLivingSpaceReportAt = 0;
 
-setInterval(() => {
+guardedInterval(() => {
   if (!bot.entity) return;
   try {
     const space = refreshLivingSpace(bot, bot.spawnPoint);
@@ -7505,7 +5567,7 @@ async function checkAccessObstructions() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkAccessObstructions().catch((err) => console.error(`[${USERNAME}] checkAccessObstructions error:`, err.message));
 }, ACCESS_CHECK_MS);
 
@@ -7554,7 +5616,7 @@ async function checkTorchSupply() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkTorchSupply().catch((err) => console.error(`[${USERNAME}] checkTorchSupply error:`, err.message));
 }, TORCH_SUPPLY_CHECK_MS);
 
@@ -7648,7 +5710,7 @@ async function checkTerrainDamage() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkTerrainDamage().catch((err) => console.error(`[${USERNAME}] checkTerrainDamage error:`, err.message));
 }, TERRAIN_REPAIR_CHECK_MS);
 
@@ -7693,7 +5755,7 @@ async function checkShelterIntegrity() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkShelterIntegrity().catch((err) => console.error(`[${USERNAME}] checkShelterIntegrity error:`, err.message));
 }, SHELTER_INTEGRITY_CHECK_MS);
 
@@ -7827,7 +5889,7 @@ for (const ev of ["goal_updated", "path_update", "path_reset"]) {
   bot.on(ev, () => { lastMoveAttemptAt = Date.now(); });
 }
 
-setInterval(checkStuck, STUCK_CHECK_MS);
+guardedInterval(checkStuck, STUCK_CHECK_MS);
 
 // Setting a goal is a fast, synchronous-feeling operation (a disk write, not a physical
 // action) -- it runs inline inside handleIncoming's busy window rather than through runAction's
@@ -7951,7 +6013,9 @@ function isAddressedStop(message, alreadyAddressed) {
 // Review MB-06 follow-up (2026-09-24): an unaddressed bare "stop" in shared chat still goes to
 // the model -- unless it comes from the player whose direct command this bot is running right
 // now, who clearly means this bot.
-let activeDirectSpeaker = null;
+export let activeDirectSpeaker = null;
+// For modules split out of this file: an imported binding is read-only there.
+export function setActiveDirectSpeaker(value) { activeDirectSpeaker = value; }
 function isStopFromActiveCommander(speaker, message) {
   return !!activeDirectSpeaker && speaker === activeDirectSpeaker && STOP_MESSAGE.test(message);
 }
@@ -7990,7 +6054,7 @@ function drainIncoming() {
   }
 }
 // busy is also released by goalTick/proposeOwnGoal/etc., none of which know about the queue.
-setInterval(drainIncoming, 1000);
+guardedInterval(drainIncoming, 1000);
 
 bot.on("chat", (speaker, message) => {
   handleIncoming(speaker, message, { alreadyAddressed: false, send: (reply) => bot.chat(reply) });
@@ -8191,7 +6255,7 @@ bot.on("spawn", () => {
 // (safe, idempotent, a no-op if nothing's running), which makes the interrupted call's own
 // promise settle almost immediately; THEN waits (briefly, bounded) for its normal finally block
 // to release busy/acting on its own before running the real flee through the standard safe path.
-const EMERGENCY_HEALTH_THRESHOLD = 6; // out of 20 -- stricter than checkSelfDefense's idle 10,
+export const EMERGENCY_HEALTH_THRESHOLD = 6; // out of 20 -- stricter than checkSelfDefense's idle 10,
                                        // reserved for genuine near-death, not routine caution
 let emergencyInFlight = false;
 
@@ -8481,7 +6545,7 @@ async function checkSleepingThreat() {
   }
 }
 
-setInterval(() => {
+guardedInterval(() => {
   checkSleepingThreat().catch((err) => console.error(`[${USERNAME}] checkSleepingThreat error:`, err.message));
 }, SLEEPING_THREAT_CHECK_MS);
 

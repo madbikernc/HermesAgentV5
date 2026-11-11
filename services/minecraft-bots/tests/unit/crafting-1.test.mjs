@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: crafting, tools, torches and gear (part 1 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -8,7 +10,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, equipment, between, actionFn, timeoutFn, makeBot, context, shelterConst, passed, check, passedCount } from './_harness.mjs';
+import { actionCases, actions, index, equipment, between, actionFn, timeoutFn, makeBot, context, shelterConst, passed, check, passedCount } from './_harness.mjs';
 
 
 await check('MB-07 armor selection keeps better worn armor and converges', async () => {
@@ -119,7 +121,7 @@ await check('Resource-gathering override: TOOL_WORDS never collides with weaponS
 
 await check('Craft: an urgent craft ("here") puts a carried table down beside her instead of walking to a far one', async () => {
   // 2026-10-30: ten wooden-sword crafts in a row cancelled on the walk to a table.
-  const src = between(actions, '    case "craft": {', '\n    case "');
+  const src = between(actionCases, '    case "craft": {', '\n    case "');
   assert.match(src, /action\.here && bot\.inventory\.items\(\)\.some\(\(i\) => i\.name === "crafting_table"\) &&\s*!positions\.some\(\(p\) => p\.distanceTo\(bot\.entity\.position\) <= 4\)\)/,
     'a carried table and none within 4 blocks');
   assert(src.indexOf('action.here') < src.indexOf('bot.pathfinder.goto(new goals.GoalNear(tableBlock.position.x'),

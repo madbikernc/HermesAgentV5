@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.41.0
+**Version:** 1.42.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -238,6 +238,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.40.0 | 2026-11-07 | Direct request: "check world knowledge of chest contents before stashing inventory in a chest, and stash their items in a chest already containing the same or similar items", and move a kind of item split between chests together in full stacks. `store` ranks chests by `known_chests.json` (same item, same kind, empty, other; a full one last), snapshots record free slots, and a snapshot that shows a split queues a `consolidate_chests` move for when she's idle. First live run: while a chest is open, withdrawn items show in the window's copy of her inventory, not `bot.inventory`, so counts come from the window. |
 | 2.41.0 | 2026-11-07 | Direct requests: "expand the range of 'nearby chests' from 32 to 128", and "check to see if the 48 block pathfinder limit is responsible for many of the pathfinder failures... find the best way in the DIRECTION of the target... travel... pathfind again". Every chest search reaches 128 blocks, with far chests walked to in hops. `searchRadius` 48 is a cost budget over the straight-line estimate; in the 24h to 2026-11-07, 2,017 of spark's 2,192 `noPath` results (1,026 of spark2's 1,083) carried a partial path toward the goal that `goto()` threw away, and 1,009 (187) ran out after 1,000+ nodes. `installSteppedGoto` walks the partial path and searches again. |
 | 2.42.0 | 2026-11-10 | Direct request, so self-repair can fix pathfinding and add tests: the pathfinder setup moved unchanged out of `index.js` (585k chars, never editable by the whole-file pipeline) into `pathfinding.js` (26k), and `tests/unit.test.mjs` (363k) split into 17 per-area files under `tests/unit/`, each under 40000 chars, with shared stubs in `tests/unit/_harness.mjs`. |
+| 2.43.0 | 2026-11-10 | Direct request ("make the code base small and modular enough that the self-repair can address issues", "more resilient by being more modular"): every action verb moved unchanged into its own `actions/*.js` file (41, largest 12k) behind a dispatch table; `faults.js` contains a periodic check's error to one logged line (with `file:line`) and logs any uncaught error before exiting; chat, planning, priorities, home scanning and self-defense moved unchanged out of `index.js` into their own modules (index.js 560k -> 436k); `tests/link-check.mjs` checks every import without running a bot. |
 | 1.30.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.31.0 row (hunt range and chickens, food-goal retry wait). |
 | 1.31.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.32.0 row (stand-in Farmer/Herder, gather_seeds, bread). |
 | 1.32.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.33.0 row (craft chain counted by name, pen fences dug through). |
@@ -250,3 +251,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.39.0 | 2026-11-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.40.0 row (stores go by known chest contents; split kinds consolidated). |
 | 1.40.0 | 2026-11-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.41.0 row (128-block chest range; stepped pathfinding past the search budget). |
 | 1.41.0 | 2026-11-10 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.42.0 row (pathfinding.js split out of index.js; unit checks split into per-area files). |
+| 1.42.0 | 2026-11-10 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.43.0 row (actions split per verb; faults.js; five modules out of index.js; link check). |

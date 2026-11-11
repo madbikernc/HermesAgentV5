@@ -1,6 +1,6 @@
 # Minecraft bot tests
 
-**Version:** 1.5.0
+**Version:** 1.6.0
 
 Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.json`).
 
@@ -17,6 +17,14 @@ can add a test to one. `unit/_harness.mjs` holds the shared module sources, stub
 export any new shared helper from there. `unit.test.mjs` only runs the area files in order; one
 area runs alone with `node tests/unit/<area>.test.mjs`. When an area file nears 40000 characters,
 split it (`-1`/`-2`), and add the new file to `unit.test.mjs`.
+
+`_harness.mjs`'s `index` is `index.js` followed by the modules split out of it (`indexOnly` is
+`index.js` alone); `actionFn` carries the `actions/*.js` handlers, and `actionCases` rebuilds the
+old `case "<type>":` switch text from them, so a check can still slice one action by its label.
+When code moves into a new module, add its source to `index` there. `tests/link-check.mjs` (run by
+`tests/run.sh unit` where `node_modules` exists) links every module without running any of it --
+never check imports by importing `index.js` for real: that starts a bot, and its login kicks the
+live bot of the same name.
 
 Two things to know before adding a unit check, both consequences of running module source in
 a `vm` context with no `node_modules`: `Vec3` is the file's own `V3` stub, injected per context; and
@@ -88,3 +96,4 @@ When a change fixes or adds bot behavior:
 | 1.3.0 | 2026-10-07 | Access/shelter/torch layers: how the offline suite stands in for `vec3` and for `export const` bindings. |
 | 1.4.0 | 2026-11-07 | Daily run split into a per-phase systemd unit chain (`infra/minecraft-bots-tests/`), each phase with its own timeout; standalone `run.sh live`/`run.sh livebot` now skip gracefully when the bot-sandbox server is unreachable, same as `all` already did. |
 | 1.5.0 | 2026-11-10 | Unit checks split into per-area files under `unit/`, each under 40000 characters, with shared stubs in `unit/_harness.mjs`; `unit.test.mjs` only runs them. |
+| 1.6.0 | 2026-11-10 | The harness's view of the split modules (`index`, `indexOnly`, `actionFn`, `actionCases`), and the link check. |

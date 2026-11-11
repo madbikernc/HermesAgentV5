@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: beds and sleeping (part 2 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -7,7 +9,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, V3, between, actionFn, timeoutFn, makeBot, context, shelter, shelterConst, check, longterm, farmGoalSrc, bedFns, bedSiteWorld, shelterFns, blockWorld, shelterLivingSpace, room, slice, residenceWorld, passedCount } from './_harness.mjs';
+import { actionCases, actions, index, V3, between, actionFn, timeoutFn, makeBot, context, shelter, shelterConst, check, longterm, farmGoalSrc, bedFns, bedSiteWorld, shelterFns, blockWorld, shelterLivingSpace, room, slice, residenceWorld, passedCount } from './_harness.mjs';
 
 
 await check('Shelter goal: a finished shelter gets a bed put in it; a build nobody can see is a failure', async () => {
@@ -114,7 +116,7 @@ await check('Beds: a spot with a bot standing in it is skipped, and a refused sp
   const next = c.findBedSites(crowded, new V3(0, 64, 0))[0];
   assert(!(next.foot.equals(best.foot) && next.head.equals(best.head)), 'the occupied spot is not offered');
   for (const cell of [next.foot, next.head]) assert(!(cell.x === best.head.x && cell.z === best.head.z), 'nothing standing in it');
-  const place = actions.slice(actions.indexOf('case "place_bed": {'), actions.indexOf('case "shear": {'));
+  const place = actionCases.slice(actionCases.indexOf('case "place_bed": {'), actionCases.indexOf('case "shear": {'));
   // The predicate gained an access clause in 1.81.0, so this only pins the "not tried yet" half;
   // the access half has its own check further down.
   assert.match(place, /\.find\(\(c\) => !tried\.some\(\(t\) => t\.equals\(c\.foot\)\)/, 'each attempt takes a spot not tried yet');
@@ -146,7 +148,7 @@ await check('Beds: given the room cells, a bed goes in that room even when anoth
   assert(sites.length > 0, 'the room has a spot');
   assert(sites.every((site) => room.has(`${site.foot.x},${site.foot.y},${site.foot.z}`) &&
     room.has(`${site.head.x},${site.head.y},${site.head.z}`)), 'every spot offered is inside the room');
-  const place = actions.slice(actions.indexOf('case "place_bed": {'), actions.indexOf('case "shear": {'));
+  const place = actionCases.slice(actionCases.indexOf('case "place_bed": {'), actionCases.indexOf('case "shear": {'));
   assert.match(place, /findBedSites\(bot, target \?\? bot\.spawnPoint \?\? bot\.entity\.position, within\)/,
     'place_bed passes its cells through');
 });
@@ -266,7 +268,7 @@ await check('Beds: a spot the server refuses is not retried on a later goal tick
 
 
 await check('place_bed: a bed spot she couldn\'t reach is reported as unreachable, not as a server refusal', async () => {
-  const bed = between(actions, '    case "place_bed": {', '\n    case "');
+  const bed = between(actionCases, '    case "place_bed": {', '\n    case "');
   assert.match(bed, /unreachable\.push\(candidate\.foot\);\s*continue;/, 'an unreachable spot is recorded as such');
   assert.match(bed, /const refused = tried\.filter\(\(t\) => !unreachable\.includes\(t\)\);/);
   assert.match(bed, /refused\.length \? `the server refused the bed/, 'only real refusals say "refused"');

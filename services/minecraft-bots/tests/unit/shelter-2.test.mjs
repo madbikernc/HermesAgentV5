@@ -1,4 +1,6 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: shelter detection, building and repair (part 2 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -7,7 +9,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, swim, V3, between, actionFn, timeoutFn, makeBot, context, shelter, check, blockWorld, shelterLivingSpace, smallRoom, room, tunnel, slice, passedCount } from './_harness.mjs';
+import { actionCases, actions, index, swim, V3, between, actionFn, timeoutFn, makeBot, context, shelter, check, blockWorld, shelterLivingSpace, smallRoom, room, tunnel, slice, passedCount } from './_harness.mjs';
 
 
 await check('Shelter upgrade: dirt and wood cells are dug out and refilled with stone, one at a time', async () => {
@@ -231,7 +233,7 @@ await check('Shelter walls: "mine" skips a target inside one, and says so when t
 
 
 await check('Access: the other four placement sites ask first, each in the way that suits it', async () => {
-  const slice = (from, to) => actions.slice(actions.indexOf(from), actions.indexOf(to));
+  const slice = (from, to) => actionCases.slice(actionCases.indexOf(from), actionCases.indexOf(to));
   const build = slice('case "build": {', 'case "build_pen": {');
   assert.match(build, /const shuts = wouldBlockAccess\(bot, pos\);/, 'build checks every wall cell');
   assert.match(build, /shutIn\+\+;[\s\S]{0,200}continue;/, 'and leaves it open rather than abandoning the shelter');
