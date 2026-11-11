@@ -1,0 +1,12 @@
+[Unit]
+Description=hermes-minecraft-bots-status - snapshot the Minecraft bots for fleetops-ui's /minecraft tab
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-minecraft-bots-status/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+# Reads this host's bot units and journals, and spark-2's over pmoney's `spark2` SSH alias; writes
+# only ~/.hermes/state/minecraft-bots/status.json.
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-minecraft-bots-status.py
+TimeoutStartSec=90

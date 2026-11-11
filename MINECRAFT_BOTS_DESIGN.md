@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.43.0
+**Version:** 2.45.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -51,7 +51,7 @@ The host split is memory headroom, not design — `spark` carries the LLM stack,
 | | |
 |---|---|
 | Game server | `192.168.1.221:25580`, `minecraft-bots.service`, `/home/zomboid-admin/minecraft-bots/` |
-| World dir | `firmament-bots`, seed `1213910773144322993` (world reinit + bot-memory wipe 2026-11-05 via `hermes-minecraft-admin.py bots reinit-world`, no seed given; previous world `firmament-bots.bak-20261105232858`, before that `firmament-bots.bak-20261028213712`, `firmament-bots.bak-20261026012446` and `firmament-bots.bak-20261014022300`) |
+| World dir | `firmament-bots`, seed `-851936759013419345` (world reinit + bot-memory wipe 2026-11-11 via `hermes-minecraft-admin.py bots reinit-world`, no seed given; previous world `firmament-bots.bak-20261111083743`, before that `firmament-bots.bak-20261105232858`, `firmament-bots.bak-20261028213712`, `firmament-bots.bak-20261026012446` and `firmament-bots.bak-20261014022300`) |
 | RCON | port `25581`, Vaultwarden item `Hermes - Minecraft Bot RCON` |
 | Build | vanilla `server.jar`, offline mode, MC 26.1.2 — **gamerule names are snake_case** (`mob_griefing`, not `mobGriefing`) |
 | Firewall | LAN/Tailscale only. Offline mode means any client can claim any username; this world is not internet-facing the way the human server is |
@@ -650,6 +650,7 @@ failures from those, not from each action's prose.
 | `hermes-rag-ingest-minecraft.py` | Embeds memory notes and skills. `--corpus minecraft` (default) or `minecraft-skills` |
 | `hermes-rag-search-minecraft.py` | Reads either corpus back, same `--corpus` flag |
 | `hermes-minecraft-admin.py` | RCON/SSH admin against the game server — gamerules, mob sweeps, world re-init, position and health checks |
+| `hermes-minecraft-bots-status.py` | Every minute (spark timer), snapshots both hosts' bots for fleetops-ui's `/minecraft` tab: running or stopped, current goal, latest lines, last 20 `OUTCOME`s |
 | `hermes-minecraft-triage.py` | The triage service's own implementation |
 | `hermes-minecraft-backup-pull.py` | The backup-pull timer's own implementation |
 | `minecraft-chests/` | Shell helpers for pre-stocking chests (`fill-tools`, `fill-food`, `fill-materials`, `fill-armor-weapons`, `equip-all-characters`) |

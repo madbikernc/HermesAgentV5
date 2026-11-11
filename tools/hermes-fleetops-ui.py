@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.19.0
+# Version: 2.20.0
+#
+# 2.20.0 (2026-11-11) — direct operator request: a new "Minecraft bots" tab (/minecraft) listing
+# the bots currently running, what each is doing (its goal.json goal plus latest log lines), and
+# its last 20 actions with success or failure. The bots run on spark and spark-2, which this
+# sandbox can't reach, so -- the /status pattern again -- it reads a JSON snapshot
+# (MC_BOTS_STATUS_PATH, default ~/.hermes/state/minecraft-bots/status.json, under the existing
+# ReadWritePaths grant) that the new hermes-minecraft-bots-status.py writes every minute. No
+# write route, no sandbox change.
 #
 # 2.19.0 (2026-11-08) — S48, FLEET_SELFREPAIR_DESIGN.md §4.8's new `/selfrepair` tab, built as part
 # of §8's Phase 2 (the generic review/PR/UI pieces, with no domain registered yet -- the real test
@@ -340,6 +348,8 @@ RAG_PORTAL_URL = os.environ.get("RAG_PORTAL_URL", "http://100.96.59.79:8093/")
 MARKET_DB = os.environ.get("MARKET_DB", "/mnt/hermes-data/market/market.db")
 FLEET_HEALTH_PATH = os.environ.get(
     "FLEET_HEALTH_PATH", str(Path.home() / ".hermes" / "state" / "fleet-health" / "last-report.json"))
+MC_BOTS_STATUS_PATH = os.environ.get(
+    "MC_STATUS_PATH", str(Path.home() / ".hermes" / "state" / "minecraft-bots" / "status.json"))
 
 TOOLS = Path(__file__).resolve().parent
 REPO = TOOLS.parent
@@ -572,6 +582,11 @@ code,.mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; f
 .s-rejected { color:var(--dim); }
 .s-done { color:var(--ok); }
 .s-deferred { color:var(--dim); }
+.r-ok { color:var(--ok); border-color:var(--ok); }
+.r-bad { color:var(--bad); border-color:var(--bad); }
+.r-warn { color:var(--warn); border-color:var(--warn); }
+details { margin:6px 0; }
+details summary { cursor:pointer; padding:4px 0; }
 input[type=search],select { background:#1b1f27; color:var(--fg); border:1px solid var(--line);
        border-radius:3px; padding:5px 8px; font:inherit; }
 button { background:#1b1f27; color:var(--accent); border:1px solid var(--line); border-radius:3px;
@@ -601,7 +616,7 @@ NAV = [("/", "Home"), ("/backlog", "Benchmark backlog"), ("/models", "Models &am
        ("/benchmarks", "Benchmark results"), ("/highlights", "Topic highlights"),
        ("/recommendations", "Recommendations"), ("/egress-blocks", "Egress-guard denials"),
        ("/market", "Market Watch"), ("/status", "System status and health"),
-       ("/selfrepair", "Self-repair")]
+       ("/selfrepair", "Self-repair"), ("/minecraft", "Minecraft bots")]
 
 
 def log(msg):
@@ -819,6 +834,10 @@ def page_home():
          "Sintra/Amy/HomeD13 compute health (CPU, memory, GPU, disk), plus broker, injection-guard, "
          "and inter-node-comms status, from hermes-fleet-health.py's daily rollup (S45). As fresh "
          "as that run's own last 06:00 pass. Read-only."),
+        ("Minecraft bots", "/minecraft",
+         "Which bots are running on spark and spark-2, what each one's current goal is, and its "
+         "last 20 actions with success or failure, from a snapshot refreshed every minute. "
+         "Read-only."),
     ]
     body = ['<p class="note">Read-only views over data this fleet already produces. '
             'Nothing here starts, stops or approves anything.</p><div class="cards">']
@@ -2894,6 +2913,136 @@ def page_system_status(query):
     return shell("System status and health", body)
 
 
+# ── Minecraft bots ────────────────────────────────────────────────────────────────────────────
+#
+# Same reason as /status for reading a file: the bots run on spark and spark-2 and this sandbox
+# can't reach either. hermes-minecraft-bots-status.py (one-minute timer) writes the snapshot.
+
+MC_RESULT_CLASS = {"ok": "r-ok", "failed": "r-bad", "cancelled": "r-warn", "refused": "r-warn"}
+# The timer runs every minute; a few missed runs is a real gap, not jitter.
+MC_STALE_AFTER_MIN = 5
+MC_ACTIONS_SHOWN = 20  # the collector keeps this many per bot
+
+
+def read_minecraft_status():
+    return json.loads(Path(MC_BOTS_STATUS_PATH).read_text())
+
+
+def mc_time(ts):
+    """Seconds matter for an action log; the date only when it isn't today."""
+    if not ts:
+        return ""
+    t = datetime.datetime.fromtimestamp(float(ts))
+    fmt = "%H:%M:%S" if t.date() == datetime.date.today() else "%m-%d %H:%M:%S"
+    return t.strftime(fmt)
+
+
+def mc_ago(ts):
+    if not ts:
+        return ""
+    minutes = int((time.time() - float(ts)) // 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+    if minutes < 48 * 60:
+        return f"{minutes // 60}h {minutes % 60}m ago"
+    return f"{minutes // 1440}d ago"
+
+
+def mc_goal_cell(bot):
+    goal = bot.get("goal")
+    running = bot.get("active_state") == "active"
+    if not goal:
+        return '<span class="empty">no goal — idle</span>' if running else '<span class="empty">—</span>'
+    who = goal.get("setBy") or goal.get("source") or "?"
+    fails = goal.get("consecutiveFailures") or 0
+    detail = (f"set by {esc(who)} · {goal.get('steps') or 0} step(s)"
+              + (f' · <span style="color:var(--bad)">{fails} failing in a row</span>' if fails else "")
+              + f" · since {esc(mc_time((goal.get('createdAt') or 0) / 1000))}")
+    label = "" if running else '<span class="empty">last goal: </span>'
+    return f'{label}{esc(goal.get("description") or "")}<br><span class="note">{detail}</span>'
+
+
+def mc_latest_cell(bot):
+    lines = [f'<span class="mono">{esc(mc_time(l.get("at")))}</span> {esc(l.get("text", "")[:160])}'
+             for l in bot.get("latest", [])]
+    ev = bot.get("last_goal_event")
+    if ev:
+        lines.append(f'<span class="note">last goal event {esc(mc_ago(ev.get("at")))}: '
+                     f'{esc(ev.get("text", "")[:160])}</span>')
+    return "<br>".join(lines) or '<span class="empty">—</span>'
+
+
+def mc_actions_table(bot):
+    rows = []
+    for a in bot.get("actions", []):
+        result = a.get("result", "?")
+        rows.append([f'<span class="mono">{esc(mc_time(a.get("at")))}</span>', esc(a.get("type", "?")),
+                     f'<span class="pill {MC_RESULT_CLASS.get(result, "")}">{esc(result)}</span>',
+                     esc(f"{a['ms'] / 1000:.1f}s" if isinstance(a.get("ms"), (int, float)) else ""),
+                     esc(a.get("why") or "")])
+    return table(["when", "action", "result", "took", "why"], rows, numeric=(3,))
+
+
+def render_minecraft():
+    snap = read_minecraft_status()
+    ts = snap.get("generated_at")
+    stale = ""
+    try:
+        age_min = ((datetime.datetime.now(datetime.timezone.utc)
+                    - datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00")))
+                   .total_seconds() / 60)
+        if age_min > MC_STALE_AFTER_MIN:
+            stale = (f' <span style="color:var(--bad)">— stale, {age_min:.0f} min since the last '
+                     f'hermes-minecraft-bots-status.py run</span>')
+    except (TypeError, ValueError):
+        stale = ' <span style="color:var(--bad)">— no valid timestamp in this snapshot</span>'
+    out = [f'<p class="note">Snapshot from {esc(when(ts))}{stale}</p>']
+    for h in snap.get("hosts", []):
+        if h.get("error"):
+            out.append(f'<div class="err"><b>{esc(h.get("host", "?"))} is missing from this snapshot.</b> '
+                       f'{esc(h["error"])}</div>')
+
+    bots = [dict(b, host=h.get("host", "?")) for h in snap.get("hosts", []) for b in h.get("bots", [])]
+    bots.sort(key=lambda b: (b.get("active_state") != "active", b.get("name", "")))
+    running = [b for b in bots if b.get("active_state") == "active"]
+    out.append(f"<h3>{len(running)} of {len(bots)} bots running</h3>")
+    rows = []
+    for b in bots:
+        state = b.get("active_state", "?")
+        cls = "r-ok" if state == "active" else ("r-bad" if state == "failed" else "s-deferred")
+        label = {"active": "running", "inactive": "stopped"}.get(state, state)
+        verb = "started" if state == "active" else "stopped"
+        restarts = f" · {b['restarts']} restart(s)" if b.get("restarts") else ""
+        rows.append([f'<b>{esc(b.get("name", "?").title())}</b><br><span class="note">'
+                     f'{esc(b.get("role", ""))}</span>',
+                     esc(b["host"]),
+                     f'<span class="pill {cls}">{esc(label)}</span><br><span class="note">'
+                     f'{verb} {esc(mc_ago(b.get("since")))}{restarts}</span>',
+                     mc_goal_cell(b), mc_latest_cell(b)])
+    out.append(table(["bot", "host", "state", "current goal", "latest"], rows))
+
+    out.append(f"<h3>Last {MC_ACTIONS_SHOWN} actions per bot</h3>")
+    for b in bots:
+        counts = Counter(a.get("result") for a in b.get("actions", []))
+        summary = ", ".join(f"{n} {r}" for r, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+        opened = " open" if b.get("active_state") == "active" else ""
+        out.append(f'<details{opened}><summary><b>{esc(b.get("name", "?").title())}</b> '
+                   f'<span class="note">{esc(summary) or "no actions logged in the last 7 days"}'
+                   f'</span></summary>{mc_actions_table(b)}</details>')
+    return "".join(out)
+
+
+def page_minecraft(query):
+    body = section(
+        "Minecraft bots",
+        "Which bots are running, each one's current goal and latest log lines, and its last "
+        f"{MC_ACTIONS_SHOWN} actions with their outcome — from "
+        "<span class=\"mono\">hermes-minecraft-bots-status.py</span>'s snapshot (every minute, "
+        "both hosts). Failed actions carry the bot's own reason. Read-only.",
+        render_minecraft)
+    return shell("Minecraft bots", body)
+
+
 # ── server ────────────────────────────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -2909,6 +3058,7 @@ ROUTES = {
     "/market/company": page_market_company,
     "/status": page_system_status,
     "/selfrepair": page_selfrepair,
+    "/minecraft": page_minecraft,
 }
 
 # Where a decide POST redirects back to -- keyed by the decide path itself, so do_POST's tail

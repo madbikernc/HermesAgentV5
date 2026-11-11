@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 2.16.0
+# Version: 2.17.0
+#
+# 2.17.0 (2026-11-11) — check_minecraft(), new for hermes-fleetops-ui.py 2.20.0's /minecraft tab:
+# a fixture shaped like hermes-minecraft-bots-status.py 1.0.0's snapshot (one host's bots, one
+# unreachable host), with ui.MC_BOTS_STATUS_PATH monkeypatched the way check_system_status() does
+# FLEET_HEALTH_PATH. Running-before-stopped order, escaping of goal text, result pills, the
+# unreachable host's error, stale and missing snapshots, route, nav and home card.
 #
 # 2.16.0 (2026-10-27) — check_backlog() extended for hermes-fleetops-ui.py 2.18.0's S46
 # auto-deferred badge: a `deferred` row whose turn carries `auto_deferred: true` gets the new
@@ -1779,6 +1785,83 @@ def check_system_status(ui, tmp):
         ui.FLEET_HEALTH_PATH = orig_path
 
 
+def check_minecraft(ui, tmp):
+    print(NL + "[minecraft bots: /minecraft reads hermes-minecraft-bots-status.py's snapshot]")
+    import datetime as dt
+    import time as tm
+    now = tm.time()
+    snap = {
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "hosts": [
+            {"host": "spark-2", "collected_at": "x", "error": None, "bots": [
+                {"name": "wade", "role": "Explorer", "active_state": "inactive", "since": now - 1800,
+                 "restarts": 0, "goal": None, "latest": [], "last_goal_event": None, "actions": []},
+                {"name": "dale", "role": "Herder", "active_state": "active", "since": now - 600,
+                 "restarts": 3, "goal": {"description": "<b>pen</b> the cows", "source": "self",
+                                         "setBy": None, "createdAt": now * 1000, "steps": 4,
+                                         "consecutiveFailures": 2},
+                 "latest": [{"at": now - 5, "text": "self-defense: flee (health=18, threat=skeleton)"}],
+                 "last_goal_event": {"at": now - 120, "text": "ranch goal: penned 1 cow (ok=true)"},
+                 "actions": [
+                     {"at": now - 5, "type": "flee", "result": "ok", "ms": 650, "why": ""},
+                     {"at": now - 9, "type": "loot", "result": "failed", "ms": 8922,
+                      "why": "checked nearby chests, no food in any of them."},
+                     {"at": now - 12, "type": "mine", "result": "cancelled", "ms": 1364, "why": ""}]},
+            ]},
+            {"host": "spark2", "collected_at": "x", "error": "RuntimeError: exit 255", "bots": []},
+        ],
+    }
+    path = tmp / "minecraft-status.json"
+    path.write_text(json.dumps(snap))
+    orig = ui.MC_BOTS_STATUS_PATH
+    ui.MC_BOTS_STATUS_PATH = str(path)
+    try:
+        html = ui.render_minecraft()
+        check("it counts the running bots", "1 of 2 bots running" in html, html[:600])
+        check("a running bot is listed before a stopped one", html.index("Dale") < html.index("Wade"))
+        check("states read running/stopped, not systemd's words",
+              ">running<" in html and ">stopped<" in html, html)
+        check("the role and restarts show", "Herder" in html and "3 restart(s)" in html)
+        check("the current goal is escaped, not rendered as markup",
+              "&lt;b&gt;pen&lt;/b&gt; the cows" in html and "<b>pen</b>" not in html)
+        check("a goal failing repeatedly says so", "2 failing in a row" in html)
+        check("a running bot with no goal would read idle; a stopped one with none, a dash",
+              ui.mc_goal_cell({"active_state": "active", "goal": None}).count("idle") == 1
+              and "idle" not in ui.mc_goal_cell({"active_state": "inactive", "goal": None}))
+        check("a stopped bot's goal is labelled as its last one",
+              "last goal" in ui.mc_goal_cell({"active_state": "inactive", "goal": {"description": "x"}}))
+        check("latest lines and the last goal event appear",
+              "threat=skeleton" in html and "penned 1 cow" in html)
+        check("each action's result is a coloured pill",
+              'class="pill r-ok">ok<' in html and 'class="pill r-bad">failed<' in html
+              and 'class="pill r-warn">cancelled<' in html, html)
+        check("a failure carries its reason", "no food in any of them" in html)
+        check("each bot's actions are summarised by result", "1 ok" in html and "1 failed" in html)
+        check("a running bot's actions are open, a stopped bot's folded",
+              "<details open><summary><b>Dale" in html and "<details><summary><b>Wade" in html, html)
+        check("a bot with no actions says so", "no actions logged" in html)
+        check("an unreachable host is named with its error", "spark2 is missing" in html
+              and "exit 255" in html)
+
+        print(NL + "[the assembled page carries the section, and the route is registered]")
+        page = ui.page_minecraft({}).decode()
+        check("the page renders under its own heading", "Minecraft bots" in page)
+        check("the route is wired up", ui.ROUTES.get("/minecraft") is ui.page_minecraft)
+        check("the nav links to it", 'href="/minecraft"' in ui.shell("x", "").decode())
+        check("the home page has a card for it", 'href="/minecraft"' in ui.page_home().decode())
+
+        print(NL + "[a stale snapshot says so]")
+        path.write_text(json.dumps(dict(snap, generated_at="2026-01-01T00:00:00+00:00")))
+        check("an old snapshot is flagged stale", "stale" in ui.render_minecraft())
+
+        ui.MC_BOTS_STATUS_PATH = str(tmp / "no-such-minecraft-status.json")
+        page = ui.page_minecraft({}).decode()
+        check("a missing snapshot names itself instead of crashing the page",
+              "This section is unavailable" in page and 'href="/status"' in page, page[:600])
+    finally:
+        ui.MC_BOTS_STATUS_PATH = orig
+
+
 def check_decide_unavailable(ui):
     print(NL + "[a page must not offer an action it knows it cannot perform]")
     # 2026-10-16: the service came up during post-reboot vault contention, its wrapper fetches
@@ -2116,6 +2199,7 @@ def main():
         check_egress_blocks(ui, tmp)
         check_market(ui, tmp)
         check_system_status(ui, tmp)
+        check_minecraft(ui, tmp)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

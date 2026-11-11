@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.17.0
+**Version:** 2.18.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog (now leading with a "Recommended for benchmarking" section), which checkpoint backs each
@@ -215,6 +215,7 @@ missing-table crash on first run — is the concrete precedent.
 | `/recommendations` | `tasks`/`turns` in `memory.db`, `id LIKE 'REC-%'` | read-only; keyed by id prefix, not an agent list — see below |
 | `/recommendations` (top section) | `MODEL_SWAP_RECOMMENDATIONS`, a curated constant in the module itself | **not** read from a live store — see below |
 | `/status` | `FLEET_HEALTH_PATH` (default `~/.hermes/state/fleet-health/last-report.json`), a plain JSON file | `hermes-fleet-health.py` 1.7.0 writes it every run (daily, 06:00); never fresher than that — see below |
+| `/minecraft` | `MC_STATUS_PATH` (default `~/.hermes/state/minecraft-bots/status.json`), a plain JSON file | `hermes-minecraft-bots-status.py` writes it every minute for both hosts' bots; flagged stale past 5 minutes — see `infra/hermes-minecraft-bots-status/README.md` |
 
 **The plan was wrong about the backlog source and the code follows the store, not the plan.** S21b
 said to read the scout's tasks with "the same `GET /tasks` shape `hermes-self-repair-status.py`
@@ -309,7 +310,7 @@ route, since even with a stolen CSRF token a form on someone else's page cannot 
 
 ## 6. Tests
 
-`tests/test_fleetops_ui.py` — 292 offline checks, no network, no live store, no socket bound. The
+`tests/test_fleetops_ui.py` — 444 offline checks, no network, no live store, no socket bound. The
 fixtures are the real schemas read off the live stores on 2026-10-09, because the first draft got
 two of them wrong from the plan's own prose. Also asserts the things that are easy to break
 silently: that the NAS and local history paths still equal `hermes_benchmark_common`'s own
@@ -406,3 +407,4 @@ rather than silent. A restart re-fetches the credentials.
 | 2.14.0 | 2026-10-26 | Direct operator request: the benchmark backlog table now defaults to hiding `rejected` candidates, matching `hermes-model-scout.py`'s own `--backlog` CLI convention ("every non-rejected, non-done entry") that this page's table had never followed. A new state filter — a GET-submitted `<select>`, the same pattern `/recommendations`' own state filter already established — shows them again on request: "(open — excludes rejected)" by default, "(every state, including rejected)", or any one state alone. `read_backlog()` now filters in SQL rather than in Python, for the same reason `read_recommendations()` already does: `rejected` is terminal and only grows, so a flat `ORDER BY updated_at DESC LIMIT 400` with no filter would eventually let old rejections crowd out the open proposed/deferred candidates the page exists to surface. The summary pills show true per-state counts across the whole table, not just the loaded/filtered page, so "how many are rejected" stays visible even while the table itself hides them. 15 new offline checks (353 total). |
 | 2.15.0 | 2026-10-27 | New `/status` page (S45), direct operator request: Sintra/Amy/HomeD13 compute health (CPU, memory, GPU, disk), plus broker, injection-guard, and inter-node-comms status. This service's sandbox rules out reaching that data live — no subprocess or SSH anywhere in this file — so it reads `hermes-fleet-health.py` 1.7.0's new daily JSON snapshot (`FLEET_HEALTH_PATH`, a subpath of the `ReadWritePaths` grant already held for `usage.db`'s sidecar) instead of probing anything itself. Same per-identity/broker/guard/comms data that script's own daily email already carries; the page states its snapshot's own age and flags it once it's more than ~36h stale. No sandbox or unit changes on either service. 16 new offline checks (377 total). |
 | 2.16.0 | 2026-10-27 | S46: `/backlog` gets an "auto-deferred" badge, next to the existing "★ recommended" one, on a `deferred` row whose turn carries `auto_deferred: true` — `hermes-model-scout.py` 1.5.0's new `find_similar_known()` check defaulting a confident near-duplicate candidate straight to `deferred` instead of `proposed`. Titled with the reason and the matched model, so a human can never mistake a scout-made call for a prior human decision — both rendered as an identical plain pill before this change. No read-path change; `read_backlog()`'s existing turn-payload read already carries whatever fields scout.py stamps. 3 new offline checks (380 total). |
+| 2.18.0 | 2026-11-11 | New `/minecraft` tab, direct operator request: which Minecraft bots are running, each one's current goal and latest log lines, and its last 20 actions with success or failure. Same reasoning as `/status` — the bots run on spark and spark-2 and this sandbox can reach neither — so it reads a snapshot the new `hermes-minecraft-bots-status.py` writes every minute, under the existing `ReadWritePaths` grant. No write route, no sandbox or unit change. 25 new offline checks (444 total). |
