@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 2.1.0
+# Version: 2.2.0
+#
+# 2.2.0 (2026-11-10) — the test task targets a per-area tests/unit/*.test.mjs file chosen from
+# the test candidates only (bridge 2.3.0), never the 363k-char unit.test.mjs; an invalid
+# test-file answer skips the incident without recording it.
 #
 # 2.1.0 (2026-11-10) — should_submit() now takes the bridge's state and gates on its own
 # `submitted_signatures` record, not triage's occurrence count (bridge 2.2.0): a repeat that was
@@ -159,8 +163,17 @@ def main():
     real = {k: getattr(mod, k) for k in ("list_candidate_paths", "ask_model_for_path", "submit_task",
                                           "write_link_turn", "save_state")}
     sent = []
-    mod.list_candidate_paths = lambda: ["services/minecraft-bots/swim-movements.js"]
-    mod.ask_model_for_path = lambda parsed, candidates: "services/minecraft-bots/swim-movements.js"
+    unit_dir = "services/minecraft-bots/tests/unit/"
+    mod.list_candidate_paths = lambda: ["services/minecraft-bots/swim-movements.js",
+                                        "services/minecraft-bots/tests/unit.test.mjs",
+                                        unit_dir + "_harness.mjs", unit_dir + "pathfinding.test.mjs",
+                                        unit_dir + "chests-1.test.mjs"]
+    offered = []
+
+    def fake_ask(parsed, candidates, fix_path=None):
+        offered.append(list(candidates))
+        return "services/minecraft-bots/swim-movements.js" if fix_path is None else unit_dir + "pathfinding.test.mjs"
+    mod.ask_model_for_path = fake_ask
     mod.submit_task = lambda path, problem: sent.append(path) or f"task-{len(sent)}"
     mod.write_link_turn = lambda *a: None
     mod.save_state = lambda state: None
@@ -168,9 +181,19 @@ def main():
     mc_domain = {"name": "minecraft-bots"}
     mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, handler_state)
     check("a 7th-occurrence finding with no task yet submits a fix+test pair",
-          sent == ["services/minecraft-bots/swim-movements.js", "services/minecraft-bots/tests/unit.test.mjs"], sent)
+          sent == ["services/minecraft-bots/swim-movements.js", unit_dir + "pathfinding.test.mjs"], sent)
+    check("the test file is chosen from the per-area unit files only -- never the whole "
+          "unit.test.mjs or the shared harness",
+          offered[1] == [unit_dir + "pathfinding.test.mjs", unit_dir + "chests-1.test.mjs"], offered)
     mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, handler_state)
     check("the next repeat of it submits nothing more", len(sent) == 2, sent)
+    sent.clear()
+    mod.ask_model_for_path = lambda parsed, candidates, fix_path=None: (
+        "services/minecraft-bots/swim-movements.js" if fix_path is None else "services/minecraft-bots/tests/unit.test.mjs")
+    skip_state = {}
+    mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, skip_state)
+    check("a test-file answer outside the per-area files submits nothing and records nothing",
+          sent == [] and not skip_state.get("submitted_signatures"), (sent, skip_state))
     for k, v in real.items():
         setattr(mod, k, v)
 
@@ -185,9 +208,11 @@ def main():
     check("disagreement is called out in the fix problem text",
           "disagreed" in disagreement_problem.lower(), disagreement_problem)
 
-    test_problem = mod.build_test_problem(parsed, "services/minecraft-bots/goals.js")
+    test_problem = mod.build_test_problem(parsed, "services/minecraft-bots/goals.js",
+                                          "services/minecraft-bots/tests/unit/control.test.mjs")
     check("test problem names the exact fix path", "services/minecraft-bots/goals.js" in test_problem, test_problem)
-    check("test problem points at the real unit test file", "unit.test.mjs" in test_problem, test_problem)
+    check("test problem points at the chosen per-area test file",
+          "tests/unit/control.test.mjs" in test_problem and "_harness.mjs" in test_problem, test_problem)
 
     print("\n[resolve_target_path: never trusts the model's answer directly]")
     candidates = ["services/minecraft-bots/goals.js", "services/minecraft-bots/actions.js"]

@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-11-10) — embed() sends at most MEMORY_EMBED_MAX_CHARS (default 4000) of a turn to
+# the embedding backend. hermes-embed runs Qwen3-Embedding-8B at --ctx-size 2048
+# (infra/hermes-rag/start-embed.sh), and the backend rejects any longer input outright
+# ("request (6561 tokens) exceeds the available context size (2048 tokens)"), which surfaced
+# here as a 502 and the turn was never stored. First seen 2026-11-10 when self-repair's
+# whole-file turns (drafts, security reviews, results) started landing: 9 rejected writes, every
+# one lost. Only the vector uses the head of the text; `raw` is still stored in full, so reads
+# and task state are unaffected. 4000 chars stays under 2048 tokens even for dense code (about
+# 2.5 chars per token).
 #
 # 1.4.0 (2026-09-04) — MEMORY_EMBED_DIMS default 1024 -> 4096, matching the fleet-wide embed swap
 # to Qwen3-Embedding-8B (infra/hermes-rag/start-embed.sh). New `_migrate_vec_turns_dims()`,
@@ -137,6 +147,9 @@ EMBED_URL = os.environ.get("MEMORY_EMBED_URL", "http://127.0.0.1:8092/v1/embeddi
 # consequence of this changing under an existing database.
 EMBED_DIMS = int(os.environ.get("MEMORY_EMBED_DIMS", "4096"))
 EMBED_TIMEOUT = 30
+# The embed backend's context is 2048 tokens; a longer input is rejected, not truncated. The
+# vector is built from the head of the text only (see 1.5.0).
+EMBED_MAX_CHARS = int(os.environ.get("MEMORY_EMBED_MAX_CHARS", "4000"))
 
 MAX_BODY = 8 * 1024 * 1024  # 8MB — generous for a turn's text, bounded
 
@@ -343,7 +356,7 @@ def embed(text: str) -> list:
     """Call the resident query-time embedding backend. Raises on any failure rather than
     returning a zero vector — a silently-wrong embedding is worse than a loud failure, same
     principle hermes_rag_common.py's own embed() already established."""
-    payload = json.dumps({"input": text}).encode("utf-8")
+    payload = json.dumps({"input": text[:EMBED_MAX_CHARS]}).encode("utf-8")
     req = urllib.request.Request(
         EMBED_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST"
     )

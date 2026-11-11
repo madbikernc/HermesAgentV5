@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.11.0
+**Version:** 6.12.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -523,7 +523,7 @@ the first time it arrives with no task recorded for it in the bridge's own state
 (`submitted_signatures`; signature = category + source line, bot tag dropped, numbers collapsed).
 Until 2.2.0 this gated on triage's own occurrence count being exactly 1, which meant any failure
 already repeating before the bridge was installed could never be submitted. On a real incident: submits
-a fix task and a test task (`services/minecraft-bots/tests/unit.test.mjs`) and links them via
+a fix task and a test task (one per-area `services/minecraft-bots/tests/unit/*.test.mjs` file) and links them via
 `hermes-self-repair-link.py`'s own logic. Publishes to Buzz as `"selfrepair"` — the identity
 `hermes-self-repair-generate.py`'s own `publish_result()` already uses live — deliberately not a
 new `"selfrepair-bridge"` Buzz identity, so this needs zero live `hermes-buzz.py` `KNOWN_AGENTS`
@@ -691,6 +691,7 @@ first.
 
 | Version | Date | Change |
 |---|---|---|
+| 6.12.0 | 2026-11-10 | Bridge 2.3.0: a minecraft-bots test task now targets one per-area `services/minecraft-bots/tests/unit/*.test.mjs` file (chosen by the same validated model call as the fix path, from those files only) instead of the 363k-char `unit.test.mjs`, which the generator always refused. 67 bridge checks. |
 | 6.11.0 | 2026-11-10 | Direct operator request. Bridge 2.2.0: findings are submitted once per signature, tracked in the bridge's own state, instead of only when triage's occurrence count is exactly 1. That gate had blocked every failure already repeating before 2026-11-08, `[stuck-path]` included, while the skip log claimed a task "was already considered". Generator 1.2.0: `MAX_FILE_CHARS` 12000 -> 40000 and `DRAFT_MAX_TOKENS`/`REVISE_MAX_TOKENS` -> 16000, sized to coder/coder2's live 65536-token context. 65 bridge checks. |
 | 6.10.0 | 2026-11-08 | Direct operator instruction: `egress-guard`'s switch flipped on; a third domain explicitly deferred until these two have a track record. Found and fixed one more real gap first — no dedup on repeated denials from the same caller — with a per-caller cooldown in the bridge (2.1.0) that releases on whichever comes first, the prior task concluding or `EGRESS_COOLDOWN_SECONDS` elapsing. 11 more offline checks (60 total). See the "Phase 4" section's own update above. |
 | 6.9.0 | 2026-11-08 | `hermes-self-repair-bridge.service` installed and enabled on spark for the first time. Found live at first start: the wrapper script had never been marked executable in git since Phase 3's original commit (`status=203/EXEC`), fixed with `git update-index --chmod=+x` (1.1.1). After that, started cleanly and its own log confirmed the backlog-replay bootstrap actually works on real data (`seeded cursor at seq=643716, will not replay its history`); `egress-guard` correctly never polled (switch off). See the "Phase 4" section's own update above. |

@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 2.2.0
+# Version: 2.3.0
+#
+# 2.3.0 (2026-11-10) — the linked test task no longer targets services/minecraft-bots/tests/
+# unit.test.mjs: at 363k chars it was always refused by the generator's MAX_FILE_CHARS (every
+# test task from 2.2.0's first live run went to `error`, so no fix could leave
+# awaiting-completeness). The unit checks are now split into per-area files under
+# tests/unit/, each under that limit, and the test task targets one of them, picked by the same
+# validated model call as the fix path (ask_model_for_path(), now given the fix path and the
+# test-file candidates only). No valid test file -> the incident is skipped and not recorded,
+# so its next occurrence tries again.
 #
 # 2.2.0 (2026-11-10) — direct operator request ("repeat failures that have never been submitted
 # should get submitted"): should_submit() gated minecraft-bots findings on triage's own occurrence
@@ -310,9 +319,18 @@ def build_fix_problem(parsed):
     return "\n".join(lines)
 
 
-def build_test_problem(parsed, fix_path):
+UNIT_TEST_DIR = "services/minecraft-bots/tests/unit/"
+
+
+def test_candidates(candidates):
+    """The per-area unit test files a test task may target -- never the shared _harness.mjs."""
+    return [c for c in candidates if c.startswith(UNIT_TEST_DIR) and c.endswith(".test.mjs")]
+
+
+def build_test_problem(parsed, fix_path, test_path):
     return (
-        f"Add or update a unit test in services/minecraft-bots/tests/unit.test.mjs that fails "
+        f"Add or update a unit test in {test_path} (shared stubs and helpers are imported from "
+        f"./_harness.mjs; import any more you need from there) that fails "
         f"against the current code and passes once {fix_path} is fixed for this incident "
         f"(category={parsed['category']}): {parsed['label']}"
     )
@@ -361,12 +379,15 @@ def list_candidate_paths():
                 yield line
 
 
-def ask_model_for_path(parsed, candidates):
+def ask_model_for_path(parsed, candidates, fix_path=None):
     listing = "\n".join(candidates)
+    task = ("name the ONE file most likely responsible for this behavior" if fix_path is None else
+            f"the fix goes in {fix_path}; name the ONE unit test file, by its area, where a test "
+            f"for this fix belongs")
     prompt = (
         "A Minecraft bot fleet's own log triage flagged an incident. Given the diagnosis below and "
-        "the real list of files that exist in this codebase, name the ONE file most likely "
-        "responsible for this behavior. Respond with EXACTLY one file path from the list below, "
+        f"the real list of files that exist in this codebase, {task}. "
+        "Respond with EXACTLY one file path from the list below, "
         "character-for-character, and nothing else -- or respond with exactly NONE if you cannot "
         "tell.\n\n"
         f"Diagnosis:\n{build_fix_problem(parsed)}\n\n"
@@ -518,11 +539,22 @@ def handle_minecraft_bots_buzz(finding, domain, budget, state):
         log(f"skipping incident: model named no real/allowlisted path (answered {model_answer!r})")
         return
 
+    tests = test_candidates(candidates)
+    try:
+        test_answer = ask_model_for_path(parsed, tests, fix_path=fix_path)
+    except Exception as exc:
+        log(f"skipping incident: test-path resolution call failed: {exc}")
+        return
+    test_path = resolve_target_path(test_answer, tests)
+    if not test_path:
+        log(f"skipping incident: model named no real unit test file (answered {test_answer!r})")
+        return
+
     fix_problem = build_fix_problem(parsed)
-    test_problem = build_test_problem(parsed, fix_path)
+    test_problem = build_test_problem(parsed, fix_path, test_path)
     try:
         fix_task_id = submit_task(fix_path, fix_problem)
-        test_task_id = submit_task("services/minecraft-bots/tests/unit.test.mjs", test_problem)
+        test_task_id = submit_task(test_path, test_problem)
         write_link_turn(fix_task_id, "fix", test_task_id)
         write_link_turn(test_task_id, "test", fix_task_id)
     except Exception as exc:

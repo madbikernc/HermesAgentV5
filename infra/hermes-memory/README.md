@@ -1,6 +1,6 @@
 # hermes-memory — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Ordered steps to stand up the fleet's shared memory service (HermesAgentV5's S2 —
 `../../HermesAgentV5/IMPLEMENTATION_PLAN.md`). For *why* this exists rather than the target
@@ -90,6 +90,14 @@ sqlite3 /mnt/hermes-data/memory/memory.db \
 
 All three must agree before this service is trusted for anything real.
 
+## Embedding long turns
+
+The embed backend (`infra/hermes-rag/start-embed.sh`) runs at `--ctx-size 2048` and rejects any
+longer input outright. `embed()` therefore sends only the first `MEMORY_EMBED_MAX_CHARS`
+(default 4000) characters of a turn; `raw` is still stored in full. Before this cap, a turn over
+2048 tokens (self-repair's whole-file drafts and reviews) came back as a 502 and was never
+stored. Check: `python3 infra/hermes-memory/tests/test_embed.py`.
+
 ## 4. What's still ahead
 
 - `tasks` table exists from S2 on but nothing populates it for real until S3 (Buzz 2.0) and S6
@@ -98,3 +106,10 @@ All three must agree before this service is trusted for anything real.
 - Retiring `hermes-session-cap-guard.sh`'s wipe-and-summarise behaviour is **not** part of S2 —
   only after recall is verified live, per the plan.
 - The model registry table (checkpoint hashes, sizes, eval results) is S9's addition, not S2's.
+
+## Revision History
+
+| Version | Date | Change |
+|---|---|---|
+| 1.0.0 | 2026-08-29 | Initial versioned baseline. |
+| 1.1.0 | 2026-11-10 | Added "Embedding long turns": `embed()` caps its input at `MEMORY_EMBED_MAX_CHARS` so turns over the embed backend's 2048-token context are stored instead of failing with a 502. |

@@ -1,17 +1,24 @@
 # Minecraft bot tests
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 
 Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.json`).
 
 | Suite | What it proves | Where it runs |
 |---|---|---|
-| `unit` — `unit.test.mjs` + `test_triage.py` + `test_rag_server.py` | The fixed logic, extracted from the real source and run against controlled stubs; triage classification and per-bot dedupe; the spark RAG server spark2 uses | Anywhere with Node and Python (no server, no `npm install`) |
+| `unit` — `unit.test.mjs` (runs every `unit/*.test.mjs`) + `test_triage.py` + `test_rag_server.py` | The fixed logic, extracted from the real source and run against controlled stubs; triage classification and per-bot dedupe; the spark RAG server spark2 uses | Anywhere with Node and Python (no server, no `npm install`) |
 | `live` — `live.test.mjs` | The real `actions.js`/`arbiter.js`/`equipment.js` against the real server, mobs and items | Spark nodes (needs `node_modules`, the bot server, and `live/rcon.py`'s vault/SSH access) |
 | `livebot` — `live-bot.test.mjs` | A whole bot process (`index.js` as `MBProbe`) driven by whispers, restarts and injected coordination messages: STOP, goal identity, resume, night pause, storing during a goal, Mayor curriculum persistence | Spark nodes |
 | `baseline` — `baseline.mjs` + `monitoring.mjs` | What the deployed fleet on this host actually did over the last 24h vs the committed baseline; every bot unit mirrored into the activity log and visible to triage | Each Spark node, over its own `minecraft-bot-*` journals |
 
-Two things to know before adding to `unit.test.mjs`, both consequences of running module source in
+The unit checks live in per-area files under `unit/` (`chests-1.test.mjs`, `pathfinding.test.mjs`,
+...), each kept under 40000 characters so the self-repair pipeline, which rewrites a whole file,
+can add a test to one. `unit/_harness.mjs` holds the shared module sources, stubs and `check()`;
+export any new shared helper from there. `unit.test.mjs` only runs the area files in order; one
+area runs alone with `node tests/unit/<area>.test.mjs`. When an area file nears 40000 characters,
+split it (`-1`/`-2`), and add the new file to `unit.test.mjs`.
+
+Two things to know before adding a unit check, both consequences of running module source in
 a `vm` context with no `node_modules`: `Vec3` is the file's own `V3` stub, injected per context; and
 a module's `export const` bindings are lexical, so they are **not** properties of the context —
 read one with `vm.runInContext('NAME', ctx)` (`shelterConst()` does this for `shelter.js`).
@@ -62,7 +69,7 @@ spark2) runs the suites as a chain of per-phase units with their own timeouts (s
 
 When a change fixes or adds bot behavior:
 
-1. **Unit:** add a check to `unit.test.mjs` that fails on the old code and passes on the new.
+1. **Unit:** add a check to the matching `unit/<area>.test.mjs` that fails on the old code and passes on the new.
 2. **Live:** if the behavior is observable in-world (movement, combat, items, equipment,
    hunger), add a scenario to `live.test.mjs`.
 3. **Baseline:** if the fix should move a fleet-level number, add or adjust a metric in
@@ -80,3 +87,4 @@ When a change fixes or adds bot behavior:
 | 1.2.0 | 2026-09-25 | RAG server checks in the unit suite. |
 | 1.3.0 | 2026-10-07 | Access/shelter/torch layers: how the offline suite stands in for `vec3` and for `export const` bindings. |
 | 1.4.0 | 2026-11-07 | Daily run split into a per-phase systemd unit chain (`infra/minecraft-bots-tests/`), each phase with its own timeout; standalone `run.sh live`/`run.sh livebot` now skip gracefully when the bot-sandbox server is unreachable, same as `all` already did. |
+| 1.5.0 | 2026-11-10 | Unit checks split into per-area files under `unit/`, each under 40000 characters, with shared stubs in `unit/_harness.mjs`; `unit.test.mjs` only runs them. |

@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.41.0
+**Version:** 2.42.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -654,6 +654,7 @@ the original incident number, still cited throughout the code. Narrative is in g
 
 | Rule | § |
 |---|---|
+| The pathfinder setup (costs, unbreakable blocks, search limits, `path_update`/`path_reset` diagnostics, the `dig_error` burst guard) is `setupPathfinding()` in `pathfinding.js`, its own file under the self-repair pipeline's 40000-char whole-file limit so a pathfinding fix can be generated against it | 2026-11-10 |
 | Any plugin carrying its own `Movements` (`collectBlock`, `pvp`) must point at the shared instance, or every tuning is silently undone | 18, 44 |
 | `maxCost = heuristic + searchRadius(48)`. For a nearby goal the whole budget is ~48–58, so one expensive step prunes a valid route entirely. This applies to *every* additive cost, `liquidCost` included: at 20 a block, three blocks of water are already over it | 47, 50 |
 | The budget caps the detour, not the distance. A search that runs out of it (`noPath` or `timeout`) still returns the path to the closest point it reached, and `goto()` used to throw that away: in the 24h to 2026-11-07, 2,017 of spark's 2,192 `noPath` results carried one. `installSteppedGoto` (swim-movements.js) walks that partial path and searches again, up to 8 legs while each gains at least 2 blocks; a changed goal or a stopped path still ends it at once | 2026-11-07 |

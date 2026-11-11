@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.40.0
+**Version:** 1.41.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -237,6 +237,7 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 2.39.0 | 2026-11-07 | S47 fleet-health investigation found `minecraft-bots-tests.service`'s single `TimeoutStartSec` had been outgrown twice (30min, then 60min) as live scenarios accumulated, with live+livebot alone now consuming the whole shared budget and crowding out baseline. Split into a `minecraft-bots-tests-fast/-live/-livebot/-baseline.service` chain, each with its own measured timeout, `OnSuccess`/`OnFailure` both chaining to the next so baseline always runs regardless of an earlier phase's outcome. Also found spark2's `MB_TEST_SUITE=baseline` override -- a manual `sed` patch applied on top of the shared template, never in git -- had been silently clobbered back to `all` by an earlier same-day deploy that `cp`'d the raw template over spark2's live unit file, so spark2 had been redundantly running the full live+livebot suite too; the split removes the sed-hack entirely by giving spark2 its own standalone `-baseline.timer` instead. |
 | 2.40.0 | 2026-11-07 | Direct request: "check world knowledge of chest contents before stashing inventory in a chest, and stash their items in a chest already containing the same or similar items", and move a kind of item split between chests together in full stacks. `store` ranks chests by `known_chests.json` (same item, same kind, empty, other; a full one last), snapshots record free slots, and a snapshot that shows a split queues a `consolidate_chests` move for when she's idle. First live run: while a chest is open, withdrawn items show in the window's copy of her inventory, not `bot.inventory`, so counts come from the window. |
 | 2.41.0 | 2026-11-07 | Direct requests: "expand the range of 'nearby chests' from 32 to 128", and "check to see if the 48 block pathfinder limit is responsible for many of the pathfinder failures... find the best way in the DIRECTION of the target... travel... pathfind again". Every chest search reaches 128 blocks, with far chests walked to in hops. `searchRadius` 48 is a cost budget over the straight-line estimate; in the 24h to 2026-11-07, 2,017 of spark's 2,192 `noPath` results (1,026 of spark2's 1,083) carried a partial path toward the goal that `goto()` threw away, and 1,009 (187) ran out after 1,000+ nodes. `installSteppedGoto` walks the partial path and searches again. |
+| 2.42.0 | 2026-11-10 | Direct request, so self-repair can fix pathfinding and add tests: the pathfinder setup moved unchanged out of `index.js` (585k chars, never editable by the whole-file pipeline) into `pathfinding.js` (26k), and `tests/unit.test.mjs` (363k) split into 17 per-area files under `tests/unit/`, each under 40000 chars, with shared stubs in `tests/unit/_harness.mjs`. |
 | 1.30.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.31.0 row (hunt range and chickens, food-goal retry wait). |
 | 1.31.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.32.0 row (stand-in Farmer/Herder, gather_seeds, bread). |
 | 1.32.0 | 2026-11-01 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.33.0 row (craft chain counted by name, pen fences dug through). |
@@ -248,3 +249,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.38.0 | 2026-11-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.39.0 row (minecraft-bots-tests split into a fast/live/livebot/baseline chain; spark2's clobbered MB_TEST_SUITE override fixed). |
 | 1.39.0 | 2026-11-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.40.0 row (stores go by known chest contents; split kinds consolidated). |
 | 1.40.0 | 2026-11-07 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.41.0 row (128-block chest range; stepped pathfinding past the search budget). |
+| 1.41.0 | 2026-11-10 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.42.0 row (pathfinding.js split out of index.js; unit checks split into per-area files). |
