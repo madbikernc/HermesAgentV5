@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.46.0
+**Version:** 2.47.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -684,6 +684,7 @@ the original incident number, still cited throughout the code. Narrative is in g
 | Any plugin carrying its own `Movements` (`collectBlock`, `pvp`) must point at the shared instance, or every tuning is silently undone | 18, 44 |
 | `maxCost = heuristic + searchRadius(48)`. For a nearby goal the whole budget is ~48–58, so one expensive step prunes a valid route entirely. This applies to *every* additive cost, `liquidCost` included: at 20 a block, three blocks of water are already over it | 47, 50 |
 | The budget caps the detour, not the distance. A search that runs out of it (`noPath` or `timeout`) still returns the path to the closest point it reached, and `goto()` used to throw that away: in the 24h to 2026-11-07, 2,017 of spark's 2,192 `noPath` results carried one. `installSteppedGoto` (swim-movements.js) walks that partial path and searches again, up to 8 legs while each gains at least 2 blocks; a changed goal or a stopped path still ends it at once | 2026-11-07 |
+| Going up through rock needs its own leg. A step up breaks three blocks, ~62 for one block of height at the dig cap, against the whole budget's slack of 48, so no search could climb out of a cave: Amy dug down to y=3 after generated chests and wandered there for an hour, every route home 90 blocks up. When the goal is 10+ blocks above her, rock overhead, and the search found nothing that climbs, stepped goto climbs instead: `GoalY` up to 8 higher with `digCost` 1 and a 500 budget for that leg only, a short climb walked as far as it rose. Under open sky nothing changes. Climbs don't count against the 8 legs. And `goto()` (mineflayer-pathfinder 2.4.5) resolves on any empty search, `noPath` included ("as close as it gets", ~25,500 in 48h, which `mine` relies on); sealed in rock under the goal, that now gets a climb instead | 2026-11-11 |
 | `digCost` 15, capped by `MAX_DIG_LABOR_COST` 20 in `swim-movements.js`'s `safeOrBreak`. One knob cannot serve both "don't breach walls" and "can still leave a room" — deterrence lives in `digCost`, safety in the cap | 44, 47, 50 |
 | Blocks with `hardness >= 10` go in `blocksCantBreak`; the cap otherwise makes obsidian/netherite look as cheap as planks and bots freeze on 75-second digs | 51 |
 | `entityCost` 8 — with 7–9 bots in one shelter, nearly every route touches an occupied square | 53 |

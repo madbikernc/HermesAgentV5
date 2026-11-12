@@ -1,5 +1,7 @@
-// Version: 1.41.0
+// Version: 1.42.0
 //
+// 1.42.0 (2026-11-11): new scenario -- sealed in rock 32 blocks under her goal, with the fleet's digCost,
+// she climbs out (swim-movements.js 1.7.0).
 // 1.41.0 (2026-11-07): new scenario -- a water channel past the search budget is crossed leg by leg
 // (swim-movements.js 1.6.0); chest searches reach 128 blocks (actions.js 1.107.0).
 // 1.40.0 (2026-11-07): new scenario -- logs stored with the other logs from what the fleet knows of
@@ -1407,6 +1409,36 @@ scenario("Torches: she makes some from coal, then trails them down a dark tunnel
       `at least ${TORCH_SPACING} blocks apart: ${lit[i - 1]} -> ${lit[i]}`);
   }
   for (const at of lit) assert.equal(bot.blockAt(at)?.name, "torch", `a real torch stands at ${at}`);
+});
+
+// 2026-11-11 (swim-movements.js 1.7.0, direct request: "pathfinding needs to understand when it has
+// to go up"): Amy followed chests down into a cave and never came back up -- at the fleet's digCost
+// of 15 a step up through rock is over the pathfinder's per-move limit even with a pickaxe. A sealed
+// pocket at the bottom of a stone column 32 blocks under her goal, away from the arena.
+scenario("Pathfinding: sealed in rock 32 blocks under her goal, she digs her way up and out", async () => {
+  const cx = x + 40, cz = z, top = y - 10, bottom = top - 31;
+  const column = `${cx - 4} ${bottom - 1} ${cz - 4} ${cx + 4} ${top} ${cz + 4}`;
+  scenarioCleanup.push(() => rcon(`fill ${column} minecraft:air`,
+    `kill @e[type=minecraft:item,x=${cx - 6},y=${bottom - 2},z=${cz - 6},dx=12,dy=40,dz=12]`).catch(() => {}));
+  await rcon(`fill ${column} minecraft:stone`, `fill ${cx} ${bottom} ${cz} ${cx} ${bottom + 1} ${cz} minecraft:air`,
+    `give ${TESTER} minecraft:stone_pickaxe`, `tp ${TESTER} ${cx + 0.5} ${bottom} ${cz + 0.5}`);
+  await waitFor(() => held("stone_pickaxe") >= 1 && bot.entity.position.y < bottom + 0.5 &&
+    bot.blockAt(new Vec3(cx, bottom + 2, cz))?.name === "stone", 15_000, "sealed in the rock with a pickaxe");
+  // The fleet's own movement setup (pathfinding.js): SwimMovements and its dig cap, digCost 15, a
+  // 48 search budget -- without them a climb is possible already and this proves nothing. No
+  // blocks to pillar with, as Amy had none.
+  const movements = new SwimMovements(bot);
+  movements.digCost = 15;
+  for (const block of bot.registry.blocksArray) {
+    if (isProtectedBlockName(block.name)) movements.blocksCantBreak.add(block.id);
+  }
+  const previous = bot.pathfinder.movements, { searchRadius } = bot.pathfinder;
+  bot.pathfinder.setMovements(movements);
+  bot.pathfinder.searchRadius = 48;
+  scenarioCleanup.push(() => { bot.pathfinder.setMovements(previous); bot.pathfinder.searchRadius = searchRadius; });
+  await withTimeoutMs(bot.pathfinder.goto(new goals.GoalNear(cx, top + 1, cz, 1)), 240_000, () => bot.pathfinder.setGoal(null));
+  assert(bot.entity.position.y >= top + 0.5, `she is up on top of the rock: y=${bot.entity.position.y.toFixed(1)}, top ${top + 1}`);
+  assert.equal(movements.digCost, 15, "digging is dear again once she is out");
 });
 
 // ---- runner -------------------------------------------------------------------------------------

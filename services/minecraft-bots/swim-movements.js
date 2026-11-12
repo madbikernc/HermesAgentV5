@@ -1,4 +1,10 @@
-// Version: 1.6.0
+// Version: 1.7.0
+//
+// 1.7.0 (2026-11-11, direct request: "pathfinding needs to understand when it has to go up") --
+// installSteppedGoto() climbs when the goal is well above her and she is under a ceiling: a leg to
+// a height up to CLIMB_LEG_RISE higher, with digCost cut to CLIMB_DIG_COST for that leg only. A
+// goto() the library resolved on an empty, unsuccessful search short of the goal also gets a climb
+// when one applies (sealed in rock); otherwise it resolves as before.
 //
 // 1.6.0 (2026-11-07) -- installSteppedGoto(): a NoPath/Timeout that still carries a partial path is
 // walked to its end and searched again from there, instead of failing.
@@ -167,6 +173,68 @@ export function installDoorSupport(bot) {
 export const STEPPED_GOTO_MAX_LEGS = 8;
 const STEPPED_GOTO_MIN_PROGRESS = 2;
 
+// Direct request, 2026-11-11: "pathfinding needs to understand when it has to go up". Amy followed
+// loot/store to generated chests underground and dug down from y=70 to y=3 two blocks a leg, then
+// never got back: every route home was 90 blocks up, and she wandered the caves between two spots
+// for over an hour. Digging down breaks one block per move; a step up through rock breaks three,
+// each priced up to MAX_DIG_LABOR_COST (20) -- ~62 for one block of height, against the search's
+// whole slack of searchRadius 48 (pathfinding.js) over the straight-line estimate. So no search
+// could ever climb through rock: every one came back with a sideways cave path, or none. When the
+// goal is at least CLIMB_MIN_RISE above her, rock overhead, and the search found nothing that
+// climbs, the next leg is a climb instead: GoalY up to CLIMB_LEG_RISE higher, with digCost cut to
+// CLIMB_DIG_COST (a pickaxe then counts for something) and a CLIMB_SEARCH_BUDGET big enough for
+// CLIMB_LEG_RISE blocks of the worst case, both for that leg only. A climb search that still runs
+// short is walked as far as it rose, like any other leg; climbs don't count against
+// STEPPED_GOTO_MAX_LEGS, and a partial path rising less than half a climb leg gets one instead.
+// Under open sky nothing changes -- a
+// valley's way up is walking round, not tunnelling through the hillside.
+export const CLIMB_MIN_RISE = 10;
+const CLIMB_LEG_RISE = 8;
+const CLIMB_DIG_COST = 1;
+const CLIMB_SEARCH_BUDGET = 500; // CLIMB_LEG_RISE x (2 + 3 x MAX_DIG_LABOR_COST), + margin
+
+function goalHeight(goal) {
+  const y = goal?.y ?? goal?.pos?.y;
+  return Number.isFinite(y) ? y : null;
+}
+
+function rockOverhead(bot, here, rise) {
+  for (let dy = 2; dy <= rise; dy++) {
+    if (bot.blockAt(here.offset(0, dy, 0))?.boundingBox === "block") return true;
+  }
+  return false;
+}
+
+async function climbLeg(bot, goto, goal, leg, lastResult) {
+  const target = goalHeight(goal);
+  const here = bot.entity.position.floored();
+  const movements = bot.pathfinder.movements;
+  if (target === null || target - here.y < CLIMB_MIN_RISE || !movements?.canDig) return false;
+  const toY = Math.min(target, here.y + CLIMB_LEG_RISE);
+  if (!rockOverhead(bot, here, toY - here.y + 1)) return false;
+  console.log(`[${bot.username}] pathfinder: the goal is ${target - here.y} blocks up, under rock -- ` +
+    `leg ${leg}: climbing to y=${toY}, then searching again`);
+  const { digCost } = movements;
+  const { searchRadius } = bot.pathfinder;
+  movements.digCost = Math.min(digCost, CLIMB_DIG_COST);
+  if (searchRadius >= 0) bot.pathfinder.searchRadius = Math.max(searchRadius, CLIMB_SEARCH_BUDGET);
+  try {
+    await goto(new pathfinderPkg.goals.GoalY(toY));
+  } catch (err) {
+    if (err.name !== "NoPath" && err.name !== "Timeout") throw err;
+    const result = lastResult();
+    const end = result?.path?.length ? result.path[result.path.length - 1] : null;
+    if (end && end.y - here.y >= STEPPED_GOTO_MIN_PROGRESS) {
+      if (searchRadius >= 0) bot.pathfinder.searchRadius = Math.max(bot.pathfinder.searchRadius, Math.ceil(result.cost ?? 0) + 8);
+      await goto(new pathfinderPkg.goals.GoalBlock(end.x, end.y, end.z));
+    }
+  } finally {
+    movements.digCost = digCost;
+    bot.pathfinder.searchRadius = searchRadius;
+  }
+  return bot.entity.position.y - here.y >= STEPPED_GOTO_MIN_PROGRESS;
+}
+
 export function installSteppedGoto(bot) {
   const goto = bot.pathfinder.goto.bind(bot.pathfinder);
   let lastResult = null;
@@ -175,13 +243,33 @@ export function installSteppedGoto(bot) {
     for (let leg = 1; ; leg++) {
       lastResult = null;
       try {
-        return await goto(goal);
+        await goto(goal);
+        // mineflayer-pathfinder 2.4.5's goto() resolves on ANY search that comes back with an empty
+        // path, noPath and partial included -- "as close as it gets", without a step (~25,500 such
+        // results in the fleet's 48h to 2026-11-11). Callers rely on that ("mine" digs from where
+        // she stands -- live: a NoPath here instead broke felling a whole trunk), so it stands,
+        // except sealed in rock well under the goal, where it hid the climb below.
+        if (lastResult && !lastResult.path?.length && lastResult.status !== "success" &&
+            typeof goal.isEnd === "function" && !goal.isEnd(bot.entity.position.floored()) &&
+            leg < STEPPED_GOTO_MAX_LEGS && await climbLeg(bot, goto, goal, leg, () => lastResult)) {
+          leg--;
+          continue;
+        }
+        return;
       } catch (err) {
         const partial = lastResult?.path;
         const partialCost = lastResult?.cost ?? 0;
-        if (leg >= STEPPED_GOTO_MAX_LEGS || (err.name !== "NoPath" && err.name !== "Timeout") || !partial?.length) throw err;
-        const end = partial[partial.length - 1];
-        const gained = goal.heuristic(bot.entity.position.floored()) - goal.heuristic(end);
+        if (leg >= STEPPED_GOTO_MAX_LEGS || (err.name !== "NoPath" && err.name !== "Timeout")) throw err;
+        const here = bot.entity.position.floored();
+        const end = partial?.length ? partial[partial.length - 1] : null;
+        // A climb doesn't use up a leg: each one gains height and they stop CLIMB_MIN_RISE short of
+        // the goal. (Live: counted, two pillar legs of 2 blocks each spent the last of them at y=179.)
+        if (!(end && end.y - here.y >= CLIMB_LEG_RISE / 2) && await climbLeg(bot, goto, goal, leg, () => lastResult)) {
+          leg--;
+          continue;
+        }
+        if (!end) throw err;
+        const gained = goal.heuristic(here) - goal.heuristic(end);
         if (gained < STEPPED_GOTO_MIN_PROGRESS) throw err;
         console.log(`[${bot.username}] pathfinder: no whole path within the search limit (${err.name}) -- ` +
           `leg ${leg}: walking to (${end.x}, ${end.y}, ${end.z}), ${gained.toFixed(1)} closer, then searching again`);

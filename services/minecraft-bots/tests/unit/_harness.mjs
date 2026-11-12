@@ -1,5 +1,6 @@
-// Version: 1.3.0
+// Version: 1.4.0
 //
+// 1.4.0 (2026-11-11): steppedGotoWorld() takes a start, rock overhead and movements, and walks GoalY climbs.
 // 1.3.0 (2026-11-10): `index` also carries chat.js, planning.js, home-scan.js and priorities.js;
 // `indexOnly` is index.js alone.
 // 1.2.0 (2026-11-10): `index` also carries self-defense.js (index.js 2.140.0).
@@ -654,29 +655,46 @@ export function chestActionContext(bot, known) {
 
 // 2026-11-07 (swim-movements.js 1.6.0): a search that runs out of budget walks its partial path
 // toward the goal and searches again, instead of failing.
-export function steppedGotoWorld(script) {
+export function steppedGotoWorld(script, { start = new V3(0, 64, 0), rock = false, canDig = true } = {}) {
   // script: one entry per real goto() call -- { path, status } rejects with that status's error after
   // emitting path_update; 'ok' resolves. A GoalBlock leg moves her to its block.
   const bot = new EventEmitter();
   const calls = [];
   const named = (name) => Object.assign(new Error(name), { name });
   bot.username = 'Amy';
-  bot.entity = { position: new V3(0, 64, 0) };
+  bot.entity = { position: start };
+  // rock: every cell above her start is solid, as in a cave; otherwise open sky.
+  bot.blockAt = (p) => ({ boundingBox: rock && p.y > start.y + 1 ? 'block' : 'empty' });
   bot.pathfinder = {
-    searchRadius: 48, legRadii: [],
+    searchRadius: 48, legRadii: [], climbDigCosts: [], climbRadii: [],
+    movements: { digCost: 15, canDig },
     async goto(goal) {
       calls.push(goal.kind ?? 'goal');
+      if (goal.kind === 'y') {
+        bot.pathfinder.climbDigCosts.push(bot.pathfinder.movements.digCost);
+        bot.pathfinder.climbRadii.push(bot.pathfinder.searchRadius);
+        // { climbPartial } next in the script: this climb's search runs short with that partial path.
+        if (script[0]?.climbPartial) {
+          const st = script.shift();
+          bot.emit('path_update', { status: 'noPath', path: st.climbPartial, cost: st.cost ?? 10 });
+          throw named('NoPath');
+        }
+        bot.entity.position = new V3(bot.entity.position.x, goal.y, bot.entity.position.z);
+        return;
+      }
       if (goal.kind === 'block') bot.pathfinder.legRadii.push(bot.pathfinder.searchRadius);
       if (goal.kind === 'block') { bot.entity.position = new V3(goal.x, goal.y, goal.z); return; }
       const step = script.shift();
       if (step === 'ok') return;
       if (step.error) throw named(step.error);
       bot.emit('path_update', { status: step.status, path: step.path, cost: step.cost ?? 10 });
+      if (step.resolves) return; // the library's own goto() resolves on any empty path
       throw named(step.status === 'noPath' ? 'NoPath' : 'Timeout');
     },
   };
   const c = vm.createContext({ console: { log() {} }, pathfinderPkg: { goals: {
-    GoalBlock: class { constructor(x, y, z) { Object.assign(this, { x, y, z, kind: 'block' }); } } } } });
+    GoalBlock: class { constructor(x, y, z) { Object.assign(this, { x, y, z, kind: 'block' }); } },
+    GoalY: class { constructor(y) { Object.assign(this, { y, kind: 'y' }); } } } } });
   vm.runInContext(between(swim, 'export const STEPPED_GOTO_MAX_LEGS', '// Opens a closed wooden door'), c);
   c.installSteppedGoto(bot);
   // The goal: 100 blocks east; its estimate is the distance left.

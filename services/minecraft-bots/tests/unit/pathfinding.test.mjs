@@ -1,5 +1,6 @@
-// Version: 1.1.0
+// Version: 1.2.0
 //
+// 1.2.0 (2026-11-11): far below the goal under rock, stepped goto climbs (swim-movements.js 1.7.0).
 // 1.1.0 (2026-11-10): setupPathfinding() (pathfinding.js 1.0.0, out of index.js) installs the
 // movement costs, unbreakable blocks, search limits and the dig_error burst guard.
 //
@@ -148,6 +149,84 @@ await check('Pathfinding: no progress, a changed goal, or too many legs still fa
   w = steppedGotoWorld(Array.from({ length: 12 }, (_, i) => ({ status: 'noPath', path: [new V3(5 * (i + 1), 64, 0)] })));
   await assert.rejects(w.bot.pathfinder.goto(w.goal), { name: 'NoPath' });
   assert.equal(w.calls.filter((k) => k === 'goal').length, 8, 'eight searches, then she gives up');
+});
+
+// 2026-11-11 (swim-movements.js 1.7.0): Amy, 90 blocks under home in a cave with no pickaxe, never
+// came back up -- a step up through rock was priced past the pathfinder's per-move limit.
+await check('Pathfinding: far below the goal under rock, she climbs in legs with digging made cheap, then finds the way', async () => {
+  const home = { y: 94, heuristic: (n) => Math.abs(100 - n.x) + Math.abs(94 - n.y) };
+  // A cave search that wanders sideways, as Amy's did; then the whole way from near the top.
+  const { bot, calls } = steppedGotoWorld([
+    { status: 'noPath', path: [new V3(20, 3, 0)] },
+    { status: 'noPath', path: [] },
+    { status: 'noPath', path: [new V3(20, 50, 0)] }, // this one climbs on its own: walked, as before
+    'ok',
+  ], { start: new V3(0, 3, 0), rock: true });
+  await bot.pathfinder.goto(home);
+  assert.deepEqual(calls.slice(0, 4), ['goal', 'y', 'goal', 'y'], 'a sideways partial and no partial both get a climb instead');
+  assert.deepEqual(bot.pathfinder.climbDigCosts, [1, 1], 'digging is cheap only while climbing');
+  assert.equal(bot.pathfinder.movements.digCost, 15, 'and put back after');
+  assert.deepEqual(bot.pathfinder.climbRadii, [500, 500], 'a climb search gets the budget for 8 blocks of rock');
+  assert.equal(bot.pathfinder.searchRadius, 48, 'the budget is put back after');
+  assert.equal(calls.at(-1), 'goal', 'then the whole way is searched again');
+  assert.equal(bot.entity.position.y, 50, 'two climbs, then a partial path that rises is walked');
+});
+
+await check('Pathfinding: a climb search that runs short is walked as far as it rose', async () => {
+  const home = { y: 94, heuristic: (n) => Math.abs(94 - n.y) };
+  const { bot, calls } = steppedGotoWorld([
+    { status: 'noPath', path: [] },
+    { climbPartial: [new V3(1, 4, 0), new V3(2, 7, 0)], cost: 520 },
+    'ok',
+  ], { start: new V3(0, 3, 0), rock: true });
+  await bot.pathfinder.goto(home);
+  assert.deepEqual(calls, ['goal', 'y', 'block', 'goal'], 'climb, walk its partial up, then search again');
+  assert.equal(bot.entity.position.y, 7);
+  assert.deepEqual(bot.pathfinder.legRadii, [528], 'the walk gets the budget its partial path cost');
+  assert.equal(bot.pathfinder.searchRadius, 48);
+  assert.equal(bot.pathfinder.movements.digCost, 15);
+});
+
+await check('Pathfinding: climbs do not use up legs, and a partial that barely rises gets a climb instead', async () => {
+  // Live (2026-11-11): counted as legs, two 2-block pillar legs spent the last of them 12 short.
+  const deep = { y: 200, heuristic: (n) => Math.abs(200 - n.y) };
+  let w = steppedGotoWorld([...Array.from({ length: 12 }, () => ({ status: 'noPath', path: [] })), 'ok'],
+    { start: new V3(0, 3, 0), rock: true });
+  await w.bot.pathfinder.goto(deep);
+  assert.equal(w.calls.filter((k) => k === 'y').length, 12, 'twelve climbs, past the eight-leg limit');
+  assert.equal(w.bot.entity.position.y, 99);
+  w = steppedGotoWorld([{ status: 'noPath', path: [new V3(0, 5, 0)] }, 'ok'], { start: new V3(0, 3, 0), rock: true });
+  await w.bot.pathfinder.goto(deep);
+  assert.deepEqual(w.calls, ['goal', 'y', 'goal'], 'a partial rising 2 is not walked: she climbs 8');
+});
+
+await check('Pathfinding: no climb under open sky, close to the goal height, or while digging is off', async () => {
+  const above = { y: 94, heuristic: (n) => Math.abs(100 - n.x) };
+  let w = steppedGotoWorld([{ status: 'noPath', path: [new V3(20, 64, 0)] }, 'ok'], { rock: false });
+  await w.bot.pathfinder.goto(above);
+  assert(!w.calls.includes('y'), 'open sky: she walks round, never tunnels up a hillside');
+  w = steppedGotoWorld([{ status: 'noPath', path: [new V3(20, 64, 0)] }, 'ok'], { rock: true });
+  await w.bot.pathfinder.goto({ y: 70, heuristic: above.heuristic });
+  assert(!w.calls.includes('y'), 'six blocks up is not a climb');
+  w = steppedGotoWorld([{ status: 'noPath', path: [] }], { start: new V3(0, 3, 0), rock: true, canDig: false });
+  await assert.rejects(w.bot.pathfinder.goto(above), { name: 'NoPath' }, 'digging suppressed: nothing to climb with');
+  w = steppedGotoWorld([{ status: 'noPath', path: [new V3(20, 64, 0)] }, 'ok'], { rock: true });
+  await w.bot.pathfinder.goto({ heuristic: above.heuristic });
+  assert(!w.calls.includes('y'), 'a goal with no height (following someone) is never climbed to');
+});
+
+await check('Pathfinding: an empty, failed search the library resolved gets a climb when sealed in rock, else stands', async () => {
+  // The live scenario found it: sealed in rock, the search came back partial with no nodes and
+  // goto() resolved -- she "arrived" 32 blocks under her goal without a step.
+  const sealed = { y: 94, heuristic: (n) => Math.abs(94 - n.y), isEnd: (n) => n.y === 94 };
+  let w = steppedGotoWorld([{ status: 'partial', path: [], resolves: true }, 'ok'], { start: new V3(0, 3, 0), rock: true });
+  await w.bot.pathfinder.goto(sealed);
+  assert.deepEqual(w.calls.slice(0, 2), ['goal', 'y'], 'sealed in: she climbs instead of "arriving"');
+  // "mine" relies on the library's "as close as it gets" (live: felling a whole trunk broke when
+  // this was a NoPath everywhere).
+  w = steppedGotoWorld([{ status: 'noPath', path: [], resolves: true }], { rock: false });
+  await w.bot.pathfinder.goto({ y: 94, heuristic: () => 5, isEnd: () => false });
+  assert.deepEqual(w.calls, ['goal'], 'no climb to make: it resolves, as the library does');
 });
 
 // 2026-11-10 (pathfinding.js 1.0.0): the pathfinder setup moved out of index.js unchanged.
