@@ -1,4 +1,5 @@
-// Version: 1.0.0
+// Version: 1.0.1
+// 1.0.1 | 2026-11-11 | Stop the server and bots before reporting; a malformed OUTCOME line can't skip cleanup (PR #4 review).
 // 1.0.0 | 2026-11-11 | Disposable-world Buzz handoff and paired planner load trials.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
@@ -323,17 +324,21 @@ async function trial(jar, seed, mode, count) {
     for (const actor of actors) console.error(actor.lines.slice(-10).join("\n"));
     return false;
   } finally {
-    const outcomes = actors.flatMap((actor) => actor.lines.flatMap((line) => {
-      const match = line.match(/ OUTCOME (\{.*\})$/);
-      return match ? [JSON.parse(match[1])] : [];
-    }));
-    console.log(JSON.stringify({ mode, seed, bots: count, crossHost, milestones, plannerErrors, plannerMs,
-      plannedBy: [...plannedBy],
-      elapsedMs: startedAt ? Date.now() - startedAt : null, recentActionOutcomes: outcomes }));
+    // Stop everything first: nothing below may leave a Java server or bot running.
+    const elapsedMs = startedAt ? Date.now() - startedAt : null;
     proxy?.closeAllConnections();
     proxy?.close();
-    for (const proc of processes.reverse()) await proc.stop();
+    for (const proc of processes.reverse()) {
+      try { await proc.stop(); } catch (error) { console.error(`stop failed: ${error.message}`); }
+    }
     await rm(root, { recursive: true, force: true });
+    const outcomes = actors.flatMap((actor) => actor.lines.flatMap((line) => {
+      const match = line.match(/ OUTCOME (\{.*\})$/);
+      if (!match) return [];
+      try { return [JSON.parse(match[1])]; } catch { return [{ unparsed: match[1] }]; }
+    }));
+    console.log(JSON.stringify({ mode, seed, bots: count, crossHost, milestones, plannerErrors, plannerMs,
+      plannedBy: [...plannedBy], elapsedMs, recentActionOutcomes: outcomes }));
   }
 }
 

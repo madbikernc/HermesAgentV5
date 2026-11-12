@@ -1,4 +1,5 @@
-// Version: 1.1.0
+// Version: 1.1.1
+// 1.1.1 | 2026-11-11 | Close the furnace window when stopped mid-batch (PR #4 review).
 // 1.1.0 | 2026-11-11 | Wait for the requested batch before collecting furnace output.
 //
 // The "smelt" action, split out of actions.js's performActionAs() switch
@@ -116,7 +117,12 @@ export async function smeltAction(bot, action, speaker, token) {
       // Returning on the first ingot strands the rest in the furnace after all input
       // leaves inventory. A second smelt cannot recover it through the input precheck.
       const outputReady = await waitForSmeltOutput(furnace, smeltCount, token, SMELT_TIMEOUT_MS);
-      if (token.cancelled) return ok("stopped waiting for the furnace.");
+      if (token.cancelled) {
+        // Stopped mid-batch (self-defense, a new goal): close the window, or it stays open into
+        // whatever comes next. What's left smelting is collected by the next smelt (above).
+        await furnace.close();
+        return ok("stopped waiting for the furnace.");
+      }
 
       let smelted = 0;
       if (outputReady) {

@@ -1,4 +1,5 @@
-// Version: 1.1.0
+// Version: 1.2.0
+// 1.2.0 | 2026-11-11 | Smelt stopped mid-batch closes the furnace window (smelt.js 1.1.1).
 // 1.1.0 | 2026-11-11 | Furnace batch wait and closed-window cleanup.
 //
 // Unit checks: crafting, tools, torches and gear (part 2 of 2).
@@ -33,6 +34,39 @@ await check('Smelt waits for the batch and stops on a closed furnace window', as
   assert.equal(await ctx.waitForSmeltOutput(furnace, 3, {}, 10), true, 'collect partial output at timeout');
 });
 
+
+await check('Smelt stopped mid-batch closes the furnace window', async () => {
+  // PR #4 review: the cancel return came before furnace.close(), leaving the window open.
+  const src = actionSource('smelt').replace(/^import .*$/m, '').replace(/^export /gm, '');
+  const token = { cancelled: false };
+  let closes = 0;
+  const furnace = new EventEmitter();
+  Object.assign(furnace, {
+    outputItem: () => null, inputItem: () => null, fuelItem: () => null,
+    putFuel: async () => {}, takeOutput: async () => null,
+    putInput: async () => { setTimeout(() => { token.cancelled = true; }, 50); },
+    close: async () => { closes++; furnace.emit('close'); },
+  });
+  const pos = new V3(3, 64, 0);
+  const bot = {
+    inventory: { items: () => [{ name: 'raw_iron', type: 1, count: 3 }] },
+    registry: { blocksByName: { furnace: { id: 9 } } },
+    findBlocks: () => [pos],
+    blockAt: () => ({ name: 'furnace', position: pos }),
+    pathfinder: { goto: async () => {}, setGoal: () => {} },
+    openFurnace: async () => furnace,
+  };
+  const ctx = vm.createContext({
+    setTimeout, clearTimeout, setInterval, clearInterval, console: { log() {} },
+    ACTION_TIMEOUT_MS: 1000, SMELT_TIMEOUT_MS: 5000, SMELT_RECIPES: { iron_ingot: ['raw_iron'] },
+    goals: { GoalNear: class {} }, noteUtilityOutcome() {}, pickFuel: () => ({ type: 2, count: 3 }),
+    refreshGear: async () => {}, wanderAndRetryFind: async () => [], withTimeout: (p) => p,
+  });
+  vm.runInContext(`${src}; this.smeltAction = smeltAction;`, ctx);
+  const result = await ctx.smeltAction(bot, { type: 'smelt', item: 'iron_ingot', count: 3 }, 'tester', token);
+  assert.equal(result.text, 'stopped waiting for the furnace.');
+  assert.equal(closes, 1, 'the furnace window is closed before returning');
+});
 
 await check('Tool upgrades: stone once she can mine it, iron once she can smelt, all five tools', async () => {
   // Direct request, 2026-10-28: tools evolve wood -> stone (any pickaxe) -> iron (stone pickaxe +
