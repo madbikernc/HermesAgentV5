@@ -1,4 +1,5 @@
-// Version: 2.144.1
+// Version: 2.145.0
+// 2.145.0 | 2026-11-11 | Report actual dropped counts and release control before give narration.
 //
 // 2.144.1 (2026-11-11, direct report: build "successes" were false positives): shelterStep's
 // "build says it stands" guard checks that THIS goal's site is a complete shelter, not that any
@@ -4810,25 +4811,26 @@ async function checkPendingGiveRequests() {
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return; // still pending -- retried next check until it expires
   pendingGiveRequest = null;
+  let result;
   try {
     console.log(`[${USERNAME}] fulfilling request: giving ${count} ${item} to ${forPlayer}`);
-    const result = await performAction(bot, { type: "give", player: forPlayer, item, count }, USERNAME, handle);
+    result = await performAction(bot, { type: "give", player: forPlayer, item, count }, USERNAME, handle);
     console.log(`[${USERNAME}] give result: ${result.text} (ok=${result.ok})`);
     if (result.cancelled) pendingGiveRequest = pending; // interrupted, not failed -- deliver later
     // Review MB-13 follow-up (2026-09-24): a genuine failure gets one retry before the promise is
-    // dropped, and a success is acknowledged to the requester with the real count.
+    // dropped. A successful toss reports the dropped count. Only the recipient can verify pickup.
     else if (!result.ok && (pending.attempts ?? 0) < 1) pendingGiveRequest = { ...pending, attempts: (pending.attempts ?? 0) + 1 };
     if (result.ok) {
       buzzPublish(AGENT_ID, "minecraft-coordination", JSON.stringify({ type: "delivered",
-        requestId: pending.requestId, forPlayer, item, count, donor: USERNAME }))
+        requestId: pending.requestId, forPlayer, item, count: result.droppedCount, donor: USERNAME }))
         .catch((err) => console.error(`[${USERNAME}] delivery ack publish failed:`, err.message));
     }
-    if (result.ok) bot.chat(await narrateAction(`brought you some ${item}, ${forPlayer}.`));
   } catch (err) {
     console.error(`[${USERNAME}] give check failed:`, err.message);
   } finally {
     handle.release();
   }
+  if (result?.ok) bot.chat(await narrateAction(result.text));
 }
 
 guardedInterval(() => {
@@ -6187,7 +6189,7 @@ bot.once("spawn", () => {
       } else if (payload.type === "claim") {
         giveClaims.get(payload.requestId)?.claimants.add(payload.donor);
       } else if (payload.type === "delivered" && payload.forPlayer === USERNAME) {
-        console.log(`[${USERNAME}] delivery confirmed: ${payload.count} ${payload.item} from ${payload.donor}`);
+        console.log(`[${USERNAME}] drop reported: ${payload.count} ${payload.item} from ${payload.donor}; pickup unverified`);
       } else if (payload.type === "scout") {
         // Direct request, 2026-09-11 ("ask the other bots to look near themselves... they
         // add/update their knowledge of nearby resources into global world memory"). Same

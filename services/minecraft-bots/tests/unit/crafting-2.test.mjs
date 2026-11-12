@@ -1,4 +1,5 @@
-// Version: 1.0.0
+// Version: 1.1.0
+// 1.1.0 | 2026-11-11 | Furnace batch wait and closed-window cleanup.
 //
 // Unit checks: crafting, tools, torches and gear (part 2 of 2).
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -8,7 +9,29 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, V3, between, sleep, check, BLOCK_ID, blockWorld, tunnel, passedCount } from './_harness.mjs';
+import { actions, index, V3, between, actionSource, sleep, check, BLOCK_ID, blockWorld, tunnel, passedCount } from './_harness.mjs';
+
+await check('Smelt waits for the batch and stops on a closed furnace window', async () => {
+  const ctx = vm.createContext({ setTimeout, clearTimeout, setInterval, clearInterval });
+  vm.runInContext(between(actionSource('smelt'), 'export function waitForSmeltOutput('), ctx);
+  const furnace = new EventEmitter();
+  let count = 1;
+  furnace.outputItem = () => ({ count });
+  let ready = false;
+  const wait = ctx.waitForSmeltOutput(furnace, 3, {}, 2000).then((result) => { ready = result; });
+  await sleep(300);
+  assert.equal(ready, false, 'the first ingot does not satisfy a batch of three');
+  count = 3;
+  await wait;
+  assert.equal(ready, true);
+  assert.equal(furnace.listenerCount('close'), 0);
+
+  count = 1;
+  const closed = ctx.waitForSmeltOutput(furnace, 3, {}, 2000);
+  furnace.emit('close');
+  assert.equal(await closed, false);
+  assert.equal(await ctx.waitForSmeltOutput(furnace, 3, {}, 10), true, 'collect partial output at timeout');
+});
 
 
 await check('Tool upgrades: stone once she can mine it, iron once she can smelt, all five tools', async () => {

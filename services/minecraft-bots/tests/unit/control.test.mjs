@@ -1,4 +1,5 @@
-// Version: 1.1.0
+// Version: 1.2.0
+// 1.2.0 | 2026-11-11 | Partial drop acknowledgements and narration after releasing control.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
@@ -10,7 +11,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, skills, arbiter, V3, between, actionFn, timeoutFn, makeBot, context, shelter, sleep, check, skillsSrc, router, goalTickContext, ragContext, farmGoalSrc, slice, passedCount } from './_harness.mjs';
+import { actions, index, skills, arbiter, V3, between, actionFn, actionSource, timeoutFn, makeBot, context, shelter, sleep, check, skillsSrc, router, goalTickContext, ragContext, farmGoalSrc, slice, passedCount } from './_harness.mjs';
 
 
 await check('MB-03 teleport-style cancelAndClear leaves no owner behind', async () => {
@@ -154,12 +155,36 @@ await check('MB-06 a bare "stop" from the player whose command is running stops 
 });
 
 
+await check('Give reports the actual partial drop without claiming recipient pickup', async () => {
+  const drops = [];
+  const bot = {
+    players: { Amy: { entity: {} } },
+    registry: { itemsByName: { raw_iron: { id: 7 } } },
+    inventory: { count: () => 1 },
+    pathfinder: { goto: async () => {}, setGoal() {} },
+    toss: async (id, metadata, count) => { drops.push([id, metadata, count]); },
+  };
+  const c = vm.createContext({ GEAR_SUFFIXES: [], ACTION_TIMEOUT_MS: 100,
+    goals: { GoalFollow: class {} }, withTimeout: (promise) => promise });
+  vm.runInContext(between(actionSource('give'), 'export async function giveAction('), c);
+  const result = await c.giveAction(bot, { player: 'Amy', item: 'raw_iron', count: 3 }, 'Babs', {});
+  assert.deepEqual(drops, [[7, null, 1]]);
+  assert.equal(result.droppedCount, 1);
+  assert.equal(result.text, 'dropped 1 raw_iron near Amy.');
+});
+
 await check('MB-13 a failed delivery is retried once; a success is acknowledged', async () => {
-  const published = []; let outcome = { ok: false, text: 'nope' };
+  const published = []; let outcome = { ok: false, text: 'nope' }; let held = false;
   const c = vm.createContext({ Date, console: { log() {}, error() {} }, USERNAME: 'Bob', AUTONOMY_ENABLED: true,
-    bot: { isSleeping: false }, AGENT_ID: 'mc-bob', settleGiveClaims() {}, routineBlocked: () => false,
-    arbiter: { requestControl: async () => ({ release() {} }), OWNERS: { ROUTINE: {} } },
-    performAction: async () => outcome, narrateAction: async (t) => t,
+    bot: { isSleeping: false, chat() {} }, AGENT_ID: 'mc-bob', settleGiveClaims() {}, routineBlocked: () => false,
+    arbiter: { requestControl: async () => {
+      held = true;
+      return { release() { held = false; } };
+    }, OWNERS: { ROUTINE: {} } },
+    performAction: async () => outcome, narrateAction: async (t) => {
+      assert.equal(held, false, 'narration must not hold the bot body');
+      return t;
+    },
     buzzPublish: async (_, __, body) => { published.push(JSON.parse(body)); } });
   vm.runInContext('var pendingGiveRequest = { forPlayer: "Amy", item: "oak_log", count: 2, requestId: "r1", attempts: 0, expiresAt: Date.now() + 60000 };' +
     between(index, 'async function checkPendingGiveRequests(', 'guardedInterval(() => {\n  checkPendingGiveRequests'), c);
@@ -168,9 +193,10 @@ await check('MB-13 a failed delivery is retried once; a success is acknowledged'
   await c.checkPendingGiveRequests();
   assert.equal(vm.runInContext('pendingGiveRequest', c), null, 'dropped after the retry');
   vm.runInContext('pendingGiveRequest = { forPlayer: "Amy", item: "oak_log", count: 2, requestId: "r2", attempts: 0, expiresAt: Date.now() + 60000 }', c);
-  outcome = { ok: true, text: 'gave' };
+  outcome = { ok: true, text: 'dropped 1 oak_log near Amy.', droppedCount: 1 };
   await c.checkPendingGiveRequests();
-  assert.deepEqual(published.map((p) => [p.type, p.requestId, p.count]), [['delivered', 'r2', 2]]);
+  assert.deepEqual(published.map((p) => [p.type, p.requestId, p.count]), [['delivered', 'r2', 1]],
+    'acknowledge the actual drop count, which may be smaller than the request');
 });
 
 

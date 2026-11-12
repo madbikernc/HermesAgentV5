@@ -1,10 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
+// 1.1.0 | 2026-11-11 | Wait for the requested batch before collecting furnace output.
 //
 // The "smelt" action, split out of actions.js's performActionAs() switch
 // (actions.js 2.0.0, 2026-11-10) unchanged, so a fix to it is a fix to this file alone. Called
 // through ACTION_HANDLERS with performActionAs's own arguments; ok()/fail() build its result.
 
-import path from "node:path";
 import { ACTION_TIMEOUT_MS, SMELT_RECIPES, SMELT_TIMEOUT_MS, goals, noteUtilityOutcome, pickFuel, refreshGear, wanderAndRetryFind, withTimeout } from "../actions.js";
 
 
@@ -113,19 +113,10 @@ export async function smeltAction(bot, action, speaker, token) {
       }
       await furnace.putInput(inputItem.type, null, smeltCount);
 
-      // furnace.js has no built-in "wait until done" -- poll its own 'update' event (fired
-      // on every server progress packet) for a non-empty output, with a safety timeout.
-      const outputReady = await new Promise((resolve) => {
-        let settled = false;
-        const check = () => {
-          const out = furnace.outputItem();
-          if (out && out.count > 0 && !settled) { settled = true; resolve(true); }
-        };
-        furnace.on("update", check);
-        check();
-        setTimeout(() => { if (!settled) resolve(false); }, SMELT_TIMEOUT_MS);
-      });
-      furnace.removeAllListeners("update");
+      // Returning on the first ingot strands the rest in the furnace after all input
+      // leaves inventory. A second smelt cannot recover it through the input precheck.
+      const outputReady = await waitForSmeltOutput(furnace, smeltCount, token, SMELT_TIMEOUT_MS);
+      if (token.cancelled) return ok("stopped waiting for the furnace.");
 
       let smelted = 0;
       if (outputReady) {
@@ -143,4 +134,24 @@ export async function smeltAction(bot, action, speaker, token) {
     }
   }
   return fail("found furnaces nearby, but couldn't use any of them.");
+}
+
+export function waitForSmeltOutput(furnace, count, token, timeoutMs) {
+  return new Promise((resolve) => {
+    const finish = (ready) => {
+      clearTimeout(deadline);
+      clearInterval(poll);
+      furnace.off("close", closed);
+      resolve(ready);
+    };
+    const closed = () => finish(false);
+    const check = () => {
+      if (token.cancelled) finish(false);
+      else if ((furnace.outputItem()?.count ?? 0) >= count) finish(true);
+    };
+    const deadline = setTimeout(() => finish(!token.cancelled && (furnace.outputItem()?.count ?? 0) > 0), timeoutMs);
+    const poll = setInterval(check, 250);
+    furnace.once("close", closed);
+    check();
+  });
 }

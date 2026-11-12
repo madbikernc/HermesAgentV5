@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Version: 1.4.0
+# Version: 1.5.0
+# 1.5.0 (2026-11-11): disposable-world multibot suite in all and as a standalone phase.
 #
 # 1.4.0 (2026-11-10): unit and all also run tests/link-check.mjs where node_modules exists -- every
 # import of index.js and the modules split out of it resolves, checked without running a bot.
@@ -8,6 +9,7 @@
 #   tests/run.sh unit        offline fix-validation checks (runs anywhere with node)
 #   tests/run.sh live        action-level live scenarios against the bot-sandbox server (Spark nodes)
 #   tests/run.sh livebot     full-bot live scenarios (a real index.js as MBProbe; Spark nodes)
+#   tests/run.sh multibot    isolated handoff and planner trials (requires MB_MULTI_SERVER_JAR)
 #   tests/run.sh baseline    this host's last-24h behavior vs tests/baselines/<host>.json, plus
 #                            monitoring coverage (every bot unit mirrored and triaged)
 #   tests/run.sh all         unit, then live + livebot (if the server is reachable), then baseline
@@ -55,6 +57,7 @@ case "$suite" in
   unit)     run unit node tests/unit.test.mjs "$@"; linkcheck; run triage python3 tests/test_triage.py; run ragserver python3 tests/test_rag_server.py ;;
   live)     if server_up; then run live node tests/live.test.mjs "$@"; else echo "=== live: skipped (no node_modules or bot server unreachable from $host)"; fi ;;
   livebot)  if server_up; then run livebot node tests/live-bot.test.mjs "$@"; else echo "=== livebot: skipped (no node_modules or bot server unreachable from $host)"; fi ;;
+  multibot) run multibot node tests/multibot.test.mjs "$@" ;;
   baseline) run baseline node tests/baseline.mjs "$@"; run monitoring node tests/monitoring.mjs ;;
   all)
     run unit node tests/unit.test.mjs
@@ -67,6 +70,7 @@ case "$suite" in
     else
       echo "=== live: skipped (no node_modules or bot server unreachable from $host)"
     fi
+    run multibot node tests/multibot.test.mjs
     if command -v journalctl >/dev/null && [ -f "tests/baselines/$host.json" ]; then
       run baseline node tests/baseline.mjs
       run monitoring node tests/monitoring.mjs
@@ -74,6 +78,6 @@ case "$suite" in
       echo "=== baseline: skipped (no journal or no tests/baselines/$host.json)"
     fi
     ;;
-  *) echo "usage: $0 {unit|live|livebot|baseline|all} [args]"; exit 2 ;;
+  *) echo "usage: $0 {unit|live|livebot|multibot|baseline|all} [args]"; exit 2 ;;
 esac
 exit $status

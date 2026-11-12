@@ -1,4 +1,5 @@
-// Version: 1.0.0
+// Version: 1.1.0
+// 1.1.0 | 2026-11-11 | Report the actual drop count and distinguish dropping from pickup.
 //
 // The "give" action, split out of actions.js's performActionAs() switch
 // (actions.js 2.0.0, 2026-11-10) unchanged, so a fix to it is a fix to this file alone. Called
@@ -84,5 +85,5 @@ export async function giveAction(bot, action, speaker, token) {
   } catch (err) {
     return fail(`couldn't give the ${action.item}: ${err.message}`);
   }
-  return ok(`gave ${giveCount} ${action.item} to ${action.player}.`);
+  return { ...ok(`dropped ${giveCount} ${action.item} near ${action.player}.`), droppedCount: giveCount };
 }
