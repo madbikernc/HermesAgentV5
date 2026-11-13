@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-11-13) — direct operator request (self-repair fidelity pass):
+#   * REVIEW_SYSTEM_PROMPT now requires the reviewer to name the call path through which the
+#     change alters runtime behavior, and to answer ISSUES when there is none -- both reviewers
+#     approved helpers nothing calls and a field nothing reads (2026-11-10/11).
+#   * Draft and revise prompts state today's date: the staged fixes' changelog lines claimed
+#     2026-09-25/26, written six weeks later.
+#   * call_model() retries a 502/503/504 or a dropped connection twice (MODEL_RETRIES, backoff
+#     MODEL_RETRY_BACKOFF_SECONDS x attempt) -- nine tasks died on a single "HTTP 502: Bad Gateway".
+#     A 400 (screening) is never retried.
+#   * publish_result() records each outcome to hermes_self_repair_outcomes.py.
 #
 # 1.3.0 (2026-11-13) — direct operator request: every task since 2026-11-12 14:46 failed with
 # HTTP 400 from the router, not the models. Its Layer 2 classifier labelled the draft, review
@@ -128,6 +139,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_injection_guard  # noqa: E402
+import hermes_self_repair_outcomes as outcomes  # noqa: E402
 _nous_judge = importlib.import_module("hermes-nous-judge")  # noqa: E402 -- hyphenated filename,
                                                               # same pattern hermes-dualcoder.py uses
 _codesec = importlib.import_module("hermes-code-security-scan")  # noqa: E402 -- same pattern
@@ -142,6 +154,9 @@ GUARD_TOKEN = os.environ.get("GUARD_TOKEN", "")
 ROUTER_URL = os.environ.get("ROUTER_URL", "http://127.0.0.1:8080").rstrip("/")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 MODEL_TIMEOUT_SECONDS = int(os.environ.get("MODEL_TIMEOUT_SECONDS", "1500"))
+MODEL_RETRIES = int(os.environ.get("MODEL_RETRIES", "2"))
+MODEL_RETRY_BACKOFF_SECONDS = int(os.environ.get("MODEL_RETRY_BACKOFF_SECONDS", "30"))
+TRANSIENT_HTTP_CODES = {502, 503, 504}
 MAX_ROUNDS = int(os.environ.get("MAX_ROUNDS", "5"))
 JUDGE_MAX_CALLS = int(os.environ.get("JUDGE_MAX_CALLS", "1"))
 JUDGE_MAX_TOKENS = int(os.environ.get("JUDGE_MAX_TOKENS", "800"))
@@ -173,7 +188,12 @@ REVIEW_SYSTEM_PROMPT = (
     "single leading word, APPROVE or ISSUES, followed by a specific, actionable list of the real "
     "problems if any -- including whether the fix actually addresses the stated problem, and "
     "whether it introduces any regression in code the problem didn't ask to change. Be a real "
-    "reviewer, not a rubber stamp."
+    "reviewer, not a rubber stamp. Before you answer APPROVE, name the concrete call path through "
+    "which this change alters what the program does at runtime: which existing caller reaches the "
+    "changed code, and how its behavior differs. If you cannot name one -- the change adds a "
+    "function nothing calls, a field nothing reads, or only comments -- the answer is ISSUES, "
+    "however correct the new code looks on its own. Check every factual claim the fix rests on "
+    "(how a library behaves, what a function returns) against the code you were given."
 )
 REVISE_SYSTEM_PROMPT = (
     "You are revising your own fixed file to address specific issues a reviewer raised. Output "
@@ -368,8 +388,22 @@ def call_model(role, system_prompt, user_content, max_tokens):
         "max_tokens": max_tokens,
     }
     headers = {"X-Hermes-Screening": "analysis"} if intake_screened_l2 else None
-    result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=MODEL_TIMEOUT_SECONDS,
-                   headers=headers)
+    for attempt in range(MODEL_RETRIES + 1):
+        try:
+            result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=MODEL_TIMEOUT_SECONDS,
+                           headers=headers)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code not in TRANSIENT_HTTP_CODES or attempt == MODEL_RETRIES:
+                raise
+            reason = f"HTTP {exc.code}"
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+            if attempt == MODEL_RETRIES:
+                raise
+            reason = str(exc)
+        log(f"{role} call failed ({reason}), retry {attempt + 1} of {MODEL_RETRIES} after "
+            f"{MODEL_RETRY_BACKOFF_SECONDS * (attempt + 1)}s")
+        time.sleep(MODEL_RETRY_BACKOFF_SECONDS * (attempt + 1))
     choice = result.get("choices", [{}])[0]
     message = choice.get("message", {})
     content = (message.get("content") or "").strip()
@@ -382,9 +416,14 @@ def call_model(role, system_prompt, user_content, max_tokens):
     return content
 
 
+def dated(system_prompt):
+    return (f"{system_prompt} Today's date is {time.strftime('%Y-%m-%d')}; if you add a changelog "
+            f"or version-history line, date it today.")
+
+
 def draft(problem, original_content):
     content = f"Problem:\n{problem}\n\nCurrent file content:\n{original_content}"
-    return call_model("coder", DRAFT_SYSTEM_PROMPT, content, max_tokens=DRAFT_MAX_TOKENS)
+    return call_model("coder", dated(DRAFT_SYSTEM_PROMPT), content, max_tokens=DRAFT_MAX_TOKENS)
 
 
 def review(reviewer, problem, original_content, candidate_content):
@@ -401,7 +440,7 @@ def revise(writer, problem, original_content, candidate_content, issues):
         f"Problem:\n{problem}\n\nOriginal file content:\n{original_content}\n\n"
         f"Your previous fixed file:\n{candidate_content}\n\nReviewer's issues:\n{issues}"
     )
-    return call_model(writer, REVISE_SYSTEM_PROMPT, content, max_tokens=REVISE_MAX_TOKENS)
+    return call_model(writer, dated(REVISE_SYSTEM_PROMPT), content, max_tokens=REVISE_MAX_TOKENS)
 
 
 def security_review(role, candidate_content, static_findings_text):
@@ -579,6 +618,9 @@ def build_unresolved_bundle(path, round_count, transcript, judge_verdict):
 def publish_result(task_id, memory_ref, outcome, message):
     """Same retry-then-log-undelivered robustness as hermes-dualcoder.py's own publish_result() --
     real 502 found live there after a fully successful run; not repeating that loss here."""
+    outcomes.record("generated", task_id=task_id, outcome=outcome,
+                    detail=(message or "").strip().splitlines()[0] if (message or "").strip() else "")
+
     def _do_publish():
         turn = _post(f"{MEMORY_URL}/turns", {
             "task_id": task_id, "agent": "selfrepair", "role": "assistant",
