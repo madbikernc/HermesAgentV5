@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 2.0.0
+#
+# 2.0.0 (2026-11-13) — direct operator request (self-repair fidelity pass). Verification now
+# proves something for the code this pipeline actually fixes:
+#   * verify() gets the diff, the checkout and the task's domain (hermes-self-repair-verify.py
+#     2.0.0): behavior-change and dead-addition checks, and the domain's own test suite
+#     (domains.json `verify_command`) run on the applied commit in a clean worktree.
+#   * A linked TEST task (completeness role "test") must actually test its fix: its test passes on
+#     the applied tree and fails with the fix's file as it was before the fix
+#     (check_test_discriminates(), domains.json `single_test_command`). A test task whose diff is
+#     empty fails outright -- it added no test (2026-11-13: one such task was "verified").
+#   * When a linked test task fails verification, its fix -- parked in "awaiting-completeness" --
+#     becomes "incomplete" with a FleetOps notice, instead of waiting forever for a test that will
+#     never come (seven fixes sat that way 2026-11-10 to 11-13). hermes-self-repair-bridge.py 2.5.0
+#     treats "incomplete" as retryable.
+#   * A commit that fails verification is reverted (`git revert`, pushed to GIT_REMOTE) instead
+#     of staying in the checkout every later fix is built and tested on. Now that verification
+#     runs the domain's test suite, one broken commit would fail every task after it -- found
+#     while building this: self-repair commit ad0828d (2026-11-13) left pathfinding.test.mjs
+#     unparseable. The original commit stays in history; the revert names the task. This replaces
+#     1.2.0's "never reverted on a verify failure" for that case only -- a declined but passing
+#     commit still stays.
 #
 # 1.5.0 (2026-11-10) — apply_diff() now runs under an exclusive lock on SELF_REPAIR_LOCK
 # (default <checkout>/.git/hermes-self-repair.lock), the same lock the new
@@ -309,6 +330,50 @@ def fetch_applied_sha(task_id):
     return None
 
 
+def mark_fix_incomplete(test_task_id, reason):
+    """The linked fix of a test task that failed: "incomplete" if it is still parked waiting for
+    this test (any other state -- already decided by a human, already failed -- is left alone)."""
+    try:
+        link = completeness_mod.fetch_link(test_task_id)
+    except Exception as exc:
+        log(f"mark_fix_incomplete: link lookup failed (task {test_task_id!r}): {exc}")
+        return
+    if not link or link.get("role") != "test":
+        return
+    fix_id = link["linked_task_id"]
+    if completeness_mod.fetch_task_state(fix_id) != "awaiting-completeness":
+        return
+    set_task_state(fix_id, "incomplete")
+    log_completeness_wait_turn(fix_id, f"linked test task {test_task_id} failed: {reason}")
+    log(f"task {fix_id!r}: incomplete -- its linked test task {test_task_id!r} failed ({reason})")
+    matrix_notice(f"[self-repair] Fix task {fix_id} is incomplete: its test task {test_task_id} "
+                  f"failed ({reason[:300]}). Not eligible for promotion.")
+
+
+def test_role_link(task_id):
+    """The completeness link if this task is a fix's linked test task, else None."""
+    try:
+        link = completeness_mod.fetch_link(task_id)
+    except Exception as exc:
+        log(f"test_role_link: link lookup failed (task {task_id!r}): {exc}")
+        return None
+    return link if link and link.get("role") == "test" else None
+
+
+def check_linked_test(task_id, link, test_rel, domain):
+    """(ok, note): this test task's test fails without its fix and passes with it."""
+    command = (domain or {}).get("single_test_command")
+    if not command:
+        return True, "Test check: domain registers no single_test_command -- not checked"
+    fix_id = link["linked_task_id"]
+    fix_sha = fetch_applied_sha(fix_id)
+    fix_rel = fetch_task_path(fix_id)
+    if not fix_sha or not fix_rel:
+        return False, f"Test check FAILED: linked fix task {fix_id} has no applied commit/path to test against"
+    return _verify_tool.check_test_discriminates(
+        SELF_REPAIR_REPO_DIR, test_rel, fix_rel, fix_sha, command, links=(domain or {}).get("verify_links"))
+
+
 def finalize_or_wait(task_id, path, sha):
     """Shared tail for both set_task_state(task_id, "verified") call sites (§4.3's completeness
     hook, Phase 3/§8.3) — checks this task's domain (if any) before finalizing. `sha` is None for
@@ -570,6 +635,27 @@ def apply_diff(task_id, path, diff_text):
             pass
 
 
+def revert_commit(task_id, sha, reason):
+    """Reverts a commit that failed verification and pushes the revert. Returns (ok, detail)."""
+    with checkout_lock():
+        rev = run_git(["revert", "--no-edit", "--no-commit", sha], check=False)
+        if rev.returncode != 0:
+            run_git(["revert", "--abort"], check=False)
+            return False, f"git revert failed: {rev.stderr.strip()[:300]}"
+        env = dict(os.environ, GIT_AUTHOR_NAME=GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL=GIT_AUTHOR_EMAIL,
+                   GIT_COMMITTER_NAME=GIT_AUTHOR_NAME, GIT_COMMITTER_EMAIL=GIT_AUTHOR_EMAIL)
+        commit = subprocess.run(
+            ["git", "commit", "-m", f"self-repair: revert {sha[:12]} (task {task_id} failed verification)\n\n"
+                                    f"task_id: {task_id}\n{reason[:600]}"],
+            cwd=str(SELF_REPAIR_REPO_DIR), capture_output=True, text=True, env=env)
+        if commit.returncode != 0:
+            return False, f"git commit of the revert failed: {commit.stderr.strip()[:300]}"
+        push = run_git(["push", GIT_REMOTE, GIT_BRANCH], check=False)
+        if push.returncode != 0:
+            return False, f"revert committed locally, push to {GIT_REMOTE} failed: {push.stderr.strip()[:300]}"
+    return True, f"reverted {sha[:12]}"
+
+
 def do_apply(task_id):
     """Returns (exit_code, error) matching every other worker's run_job() convention: 0 success,
     1 operational failure (retryable via the attempt counter), 2 refused (not retryable — a
@@ -591,6 +677,13 @@ def do_apply(task_id):
     diff_text = fetch_diff_text(task_id)
     if diff_text is None:
         return 2, f"task {task_id!r} has no logged diff turn — cannot apply"
+
+    if not diff_text.strip() and test_role_link(task_id):
+        reason = "the test task's diff is empty -- it added no test"
+        log_verify_turn(task_id, False, f"Test check FAILED: {reason}")
+        set_task_state(task_id, "verify-failed")
+        mark_fix_incomplete(task_id, reason)
+        return 0, ""
 
     if not diff_text.strip():
         log(f"task {task_id!r}: empty diff (converged candidate was byte-identical) — nothing to apply, success")
@@ -627,7 +720,15 @@ def do_apply(task_id):
     # file's own header for why). The broker job still reports success below: the mechanical apply
     # genuinely succeeded, and verification outcome is tracked separately via task state, which
     # Step 5 will check before ever offering promotion.
-    verify_ok, verify_report = _verify_tool.verify(real_path)
+    domain = domains_mod.domain_for_path(path)
+    verify_ok, verify_report = _verify_tool.verify(
+        real_path, diff_text=diff_text, repo_dir=SELF_REPAIR_REPO_DIR, rel_path=path,
+        test_command=(domain or {}).get("verify_command"), links=(domain or {}).get("verify_links"))
+    link = test_role_link(task_id)
+    if verify_ok and link:
+        test_ok, test_note = check_linked_test(task_id, link, path, domain)
+        verify_ok = test_ok
+        verify_report = f"{verify_report}\n\n{test_note}"
     log_verify_turn(task_id, verify_ok, verify_report)
     if verify_ok:
         # Step 5 hand-off (post_promotion_offer, inside finalize_or_wait) is a one-shot notice,
@@ -640,8 +741,12 @@ def do_apply(task_id):
         finalize_or_wait(task_id, path, sha)
     else:
         set_task_state(task_id, "verify-failed")
-        log(f"task {task_id!r}: pre-promotion verification FAILED — commit stays on {GIT_REMOTE}, "
-            f"not eligible for promotion until resolved")
+        reverted, revert_detail = revert_commit(task_id, sha, verify_report)
+        log(f"task {task_id!r}: {revert_detail}")
+        if link:
+            mark_fix_incomplete(task_id, "its test failed verification")
+        log(f"task {task_id!r}: pre-promotion verification FAILED -- {revert_detail} on {GIT_REMOTE}, "
+            f"not eligible for promotion")
         escalate(task_id, f"applied successfully but failed pre-promotion verification:\n{verify_report[:800]}")
     return 0, ""
 

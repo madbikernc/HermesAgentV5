@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-11-13) — check_apply_test_role(): hermes-self-repair-apply.py 2.0.0's test-task
+# handling -- an empty test diff fails and marks its fix "incomplete", a failed verification
+# reverts the commit and marks the fix "incomplete", a passing one still unblocks the fix, and a
+# fix already decided by a human is never touched.
 #
 # Offline checks for FLEET_SELFREPAIR_DESIGN.md §4.3's completeness hook (Phase 3, §8.3):
 # tools/hermes_self_repair_completeness.py's own logic, plus the two new functions it drives in
@@ -10,6 +15,7 @@
 #
 # Run: python3 infra/hermes-self-repair/tests/test_completeness.py
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -225,9 +231,106 @@ def check_apply_finalize_or_wait():
           "fixB" in calls["promotion_offers"])
 
 
+def check_apply_test_role():
+    print("\n[hermes-self-repair-apply.py 2.0.0: a linked test task must test its fix]")
+    apply_mod = load_apply_module()
+    mem = FakeMemory()
+    patch_completeness(apply_mod.completeness_mod, mem)
+    notices, reverts = [], []
+
+    def fake_get(url, token=None, timeout=15):
+        if "/tasks/" in url:
+            return mem.tasks.get(url.rsplit("/", 1)[-1], {})
+        if "/turns" in url:
+            return {"turns": mem.turns.get(url.split("task_id=")[1].split("&")[0], [])}
+        raise AssertionError(f"unexpected GET {url}")
+
+    def fake_post(url, payload, token=None, timeout=15):
+        if url.endswith("/tasks"):
+            mem.set_state(payload["id"], payload["state"])
+        elif url.endswith("/turns"):
+            mem.add_turn(payload["task_id"], json.loads(payload["raw"]))
+        return {"id": 0}
+
+    apply_mod._get, apply_mod._post = fake_get, fake_post
+    apply_mod.matrix_notice = notices.append
+    apply_mod.post_promotion_offer = lambda *a: None
+    apply_mod.escalate = lambda *a: None
+    apply_mod.checkout_lock = contextlib.nullcontext
+    apply_mod.log_applied_commit = lambda task_id, sha: mem.add_turn(task_id, {"phase": "applied-commit", "sha": sha})
+    apply_mod.revert_commit = lambda task_id, sha, reason: (reverts.append((task_id, sha)) or (True, "reverted"))
+    domain = {"name": "minecraft-bots", "completeness_rule": "test-artifact",
+              "verify_command": ["true"], "single_test_command": ["node", "{test_path}"]}
+    apply_mod.domains_mod.domain_for_path = lambda path: domain
+    apply_mod._read_tool.load_allowlist = lambda: ([], [])
+    apply_mod._read_tool.resolve_in_repo = lambda path: Path("/x") / path
+    apply_mod._read_tool.is_allowed = lambda *a: (True, "")
+
+    def pair(fix, test, test_diff):
+        mem.add_task(fix, "awaiting-completeness")
+        mem.add_task(test, "done")
+        mem.add_turn(fix, {"path": "services/minecraft-bots/weapons.js", "problem": "p"})
+        mem.add_turn(fix, {"phase": "applied-commit", "sha": "f1x5ha"})
+        mem.add_turn(fix, {"phase": "completeness-link", "role": "fix", "linked_task_id": test})
+        mem.add_turn(test, {"path": "services/minecraft-bots/tests/unit/weapons.test.mjs", "problem": "p"})
+        mem.add_turn(test, {"phase": "completeness-link", "role": "test", "linked_task_id": fix})
+        mem.add_turn(test, {"phase": "diff", "content": test_diff})
+
+    test_diff = ("--- a/services/minecraft-bots/tests/unit/weapons.test.mjs\n"
+                 "+++ b/services/minecraft-bots/tests/unit/weapons.test.mjs\n@@ -1 +1,2 @@\n x\n+y\n")
+
+    pair("fixE", "testE", "")
+    code, err = apply_mod.do_apply("testE")
+    check("an empty test diff fails verification (it added no test)",
+          code == 0 and mem.tasks["testE"]["state"] == "verify-failed", (code, err, mem.tasks["testE"]))
+    check("and its waiting fix becomes incomplete, with a FleetOps notice",
+          mem.tasks["fixE"]["state"] == "incomplete" and any("fixE" in n for n in notices), (mem.tasks["fixE"], notices))
+
+    pair("fixF", "testF", test_diff)
+    apply_mod.apply_diff = lambda task_id, path, diff: (True, "committed", "7e575ha")
+    apply_mod._verify_tool.verify = lambda *a, **k: (True, "suite OK")
+    apply_mod._verify_tool.check_test_discriminates = lambda *a, **k: (False, "Test check FAILED: also passes without the fix")
+    apply_mod.do_apply("testF")
+    check("a test that passes without its fix fails verification",
+          mem.tasks["testF"]["state"] == "verify-failed", mem.tasks["testF"])
+    check("its commit is reverted", ("testF", "7e575ha") in reverts, reverts)
+    check("and its fix becomes incomplete", mem.tasks["fixF"]["state"] == "incomplete", mem.tasks["fixF"])
+
+    pair("fixG", "testG", test_diff)
+    seen = {}
+    def discriminates(repo, test_rel, fix_rel, fix_sha, command, links=None):
+        seen.update(test=test_rel, fix=fix_rel, sha=fix_sha)
+        return True, "Test check: OK"
+    apply_mod._verify_tool.check_test_discriminates = discriminates
+    apply_mod.do_apply("testG")
+    check("the check runs the test against the fix's own path and applied commit",
+          seen == {"test": "services/minecraft-bots/tests/unit/weapons.test.mjs",
+                   "fix": "services/minecraft-bots/weapons.js", "sha": "f1x5ha"}, seen)
+    check("a test that discriminates verifies", mem.tasks["testG"]["state"] == "verified", mem.tasks["testG"])
+    check("and unblocks its fix", mem.tasks["fixG"]["state"] == "verified", mem.tasks["fixG"])
+    check("nothing passing is reverted", ("testG", "7e575ha") not in reverts, reverts)
+
+    pair("fixH", "testH", test_diff)
+    mem.set_state("fixH", "promotion-declined")
+    apply_mod._verify_tool.check_test_discriminates = lambda *a, **k: (False, "no")
+    apply_mod.do_apply("testH")
+    check("a fix a human already declined is never touched by its test failing",
+          mem.tasks["fixH"]["state"] == "promotion-declined", mem.tasks["fixH"])
+
+    mem.add_task("fixI", "done")
+    mem.add_turn("fixI", {"path": "services/minecraft-bots/weapons.js", "problem": "p"})
+    mem.add_turn("fixI", {"phase": "diff", "content": test_diff.replace("tests/unit/weapons.test.mjs", "weapons.js")})
+    apply_mod._verify_tool.verify = lambda *a, **k: (False, "Tests FAILED")
+    apply_mod.apply_diff = lambda task_id, path, diff: (True, "committed", "bad5ha")
+    apply_mod.do_apply("fixI")
+    check("a fix that fails verification is reverted too", ("fixI", "bad5ha") in reverts, reverts)
+    check("and is verify-failed", mem.tasks["fixI"]["state"] == "verify-failed", mem.tasks["fixI"])
+
+
 def main():
     check_completeness_module()
     check_apply_finalize_or_wait()
+    check_apply_test_role()
     total = CHECKS[0]
     failed = len(FAILURES)
     print(f"\n{total - failed}/{total} checks passed")
