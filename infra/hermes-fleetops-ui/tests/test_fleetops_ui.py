@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 2.17.0
+# Version: 2.18.0
+#
+# 2.18.0 (2026-11-13) — the self-repair gate's "skip" is also legal from "awaiting-completeness"
+# (hermes-self-repair-promote-gate.py 1.2.0): FakeSelfRepairGate's table follows it, and such a row
+# offers skip only, never promote.
 #
 # 2.17.0 (2026-11-11) — check_minecraft(), new for hermes-fleetops-ui.py 2.20.0's /minecraft tab:
 # a fixture shaped like hermes-minecraft-bots-status.py 1.0.0's snapshot (one host's bots, one
@@ -1905,7 +1909,7 @@ class FakeSelfRepairGate:
 
     TRANSITIONS = {
         "promote": ({"verified"}, "promotion-approved"),
-        "skip": ({"verified"}, "promotion-declined"),
+        "skip": ({"verified", "awaiting-completeness"}, "promotion-declined"),
     }
 
     def __init__(self, tasks, write_ok=True, applied_shas=None):
@@ -1957,6 +1961,9 @@ def check_selfrepair_gate_contract(ui):
           sorted(ui.selfrepair_legal_actions("verified")) == ["promote", "skip"],
           str(sorted(ui.selfrepair_legal_actions("verified"))))
     check("a drafting task offers nothing", ui.selfrepair_legal_actions("drafting") == [])
+    check("a task awaiting completeness offers skip, never promote",
+          ui.selfrepair_legal_actions("awaiting-completeness") == ["skip"],
+          str(ui.selfrepair_legal_actions("awaiting-completeness")))
     check("an unknown state offers nothing rather than everything",
           ui.selfrepair_legal_actions("weird") == [] and ui.selfrepair_legal_actions(None) == [])
     ui.SELFREPAIR_GATE = None

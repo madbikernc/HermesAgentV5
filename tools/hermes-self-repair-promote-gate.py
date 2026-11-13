@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-11-13) — direct operator request: "skip" also declines a task parked in
+# "awaiting-completeness". Found live: the operator skipped five staged fixes that do nothing
+# (helpers nobody calls, comment-only edits) and the gate refused all five, because each was
+# waiting on a linked test task that never finished -- so they could neither be declined nor
+# ever reach "verified". A decline needs no completeness: nothing is promoted, the commit stays on
+# NAS2. hermes-self-repair-apply.py's unblock_linked_peer() only ever moves a peer still in
+# "awaiting-completeness" to "verified", so a declined task stays declined; and
+# hermes-self-repair-bridge.py 2.4.0 never retries a signature once a task is
+# "promotion-declined". "promote" is unchanged: still "verified" only.
 #
 # 1.1.0 (2026-11-08) — FLEET_SELFREPAIR_DESIGN.md §4.8's FleetOps `/selfrepair` tab needs to import
 # this gate's transition table rather than reimplement it, the exact house rule
@@ -43,7 +53,8 @@
 #
 # handle_command() ALWAYS re-fetches the task from hermes-memory and re-checks its real state
 # before acting — never trusts that a task named in a chat message is actually awaiting a decision.
-# Only a task in state == "verified" can be promoted or skipped; anything else (already decided,
+# Only a task in state == "verified" can be promoted; "skip" is also legal from
+# "awaiting-completeness" (1.2.0). Anything else (already decided,
 # still generating, failed verification, or a typo'd id) gets a plain refusal reply, not a silent
 # ignore and not a guess.
 #
@@ -106,7 +117,7 @@ GATE_AGENT = "selfrepair-promote-gate"
 # check here to match model-scout-gate.py's shape; a task's eligibility is its state alone.
 TRANSITIONS = {
     "promote": ({"verified"}, "promotion-approved"),
-    "skip": ({"verified"}, "promotion-declined"),
+    "skip": ({"verified", "awaiting-completeness"}, "promotion-declined"),
 }
 
 
