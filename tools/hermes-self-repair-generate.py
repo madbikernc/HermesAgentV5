@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-11-13) — direct operator request: every task since 2026-11-12 14:46 failed with
+# HTTP 400 from the router, not the models. Its Layer 2 classifier labelled the draft, review
+# and security prompts MALICIOUS (scores 0.93-1.0): they carry incident text and whole bot
+# source files, and one matched Layer 1's `sleep(10` pattern. That is hermes-router.py 2.16.0's
+# own S27f case -- the screener right about the text, wrong about the situation. The REQUEST
+# (the task spec, incident text included) is still screened here at intake by screen(), Layer 1
+# and Layer 2 both blocking; what follows is that screened request plus repo files and the
+# models' own replies, data by construction. So call_model() now sends
+# `X-Hermes-Screening: analysis` -- but only for a task whose intake Layer 2 pass actually ran
+# and passed (GUARD_TOKEN set, guard reachable). On Layer 1 alone the router stays the only
+# Layer 2 screen and keeps blocking. The router still runs Layer 1 (blocking) and logs every
+# would-have-blocked verdict.
 #
 # 1.2.0 (2026-11-10) — direct operator request: raise the whole-file limit. MAX_FILE_CHARS
 # 12000 -> 40000, sized to the real backends instead of a placeholder: coder (Qwen3.8-27B) and
@@ -206,10 +219,10 @@ def _get(url, token=None, timeout=15):
         return json.loads(resp.read().decode())
 
 
-def _post(url, payload, token=None, timeout=15):
+def _post(url, payload, token=None, timeout=15, headers=None):
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **(headers or {})},
     )
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -262,6 +275,8 @@ def log_guard_verdict(layer, severity_value, detail):
 
 
 def screen(text):
+    """False if blocked. Otherwise "l2" when this agent's own Layer 2 pass ran and passed, or
+    "l1-only" when it was skipped or unreachable -- both truthy."""
     hits = hermes_injection_guard.scan_messages([{"role": "user", "content": text}])
     severity = hermes_injection_guard.overall_severity(hits)
     if severity == "block":
@@ -280,9 +295,15 @@ def screen(text):
                 log(f"Layer 2 BLOCKED selfrepair request: score={verdict['score']:.3f}")
                 log_guard_verdict("L2", "block", {"label": verdict["label"], "score": verdict["score"]})
                 return False
+            return "l2"
         except Exception as exc:
             log(f"Layer 2 unreachable, proceeding on Layer 1 alone: {exc}")
-    return True
+    return "l1-only"
+
+
+# True while the task being processed passed this agent's own intake Layer 2 screen (see 1.3.0).
+# One task at a time in this process, so a module-level flag set per claim is enough.
+intake_screened_l2 = False
 
 
 def log_round(task_id, phase, round_num, actor, content):
@@ -346,7 +367,9 @@ def call_model(role, system_prompt, user_content, max_tokens):
         ],
         "max_tokens": max_tokens,
     }
-    result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=MODEL_TIMEOUT_SECONDS)
+    headers = {"X-Hermes-Screening": "analysis"} if intake_screened_l2 else None
+    result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=MODEL_TIMEOUT_SECONDS,
+                   headers=headers)
     choice = result.get("choices", [{}])[0]
     message = choice.get("message", {})
     content = (message.get("content") or "").strip()
@@ -586,6 +609,8 @@ def publish_result(task_id, memory_ref, outcome, message):
 
 
 def process_one():
+    global intake_screened_l2
+    intake_screened_l2 = False
     claim = claim_next("selfrepair")
     if not claim:
         return False
@@ -606,13 +631,15 @@ def process_one():
         set_task_state(task_id, "error-no-content")
         return True
 
-    if not screen(raw_text):
+    verdict = screen(raw_text)
+    if not verdict:
         set_task_state(task_id, "blocked")
         ack_claim(claim_id)
         publish_result(task_id, memory_ref, "blocked",
                         "This request was rejected by the fleet's screening layer.")
         return True
 
+    intake_screened_l2 = verdict == "l2"
     ack_claim(claim_id)  # ack immediately -- this can run many minutes across many router calls,
                           # same reasoning hermes-dualcoder.py's own header gives
 
