@@ -21,6 +21,7 @@
 #     unparseable. The original commit stays in history; the revert names the task. This replaces
 #     1.2.0's "never reverted on a verify failure" for that case only -- a declined but passing
 #     commit still stays.
+#   * Verification results, incompletes and reverts are recorded to hermes_self_repair_outcomes.py.
 #
 # 1.5.0 (2026-11-10) — apply_diff() now runs under an exclusive lock on SELF_REPAIR_LOCK
 # (default <checkout>/.git/hermes-self-repair.lock), the same lock the new
@@ -163,6 +164,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_self_repair_completeness as completeness_mod  # noqa: E402
 import hermes_self_repair_domains as domains_mod  # noqa: E402
+import hermes_self_repair_outcomes as outcomes  # noqa: E402
 
 BROKER_URL = os.environ.get("BROKER_URL", "http://10.129.1.15:8100").rstrip("/")
 BROKER_TOKEN = os.environ.get("BROKER_TOKEN", "")
@@ -241,7 +243,12 @@ def set_task_state(task_id, state):
         log(f"set_task_state({task_id!r}, {state!r}) failed: {exc}")
 
 
+def first_failure(report):
+    return next((line.strip() for line in report.splitlines() if "FAILED" in line), "")
+
+
 def log_verify_turn(task_id, ok, report):
+    outcomes.record("verified", task_id=task_id, ok=ok, failed=first_failure(report) if not ok else "")
     try:
         _post(f"{MEMORY_URL}/turns", {
             "task_id": task_id, "agent": "selfrepair-apply", "role": "assistant",
@@ -344,6 +351,7 @@ def mark_fix_incomplete(test_task_id, reason):
     if completeness_mod.fetch_task_state(fix_id) != "awaiting-completeness":
         return
     set_task_state(fix_id, "incomplete")
+    outcomes.record("incomplete", task_id=fix_id, test=test_task_id, reason=reason)
     log_completeness_wait_turn(fix_id, f"linked test task {test_task_id} failed: {reason}")
     log(f"task {fix_id!r}: incomplete -- its linked test task {test_task_id!r} failed ({reason})")
     matrix_notice(f"[self-repair] Fix task {fix_id} is incomplete: its test task {test_task_id} "
@@ -742,6 +750,7 @@ def do_apply(task_id):
     else:
         set_task_state(task_id, "verify-failed")
         reverted, revert_detail = revert_commit(task_id, sha, verify_report)
+        outcomes.record("reverted", task_id=task_id, sha=sha, ok=reverted, detail=revert_detail)
         log(f"task {task_id!r}: {revert_detail}")
         if link:
             mark_fix_incomplete(task_id, "its test failed verification")

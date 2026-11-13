@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+#
+# 1.0.1 (2026-11-13) — outcomes go to a temp file, never the real ~/.hermes log.
 #
 # 1.0.0 (2026-11-13) — offline checks for tools/hermes-self-repair-promote-gate.py's
 # handle_command(): which states "promote"/"skip" are legal from (gate 1.2.0: "skip" also
@@ -10,6 +12,10 @@
 import importlib.util
 import sys
 from pathlib import Path
+
+import tempfile as _tempfile
+import os as _os
+_os.environ["SELFREPAIR_OUTCOMES"] = str(Path(_tempfile.mkdtemp(prefix="selfrepair-test-")) / "outcomes.jsonl")
 
 TOOLS = Path(__file__).resolve().parents[3] / "tools"
 FAILURES = []

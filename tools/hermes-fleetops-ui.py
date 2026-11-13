@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-# Version: 2.20.0
+# Version: 2.21.0
+#
+# 2.21.0 (2026-11-13) — direct operator request (self-repair fidelity pass): the /selfrepair tab
+# gains "Is it working?", read from the self-repair outcome log (hermes_self_repair_outcomes.py,
+# no hermes-memory token needed): a 30-day funnel -- findings seen, fixes and tests submitted,
+# generation outcomes, verification passes and failures with the most common failing check,
+# incompletes, reverts, promote/skip decisions -- and, for every fix approved for promotion, how
+# often its incident occurred in the 7 days before the approval and since. A decision made on
+# this page is recorded there too.
 #
 # 2.20.0 (2026-11-11) — direct operator request: a new "Minecraft bots" tab (/minecraft) listing
 # the bots currently running, what each is doing (its goal.json goal plus latest log lines), and
@@ -368,6 +376,7 @@ import hermes_benchmark_common as bc  # noqa: E402
 # hermes_benchmark_common.py already are here. Unlike the model-scout/self-repair GATE modules
 # below, there is no fail-closed load_gate()-style import for this one.
 import hermes_self_repair_domains as sr_domains  # noqa: E402
+import hermes_self_repair_outcomes as sr_outcomes  # noqa: E402
 
 NAS_HISTORY = Path("/mnt/nas2-hermes-backup/Private/Hermes/Benchmarks/history.jsonl")
 LOCAL_HISTORY = Path.home() / ".hermes" / "state" / "benchmark-history.jsonl"
@@ -1464,6 +1473,7 @@ def apply_selfrepair_decision(task_id, action, who=""):
         "summary": f"{task_id}: {state} -> {new_state} by \"{action}\" (fleetops-ui{whom})",
     })
     log(f"{task_id}: {state} -> {new_state} ({action}) via fleetops-ui{whom}")
+    sr_outcomes.record("decided", task_id=task_id, action=action, by="fleetops-ui", from_state=state)
     # Announce it where the Matrix path would have, same as apply_decision() above -- non-fatal,
     # since a Matrix outage must not undo a transition already written.
     try:
@@ -1576,6 +1586,99 @@ def render_selfrepair(state_filter="verified"):
             f'{bar}{body}{bar}</form>')
 
 
+SELFREPAIR_FUNNEL_DAYS = 30
+SELFREPAIR_EFFECT_DAYS = 7
+
+
+def selfrepair_funnel(events):
+    """Counts for the "Is it working?" funnel from outcome-log events (pure, offline-testable)."""
+    f = {"seen": 0, "submitted_fix": 0, "submitted_test": 0, "generated": {}, "verified_ok": 0,
+         "verified_failed": 0, "failed_checks": {}, "incomplete": 0, "reverted": 0,
+         "promote": 0, "skip": 0, "skip_reasons": {}}
+    for e in events:
+        kind = e.get("event")
+        if kind == "seen":
+            f["seen"] += 1
+            if not e.get("submitted"):
+                reason = re.sub(r"\d+", "N", (e.get("reason") or "")[:70])
+                f["skip_reasons"][reason] = f["skip_reasons"].get(reason, 0) + 1
+        elif kind == "submitted":
+            f["submitted_test" if e.get("role") == "test" else "submitted_fix"] += 1
+        elif kind == "generated":
+            out = e.get("outcome") or "?"
+            f["generated"][out] = f["generated"].get(out, 0) + 1
+        elif kind == "verified":
+            if e.get("ok"):
+                f["verified_ok"] += 1
+            else:
+                f["verified_failed"] += 1
+                check = (e.get("failed") or "?").split(":")[0][:60]
+                f["failed_checks"][check] = f["failed_checks"].get(check, 0) + 1
+        elif kind == "incomplete":
+            f["incomplete"] += 1
+        elif kind == "reverted":
+            f["reverted"] += 1
+        elif kind == "decided" and e.get("action") in ("promote", "skip"):
+            f[e["action"]] += 1
+    return f
+
+
+def selfrepair_effect(events, now=None, days=SELFREPAIR_EFFECT_DAYS):
+    """For each fix approved for promotion: its incident's occurrences in the `days` before the
+    approval and in the `days` after it (or since, if fewer have passed). Pure."""
+    now = time.time() if now is None else now
+    window = days * 86400
+    signature_of = {e["task_id"]: e.get("signature") for e in events
+                    if e.get("event") == "submitted" and e.get("task_id")}
+    rows = []
+    for e in events:
+        if e.get("event") != "decided" or e.get("action") != "promote":
+            continue
+        sig = signature_of.get(e.get("task_id"))
+        if not sig:
+            continue
+        at = e["ts"]
+        seen = [x["ts"] for x in events if x.get("event") == "seen" and x.get("signature") == sig]
+        before = sum(1 for t in seen if at - window <= t < at)
+        after = sum(1 for t in seen if at <= t < at + window)
+        rows.append({"task_id": e["task_id"], "signature": sig, "approved_at": at,
+                     "before": before, "after": after, "days_after": min(days, (now - at) / 86400)})
+    return rows
+
+
+def render_selfrepair_funnel():
+    events = sr_outcomes.read(time.time() - SELFREPAIR_FUNNEL_DAYS * 86400)
+    if not events:
+        return ('<p class="empty">No outcomes recorded yet. The outcome log started '
+                '2026-11-13; it fills as findings arrive.</p>')
+    f = selfrepair_funnel(events)
+    gen = ", ".join(f"{esc(k)} {v:,}" for k, v in sorted(f["generated"].items())) or "none"
+    checks = ", ".join(f"{esc(k)} {v:,}" for k, v in sorted(f["failed_checks"].items(), key=lambda kv: -kv[1])[:4])
+    skips = ", ".join(f"{esc(k)} {v:,}" for k, v in sorted(f["skip_reasons"].items(), key=lambda kv: -kv[1])[:4])
+    rows = [
+        ["findings seen", f"{f['seen']:,}", skips and f"not submitted: {skips}"],
+        ["fixes submitted", f"{f['submitted_fix']:,}", ""],
+        ["generation results", f"{sum(f['generated'].values()):,}", gen],
+        ["verification passed", f"{f['verified_ok']:,}", ""],
+        ["verification failed", f"{f['verified_failed']:,}", checks],
+        ["tests submitted (after their fix verified)", f"{f['submitted_test']:,}", ""],
+        ["fixes left incomplete (their test failed)", f"{f['incomplete']:,}", ""],
+        ["failed commits reverted", f"{f['reverted']:,}", ""],
+        ["approved for promotion / declined", f"{f['promote']:,} / {f['skip']:,}", ""],
+    ]
+    body = table(["last 30 days", "count", "detail"], rows)
+    effect = selfrepair_effect(events)
+    if effect:
+        erows = [[f'<span class="mono">{esc(r["task_id"])}</span>', esc(r["signature"]),
+                  esc(when(r["approved_at"])), f"{r['before']:,}",
+                  f"{r['after']:,} in {r['days_after']:.1f} days"] for r in effect]
+        body += table(["task", "incident", "approved", f"seen {SELFREPAIR_EFFECT_DAYS}d before",
+                       "seen since"], erows)
+    else:
+        body += '<p class="empty">No fix approved for promotion yet, so no before/after to show.</p>'
+    return body
+
+
 def page_selfrepair(query=None):
     query = query or {}
     state_filter = (query.get("state") or ["verified"])[0]
@@ -1587,6 +1690,8 @@ def page_selfrepair(query=None):
                  "work with zero domains before any is added." if not domains else
                  f"{len(domains)} domain(s) registered: " +
                  ", ".join(esc(d.get("name", "?")) for d in domains) + ".")
+    body += section("Is it working?", "From the self-repair outcome log: what each stage did, "
+                    "and whether an approved fix made its incident rarer.", render_selfrepair_funnel)
     body += section("Self-repair tasks", dom_note, lambda: render_selfrepair(state_filter))
     return shell("Self-repair", body)
 

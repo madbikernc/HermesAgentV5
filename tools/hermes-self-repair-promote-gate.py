@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-11-13) — each promote/skip it carries out is recorded to
+# hermes_self_repair_outcomes.py (self-repair fidelity pass).
 #
 # 1.2.0 (2026-11-13) — direct operator request: "skip" also declines a task parked in
 # "awaiting-completeness". Found live: the operator skipped five staged fixes that do nothing
@@ -90,6 +93,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hermes_self_repair_outcomes as outcomes  # noqa: E402
 
 MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER", "http://127.0.0.1:6167").rstrip("/")
 FLEETOPS_TOKEN = os.environ.get("FLEETOPS_MATRIX_TOKEN", "")
@@ -280,6 +286,7 @@ def handle_command(action, task_id):
             "summary": f"{task_id}: {state} -> {new_state} by \"{action}\"",
         })
         send_room_message(f"[self-repair] Task {task_id} marked declined — staying staged on NAS2 only.")
+    outcomes.record("decided", task_id=task_id, action=action, by="fleetops-reply", from_state=state)
 
 
 def poll_once(state):

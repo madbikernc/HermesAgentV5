@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.1.1
+#
+# 1.1.1 (2026-11-13) — outcomes go to a temp file, never the real ~/.hermes log.
 #
 # 1.1.0 (2026-11-13) — check_apply_test_role(): hermes-self-repair-apply.py 2.0.0's test-task
 # handling -- an empty test diff fails and marks its fix "incomplete", a failed verification
@@ -21,6 +23,10 @@ import json
 import os
 import sys
 from pathlib import Path
+
+import tempfile as _tempfile
+import os as _os
+_os.environ["SELFREPAIR_OUTCOMES"] = str(Path(_tempfile.mkdtemp(prefix="selfrepair-test-")) / "outcomes.jsonl")
 
 REPO = Path(__file__).resolve().parents[3]
 TOOLS = REPO / "tools"

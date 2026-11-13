@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Version: 2.18.0
+# Version: 2.19.0
+#
+# 2.19.0 (2026-11-13) — check_selfrepair_funnel(): the /selfrepair "Is it working?" funnel and
+# before/after counts (hermes-fleetops-ui.py 2.21.0), from a fixture outcome log.
 #
 # 2.18.0 (2026-11-13) — the self-repair gate's "skip" is also legal from "awaiting-completeness"
 # (hermes-self-repair-promote-gate.py 1.2.0): FakeSelfRepairGate's table follows it, and such a row
@@ -130,6 +133,9 @@ import urllib.error
 import sqlite3
 import sys
 from pathlib import Path
+import os as _os
+import tempfile as _tempfile
+_os.environ["SELFREPAIR_OUTCOMES"] = _os.path.join(_tempfile.mkdtemp(prefix="fleetops-test-"), "outcomes.jsonl")
 
 REPO = Path(__file__).resolve().parents[3]
 TOOLS = REPO / "tools"
@@ -1942,6 +1948,39 @@ class FakeSelfRepairGate:
         self.messages.append(text)
 
 
+def check_selfrepair_funnel(ui):
+    print(NL + "[the self-repair funnel and before/after counts]")
+    day = 86400
+    t0 = 1_800_000_000.0
+    events = [
+        {"event": "seen", "ts": t0 - 3 * day, "signature": "oom|heap", "submitted": True},
+        {"event": "seen", "ts": t0 - 2 * day, "signature": "oom|heap", "submitted": False, "reason": "already submitted 12"},
+        {"event": "seen", "ts": t0 - 1 * day, "signature": "oom|heap", "submitted": False, "reason": "already submitted 13"},
+        {"event": "seen", "ts": t0 - 9 * day, "signature": "oom|heap", "submitted": False, "reason": "old"},
+        {"event": "submitted", "ts": t0 - 3 * day, "task_id": "fx", "role": "fix", "signature": "oom|heap"},
+        {"event": "generated", "ts": t0 - 3 * day, "task_id": "fx", "outcome": "done"},
+        {"event": "generated", "ts": t0 - 3 * day, "task_id": "fy", "outcome": "error"},
+        {"event": "verified", "ts": t0 - 3 * day, "task_id": "fx", "ok": True},
+        {"event": "verified", "ts": t0 - 3 * day, "task_id": "fz", "ok": False, "failed": "Dead-addition check FAILED -- x"},
+        {"event": "reverted", "ts": t0 - 3 * day, "task_id": "fz"},
+        {"event": "submitted", "ts": t0 - 2 * day, "task_id": "tx", "role": "test", "signature": "oom|heap"},
+        {"event": "decided", "ts": t0, "task_id": "fx", "action": "promote"},
+        {"event": "seen", "ts": t0 + 1 * day, "signature": "oom|heap", "submitted": False, "reason": "already"},
+    ]
+    f = ui.selfrepair_funnel(events)
+    check("findings, fixes and tests are counted", f["seen"] == 5 and f["submitted_fix"] == 1 and f["submitted_test"] == 1, f)
+    check("generation outcomes are broken down", f["generated"] == {"done": 1, "error": 1}, f["generated"])
+    check("verification failures name their check", f["verified_failed"] == 1 and
+          f["failed_checks"] == {"Dead-addition check FAILED -- x": 1}, f["failed_checks"])
+    check("skip reasons are grouped with numbers collapsed", f["skip_reasons"].get("already submitted N") == 2, f["skip_reasons"])
+    check("reverts and decisions are counted", f["reverted"] == 1 and f["promote"] == 1, f)
+    rows = ui.selfrepair_effect(events, now=t0 + 2 * day)
+    check("an approved fix shows its incident before and since",
+          len(rows) == 1 and rows[0]["before"] == 3 and rows[0]["after"] == 1, rows)
+    check("and how many days 'since' covers", rows and abs(rows[0]["days_after"] - 2) < 0.01, rows)
+    check("nothing approved, nothing to compare", ui.selfrepair_effect(events[:-2]) == [])
+
+
 def check_selfrepair_gate_contract(ui):
     print(NL + "[S48: the self-repair decision rules belong to the gate, not to this page]")
     gate = ui.load_selfrepair_gate()
@@ -2194,6 +2233,7 @@ def main():
         check_decisions(ui)
         check_decide_unavailable(ui)
         check_selfrepair_gate_contract(ui)
+        check_selfrepair_funnel(ui)
         check_selfrepair_decisions(ui)
         check_selfrepair(ui, tmp)
         check_failure_naming(ui)
