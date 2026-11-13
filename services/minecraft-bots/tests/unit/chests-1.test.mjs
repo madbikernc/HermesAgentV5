@@ -1,4 +1,5 @@
-// Version: 1.1.0
+// Version: 1.1.1
+// 1.1.1 (2026-11-13): index.js/actions.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js; LOOT_GROUPS is read from where it now is.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
@@ -245,7 +246,8 @@ await check('Builder placement: a successful crafting_table/furnace/chest/beehiv
 // Farming and ranching (2026-09-25).
 await check('Food: loot "food" asks chests for every edible item; "seeds" for anything plantable', async () => {
   const c = vm.createContext({ FOOD_NAMES: ['bread', 'carrot'] });
-  vm.runInContext(between(actions, 'const SEED_NAMES', '// Verified achievements'), c);
+  // actions.js 3.0.0: LOOT_GROUPS stays in actions.js (it reads FOOD_NAMES at load), its seeds in action-world.js.
+  vm.runInContext(between(actions, 'const SEED_NAMES', '// Verified achievements') + between(actions, 'const LOOT_GROUPS', '\n'), c);
   const groups = vm.runInContext('LOOT_GROUPS', c);
   assert.deepEqual([...groups.food], ['bread', 'carrot']);
   assert.deepEqual([...groups.seeds], ['wheat_seeds', 'carrot', 'potato', 'beetroot_seeds']);
@@ -342,7 +344,7 @@ await check('Inventory: full with no chest at home, she makes and places one; on
   await c.makeHomeChest(null);
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { type: 'place_home', item: 'chest' }, 'holding a chest: put it down at home');
 
-  const full = between(index, 'async function checkInventoryFull(', 'guardedInterval(');
+  const full = between(index, 'async function checkInventoryFull(', 'const TRASH_CHECK_MS');
   assert.match(full, /countUsableNearHome\(\["chest"\]\) < 1[\s\S]*makeHomeChest\(handle\)/,
     'the full-inventory check makes a chest when there is no usable one at home');
 });

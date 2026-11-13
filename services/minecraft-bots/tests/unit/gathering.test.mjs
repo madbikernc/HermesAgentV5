@@ -1,4 +1,5 @@
-// Version: 1.1.0
+// Version: 1.1.1
+// 1.1.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
@@ -19,8 +20,8 @@ await check('MB-11 fallback coordinator accepted once Mayor is unreachable; serv
     lastActivityAt: 0, setInterval() {}, guardedInterval() {}, Date, process: { env: {} },
     isAnotherBot: (s) => ['Mark', 'Mayor', 'Luke'].includes(s), isMayor: (s) => s === 'Mayor',
     classifyIntent: async () => { classified++; return { type: 'none' }; }, console: { log() {}, error() {} } });
-  vm.runInContext('var lastMayorSeenAt = 0;' + between(index, 'const PROCESS_STARTED_AT', '// Real gap found live (2026-09-07): with no memory') +
-    between(index, 'const NON_PLAYER_SPEAKERS', 'bot.on("chat"'), c);
+  vm.runInContext('var lastMayorSeenAt = 0;' + between(index, 'const PROCESS_STARTED_AT', 'guardedInterval(goalHeartbeatTick') +
+    between(index, 'const NON_PLAYER_SPEAKERS', 'function watchFleetTopics('), c);
   c.handleIncoming('Mark', 'Amy, gather wood', { alreadyAddressed: false, send() {} });
   c.handleIncoming('Luke', 'Amy, gather wood', { alreadyAddressed: false, send() {} });
   c.handleIncoming('Rcon', 'Teleported MBTester to 2000, 201, 2000', { alreadyAddressed: false, send() {} });
@@ -39,7 +40,7 @@ await check('Tier 2: checkLocationSharing runs noteNearbyResources on a standing
   const bot = { entity: { position: {} } };
   const c = vm.createContext({ setInterval() {}, guardedInterval() {}, console: { error() {} },
     AUTONOMY_ENABLED: true, bot, noteNearbyResources: async (reason) => { calls++; assert.match(reason, /location sweep/); } });
-  vm.runInContext(between(index, 'async function checkLocationSharing(', 'guardedInterval(() => {\n  checkLocationSharing'), c);
+  vm.runInContext(between(index, 'async function checkLocationSharing(', 'const CHEST_CONSOLIDATION_CHECK_MS'), c);
   await c.checkLocationSharing();
   assert.equal(calls, 1, 'runs while loaded in and autonomous');
   bot.entity = null;

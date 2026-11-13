@@ -1,6 +1,6 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 4.4.0
+**Version:** 4.5.0
 
 Mineflayer bot runtime for the Firmament's nine Minecraft bots. **What the bots do and why lives
 in `../../MINECRAFT_BOTS_DESIGN.md`** — this file covers only how to run and configure the
@@ -65,8 +65,18 @@ Everything has a working default; a unit file only sets what it overrides.
 
 | File | Job |
 |---|---|
-| `index.js` | The bot: connection, chat pipeline, goal loop, idle-tick checks, role priority functions, Mayor curriculum |
-| `actions.js` | Every physical verb (`performAction`), chest/furnace/gear helpers |
+| `index.js` | The bot: creates it, holds the state the modules share (`busy`, `currentGoal`, ...), and registers every listener and periodic check in order. Most code lives in the modules below (split 2026-11-13, each under the self-repair pipeline's 40000-char file limit) |
+| `fleet-coordination.js` | Role notes, recent goal outcomes, goal/give/threat/death broadcasts, resource notes |
+| `goal-proposal.js`, `goal-tick.js` | Self-proposed goals; the goal loop (`goalTick`) and its follow-up scheduling |
+| `goal-runners.js`, `gear-goals.js`, `shelter-goals.js` | The dedicated goal runners: builder placement, farm, ranch, bed, weapon, tools, food, shelter |
+| `mayor.js` | The Mayor's tech-tree curriculum, directives to other bots, the fallback coordinator |
+| `night-survival.js` | Sleep and dusk, emergency health, drowning, threats while asleep |
+| `upkeep-inventory.js`, `upkeep-home.js`, `upkeep-world.js` | The periodic checks: hunger, crops, give requests, storage, trash, lighting, terrain, shelter integrity, stuck detection |
+| `incoming.js` | Incoming chat and commands, stop, the incoming queue, the Buzz topic watchers |
+| `chat.js`, `planning.js`, `self-defense.js`, `home-scan.js`, `priorities.js` | Chat replies and intent, the step planner, self-defense, home scans, the role priority lists (split 2026-11-10) |
+| `actions.js` | `performAction` and its dispatcher over `actions/*.js` (one file per verb); re-exports every helper below |
+| `action-vocab.js`, `action-search.js`, `action-movement.js`, `action-crafting.js`, `action-world.js`, `action-shelter.js`, `action-chests.js`, `action-claims.js` | The helpers the actions share: item and block vocabulary, searching, boats and collection, crafting, pens/farms/beds, shelter geometry, the chest record, builder claims (split 2026-11-13) |
+| `history/` | `index.js`'s and `actions.js`'s change history (moved out of the files 2026-11-13) |
 | `arbiter.js` | Urgency tiers — who may hold the body |
 | `roles.js` | Role taxonomy and per-bot assignment |
 | `goals.js` | Persistent goal state, `actionsTaken`, failure counters |
@@ -81,6 +91,15 @@ Everything has a working default; a unit file only sets what it overrides.
 | `matrix.js` | Legacy, optional Matrix room watcher (pre-Buzz); only runs with a `MATRIX_ACCESS_TOKEN` |
 
 ## Things that will bite you
+
+- **`index.js` and `actions.js` keep their change history in `history/`**, not at the top of the file
+  (each was larger than the self-repair pipeline's whole file limit). Bump the `// Version:` line in
+  the file and add the entry at the top of `history/<file>.md`. Every other file keeps its own header.
+- **A module-level variable is assigned only in the file that declares it.** Another file imports it
+  (a live, read-only binding) and writes it through that file's setter -- `setBusy()`,
+  `setCurrentGoal()`. `busy = true` in a split-out module is a TypeError at runtime, not at load.
+  Code that runs at load (`bot.on`, `guardedInterval`) stays in `index.js`: the modules evaluate
+  before `index.js` has created `bot`.
 
 - **Adding an action verb means three places**: the `actions.js` switch, `classifyIntent`'s
   vocabulary, and `planNextStep`/`parseGoalStep`'s vocabulary — plus `SKILL_ACTION_VERBS` unless

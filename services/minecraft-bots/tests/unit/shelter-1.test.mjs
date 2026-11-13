@@ -1,4 +1,5 @@
-// Version: 1.1.0
+// Version: 1.1.1
+// 1.1.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
@@ -153,7 +154,7 @@ await check('checkShelterIntegrity (unified, general) repairs the first damaged 
       performAction: async (_bot, action) => { calls.push(action); return { ok: true, text: 'patched the shelter.' }; },
       bot: { spawnPoint: new V3(0, 64, 0) }, USERNAME: 'Test', console: { log() {}, error() {} },
     });
-    vm.runInContext(between(index, 'async function checkShelterIntegrity() {', 'guardedInterval(() => {'), c);
+    vm.runInContext(between(index, 'async function checkShelterIntegrity() {', 'const STUCK_CHECK_MS'), c);
     return c;
   };
   const complete = { inside: new Set(['0,64,0']), shell: new Set(), holes: new Set() };

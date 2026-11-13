@@ -1,4 +1,5 @@
-// Version: 1.1.0
+// Version: 1.1.1
+// 1.1.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
@@ -61,7 +62,7 @@ await check('MB-12 heartbeat re-announces the goal and expires silent peers', as
   const sent = []; const otherBotGoals = new Map([['mc-bob', 'mine'], ['mc-nell', 'farm']]);
   const c = vm.createContext({ console: { log() {} }, USERNAME: 'Mayor', Date, otherBotGoals, setInterval() {}, guardedInterval() {},
     currentGoal: { description: 'coordinate' }, broadcastGoalState: (...a) => { sent.push(a); } });
-  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, '// goal every GOAL_HEARTBEAT_MS', 'guardedInterval(goalHeartbeatTick'), c);
+  vm.runInContext('var currentGoal = this.currentGoal;' + between(index, '// goal every GOAL_HEARTBEAT_MS', 'async function broadcastThreatAlert('), c);
   const now = 10_000_000;
   vm.runInContext(`otherBotGoalSeenAt.set("mc-bob", ${now - 60_000}); otherBotGoalSeenAt.set("mc-nell", ${now - 3_600_000});`, c);
   c.goalHeartbeatTick(now);
@@ -191,12 +192,12 @@ await check('Ripe crops: a failed routine harvest backs off 15 minutes; a cancel
     farmStatus: () => ({ ripe: 3, growing: 0 }), routineBlocked: () => false,
     arbiter: { OWNERS: { ROUTINE: 1 }, requestControl: async () => ({ release() {} }) },
     performAction: async (b, a) => { calls.push(a); return reply; } });
-  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'guardedInterval(() => {'), c);
+  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'const GIVE_CHECK_MS'), c);
   await c.checkRipeCrops(); await c.checkRipeCrops();
   assert.equal(calls.length, 1, 'backing off after the failure');
   assert.deepEqual({ ...calls[0] }, { type: 'harvest', onlyRipe: true });
   const c2 = vm.createContext({ ...c, performAction: async (b, a) => { calls.push(a); return { ok: false, cancelled: true, text: 'stopped' }; } });
-  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'guardedInterval(() => {'), c2);
+  vm.runInContext('let lastHarvestAt = 0;' + between(index, 'const RIPE_CHECK_MS', 'const GIVE_CHECK_MS'), c2);
   await c2.checkRipeCrops(); await c2.checkRipeCrops();
   assert.equal(calls.length, 3, 'an interrupted harvest is retried');
   assert.match(actionHandlerSrc, /if \(total\) await collectDrops/, 'drops are collected only after a real harvest');

@@ -1,4 +1,10 @@
-// Version: 1.5.0
+// Version: 1.6.0
+// 1.6.0 (2026-11-13): `actions` joins the eight action-*.js modules actions.js 3.0.0 was split into.
+// `index` also carries the twelve modules index.js 3.0.0 was split into, in their
+// original order, imports dropped, so a slice that spans two of them still reads as one piece. A
+// module-level variable written from another file is written through a setter there
+// (setCurrentGoal(x)); between() turns those calls back into the assignments they replaced, so a
+// slice runs in a test context exactly as the code read before the split.
 // 1.5.0 (2026-11-11): merged PR #4 -- readSource() normalizes CRLF before slicing runtime sources.
 //
 // 1.4.0 (2026-11-11): steppedGotoWorld() takes a start, rock overhead and movements, and walks GoalY climbs.
@@ -20,7 +26,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const root = fileURLToPath(new URL('../../', import.meta.url));
 const readSource = async (file) => (await readFile(root + file, 'utf8')).replace(/\r\n/g, '\n');
-export const actions = await readSource('actions.js');
+// actions.js 3.0.0 (2026-11-13): its helpers moved to action-*.js; `actions` joins them back, imports dropped, with
+// what stayed in actions.js (performAction and the dispatcher) last, where it was.
+const ACTION_MODULES = ['action-vocab.js', 'action-search.js', 'action-movement.js', 'action-crafting.js', 'action-world.js',
+  'action-shelter.js', 'action-chests.js', 'action-claims.js'];
+const dropImportsA = (s) => s.replace(/^(import [^;]*|export {[^}]*} from [^;]*);$/gm, '');
+export const actions = [...(await Promise.all(ACTION_MODULES.map(readSource))), await readSource('actions.js')]
+  .map(dropImportsA).join(String.fromCharCode(10));
 // index.js plus the modules split out of it (self-defense.js, chat.js, planning.js, home-scan.js, priorities.js, 2026-11-10), so a check that slices a
 // function by its markers finds it wherever it now lives.
 export const indexOnly = await readSource('index.js');
@@ -29,7 +41,12 @@ export const chatSrc = await readSource('chat.js');
 export const planningSrc = await readSource('planning.js');
 export const homeScanSrc = await readSource('home-scan.js');
 export const prioritiesSrc = await readSource('priorities.js');
-export const index = [indexOnly, selfDefenseSrc, chatSrc, planningSrc, homeScanSrc, prioritiesSrc].join(String.fromCharCode(10));
+const INDEX_MODULES = ['fleet-coordination.js', 'goal-proposal.js', 'goal-runners.js', 'gear-goals.js', 'shelter-goals.js',
+  'goal-tick.js', 'mayor.js', 'night-survival.js', 'upkeep-inventory.js', 'upkeep-home.js', 'upkeep-world.js', 'incoming.js'];
+const dropImports = (s) => s.replace(/^(import [^;]*|export {[^}]*} from [^;]*);$/gm, '');
+export const indexModulesSrc = (await Promise.all(INDEX_MODULES.map(readSource))).map(dropImports);
+export const index = [dropImports(indexOnly), ...indexModulesSrc, selfDefenseSrc, chatSrc, planningSrc, homeScanSrc, prioritiesSrc]
+  .join(String.fromCharCode(10));
 export const equipment = await readSource('equipment.js');
 export const skills = await readSource('skills.js');
 export const swim = await readSource('swim-movements.js');
@@ -49,12 +66,30 @@ export class V3 {
   floored() { return new V3(Math.floor(this.x), Math.floor(this.y), Math.floor(this.z)); }
 }
 
+const SPLIT_SETTERS = { setBusy: 'busy', setCurrentGoal: 'currentGoal', setLastActivityAt: 'lastActivityAt',
+  setLastMayorSeenAt: 'lastMayorSeenAt', setPendingGiveRequest: 'pendingGiveRequest', setLastHarvestAt: 'lastHarvestAt',
+  setSurplusCleanupDueAt: 'surplusCleanupDueAt' };
+function unsetter(text) {
+  const call = new RegExp(String.raw`(?<![\w$.])(` + Object.keys(SPLIT_SETTERS).join('|') + String.raw`)\(`, 'g');
+  let out = '';
+  let last = 0;
+  for (let m; (m = call.exec(text));) {
+    if (/function\s+$/.test(text.slice(Math.max(0, m.index - 12), m.index))) continue; // the setter's own definition
+    let depth = 1;
+    let i = call.lastIndex;
+    for (; i < text.length && depth; i++) depth += text[i] === '(' ? 1 : text[i] === ')' ? -1 : 0;
+    out += text.slice(last, m.index) + `(${SPLIT_SETTERS[m[1]]} = ${text.slice(call.lastIndex, i - 1)})`;
+    last = i;
+    call.lastIndex = i;
+  }
+  return out + text.slice(last);
+}
 export function between(source, start, end) {
   const from = source.indexOf(start);
   assert(from >= 0, start);
   const to = end ? source.indexOf(end, from + start.length) : source.length;
   assert(to > from, end);
-  return source.slice(from, to).replace(/export /g, '');
+  return unsetter(source.slice(from, to)).replace(/export /g, '');
 }
 // actions.js 2.0.0: each action is its own file under actions/, dispatched by ACTION_HANDLERS.
 // Their source, imports dropped, is appended to every slice that runs performActionAs, so the
@@ -268,7 +303,7 @@ export function bedWorld({ standAt = new V3(0, 64, 0), occupied = [], remembered
       return rescan();
     } });
   vm.runInContext(between(actions, 'function bedNearHazard(', '\n// Direct request, 2026-09-09') +
-    between(actions, '// A bed is two blocks;', '\n// Direct request, 2026-09-10') + timeoutFn + actionFn, c);
+    between(actions, '// A bed is two blocks;', 'const LOOT_GROUPS') + timeoutFn + actionFn, c); // to the end of action-claims.js
   return { bot, c, addBed, blocks, tried };
 }
 
@@ -331,7 +366,7 @@ export function hungerWorld({ food = 10, items = [], lootGives = null, huntGives
     AUTONOMY_ENABLED: true, HUNGER_THRESHOLD: 18, CRITICAL_FOOD_LEVEL: 6, FOOD_NAMES: ['bread', 'carrot', 'beef'],
     heldCount: (test) => inv.filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
     routineBlocked: () => false, arbiter: { OWNERS: { ROUTINE: 1, HUNGER_CRITICAL: 2 }, requestControl: async () => ({ release() {} }) } });
-  vm.runInContext(between(index, 'const FOOD_FETCH_COUNT', 'guardedInterval(() => {'), c);
+  vm.runInContext(between(index, 'const FOOD_FETCH_COUNT', 'const RIPE_CHECK_MS'), c);
   return { c, calls, inv };
 }
 

@@ -1,4 +1,5 @@
-// Version: 1.2.0
+// Version: 1.2.1
+// 1.2.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 // 1.2.0 | 2026-11-11 | Partial drop acknowledgements and narration after releasing control.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
@@ -187,7 +188,7 @@ await check('MB-13 a failed delivery is retried once; a success is acknowledged'
     },
     buzzPublish: async (_, __, body) => { published.push(JSON.parse(body)); } });
   vm.runInContext('var pendingGiveRequest = { forPlayer: "Amy", item: "oak_log", count: 2, requestId: "r1", attempts: 0, expiresAt: Date.now() + 60000 };' +
-    between(index, 'async function checkPendingGiveRequests(', 'guardedInterval(() => {\n  checkPendingGiveRequests'), c);
+    between(index, 'async function checkPendingGiveRequests(', 'const INVENTORY_CHECK_MS'), c);
   await c.checkPendingGiveRequests();
   assert.equal(vm.runInContext('pendingGiveRequest?.attempts', c), 1, 'queued for one retry');
   await c.checkPendingGiveRequests();
@@ -433,7 +434,7 @@ await check('Goal loop: a finished step chains the next tick instead of waiting 
     currentGoal: goal, setTimeout: (fn, ms) => timers.push(ms), setInterval: () => {}, guardedInterval: () => {},
     goalTick: async () => { ran++; if (step) goal.steps++; } });
   vm.runInContext('var currentGoal = this.currentGoal;' +
-    between(index, 'const GOAL_FOLLOWUP_MS', 'guardedInterval(runGoalTick'), c);
+    between(index, 'const GOAL_FOLLOWUP_MS', 'const MAYOR_DIRECTIVE_MS'), c);
   await c.runGoalTick();
   assert.deepEqual([...timers], [2000], 'a step ran: the next tick is queued 2s out');
   step = false;

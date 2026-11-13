@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.47.0
+**Version:** 2.48.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -110,7 +110,13 @@ Python client has mineflayer's maturity.
 
 | File | Job |
 |---|---|
-| `index.js` | The bot: connection, startup, the goal loop and goal runners, every idle-tick check, Buzz handlers, Mayor curriculum |
+| `index.js` | The bot: connection and startup, the state the modules share (written elsewhere only through its setters), and every listener and periodic check, registered in their original order |
+| `goal-tick.js`, `goal-proposal.js` | The goal loop (`goalTick`) and its scheduling; self-proposed goals |
+| `goal-runners.js`, `gear-goals.js`, `shelter-goals.js` | The dedicated goal runners (builder placement, farm, ranch, bed, weapon, tools, food, shelter) |
+| `mayor.js` | Mayor curriculum, directives to the other bots, the fallback coordinator |
+| `night-survival.js` | Sleep and dusk, emergency health, drowning, threats while asleep |
+| `upkeep-inventory.js`, `upkeep-home.js`, `upkeep-world.js` | The idle-tick checks |
+| `fleet-coordination.js`, `incoming.js` | Goal/give/threat broadcasts and resource notes; incoming chat, stop, Buzz handlers |
 | `chat.js` | `classifyIntent`, the chat reply, narration, what gets remembered |
 | `planning.js` | `runAction`, the goal-step parser, `planNextStep`, goal-conflict arbitration |
 | `priorities.js` | What to work on next: survival, tool-upgrade, shelter-reface, builder and soldier priorities; communal shelter checks |
@@ -118,7 +124,8 @@ Python client has mineflayer's maturity.
 | `self-defense.js` | Fight or flee, last-resort attack/flee, threat memory, squad response, rally points (`installSelfDefense()`) |
 | `pathfinding.js` | The pathfinder setup: costs, unbreakable blocks, search limits, path diagnostics (`setupPathfinding()`) |
 | `faults.js` | `guardedInterval()` for every periodic check; the process-wide uncaught-error handler |
-| `actions.js` | `performAction` and its dispatch table, plus the chest/furnace/gear/bed helpers the actions share |
+| `actions.js` | `performAction` and its dispatch table; re-exports the helpers the actions share, which live in `action-vocab.js`, `action-search.js`, `action-movement.js`, `action-crafting.js`, `action-world.js`, `action-shelter.js`, `action-chests.js`, `action-claims.js` |
+| `history/` | `index.js`'s and `actions.js`'s change history, moved out of the files (2026-11-13) |
 | `actions/*.js` | One file per action verb (41), each exporting its handler |
 | `arbiter.js` | Coherence arbiter — who may hold the body, by urgency tier |
 | `roles.js` | Role taxonomy + per-bot assignment (data, not behavior) |

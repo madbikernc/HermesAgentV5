@@ -1,4 +1,5 @@
-// Version: 1.2.0
+// Version: 1.2.1
+// 1.2.1 (2026-11-13): index.js 3.0.0 -- the breath listener is the named onLowBreath(), registered by index.js; the check registers it.
 //
 // 1.2.0 (2026-11-11): far below the goal under rock, stepped goto climbs (swim-movements.js 1.7.0).
 // 1.1.0 (2026-11-10): setupPathfinding() (pathfinding.js 1.0.0, out of index.js) installs the
@@ -68,6 +69,7 @@ await check('Water: the drowning reflex reads her own air, and the shore search 
     AUTONOMY_ENABLED: true, USERNAME: 'Babs', goals: { GoalNear: class {} },
     arbiter: { OWNERS: { DROWNING: 'drowning' }, requestControl: async () => null, currentOwner: () => 'x' } });
   vm.runInContext(between(index, 'const DROWNING_OXYGEN_THRESHOLD', '// Direct request, 2026-09-07 ("they don\'t seem to be fighting back'), c);
+  vm.runInContext('bot.on("breath", onLowBreath);', c); // index.js registers it (3.0.0: a named function now)
   bot.emit('breath');
   assert(!logs.some((l) => /EMERGENCY: oxygen critical/.test(l)), 'a nearby squid\'s air (oxygenLevel 4) with her own at 300 ticks: no emergency');
   await sleep(10);
@@ -118,6 +120,7 @@ await check('Water: bobbing at the surface (isInWater false for a tick) still se
     AUTONOMY_ENABLED: true, USERNAME: 'Babs', goals: { GoalNear: class {} },
     arbiter: { OWNERS: { DROWNING: 'drowning' }, requestControl: async () => handle, holdsControl: () => true, currentOwner: () => 'x' } });
   vm.runInContext(between(index, 'const DROWNING_OXYGEN_THRESHOLD', '// Direct request, 2026-09-07 ("they don\'t seem to be fighting back'), c);
+  vm.runInContext('bot.on("breath", onLowBreath);', c); // index.js registers it (3.0.0: a named function now)
   bot.emit('breath');
   bot.entity.isInWater = false; // her head clears the surface for a tick
   await sleep(300);
