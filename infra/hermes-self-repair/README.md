@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 6.13.0
+**Version:** 7.0.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -707,10 +707,72 @@ Both domains are now switched on. A third domain is explicitly **deferred, not f
 direct operator instruction — pending seeing how minecraft-bots and egress-guard actually perform
 first.
 
+## Fidelity pass (2026-11-12/13): what changed, and why
+
+Direct operator request: "improve the fidelity and accuracy, the effectiveness of the self repair
+process". Measured first, from hermes-memory's own `tasks`/`turns` (read-only): of 52 self-repair
+tasks, 36 had ended in `error` -- 15 router screening refusals (HTTP 400), 9 single HTTP 502s, 7 test
+tasks aimed at the 363k-char `unit.test.mjs`, 6 fixes aimed at `index.js` -- and of the seven fixes
+staged on NAS2 2026-11-10/11, five changed nothing (helpers nobody calls, a field nothing reads, a
+no-op on a false premise, a comment-only edit), all "verified". A self-repair test commit
+(`ad0828d`, 2026-11-13) left `pathfinding.test.mjs` unparseable and was verified too.
+
+**Getting tasks through at all**
+- The generator (1.3.0) declares `X-Hermes-Screening: analysis` to the router only for a task whose
+  own intake Layer 2 pass ran and passed; the router still runs Layer 1 (blocking) and logs every
+  would-have-blocked verdict. Operator-approved change to a security screen.
+- The generator (1.4.0) retries a 502/503/504 or a dropped connection twice; a 400 never.
+- The bridge (2.4.x) retries a signature whose task ended `error` (and, 2.5.0, `incomplete` or
+  `verify-failed`), at most 3 submissions, an hour apart, never after a human decision.
+- The gate (1.2.0) lets `skip` decline a task parked in `awaiting-completeness`.
+
+**Verification that proves something** (`hermes-self-repair-verify.py` 2.0.0, `-apply.py` 2.0.0)
+- `node --check` for JavaScript; a comment-only diff fails; an export used nowhere, a local function
+  never called, or a property only ever written fails.
+- The domain's own test suite (`domains.json` `verify_command`: `tests/run.sh unit` for
+  minecraft-bots) runs on the applied commit in a fresh `git worktree` with `verify_links`
+  (node_modules) symlinked in.
+- A commit that fails verification is **reverted** on `nas2-selfrepair` -- with the suite running,
+  one broken commit would fail every later task. (Reverses Step 4's "never reverted" for this case;
+  a declined but passing commit still stays.)
+
+**Tests written from the fix, and required to test it**
+- The bridge (2.5.0) submits the fix alone with a `test-plan` turn; once the fix has verified and
+  waits in `awaiting-completeness`, `sweep_pending_tests()` submits the test task with the applied
+  diff in its problem, and links the pair.
+- A linked test task must pass with the fix and **fail** with the fix's file as it was before it
+  (`single_test_command`). An empty test diff fails. A failed test task turns its fix `incomplete`
+  (FleetOps notice) instead of leaving it waiting forever.
+
+**Aiming at the right code, with the right context**
+- The fix target is the file that emits the log line, found by grepping the domain's source for the
+  line's literal fragments (`locate_emitter()`); the model is asked only when nothing matches. An
+  emitter over `MAX_FILE_CHARS` is skipped with its reason, never swapped for a smaller file.
+- The fix problem carries the emitting code and the bot's recent log lines
+  (`hermes-minecraft-triage.py` 1.8.0 appends a `recent log` block to every incident).
+- The review prompt requires a named runtime call path (ISSUES if none); draft/revise prompts carry
+  today's date.
+
+**One failure, one incident**
+- Both systemd crash lines, on any bot, are one signature; "giving up on goal" is one, whatever the
+  goal; a crash within 600 s of the same bot's OOM is that OOM (crashes are held 120 s for it).
+
+**Seeing whether it works**
+- `tools/hermes_self_repair_outcomes.py`: every stage appends what it did and why to
+  `~/.hermes/state/selfrepair-outcomes.jsonl` (no tokens, diffs or transcripts).
+- FleetOps `/selfrepair` "Is it working?": a 30-day funnel and, for each fix approved for promotion,
+  its incident's occurrences in the 7 days before and since.
+
+Known limits: `index.js` (436k) and `actions.js` (248k) are still over the whole-file limit, so an
+incident they emit is now skipped rather than misdirected -- splitting them further is what makes
+those incidents fixable. A fix built on a false premise that still changes code (`58104d9`) is
+caught only by its test failing to discriminate.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 7.0.0 | 2026-11-13 | Direct operator request. Added "Fidelity pass": screening hand-off and transient retries (generate 1.3.0/1.4.0), error retries (bridge 2.4.x), skip from awaiting-completeness (gate 1.2.0), JS-aware verification with the domain test suite and revert-on-failure (verify 2.0.0, apply 2.0.0 -- reverses Step 4's "never reverted" for a failed commit), tests written from the applied fix and required to fail without it, emitter-based targeting with context, crash/OOM grouping (bridge 2.5.0, triage 1.8.0), and the outcome log + FleetOps funnel. |
 | 6.13.0 | 2026-11-10 | Added "Keeping the checkout current": `hermes-self-repair-sync.sh` + timer merge `origin/master` into the self-repair checkout every 30 minutes and push it to `nas2-selfrepair`, sharing a lock with the apply worker (1.5.0). The checkout had never been updated from GitHub since 2026-11-07. 10 checks in `tests/test_sync.py`. |
 | 6.12.0 | 2026-11-10 | Bridge 2.3.0: a minecraft-bots test task now targets one per-area `services/minecraft-bots/tests/unit/*.test.mjs` file (chosen by the same validated model call as the fix path, from those files only) instead of the 363k-char `unit.test.mjs`, which the generator always refused. 67 bridge checks. |
 | 6.11.0 | 2026-11-10 | Direct operator request. Bridge 2.2.0: findings are submitted once per signature, tracked in the bridge's own state, instead of only when triage's occurrence count is exactly 1. That gate had blocked every failure already repeating before 2026-11-08, `[stuck-path]` included, while the skip log claimed a task "was already considered". Generator 1.2.0: `MAX_FILE_CHARS` 12000 -> 40000 and `DRAFT_MAX_TOKENS`/`REVISE_MAX_TOKENS` -> 16000, sized to coder/coder2's live 65536-token context. 65 bridge checks. |
