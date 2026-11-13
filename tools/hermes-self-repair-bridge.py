@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 2.3.0
+# Version: 2.4.0
+#
+# 2.4.0 (2026-11-12) — direct operator request: a signature whose task died on a pipeline error
+# was never tried again. should_submit() skipped any recorded signature for good, so when the
+# generator's router calls started failing (HTTP 400/502, 2026-11-12), `[goal-abandoned]`'s fix
+# task 26b36ed9 went to `error` and the bridge has logged "already submitted" for it ever since.
+# A recorded signature is now resubmitted when its fix or test task ended in `error` and nothing
+# has reached a human decision (`verified`/`promotion-approved`/`promoted`/`promotion-declined`),
+# at most SIGNATURE_MAX_ATTEMPTS times in all and no sooner than SIGNATURE_RETRY_SECONDS after the
+# last submission -- an error that repeats every time (a file over MAX_FILE_CHARS) is retried
+# twice more, not every poll. The states are only looked up once that interval has passed, so the
+# per-minute skips stay free. `unresolved` (the models never agreed) and `blocked` (intake
+# screening) are not retried: neither is a transient failure.
 #
 # 2.3.0 (2026-11-10) — the linked test task no longer targets services/minecraft-bots/tests/
 # unit.test.mjs: at 363k chars it was always refused by the generator's MAX_FILE_CHARS (every
@@ -126,6 +138,9 @@
 #                               one, and even once it concludes, a new one waits out the rest of
 #                               this window (1.1.0/2.1.0's bootstrap/budget protections cover the
 #                               cross-domain burst case; this covers one caller looping on its own)
+#   SIGNATURE_RETRY_SECONDS     default 3600 -- minecraft-bots only; a recorded signature whose
+#                               task ended in `error` is resubmitted no sooner than this (2.4.0)
+#   SIGNATURE_MAX_ATTEMPTS      default 3 -- submissions per signature in all, retries included
 #   BRIDGE_STATE_DIR            default ~/.hermes/state/selfrepair-bridge -- durable cursor per
 #                               source so a restart never re-processes old findings, and a source
 #                               with no cursor yet is seeded at its current tip, never replayed
@@ -159,6 +174,8 @@ SEVERITY_RANK = {"low": 0, "unknown": 0, "medium": 1, "high": 2}
 MIN_SEVERITY_RANK = SEVERITY_RANK[os.environ.get("MIN_SEVERITY", "medium")]
 MAX_SUBMISSIONS_PER_POLL = int(os.environ.get("MAX_SUBMISSIONS_PER_POLL", "3"))
 EGRESS_COOLDOWN_SECONDS = int(os.environ.get("EGRESS_COOLDOWN_SECONDS", "3600"))
+SIGNATURE_RETRY_SECONDS = int(os.environ.get("SIGNATURE_RETRY_SECONDS", "3600"))
+SIGNATURE_MAX_ATTEMPTS = int(os.environ.get("SIGNATURE_MAX_ATTEMPTS", "3"))
 STATE_DIR = Path(os.environ.get(
     "BRIDGE_STATE_DIR", str(Path.home() / ".hermes" / "state" / "selfrepair-bridge")))
 BRIDGE_AGENT = "selfrepair-bridge"
@@ -283,7 +300,25 @@ def finding_signature(parsed):
     return f"{parsed['category']}|{line}"
 
 
-def should_submit(parsed, state):
+HUMAN_DECIDED_TASK_STATES = {"verified", "promotion-approved", "promoted", "promotion-declined"}
+
+
+def retry_reason(record, now):
+    """A reason string if this recorded signature's tasks died on a pipeline error and it may be
+    submitted again (2.4.0), else None."""
+    attempts = record.get("attempts", 1)
+    if attempts >= SIGNATURE_MAX_ATTEMPTS:
+        return None
+    if now - record.get("submitted_at", 0) < SIGNATURE_RETRY_SECONDS:
+        return None
+    states = [fetch_task_state_or_none(record[k]) for k in ("fix", "test") if record.get(k)]
+    if "error" not in states or any(st in HUMAN_DECIDED_TASK_STATES for st in states):
+        return None
+    return (f"retrying: task {record.get('fix')} ended in error "
+            f"(attempt {attempts + 1} of {SIGNATURE_MAX_ATTEMPTS})")
+
+
+def should_submit(parsed, state, now=None):
     """Returns (ok: bool, reason: str). A signature at or above MIN_SEVERITY, from either role,
     is submitted once, the first time the bridge sees it with no task recorded for it in its own
     state (`submitted_signatures`) -- whatever triage's occurrence count says. Triage counted
@@ -295,13 +330,19 @@ def should_submit(parsed, state):
         return False, f"below MIN_SEVERITY (roles: {parsed['roles']})"
     record = (state.get("submitted_signatures") or {}).get(finding_signature(parsed))
     if record:
+        retry = retry_reason(record, time.time() if now is None else now)
+        if retry:
+            return True, retry
         return False, f"already submitted for this signature (fix task {record.get('fix')})"
     return True, "never submitted for this signature, severity threshold met"
 
 
 def record_signature_submission(state, parsed, fix_task_id, test_task_id, now):
-    state.setdefault("submitted_signatures", {})[finding_signature(parsed)] = {
-        "fix": fix_task_id, "test": test_task_id, "submitted_at": now}
+    signatures = state.setdefault("submitted_signatures", {})
+    previous = signatures.get(finding_signature(parsed)) or {}
+    signatures[finding_signature(parsed)] = {
+        "fix": fix_task_id, "test": test_task_id, "submitted_at": now,
+        "attempts": previous.get("attempts", 0) + 1}
     save_state(state)
 
 

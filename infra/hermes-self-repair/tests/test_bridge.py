@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 2.2.0
+# Version: 2.3.0
+#
+# 2.3.0 (2026-11-12) — a recorded signature whose task ended in `error` is retried after
+# SIGNATURE_RETRY_SECONDS, up to SIGNATURE_MAX_ATTEMPTS, never after a human decision, and never
+# for `unresolved` (bridge 2.4.0).
 #
 # 2.2.0 (2026-11-10) — the test task targets a per-area tests/unit/*.test.mjs file chosen from
 # the test candidates only (bridge 2.3.0), never the 363k-char unit.test.mjs; an invalid
@@ -133,7 +137,9 @@ def main():
           "bridge existed)", ok is True, reason)
 
     real_save_state = mod.save_state
+    real_fetch = mod.fetch_task_state_or_none
     mod.save_state = lambda state: None
+    mod.fetch_task_state_or_none = lambda task_id: "drafting"
     seen_state = {}
     mod.record_signature_submission(seen_state, repeat, "fix-1", "test-1", now=1000.0)
     ok, reason = mod.should_submit(repeat, seen_state)
@@ -146,6 +152,44 @@ def main():
         "source line: TypeError", "source line: [Amy] TypeError")), "fix-2", "test-2", now=1000.0)
     ok, reason = mod.should_submit(other_bot, seen_state)
     check("the same failure on another bot is the same signature, not a second task", ok is False, reason)
+
+    print("\n[should_submit: a signature whose task died on an error is retried, within limits]")
+    seen_state = {}
+    mod.record_signature_submission(seen_state, repeat, "fix-1", "test-1", now=1000.0)
+    states = {"fix-1": "error", "test-1": "error"}
+    mod.fetch_task_state_or_none = lambda task_id: states.get(task_id, "drafting")
+    later = 1000.0 + mod.SIGNATURE_RETRY_SECONDS
+    ok, reason = mod.should_submit(repeat, seen_state, now=1000.0 + 60)
+    check("an errored task is not retried inside the retry interval", ok is False, reason)
+    ok, reason = mod.should_submit(repeat, seen_state, now=later)
+    check("an errored task is retried once the interval has passed (the 26b36ed9 case)", ok is True, reason)
+    check("the retry reason names the task and the attempt", "fix-1" in reason and "attempt 2" in reason, reason)
+    states = {"fix-1": "awaiting-completeness", "test-1": "error"}
+    ok, reason = mod.should_submit(repeat, seen_state, now=later)
+    check("a test task that errored retries the pair (the fix can never leave awaiting-completeness)",
+          ok is True, reason)
+    for decided in ("verified", "promotion-declined", "promoted"):
+        states = {"fix-1": decided, "test-1": "error"}
+        ok, reason = mod.should_submit(repeat, seen_state, now=later)
+        check(f"no retry once a human decision exists ({decided})", ok is False, reason)
+    for concluded in ("unresolved", "blocked", "drafting", mod.UNKNOWN_TASK_STATE):
+        states = {"fix-1": concluded, "test-1": concluded}
+        ok, reason = mod.should_submit(repeat, seen_state, now=later)
+        check(f"no retry when nothing errored ({concluded})", ok is False, reason)
+    states = {}
+    mod.fetch_task_state_or_none = lambda task_id: "error"
+    mod.record_signature_submission(seen_state, repeat, "fix-1b", "test-1b", now=later)
+    mod.record_signature_submission(seen_state, repeat, "fix-1c", "test-1c", now=later)
+    record = seen_state["submitted_signatures"][mod.finding_signature(repeat)]
+    check("each submission counts an attempt", record.get("attempts") == 3, record)
+    ok, reason = mod.should_submit(repeat, seen_state, now=later + 10 * mod.SIGNATURE_RETRY_SECONDS)
+    check("no retry past SIGNATURE_MAX_ATTEMPTS", ok is False, reason)
+    calls = []
+    mod.fetch_task_state_or_none = lambda task_id: calls.append(task_id) or "error"
+    mod.should_submit(repeat, {"submitted_signatures": {mod.finding_signature(repeat): {
+        "fix": "f", "test": "t", "submitted_at": later, "attempts": 1}}}, now=later + 1)
+    check("inside the interval, no task-state lookup is made at all", calls == [], calls)
+    mod.fetch_task_state_or_none = real_fetch
     mod.save_state = real_save_state
 
     stuck = {"category": "stuck-path", "source_line": "[Bob] path_reset: stuck at 12.5 64 -3"}
