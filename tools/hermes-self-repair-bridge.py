@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.4.0
+# Version: 2.4.1
+#
+# 2.4.1 (2026-11-13) — a record written before 2.4.0 has no `attempts`; retry_reason() already
+# counts it as 1, but record_signature_submission() counted it as 0, so its first retry was
+# recorded as attempt 1 and the signature got one submission past SIGNATURE_MAX_ATTEMPTS. Both
+# now read a missing count as 1.
 #
 # 2.4.0 (2026-11-12) — direct operator request: a signature whose task died on a pipeline error
 # was never tried again. should_submit() skipped any recorded signature for good, so when the
@@ -342,7 +347,7 @@ def record_signature_submission(state, parsed, fix_task_id, test_task_id, now):
     previous = signatures.get(finding_signature(parsed)) or {}
     signatures[finding_signature(parsed)] = {
         "fix": fix_task_id, "test": test_task_id, "submitted_at": now,
-        "attempts": previous.get("attempts", 0) + 1}
+        "attempts": (previous.get("attempts", 1) + 1) if previous else 1}
     save_state(state)
 
 

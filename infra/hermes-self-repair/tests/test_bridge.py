@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Version: 2.3.0
+# Version: 2.3.1
+#
+# 2.3.1 (2026-11-13) — a retry of a pre-2.4.0 record (no `attempts`) is recorded as attempt 2
+# (bridge 2.4.1).
 #
 # 2.3.0 (2026-11-12) — a recorded signature whose task ended in `error` is retried after
 # SIGNATURE_RETRY_SECONDS, up to SIGNATURE_MAX_ATTEMPTS, never after a human decision, and never
@@ -189,6 +192,12 @@ def main():
     mod.should_submit(repeat, {"submitted_signatures": {mod.finding_signature(repeat): {
         "fix": "f", "test": "t", "submitted_at": later, "attempts": 1}}}, now=later + 1)
     check("inside the interval, no task-state lookup is made at all", calls == [], calls)
+    legacy = {"submitted_signatures": {mod.finding_signature(repeat): {
+        "fix": "old-fix", "test": "old-test", "submitted_at": 1000.0}}}
+    mod.record_signature_submission(legacy, repeat, "new-fix", "new-test", now=later)
+    check("a retry of a record from before attempts were counted is attempt 2, not 1",
+          legacy["submitted_signatures"][mod.finding_signature(repeat)]["attempts"] == 2,
+          legacy["submitted_signatures"])
     mod.fetch_task_state_or_none = real_fetch
     mod.save_state = real_save_state
 
