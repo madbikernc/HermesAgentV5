@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
 #
 # Unit checks for tools/hermes-minecraft-triage.py (review MB-18/MB-19): classification of real bot
 # log lines, per-bot/per-signature dedupe with recurrence counts, and a full diagnosis queue that
@@ -8,6 +8,7 @@
 #
 # Revision History: 1.0.0 | 2026-09-25 | Initial checks for MB-18/MB-19.
 #                   1.1.0 | 2026-11-13 | A queued incident carries that bot's recent log lines (triage 1.8.0).
+#                   1.2.0 | 2026-11-13 | No Buzz token: exit for systemd to retry, never run blind (triage 1.8.1).
 import importlib.util
 import os
 import queue
@@ -93,6 +94,20 @@ def recent_lines_go_with_the_incident():
     assert all("[Nell]" not in l for l in context), "only that bot's own lines"
 
 
+def no_token_exits_instead_of_running_blind():
+    real = triage.vault_get, triage.watch_loop
+    triage.vault_get = lambda item, field: ""
+    triage.watch_loop = lambda token: (_ for _ in ()).throw(AssertionError("must not watch without a token"))
+    try:
+        triage.main()
+        raise AssertionError("main() returned")
+    except SystemExit as exc:
+        assert exc.code and "no Buzz token" in str(exc.code), exc.code
+    finally:
+        triage.vault_get, triage.watch_loop = real
+    assert triage.VAULT_TIMEOUT_S >= 60, "spark's vault takes 30-60s"
+
+
 def default_units_cover_every_bot():
     assert triage.BOT_UNITS == ["minecraft-bot-*.service"]
 
@@ -103,6 +118,7 @@ check("MB-19 one bot's repeats are counted, diagnosed once per cooldown", repeat
 check("MB-19 a full diagnosis queue records the incident without blocking", full_queue_does_not_block)
 check("MB-19 every match is persisted to the events file", events_persisted_first)
 check("Self-repair: a queued incident carries that bot's own recent log lines", recent_lines_go_with_the_incident)
+check("No Buzz token: triage exits for systemd to retry instead of running blind", no_token_exits_instead_of_running_blind)
 check("MB-18 default units cover every minecraft-bot-* unit on the host", default_units_cover_every_bot)
 print(f"{passed} triage checks passed.")
 sys.exit(0)

@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.8.0
+# Version: 1.8.1
+#
+# 1.8.1 (2026-11-13) — every Buzz publish from spark's triage failed 401 (116 of 116 in six hours,
+# all of the retained journal): vault_get() gave the lookup 15s, spark's vault takes 30-60s
+# (systemd-creds decrypt first; the self-repair bridge's own lookups at the same restart took
+# that long), so the token came back empty and triage ran on without one -- only a WARNING, and
+# no incident from Amy or Luke ever reached Buzz or self-repair. spark-2's vault answers inside
+# 15s, which is why it never failed there. The lookup now gets VAULT_TIMEOUT_S (default 120),
+# and an empty token after that exits non-zero for systemd (Restart=always) to retry, instead
+# of running blind.
 #
 # 1.8.0 (2026-11-13) — direct operator request (self-repair fidelity pass): an incident now carries
 # the bot's own recent log lines. Each Buzz body ends with a `recent log (N lines before):` block,
@@ -167,6 +176,7 @@ BUZZ_URL = os.environ.get("BUZZ_URL", "http://10.129.1.15:8101")
 LOG_PATH = Path(os.environ.get("TRIAGE_LOG_PATH", "/mnt/hermes-data/minecraft-memory/triage.log"))
 EVENTS_PATH = Path(os.environ.get("TRIAGE_EVENTS_PATH", "/mnt/hermes-data/minecraft-memory/triage-events.jsonl"))
 DIAGNOSIS_QUEUE_MAX = int(os.environ.get("TRIAGE_QUEUE_MAX", "20"))
+VAULT_TIMEOUT_S = int(os.environ.get("VAULT_TIMEOUT_S", "120"))
 CONTEXT_LINES = int(os.environ.get("TRIAGE_CONTEXT_LINES", "25"))
 COOLDOWN_S = int(os.environ.get("TRIAGE_COOLDOWN_S", "300"))
 BOT_UNITS = os.environ.get("MC_BOT_UNITS", "minecraft-bot-*.service").split(",")
@@ -239,7 +249,7 @@ def log(msg):
 
 def vault_get(item, field):
     try:
-        r = subprocess.run([VAULT_GET, item, field], capture_output=True, text=True, timeout=15)
+        r = subprocess.run([VAULT_GET, item, field], capture_output=True, text=True, timeout=VAULT_TIMEOUT_S)
         return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
         return ""
@@ -487,7 +497,8 @@ def process_message(message, unit, incidents, jobs, now=None, recent=None):
 def main():
     buzz_token = vault_get("buzz-token", "password")
     if not buzz_token:
-        log("WARNING: no Buzz token -- triage results will only go to the local log file")
+        # Running on without one publishes nothing (every POST is a 401) and says so only once.
+        sys.exit(f"no Buzz token from the vault within {VAULT_TIMEOUT_S}s -- exiting for systemd to retry")
     while True:
         try:
             watch_loop(buzz_token)
