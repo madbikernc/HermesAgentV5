@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-# Version: 2.4.1
+# Version: 2.5.0
+#
+# 2.5.0 (2026-11-13) — direct operator request (self-repair fidelity pass). What the bridge
+# submits, and how, was the source of most of the pipeline's misses:
+#   * The test task is written AFTER the fix, from its diff. Before, both were submitted at the
+#     same moment and the test task got one line of text, never the fix -- and when it died the
+#     fix waited forever. Now the fix goes alone with a `test-plan` turn naming the test file;
+#     sweep_pending_tests() submits the test task once that fix has passed verification and is
+#     parked in awaiting-completeness, its problem carrying the applied diff, and links the two.
+#   * The fix target is where the log line comes from. locate_emitter() searches the domain's
+#     source for the line's literal text (read tool `grep`) and takes the file that emits it;
+#     the model is asked only when nothing matches. An emitter over MAX_FILE_CHARS (index.js,
+#     actions.js) is skipped and logged, not handed to the model to pick a smaller file instead
+#     (goals.js was picked three times for index.js's "giving up on goal").
+#   * The fix problem carries the emitting code (EMITTER_CONTEXT_LINES either side) and the bot's
+#     recent log lines before the incident (hermes-minecraft-triage.py 1.8.0's `recent log`).
+#   * One failure, one signature: a bot crash (process-exit, either systemd line, any bot) is one
+#     signature, and a crash within OOM_GROUP_SECONDS of the same bot's OOM is that OOM, not its
+#     own incident -- process-exit findings wait PROCESS_EXIT_DEFER_SECONDS for the OOM to arrive.
+#     "giving up on goal" is one signature, not one per goal text.
+#   * "incomplete" and "verify-failed" are retryable, like "error" (hermes-self-repair-apply.py
+#     2.0.0 now produces both for a real failure).
+#   * Every finding, submission and skip reason is recorded to hermes_self_repair_outcomes.py.
 #
 # 2.4.1 (2026-11-13) — a record written before 2.4.0 has no `attempts`; retry_reason() already
 # counts it as 1, but record_signature_submission() counted it as 0, so its first retry was
@@ -146,6 +168,12 @@
 #   SIGNATURE_RETRY_SECONDS     default 3600 -- minecraft-bots only; a recorded signature whose
 #                               task ended in `error` is resubmitted no sooner than this (2.4.0)
 #   SIGNATURE_MAX_ATTEMPTS      default 3 -- submissions per signature in all, retries included
+#   MAX_FILE_CHARS              default 40000 -- same as the generator's; an emitter over it is
+#                               skipped rather than substituted (2.5.0)
+#   SWEEP_SECONDS               default 300 -- how often sweep_pending_tests() looks for fixes
+#                               waiting on a test task to be written
+#   OOM_GROUP_SECONDS           default 600 -- a bot crash this soon after its OOM is that OOM
+#   PROCESS_EXIT_DEFER_SECONDS  default 120 -- how long a crash waits for its OOM to arrive
 #   BRIDGE_STATE_DIR            default ~/.hermes/state/selfrepair-bridge -- durable cursor per
 #                               source so a restart never re-processes old findings, and a source
 #                               with no cursor yet is seeded at its current tip, never replayed
@@ -163,7 +191,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import hermes_self_repair_domains as domains_mod  # noqa: E402
+import hermes_self_repair_domains as domains_mod
+import hermes_self_repair_outcomes as outcomes  # noqa: E402
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
@@ -181,6 +210,14 @@ MAX_SUBMISSIONS_PER_POLL = int(os.environ.get("MAX_SUBMISSIONS_PER_POLL", "3"))
 EGRESS_COOLDOWN_SECONDS = int(os.environ.get("EGRESS_COOLDOWN_SECONDS", "3600"))
 SIGNATURE_RETRY_SECONDS = int(os.environ.get("SIGNATURE_RETRY_SECONDS", "3600"))
 SIGNATURE_MAX_ATTEMPTS = int(os.environ.get("SIGNATURE_MAX_ATTEMPTS", "3"))
+MAX_FILE_CHARS = int(os.environ.get("MAX_FILE_CHARS", "40000"))  # hermes-self-repair-generate.py's own
+SWEEP_SECONDS = int(os.environ.get("SWEEP_SECONDS", "300"))
+OOM_GROUP_SECONDS = int(os.environ.get("OOM_GROUP_SECONDS", "600"))
+PROCESS_EXIT_DEFER_SECONDS = int(os.environ.get("PROCESS_EXIT_DEFER_SECONDS", "120"))
+EMITTER_CONTEXT_LINES = 20
+MAX_TEST_DIFF_CHARS = 8000
+RETRYABLE_TASK_STATES = {"error", "incomplete", "verify-failed"}
+now_fn = time.time  # the offline tests replace this
 STATE_DIR = Path(os.environ.get(
     "BRIDGE_STATE_DIR", str(Path.home() / ".hermes" / "state" / "selfrepair-bridge")))
 BRIDGE_AGENT = "selfrepair-bridge"
@@ -251,6 +288,7 @@ _HEADER_RE = re.compile(r"^\[(?P<category>[^\]]+)\]\s*(?P<label>.*)$")
 _ROLE_RE = re.compile(r"^\s*(?P<role>coder2?):\s*severity=(?P<sev>\w+)\s+cause=(?P<cause>.*?)\s+next=(?P<next>.*)$")
 _SOURCE_LINE_RE = re.compile(r"^\s*source line:\s*(?P<line>.*)$")
 _OCCURRENCES_RE = re.compile(r"occurrences for this bot\+signature:\s*(?P<count>\d+)")
+_CONTEXT_HEADER_RE = re.compile(r"^\s*recent log\b")
 
 
 def parse_triage_body(body):
@@ -267,9 +305,17 @@ def parse_triage_body(body):
         return None
     parsed = {
         "category": header.group("category"), "label": header.group("label").strip(),
-        "roles": {}, "disagreement": False, "source_line": None, "occurrences": 1,
+        "roles": {}, "disagreement": False, "source_line": None, "occurrences": 1, "context": [],
     }
+    in_context = False
     for line in lines[1:]:
+        if in_context and line.startswith("    "):
+            parsed["context"].append(line.strip())
+            continue
+        in_context = False
+        if _CONTEXT_HEADER_RE.match(line):
+            in_context = True
+            continue
         role_match = _ROLE_RE.match(line)
         if role_match:
             parsed["roles"][role_match.group("role")] = {
@@ -301,8 +347,24 @@ def finding_signature(parsed):
     leading "[Bot]" tag dropped and numbers collapsed (same collapsing as triage's own
     normalize_signature()), so the same failure on nine bots is one signature, not nine."""
     line = re.sub(r"^\[[^\]]*\]\s*", "", (parsed.get("source_line") or "").strip())
+    category = parsed["category"]
+    if category == "process-exit":
+        # Two systemd lines per crash ("Main process exited, code=dumped" and "Failed with result
+        # 'core-dump'"), one unit per bot: one signature for a bot crash, whichever bot (2.5.0).
+        line = ("minecraft-bot-X.service: crashed (core dump)" if "dump" in line
+                else re.sub(r"minecraft-bot-[\w-]+", "minecraft-bot-X", line))
+    elif category == "goal-abandoned":
+        line = re.sub(r"(giving up on goal after \S+ failures).*", r"\1", line)
     line = re.sub(r"\s+", " ", re.sub(r"\d+(\.\d+)?", "N", line))[:160]
-    return f"{parsed['category']}|{line}"
+    return f"{category}|{line}"
+
+
+def finding_bot(parsed):
+    """The bot a finding is about, lowercased, from its "[Name]" tag or its minecraft-bot-<name>
+    unit -- or None."""
+    line = parsed.get("source_line") or ""
+    m = re.match(r"^\[([A-Za-z]+)\]", line.strip()) or re.search(r"minecraft-bot-([a-z]+)\.service", line)
+    return m.group(1).lower() if m else None
 
 
 HUMAN_DECIDED_TASK_STATES = {"verified", "promotion-approved", "promoted", "promotion-declined"}
@@ -317,9 +379,10 @@ def retry_reason(record, now):
     if now - record.get("submitted_at", 0) < SIGNATURE_RETRY_SECONDS:
         return None
     states = [fetch_task_state_or_none(record[k]) for k in ("fix", "test") if record.get(k)]
-    if "error" not in states or any(st in HUMAN_DECIDED_TASK_STATES for st in states):
+    if not any(st in RETRYABLE_TASK_STATES for st in states) or any(st in HUMAN_DECIDED_TASK_STATES for st in states):
         return None
-    return (f"retrying: task {record.get('fix')} ended in error "
+    failed = next(st for st in states if st in RETRYABLE_TASK_STATES)
+    return (f"retrying: task {record.get('fix')} ended {failed} "
             f"(attempt {attempts + 1} of {SIGNATURE_MAX_ATTEMPTS})")
 
 
@@ -342,16 +405,19 @@ def should_submit(parsed, state, now=None):
     return True, "never submitted for this signature, severity threshold met"
 
 
-def record_signature_submission(state, parsed, fix_task_id, test_task_id, now):
+def record_signature_submission(state, parsed, fix_task_id, test_task_id, now, test_path=None,
+                                fix_path=None):
     signatures = state.setdefault("submitted_signatures", {})
     previous = signatures.get(finding_signature(parsed)) or {}
     signatures[finding_signature(parsed)] = {
         "fix": fix_task_id, "test": test_task_id, "submitted_at": now,
-        "attempts": (previous.get("attempts", 1) + 1) if previous else 1}
+        "attempts": (previous.get("attempts", 1) + 1) if previous else 1,
+        "test_path": test_path, "fix_path": fix_path,
+        "category": parsed.get("category"), "label": parsed.get("label")}
     save_state(state)
 
 
-def build_fix_problem(parsed):
+def build_fix_problem(parsed, emitter=None):
     role_lines = [f"{role} assessed severity={info['severity']}, cause: {info['cause']}, suggested next step: {info['next']}"
                   for role, info in sorted(parsed["roles"].items())]
     lines = [
@@ -362,6 +428,11 @@ def build_fix_problem(parsed):
         lines.append("coder and coder2 disagreed on severity for this incident — treat with extra care.")
     if parsed["source_line"]:
         lines.append(f"Source log line: {parsed['source_line']}")
+    if emitter:
+        lines.append(f"\nThis log line is emitted at {emitter['path']}:{emitter['line']} -- the code there:\n"
+                     f"{emitter['snippet']}")
+    if parsed.get("context"):
+        lines.append("\nThe bot's log lines just before the incident:\n" + "\n".join(parsed["context"]))
     return "\n".join(lines)
 
 
@@ -373,12 +444,25 @@ def test_candidates(candidates):
     return [c for c in candidates if c.startswith(UNIT_TEST_DIR) and c.endswith(".test.mjs")]
 
 
-def build_test_problem(parsed, fix_path, test_path):
-    return (
+def build_test_problem(parsed, fix_path, test_path, fix_diff=None):
+    text = (
         f"Add or update a unit test in {test_path} (shared stubs and helpers are imported from "
         f"./_harness.mjs; import any more you need from there) that fails "
         f"against the current code and passes once {fix_path} is fixed for this incident "
         f"(category={parsed['category']}): {parsed['label']}"
+    )
+    if fix_diff is None:
+        return text
+    if len(fix_diff) > MAX_TEST_DIFF_CHARS:
+        fix_diff = fix_diff[:MAX_TEST_DIFF_CHARS] + "\n... (diff truncated)"
+    return (
+        f"Add or update a unit test in {test_path} (shared stubs and helpers are imported from "
+        f"./_harness.mjs; import any more you need from there) for the fix below, already applied "
+        f"to {fix_path} for this incident (category={parsed['category']}): {parsed['label']}. "
+        f"The test must PASS with this fix and FAIL with {fix_path} as it was before the diff -- "
+        f"it is run both ways, and a test that passes either way is rejected. Exercise the "
+        f"behavior the diff changes, through the code path the diff touches.\n\n"
+        f"The fix (unified diff):\n{fix_diff}"
     )
 
 
@@ -449,6 +533,158 @@ def ask_model_for_path(parsed, candidates, fix_path=None):
     with urllib.request.urlopen(req, timeout=150) as resp:
         data = json.loads(resp.read())
     return data["choices"][0]["message"]["content"].strip()
+
+
+def literal_fragments(source_line):
+    """Literal stretches of a log line likely to appear verbatim in the source that emits it:
+    split at numbers, quoted or parenthesised values and ": " (where a message's dynamic tail
+    starts), stripped, 12+ chars, longest first, at most four."""
+    line = re.sub(r"^\[[^\]]*\]\s*", "", (source_line or "").strip())
+    parts = re.split(r"\d+(?:\.\d+)?|\([^)]*\)|'[^']*'|\"[^\"]*\"|`[^`]*`|:\s", line)
+    frags = sorted({p.strip(" .,-") for p in parts if len(p.strip(" .,-")) >= 12}, key=len, reverse=True)
+    return frags[:4]
+
+
+def best_emitter(matches_by_fragment):
+    """{fragment: [(path, line_no)]} -> (path, line_no) of the one file matching the most fragments,
+    or None if nothing matched or two files tie. Test files never count as emitters."""
+    score = {}
+    first_line = {}
+    for fragment, hits in matches_by_fragment.items():
+        for path, line_no in hits:
+            if "/tests/" in path or not path.endswith((".js", ".mjs", ".cjs")):
+                continue
+            if (fragment, path) in first_line:
+                continue
+            first_line[(fragment, path)] = line_no
+            score[path] = score.get(path, 0) + 1
+    if not score:
+        return None
+    ranked = sorted(score.items(), key=lambda kv: kv[1], reverse=True)
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return None
+    path = ranked[0][0]
+    line_no = min(n for (f, p), n in first_line.items() if p == path)
+    return path, line_no
+
+
+def read_tool(*args):
+    proc = subprocess.run([sys.executable, SELF_REPAIR_READ_TOOL, *args],
+                          capture_output=True, text=True, timeout=60)
+    return proc.returncode, proc.stdout
+
+
+_EMITTER_CACHE = {}
+
+
+def locate_emitter(parsed, root="services/minecraft-bots"):
+    """{"path", "line", "size", "snippet"} for the file that emits this finding's log line, or None
+    (2.5.0). Cached per signature for an hour -- the same failure repeats every minute."""
+    sig = finding_signature(parsed)
+    cached = _EMITTER_CACHE.get(sig)
+    if cached and now_fn() - cached[0] < 3600:
+        return cached[1]
+    matches = {}
+    for fragment in literal_fragments(parsed.get("source_line")):
+        rc, out = read_tool("grep", re.escape(fragment), root)
+        hits = []
+        for row in out.splitlines() if rc == 0 else []:
+            path, _, rest = row.partition(":")
+            line_no, _, _ = rest.partition(":")
+            if line_no.isdigit():
+                hits.append((path, int(line_no)))
+        matches[fragment] = hits
+    found = best_emitter(matches)
+    emitter = None
+    if found:
+        path, line_no = found
+        rc, text = read_tool("read", path)
+        if rc == 0:
+            lines = text.splitlines()
+            lo, hi = max(0, line_no - 1 - EMITTER_CONTEXT_LINES), min(len(lines), line_no + EMITTER_CONTEXT_LINES)
+            snippet = "\n".join(f"{n + 1}: {lines[n]}" for n in range(lo, hi))
+            emitter = {"path": path, "line": line_no, "size": len(text), "snippet": snippet}
+    _EMITTER_CACHE[sig] = (now_fn(), emitter)
+    return emitter
+
+
+def write_test_plan_turn(task_id, test_path):
+    _post(f"{MEMORY_URL}/turns", {
+        "task_id": task_id, "agent": BRIDGE_AGENT, "role": "assistant",
+        "raw": json.dumps({"phase": "test-plan", "test_path": test_path}),
+    }, MEMORY_TOKEN)
+
+
+def fetch_fix_diff(task_id):
+    """The applied fix's diff (the generator's phase="diff" turn), or None."""
+    try:
+        turns = _get(f"{MEMORY_URL}/turns?task_id={task_id}&limit=200", MEMORY_TOKEN).get("turns", [])
+    except Exception as exc:
+        log(f"fetch_fix_diff failed (task {task_id!r}): {exc}")
+        return None
+    for t in turns:
+        try:
+            payload = json.loads(t.get("raw") or "{}")
+        except (ValueError, TypeError):
+            continue
+        if isinstance(payload, dict) and payload.get("phase") == "diff":
+            return payload.get("content")
+    return None
+
+
+def sweep_pending_tests(state, budget):
+    """Submits the test task for every recorded fix that passed verification and now waits on one
+    (state awaiting-completeness, no test submitted yet), with the applied diff in its problem,
+    and links the two (2.5.0). Returns how many it submitted."""
+    submitted = 0
+    for sig, rec in (state.get("submitted_signatures") or {}).items():
+        if rec.get("test") or not rec.get("test_path") or not rec.get("fix"):
+            continue
+        if fetch_task_state_or_none(rec["fix"]) != "awaiting-completeness":
+            continue
+        if budget["remaining"] <= 0:
+            break
+        diff = fetch_fix_diff(rec["fix"])
+        if not diff:
+            continue
+        parsed = {"category": rec.get("category") or sig.split("|", 1)[0], "label": rec.get("label") or ""}
+        problem = build_test_problem(parsed, rec.get("fix_path") or "(the fix's file)", rec["test_path"], diff)
+        try:
+            test_id = submit_task(rec["test_path"], problem)
+            write_link_turn(rec["fix"], "fix", test_id)
+            write_link_turn(test_id, "test", rec["fix"])
+        except Exception as exc:
+            log(f"test submission for fix {rec['fix']} failed: {exc}")
+            continue
+        rec["test"] = test_id
+        budget["remaining"] -= 1
+        submitted += 1
+        save_state(state)
+        outcomes.record("submitted", task_id=test_id, role="test", path=rec["test_path"], signature=sig,
+                        fix=rec["fix"])
+        log(f"submitted test task {test_id} ({rec['test_path']}) for verified fix {rec['fix']}")
+    return submitted
+
+
+def process_deferred(state, budget):
+    """Handles process-exit findings whose OOM window has passed (2.5.0)."""
+    pending = state.get("deferred") or []
+    keep = []
+    for i, item in enumerate(pending):
+        if now_fn() - item.get("at", 0) < PROCESS_EXIT_DEFER_SECONDS:
+            keep.append(item)
+            continue
+        domain = next((d for d in domains_mod.load_domains() if d.get("name") == item.get("domain")),
+                      {"name": item.get("domain")})
+        try:
+            handle_minecraft_bots_buzz({**item["finding"], "_deferred_at": item["at"]}, domain, budget, state)
+        except BudgetExhausted:
+            keep.extend(pending[i:])
+            break
+        except Exception as exc:
+            log(f"deferred finding failed: {exc}")
+    state["deferred"] = keep
+    save_state(state)
 
 
 def resolve_caller_path(caller):
@@ -561,29 +797,54 @@ def record_egress_submission(state, caller, task_id, now):
 def handle_minecraft_bots_buzz(finding, domain, budget, state):
     body = finding.get("body", "")
     parsed = parse_triage_body(body)
+    now = now_fn()
+    sig = finding_signature(parsed) if parsed else None
+    category = parsed["category"] if parsed else None
+
+    def skip(reason):
+        log(f"skipping incident ({reason}): {body[:120]!r}")
+        outcomes.record("seen", signature=sig, category=category, submitted=False, reason=reason)
+
+    bot = finding_bot(parsed) if parsed else None
+    if category == "oom" and bot:
+        state.setdefault("recent_oom", {})[bot] = now
+    if category == "process-exit" and bot:
+        happened_at = finding.get("_deferred_at", now)
+        oom_at = (state.get("recent_oom") or {}).get(bot)
+        if oom_at is not None and abs(happened_at - oom_at) <= OOM_GROUP_SECONDS:
+            return skip(f"{bot} crashed {int(happened_at - oom_at)}s from its OOM -- the OOM's incident, not its own")
+        if "_deferred_at" not in finding:
+            state.setdefault("deferred", []).append({"finding": finding, "at": now, "domain": domain.get("name")})
+            save_state(state)
+            log(f"holding {bot}'s crash {PROCESS_EXIT_DEFER_SECONDS}s for an OOM it may follow")
+            return
+
     ok, reason = should_submit(parsed, state)
     if not ok:
-        log(f"skipping incident ({reason}): {body[:120]!r}")
-        return
+        return skip(reason)
 
     if budget["remaining"] <= 0:
         raise BudgetExhausted()
 
     candidates = list(list_candidate_paths())
     if not candidates:
-        log("skipping incident: could not list any candidate files (read tool unavailable?)")
-        return
+        return skip("could not list any candidate files (read tool unavailable?)")
 
-    try:
-        model_answer = ask_model_for_path(parsed, candidates)
-    except Exception as exc:
-        log(f"skipping incident: path-resolution call failed: {exc}")
-        return
-
-    fix_path = resolve_target_path(model_answer, candidates)
-    if not fix_path:
-        log(f"skipping incident: model named no real/allowlisted path (answered {model_answer!r})")
-        return
+    emitter = locate_emitter(parsed)
+    if emitter and emitter["size"] > MAX_FILE_CHARS:
+        return skip(f"emitted by {emitter['path']}:{emitter['line']}, {emitter['size']} chars -- over "
+                    f"MAX_FILE_CHARS={MAX_FILE_CHARS}, not a whole-file self-repair target")
+    if emitter and emitter["path"] in candidates:
+        fix_path = emitter["path"]
+    else:
+        emitter = None
+        try:
+            model_answer = ask_model_for_path(parsed, candidates)
+        except Exception as exc:
+            return skip(f"path-resolution call failed: {exc}")
+        fix_path = resolve_target_path(model_answer, candidates)
+        if not fix_path:
+            return skip(f"model named no real/allowlisted path (answered {model_answer!r})")
 
     tests = test_candidates(candidates)
     try:
@@ -593,23 +854,24 @@ def handle_minecraft_bots_buzz(finding, domain, budget, state):
         return
     test_path = resolve_target_path(test_answer, tests)
     if not test_path:
-        log(f"skipping incident: model named no real unit test file (answered {test_answer!r})")
-        return
+        return skip(f"model named no real unit test file (answered {test_answer!r})")
 
-    fix_problem = build_fix_problem(parsed)
-    test_problem = build_test_problem(parsed, fix_path, test_path)
+    fix_problem = build_fix_problem(parsed, emitter)
     try:
         fix_task_id = submit_task(fix_path, fix_problem)
-        test_task_id = submit_task(test_path, test_problem)
-        write_link_turn(fix_task_id, "fix", test_task_id)
-        write_link_turn(test_task_id, "test", fix_task_id)
+        write_test_plan_turn(fix_task_id, test_path)
     except Exception as exc:
         log(f"submission failed partway through: {exc} — a human should check for an orphaned task")
         return
     budget["remaining"] -= 1
-    record_signature_submission(state, parsed, fix_task_id, test_task_id, time.time())
-    log(f"submitted linked tasks fix={fix_task_id} ({fix_path}) test={test_task_id} for domain "
-        f"{domain.get('name')!r} ({budget['remaining']} submission(s) left this poll cycle)")
+    record_signature_submission(state, parsed, fix_task_id, None, now, test_path=test_path, fix_path=fix_path)
+    attempt = state["submitted_signatures"][sig]["attempts"]
+    outcomes.record("seen", signature=sig, category=category, submitted=True, reason=reason)
+    outcomes.record("submitted", task_id=fix_task_id, role="fix", path=fix_path, signature=sig,
+                    attempt=attempt, located="emitter" if emitter else "model")
+    log(f"submitted fix={fix_task_id} ({fix_path}, {'emitter' if emitter else 'model-chosen'}); its "
+        f"test task ({test_path}) follows once the fix verifies -- domain {domain.get('name')!r} "
+        f"({budget['remaining']} submission(s) left this poll cycle)")
 
 
 def handle_egress_guard_denial(finding, domain, budget, state):
@@ -790,6 +1052,14 @@ SOURCE_POLLERS = {
 
 def poll_once(state):
     budget = {"remaining": MAX_SUBMISSIONS_PER_POLL}
+    if state.get("deferred"):
+        process_deferred(state, budget)
+    if now_fn() - state.get("last_sweep", 0) >= SWEEP_SECONDS:
+        state["last_sweep"] = now_fn()
+        try:
+            sweep_pending_tests(state, budget)
+        except Exception as exc:
+            log(f"sweep_pending_tests failed: {exc}")
     for domain in domains_mod.load_domains():
         if not domains_mod.domain_switch_on(domain):
             continue

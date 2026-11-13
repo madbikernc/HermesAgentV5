@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
 #
 # Unit checks for tools/hermes-minecraft-triage.py (review MB-18/MB-19): classification of real bot
 # log lines, per-bot/per-signature dedupe with recurrence counts, and a full diagnosis queue that
@@ -7,6 +7,7 @@
 #   python3 services/minecraft-bots/tests/test_triage.py      (tests/run.sh unit runs it too)
 #
 # Revision History: 1.0.0 | 2026-09-25 | Initial checks for MB-18/MB-19.
+#                   1.1.0 | 2026-11-13 | A queued incident carries that bot's recent log lines (triage 1.8.0).
 import importlib.util
 import os
 import queue
@@ -80,6 +81,18 @@ def events_persisted_first():
     assert path.read_text().count("\n") == before + 1
 
 
+def recent_lines_go_with_the_incident():
+    incidents, jobs, recent = {}, queue.Queue(), {}
+    for i in range(30):
+        triage.process_message(f"[Bob] tick {i}", "minecraft-bot-bob.service", incidents, jobs, now=1.0, recent=recent)
+    triage.process_message("[Nell] other bot", "minecraft-bot-nell.service", incidents, jobs, now=1.0, recent=recent)
+    triage.process_message("TypeError: z is not a function", "minecraft-bot-bob.service", incidents, jobs, now=1.0, recent=recent)
+    *_, context = jobs.get_nowait()
+    assert len(context) == triage.CONTEXT_LINES, f"the last {triage.CONTEXT_LINES} lines, got {len(context)}"
+    assert context[-1] == "[Bob] tick 29" and "TypeError" not in " ".join(context), "lines BEFORE the incident"
+    assert all("[Nell]" not in l for l in context), "only that bot's own lines"
+
+
 def default_units_cover_every_bot():
     assert triage.BOT_UNITS == ["minecraft-bot-*.service"]
 
@@ -89,6 +102,7 @@ check("MB-19 two bots crashing within the cooldown stay two incidents", two_bots
 check("MB-19 one bot's repeats are counted, diagnosed once per cooldown", repeats_counted_not_rediagnosed)
 check("MB-19 a full diagnosis queue records the incident without blocking", full_queue_does_not_block)
 check("MB-19 every match is persisted to the events file", events_persisted_first)
+check("Self-repair: a queued incident carries that bot's own recent log lines", recent_lines_go_with_the_incident)
 check("MB-18 default units cover every minecraft-bot-* unit on the host", default_units_cover_every_bot)
 print(f"{passed} triage checks passed.")
 sys.exit(0)

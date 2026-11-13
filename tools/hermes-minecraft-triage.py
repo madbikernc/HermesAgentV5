@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.7.1
+# Version: 1.8.0
+#
+# 1.8.0 (2026-11-13) — direct operator request (self-repair fidelity pass): an incident now carries
+# the bot's own recent log lines. Each Buzz body ends with a `recent log (N lines before):` block,
+# the TRIAGE_CONTEXT_LINES (default 25) lines that bot's unit logged just before the triaged line,
+# indented four spaces. hermes-self-repair-bridge.py 2.5.0 passes them into the fix problem: one
+# log line and two models' guesses at its cause was all a self-repair fix ever had to work from,
+# so a false premise (2026-11-11's "inventory.items() excludes the held slot") had nothing to be
+# checked against. The coder/coder2 triage calls themselves are unchanged -- they still see the
+# one line.
 #
 # 1.7.1 (2026-11-04) — comment-only: call_role()'s max_tokens comment said coder2 "is backed by
 # Muse-Glimmer-30B". It isn't any more — coder2 has run GLM-4.7-Flash-Q4_K_M (stock, launched with
@@ -138,6 +147,7 @@
 # Usage: python3 hermes-minecraft-triage.py  (run under systemd, see
 # infra/minecraft-bots-triage/hermes-minecraft-triage.service)
 
+import collections
 import json
 import os
 import queue
@@ -157,6 +167,7 @@ BUZZ_URL = os.environ.get("BUZZ_URL", "http://10.129.1.15:8101")
 LOG_PATH = Path(os.environ.get("TRIAGE_LOG_PATH", "/mnt/hermes-data/minecraft-memory/triage.log"))
 EVENTS_PATH = Path(os.environ.get("TRIAGE_EVENTS_PATH", "/mnt/hermes-data/minecraft-memory/triage-events.jsonl"))
 DIAGNOSIS_QUEUE_MAX = int(os.environ.get("TRIAGE_QUEUE_MAX", "20"))
+CONTEXT_LINES = int(os.environ.get("TRIAGE_CONTEXT_LINES", "25"))
 COOLDOWN_S = int(os.environ.get("TRIAGE_COOLDOWN_S", "300"))
 BOT_UNITS = os.environ.get("MC_BOT_UNITS", "minecraft-bot-*.service").split(",")
 HEAPDUMP_ROOT = Path(os.environ.get("MC_HEAPDUMP_ROOT", "/mnt/hermes-data/minecraft-memory/heapdumps"))
@@ -384,10 +395,13 @@ def record_event(event):
 
 def diagnosis_worker(jobs, buzz_token):
     while True:
-        category, label, message, unit, stats = jobs.get()
+        category, label, message, unit, stats, *rest = jobs.get()
+        context = rest[0] if rest else []
         try:
             result = triage_incident(category, label, message, unit)
             if result:
+                if context:
+                    result += f"\n  recent log ({len(context)} lines before):\n" + "\n".join(f"    {l}" for l in context)
                 result += (f"\n\n(occurrences for this bot+signature: {stats['count']}, "
                            f"first {stats['first']}, last {stats['last']})")
                 append_log(result)
@@ -416,6 +430,7 @@ def watch_loop(buzz_token):
     # (unit, category, signature) -> {"count", "first", "last", "triaged_at"}; cooldown and
     # recurrence counting are per bot and per distinct failure, never per category alone.
     incidents = {}
+    recent = {}  # unit -> its last CONTEXT_LINES lines (1.8.0)
     jobs = queue.Queue(maxsize=DIAGNOSIS_QUEUE_MAX)
     threading.Thread(target=diagnosis_worker, args=(jobs, buzz_token), daemon=True).start()
     for raw_json in proc.stdout:
@@ -430,13 +445,19 @@ def watch_loop(buzz_token):
                 message = bytes(message).decode("utf-8", "replace")
             except (TypeError, ValueError):
                 message = str(message)
-        process_message(message, entry.get("_SYSTEMD_UNIT"), incidents, jobs)
+        process_message(message, entry.get("_SYSTEMD_UNIT"), incidents, jobs, recent=recent)
 
 
-def process_message(message, unit, incidents, jobs, now=None):
+def process_message(message, unit, incidents, jobs, now=None, recent=None):
     """Classify one journal line: record it, count it per (unit, category, signature), and queue a
     diagnosis unless that bot's same failure is in cooldown. Returns the category, or None.
-    Split out of watch_loop (1.6.0) so tests/test_triage.py can drive it without journalctl."""
+    Split out of watch_loop (1.6.0) so tests/test_triage.py can drive it without journalctl.
+    `recent` (1.8.0): unit -> deque of its last lines; the lines before this one go with its job."""
+    context = []
+    if recent is not None:
+        buf = recent.setdefault(unit, collections.deque(maxlen=CONTEXT_LINES))
+        context = list(buf)
+        buf.append(message.strip()[:300])
     for category, pattern, label in TRIAGE_PATTERNS:
         if not pattern.search(message):
             continue
@@ -456,7 +477,7 @@ def process_message(message, unit, incidents, jobs, now=None):
         stats["triaged_at"] = now
         log(f"triage-worthy: [{category}] {unit} {message.strip()[:150]}")
         try:
-            jobs.put_nowait((category, label, message, unit, dict(stats)))
+            jobs.put_nowait((category, label, message, unit, dict(stats), context))
         except queue.Full:
             log(f"diagnosis queue full, recorded without diagnosis: [{category}] {unit}")
         return category  # one category match per line is enough

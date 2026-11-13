@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 2.3.1
+# Version: 2.4.0
+#
+# 2.4.0 (2026-11-13) — bridge 2.5.0: the fix is submitted alone with a test plan and the test task
+# follows from the applied diff (sweep_pending_tests()); the emitting file is found by searching
+# the source (literal_fragments()/best_emitter()/locate_emitter()) and an over-limit emitter is
+# skipped; the triage `recent log` block and the emitting code reach the fix problem; one
+# signature per bot crash and per "giving up on goal"; a crash near the same bot's OOM is
+# grouped into it; "incomplete"/"verify-failed" are retryable. Every network and file write the
+# bridge makes is stubbed here, and outcomes go to a temp file (the 2.5.0 handler test first ran
+# unstubbed and reached the real hermes-memory, which refused it).
 #
 # 2.3.1 (2026-11-13) — a retry of a pre-2.4.0 record (no `attempts`) is recorded as attempt 2
 # (bridge 2.4.1).
@@ -38,8 +47,14 @@
 # Run: python3 infra/hermes-self-repair/tests/test_bridge.py
 
 import importlib.util
+import os
 import sys
+import tempfile
 from pathlib import Path
+
+os.environ["SELFREPAIR_OUTCOMES"] = str(Path(tempfile.mkdtemp(prefix="bridge-test-")) / "outcomes.jsonl")
+os.environ["MEMORY_URL"] = "http://127.0.0.1:9"  # nothing listens: an unstubbed call fails fast
+os.environ["BUZZ_URL"] = "http://127.0.0.1:9"
 
 REPO = Path(__file__).resolve().parents[3]
 TOOLS = REPO / "tools"
@@ -212,12 +227,14 @@ def main():
     ok, reason = mod.should_submit(None, {})
     check("an unparseable body -> skipped, not a crash", ok is False, reason)
 
-    print("\n[handle_minecraft_bots_buzz: a long-repeating failure is submitted once, then recorded]")
-    real = {k: getattr(mod, k) for k in ("list_candidate_paths", "ask_model_for_path", "submit_task",
-                                          "write_link_turn", "save_state")}
-    sent = []
+    print("\n[handle_minecraft_bots_buzz: the fix goes alone, with a test plan]")
+    stubbed = ("list_candidate_paths", "ask_model_for_path", "submit_task", "write_link_turn", "save_state",
+               "write_test_plan_turn", "locate_emitter", "fetch_task_state_or_none", "fetch_fix_diff", "now_fn")
+    real = {k: getattr(mod, k) for k in stubbed}
+    sent, plans, links = [], [], []
     unit_dir = "services/minecraft-bots/tests/unit/"
     mod.list_candidate_paths = lambda: ["services/minecraft-bots/swim-movements.js",
+                                        "services/minecraft-bots/goals.js",
                                         "services/minecraft-bots/tests/unit.test.mjs",
                                         unit_dir + "_harness.mjs", unit_dir + "pathfinding.test.mjs",
                                         unit_dir + "chests-1.test.mjs"]
@@ -227,19 +244,33 @@ def main():
         offered.append(list(candidates))
         return "services/minecraft-bots/swim-movements.js" if fix_path is None else unit_dir + "pathfinding.test.mjs"
     mod.ask_model_for_path = fake_ask
-    mod.submit_task = lambda path, problem: sent.append(path) or f"task-{len(sent)}"
-    mod.write_link_turn = lambda *a: None
+    ids = [0]
+
+    def fake_submit(path, problem):
+        sent.append((path, problem))
+        ids[0] += 1
+        return f"task-{ids[0]}"
+    mod.submit_task = fake_submit
+    mod.write_link_turn = lambda task_id, role, other: links.append((task_id, role, other))
+    mod.write_test_plan_turn = lambda task_id, test_path: plans.append((task_id, test_path))
     mod.save_state = lambda state: None
+    mod.locate_emitter = lambda parsed, root="services/minecraft-bots": None
+    clock = [10_000.0]
+    mod.now_fn = lambda: clock[0]
     handler_state = {}
     mc_domain = {"name": "minecraft-bots"}
     mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, handler_state)
-    check("a 7th-occurrence finding with no task yet submits a fix+test pair",
-          sent == ["services/minecraft-bots/swim-movements.js", unit_dir + "pathfinding.test.mjs"], sent)
+    check("a never-submitted finding submits the fix alone",
+          [p for p, _ in sent] == ["services/minecraft-bots/swim-movements.js"], sent)
+    check("with a test plan naming the per-area test file", plans == [("task-1", unit_dir + "pathfinding.test.mjs")], plans)
     check("the test file is chosen from the per-area unit files only -- never the whole "
           "unit.test.mjs or the shared harness",
           offered[1] == [unit_dir + "pathfinding.test.mjs", unit_dir + "chests-1.test.mjs"], offered)
+    rec = next(iter(handler_state["submitted_signatures"].values()))
+    check("the record holds no test task yet, and the plan", rec["test"] is None and
+          rec["test_path"] == unit_dir + "pathfinding.test.mjs" and rec["fix_path"].endswith("swim-movements.js"), rec)
     mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, handler_state)
-    check("the next repeat of it submits nothing more", len(sent) == 2, sent)
+    check("the next repeat of it submits nothing more", len(sent) == 1, sent)
     sent.clear()
     mod.ask_model_for_path = lambda parsed, candidates, fix_path=None: (
         "services/minecraft-bots/swim-movements.js" if fix_path is None else "services/minecraft-bots/tests/unit.test.mjs")
@@ -247,6 +278,137 @@ def main():
     mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, skip_state)
     check("a test-file answer outside the per-area files submits nothing and records nothing",
           sent == [] and not skip_state.get("submitted_signatures"), (sent, skip_state))
+    mod.ask_model_for_path = fake_ask
+
+    print("\n[sweep_pending_tests: the test task follows the verified fix, from its diff]")
+    fix_states = {"task-1": "awaiting-completeness"}
+    mod.fetch_task_state_or_none = lambda task_id: fix_states.get(task_id, "drafting")
+    mod.fetch_fix_diff = lambda task_id: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new_behavior()\n"
+    sent.clear()
+    n = mod.sweep_pending_tests(handler_state, {"remaining": 3})
+    check("a fix waiting on its test gets one", n == 1 and sent and sent[0][0] == unit_dir + "pathfinding.test.mjs", sent)
+    check("the test problem carries the applied diff and the both-ways rule",
+          "new_behavior()" in sent[0][1] and "FAIL with" in sent[0][1], sent[0][1][:300])
+    check("the two are linked both ways", ("task-1", "fix", "task-2") in links and ("task-2", "test", "task-1") in links, links)
+    check("and the record now names the test", rec["test"] == "task-2", rec)
+    n = mod.sweep_pending_tests(handler_state, {"remaining": 3})
+    check("a second sweep submits nothing more", n == 0, sent)
+    other = {"submitted_signatures": {"s": {"fix": "f9", "test": None, "test_path": unit_dir + "x.test.mjs"}}}
+    fix_states["f9"] = "drafting"
+    check("a fix still generating gets no test yet", mod.sweep_pending_tests(other, {"remaining": 3}) == 0)
+    fix_states["f9"] = "awaiting-completeness"
+    check("nor once the budget is spent", mod.sweep_pending_tests(other, {"remaining": 0}) == 0)
+
+    print("\n[locate_emitter: the fix target is where the log line comes from]")
+    frags = mod.literal_fragments("[Dale] giving up on goal after 20 failures: get basic tools for herding")
+    check("fragments split at numbers and ': ', longest first",
+          "giving up on goal after" in frags and "get basic tools for herding" in frags, frags)
+    check("short fragments are dropped", all(len(f) >= 12 for f in frags), frags)
+    check("the file matching the most fragments wins",
+          mod.best_emitter({"a": [("services/minecraft-bots/index.js", 40), ("services/minecraft-bots/goals.js", 3)],
+                            "b": [("services/minecraft-bots/index.js", 41)]}) == ("services/minecraft-bots/index.js", 40))
+    check("a tie is no answer, not a guess",
+          mod.best_emitter({"a": [("services/minecraft-bots/a.js", 1)], "b": [("services/minecraft-bots/b.js", 1)]}) is None)
+    check("a test file never counts as the emitter",
+          mod.best_emitter({"a": [("services/minecraft-bots/tests/unit/x.test.mjs", 1)]}) is None)
+    real_read_tool = mod.read_tool
+    src = "\n".join(f"line {i}" for i in range(1, 60)) + "\nlog(`giving up on goal after ${n} failures: ${d}`);\n"
+    def fake_read_tool(op, *args):
+        if op == "grep":
+            return (0, "services/minecraft-bots/goal-runner.js:60:log(`giving up on goal after ${n}...`)\n"
+                    if "giving" in args[0] else "")
+        return 0, src
+    mod.read_tool = fake_read_tool
+    mod.locate_emitter = real["locate_emitter"]
+    mod._EMITTER_CACHE.clear()
+    em = mod.locate_emitter({"category": "goal-abandoned", "source_line": "[Dale] giving up on goal after 20 failures: herd"})
+    check("locate_emitter names the emitting file and line", em and em["path"] == "services/minecraft-bots/goal-runner.js"
+          and em["line"] == 60, em)
+    check("with the code around it", em and "giving up on goal" in em["snippet"] and "40: line 40" in em["snippet"], em)
+    check("and the file's size", em and em["size"] == len(src), em)
+    mod.read_tool = real_read_tool
+
+    sent.clear()
+    asked = []
+    mod.ask_model_for_path = lambda parsed, candidates, fix_path=None: (asked.append(fix_path) or
+        (unit_dir + "pathfinding.test.mjs" if fix_path else "services/minecraft-bots/swim-movements.js"))
+    mod.locate_emitter = lambda parsed, root="services/minecraft-bots": {
+        "path": "services/minecraft-bots/goals.js", "line": 12, "size": 900, "snippet": "12: emit()"}
+    mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, {})
+    check("an emitter found is the fix target; the model is not asked for the fix file",
+          sent and sent[0][0] == "services/minecraft-bots/goals.js" and None not in asked, (sent, asked))
+    check("the fix problem carries the emitting code", sent and "goals.js:12" in sent[0][1] and "12: emit()" in sent[0][1],
+          sent[0][1][-200:] if sent else sent)
+    sent.clear()
+    mod.locate_emitter = lambda parsed, root="services/minecraft-bots": {
+        "path": "services/minecraft-bots/index.js", "line": 9000, "size": 436470, "snippet": ""}
+    big_state = {}
+    mod.handle_minecraft_bots_buzz({"body": REPEAT_OCCURRENCE}, mc_domain, {"remaining": 3}, big_state)
+    check("an emitter over MAX_FILE_CHARS is skipped, not swapped for a smaller file",
+          sent == [] and not big_state.get("submitted_signatures"), (sent, big_state))
+    mod.locate_emitter = lambda parsed, root="services/minecraft-bots": None
+
+    print("\n[signatures: one failure, one signature]")
+    exit_a = {"category": "process-exit", "source_line": "minecraft-bot-dale.service: Main process exited, code=dumped, status=6/ABRT"}
+    exit_b = {"category": "process-exit", "source_line": "minecraft-bot-nell.service: Failed with result 'core-dump'."}
+    check("both systemd crash lines, on any bot, are one signature",
+          mod.finding_signature(exit_a) == mod.finding_signature(exit_b), (mod.finding_signature(exit_a), mod.finding_signature(exit_b)))
+    goal_a = {"category": "goal-abandoned", "source_line": "[Dale] giving up on goal after 20 failures: get basic tools"}
+    goal_b = {"category": "goal-abandoned", "source_line": "[Amy] giving up on goal after 3 failures: armor"}
+    check("'giving up on goal' is one signature whatever the goal",
+          mod.finding_signature(goal_a) == mod.finding_signature(goal_b), mod.finding_signature(goal_a))
+    check("the bot is read from its tag or its unit",
+          mod.finding_bot(goal_a) == "dale" and mod.finding_bot(exit_b) == "nell")
+
+    print("\n[a crash right after the same bot's OOM is that OOM]")
+    def triage(category, line):
+        return (f"[{category}] something\n  coder:  severity=high cause=c next=n\n"
+                f"  coder2: severity=high cause=c next=n\n  source line: {line}")
+    oom_body = triage("oom", "[Dale] FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory")
+    exit_body = triage("process-exit", "minecraft-bot-dale.service: Main process exited, code=dumped, status=6/ABRT")
+    sent.clear()
+    st = {}
+    clock[0] = 20_000.0
+    mod.handle_minecraft_bots_buzz({"body": oom_body}, mc_domain, {"remaining": 3}, st)
+    clock[0] += 5
+    mod.handle_minecraft_bots_buzz({"body": exit_body}, mc_domain, {"remaining": 3}, st)
+    check("the OOM is submitted, the crash 5s later is not", len(sent) == 1, [p for p, _ in sent])
+    sent.clear()
+    st = {}
+    clock[0] = 30_000.0
+    mod.handle_minecraft_bots_buzz({"body": exit_body}, mc_domain, {"remaining": 3}, st)
+    check("a crash with no OOM yet is held, not submitted", sent == [] and len(st.get("deferred", [])) == 1, st)
+    clock[0] += 30
+    mod.handle_minecraft_bots_buzz({"body": oom_body}, mc_domain, {"remaining": 3}, st)
+    clock[0] += mod.PROCESS_EXIT_DEFER_SECONDS
+    mod.process_deferred(st, {"remaining": 3})
+    check("when its OOM arrives while it is held, the crash is dropped",
+          len(sent) == 1 and not st.get("deferred"), ([p for p, _ in sent], st.get("deferred")))
+    sent.clear()
+    st = {}
+    clock[0] = 40_000.0
+    mod.handle_minecraft_bots_buzz({"body": exit_body}, mc_domain, {"remaining": 3}, st)
+    clock[0] += mod.PROCESS_EXIT_DEFER_SECONDS
+    mod.process_deferred(st, {"remaining": 3})
+    check("a crash with no OOM is submitted once the hold is over", len(sent) == 1 and not st.get("deferred"),
+          ([p for p, _ in sent], st.get("deferred")))
+
+    print("\n[context: the bot's recent log lines reach the fix problem]")
+    with_context = (REPEAT_OCCURRENCE.split("\n\n")[0] +
+                    "\n  recent log (3 lines before):\n    [Babs] goal: mine iron\n    [Babs] path_update noPath\n    [Babs] tick\n")
+    parsed_ctx = mod.parse_triage_body(with_context)
+    check("the recent log block is parsed", parsed_ctx["context"] == ["[Babs] goal: mine iron", "[Babs] path_update noPath", "[Babs] tick"],
+          parsed_ctx["context"])
+    check("and goes into the fix problem", "[Babs] path_update noPath" in mod.build_fix_problem(parsed_ctx))
+    check("a body without one parses as before", mod.parse_triage_body(REPEAT_OCCURRENCE)["context"] == [])
+
+    print("\n[retry: incomplete and verify-failed are retryable now]")
+    for failed in ("incomplete", "verify-failed"):
+        mod.fetch_task_state_or_none = lambda task_id, f=failed: f
+        rec_state = {"submitted_signatures": {mod.finding_signature(repeat): {
+            "fix": "fx", "test": None, "submitted_at": 0.0, "attempts": 1}}}
+        ok, reason = mod.should_submit(repeat, rec_state, now=mod.SIGNATURE_RETRY_SECONDS + 1)
+        check(f"a fix that ended {failed} is retried", ok is True and failed in reason, reason)
     for k, v in real.items():
         setattr(mod, k, v)
 

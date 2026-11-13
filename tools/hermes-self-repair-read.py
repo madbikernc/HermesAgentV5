@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-11-13) — `grep` over a directory skips node_modules/dot-directories, same as `list`
+# already does: hermes-self-repair-bridge.py 2.5.0 now greps services/minecraft-bots for the text of
+# every incident's log line, and walking ~95 vendored packages each time was slow and could only
+# ever find a match in code the self-repair pipeline must not target. Narrows the search, never
+# widens it -- the allowlist check on every file is unchanged.
 #
 # 1.1.0 (2026-11-08) — Phase 3 (§8.3): added `list [path]`, a third read-only operation --
 # recursively lists allowlisted file paths under [path] (default: repo root), one per line,
@@ -159,7 +165,8 @@ def cmd_grep(pattern, rel_root):
             return 2
         candidates = [real_root]
     elif real_root.is_dir():
-        candidates = [p for p in sorted(real_root.rglob("*")) if p.is_file()]
+        candidates = [p for p in sorted(real_root.rglob("*")) if p.is_file() and not any(
+            part in SKIP_DIR_NAMES or part.startswith(".") for part in p.relative_to(real_root).parts[:-1])]
     else:
         log(f"refused: {rel_root!r} is neither a file nor a directory")
         return 2
