@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 7.1.0
+**Version:** 7.2.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -803,10 +803,32 @@ intake-screening blocks, one security-phase crash. Six changes, each from one of
 The FleetOps notices come from `tools/hermes_self_repair_notice.py`; the generate and bridge
 wrappers (1.1.0, 1.2.0) fetch `matrix-fleetops` for it, optional, as the apply wrapper already did.
 
+## Pre-review checks (2026-11-14): what changed, and why
+
+Measured 13 hours after the improvements pass: seven fix attempts, none promoted. Three
+deadlocked, one fix's own test failed, one broke an existing test, and two converged on drafts
+the verify gate then rejected in seconds -- d2894fb5 with a syntax error at `get-wool.js:40`,
+92a06120 with only comments changed. Each cost one of the signature's three attempts.
+
+- **The verify gate's cheap checks run on every draft, before review.** `mechanical_issues()`
+  (generator 1.6.0) calls `hermes-self-repair-verify.py`'s own `check_syntax()` on a temp copy
+  outside the checkout and its `check_behavior_change()` on the draft's diff. A failure is that
+  round's ISSUES (actor `mechanical-checks`, no model call), revised like any reviewer's. An
+  unchanged draft is not a failure. A judge's APPROVE of a version that fails them is overruled.
+  Replaying both tasks' real drafts from hermes-memory: d2894fb5's round-2 revision and all three
+  of 92a06120's drafts are caught.
+- **`node --check` needs the package type.** With no `package.json` beside it, node 22's module
+  detection exits 0 on a broken ESM `.js` file; the temp copy gets `{"type": "module"}`, what
+  `services/minecraft-bots/package.json` (the repo's only JavaScript) declares.
+
+The unit suite still runs only at verify: it needs a worktree of the checkout, which the
+generator never touches.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 7.2.0 | 2026-11-14 | Direct operator request. Added "Pre-review checks": verify's syntax and behavior-change checks run on every draft before review (generate 1.6.0), with the `node --check` package-type finding. |
 | 7.1.0 | 2026-11-13 | Direct operator request. Added "Improvements pass": per-kind goal-abandon signatures, backend outages as FleetOps notices, the security-phase 400 diagnosed (leaked reasoning stripped, refusals carry the router's reason), deadlocks and recurring promoted fixes posted to FleetOps, hourly counted sightings. "Known limits" updated: index.js/actions.js are split (59b098f). |
 | 7.0.0 | 2026-11-13 | Direct operator request. Added "Fidelity pass": screening hand-off and transient retries (generate 1.3.0/1.4.0), error retries (bridge 2.4.x), skip from awaiting-completeness (gate 1.2.0), JS-aware verification with the domain test suite and revert-on-failure (verify 2.0.0, apply 2.0.0 -- reverses Step 4's "never reverted" for a failed commit), tests written from the applied fix and required to fail without it, emitter-based targeting with context, crash/OOM grouping (bridge 2.5.0, triage 1.8.0), and the outcome log + FleetOps funnel. |
 | 6.13.0 | 2026-11-10 | Added "Keeping the checkout current": `hermes-self-repair-sync.sh` + timer merge `origin/master` into the self-repair checkout every 30 minutes and push it to `nas2-selfrepair`, sharing a lock with the apply worker (1.5.0). The checkout had never been updated from GitHub since 2026-11-07. 10 checks in `tests/test_sync.py`. |

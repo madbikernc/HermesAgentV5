@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-# Version: 1.5.0
+# Version: 1.6.0
+#
+# 1.6.0 (2026-11-14) — direct operator request: the verify gate's cheap deterministic checks run
+# on every draft, before a reviewer sees it (mechanical_issues()): the syntax check
+# (py_compile / bash -n / node --check, on a temp copy outside the checkout) and the
+# behavior-change check (a diff of only comments or blank lines), both from
+# hermes-self-repair-verify.py itself. A failure is that round's ISSUES, sent back for revision
+# the same way a reviewer's would be, with no model call. Of 2026-11-13/14's seven fix attempts,
+# d2894fb5 (a syntax error at get-wool.js:40) and 92a06120 (comments only) converged, applied
+# and were reverted by verify, each costing one of the signature's three attempts for something a
+# check could have sent back in a round. A judge's APPROVE of a draft that fails them is no
+# approval.
 #
 # 1.5.0 (2026-11-13) — direct operator request (self-repair improvements):
 #   * Leaked reasoning is stripped from every reply (strip_reasoning()). Task e185ae3c's security
@@ -146,6 +157,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -158,6 +170,7 @@ import hermes_self_repair_outcomes as outcomes  # noqa: E402
 _nous_judge = importlib.import_module("hermes-nous-judge")  # noqa: E402 -- hyphenated filename,
                                                               # same pattern hermes-dualcoder.py uses
 _codesec = importlib.import_module("hermes-code-security-scan")  # noqa: E402 -- same pattern
+_verify = importlib.import_module("hermes-self-repair-verify")  # noqa: E402 -- same pattern
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
 BUZZ_URL = os.environ.get("BUZZ_URL", f"http://{SPARK_IP}:8101").rstrip("/")
@@ -510,7 +523,36 @@ def ask_judge(problem, candidate_content, disagreement_text):
     return reply.upper().startswith("APPROVE"), reply
 
 
-def run_bug_loop(task_id, problem, original_content):
+SYNTAX_CHECKED_SUFFIXES = {".py", ".sh", ".js", ".mjs", ".cjs"}
+
+
+def mechanical_issues(path, original_content, candidate_content):
+    """What the verify gate would reject this draft for, found before any review (1.6.0): the
+    syntax check, on a temp copy outside the self-repair checkout, and the behavior-change check.
+    A draft identical to the original is no failure here -- an empty diff is a valid outcome."""
+    issues = []
+    suffix = Path(path).suffix.lower()
+    if suffix in SYNTAX_CHECKED_SUFFIXES:
+        with tempfile.TemporaryDirectory(prefix="selfrepair-draft-") as tmp:
+            draft_path = Path(tmp) / Path(path).name
+            draft_path.write_text(candidate_content, encoding="utf-8")
+            if suffix == ".js":
+                # The repo's only .js files are services/minecraft-bots', whose package.json says
+                # "type": "module". Without one beside it, node 22's module detection passes a
+                # broken ESM file under --check (exit 0, checked on spark).
+                (Path(tmp) / "package.json").write_text('{"type": "module"}\n', encoding="utf-8")
+            ok, note = _verify.check_syntax(draft_path)
+            if not ok:
+                issues.append(note.replace(str(draft_path), path))
+    diff_text = compute_diff(path, original_content, candidate_content)
+    if diff_text.strip():
+        ok, note = _verify.check_behavior_change(suffix, diff_text)
+        if not ok:
+            issues.append(note)
+    return issues
+
+
+def run_bug_loop(task_id, problem, original_content, path=None):
     """Returns (converged, final_content, transcript, judge_verdict) -- same shape
     hermes-dualcoder.py's run_bug_loop() returns, `final_content` in place of `final_code`."""
     set_task_state(task_id, "drafting")
@@ -523,12 +565,20 @@ def run_bug_loop(task_id, problem, original_content):
         round_num += 1
         reviewer = "coder2" if author == "coder" else "coder"
         set_task_state(task_id, f"review-round-{round_num}")
-        approved, reply = review(reviewer, problem, original_content, candidate)
-        log_round(task_id, "review", round_num, reviewer, reply)
-        transcript.append(
-            f"Round {round_num} ({reviewer} reviewing {author}'s version): "
-            f"{'APPROVE' if approved else 'ISSUES'} -- {reply}"
-        )
+        issues = mechanical_issues(path, original_content, candidate) if path else []
+        if issues:
+            approved = False
+            reply = ("ISSUES -- this version fails the verify gate's own checks, so it was not sent "
+                     "for review:\n" + "\n".join(f"- {issue}" for issue in issues))
+            log_round(task_id, "review", round_num, "mechanical-checks", reply)
+            transcript.append(f"Round {round_num} (mechanical checks on {author}'s version): {reply}")
+        else:
+            approved, reply = review(reviewer, problem, original_content, candidate)
+            log_round(task_id, "review", round_num, reviewer, reply)
+            transcript.append(
+                f"Round {round_num} ({reviewer} reviewing {author}'s version): "
+                f"{'APPROVE' if approved else 'ISSUES'} -- {reply}"
+            )
         if approved:
             return True, candidate, transcript, None
         if round_num >= MAX_ROUNDS:
@@ -545,6 +595,10 @@ def run_bug_loop(task_id, problem, original_content):
         log(f"task {task_id!r}: judge call failed/unavailable: {exc}")
         return False, candidate, transcript, f"(judge unavailable: {exc})"
     log_round(task_id, "third-party-review", 1, "nous-judge", judge_reply)
+    issues = mechanical_issues(path, original_content, candidate) if approved and path else []
+    if issues:
+        return False, candidate, transcript, (f"{judge_reply}\n(Overruled: the judged version fails "
+                                              f"the verify gate's own checks: {'; '.join(issues)})")
     return approved, candidate, transcript, judge_reply
 
 
@@ -773,7 +827,7 @@ def process_one():
 
     try:
         converged, candidate_content, transcript, judge_verdict = run_bug_loop(
-            task_id, problem, original_content)
+            task_id, problem, original_content, path)
     except Exception as exc:
         log(f"task {task_id!r}: bug-review loop failed: {exc}")
         publish_result(task_id, memory_ref, "error", f"Self-repair generation failed: {exc}")

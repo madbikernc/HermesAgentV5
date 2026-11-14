@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
+#
+# 1.3.0 (2026-11-14) — generate 1.6.0: the verify gate's syntax and behavior-change checks run on
+# every draft before review, a failure goes back for revision without a model call, and a judge's
+# APPROVE of a version that fails them is overruled.
 #
 # 1.2.0 (2026-11-13) — generate 1.5.0: a router refusal carries the router's reason, leaked
 # reasoning is stripped, and an unresolved task is posted to FleetOps with its draft diff.
@@ -18,6 +22,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -171,13 +176,52 @@ def main():
     mod.screen = lambda raw: "l2"
     mod.parse_task_spec = lambda raw: ("services/minecraft-bots/x.js", "problem")
     mod.read_target_file = lambda path: "a\n"
-    mod.run_bug_loop = lambda tid, problem, original: (False, "b\n", ["Round 1: ISSUES -- no"], None)
+    mod.run_bug_loop = lambda tid, problem, original, path=None: (False, "b\n", ["Round 1: ISSUES -- no"], None)
     rounds = []
     mod.log_round = lambda tid, phase, n, actor, content: rounds.append(phase)
     mod.publish_result = lambda *a: None
     mod.process_one()
     check("process_one() posts the deadlock and records its diff",
           len(posted) == 1 and "t1" in posted[0] and "+b" in posted[0] and rounds == ["unresolved-diff"], (posted, rounds))
+
+    print("[the verify gate's own checks run on every draft, before review]")
+    gen = load()
+    gen.log_round = gen.set_task_state = lambda *a, **k: None
+    original = "export function f(x) {\n  return x + 1;\n}\n"
+    fixed = "export function f(x) {\n  return x + 2;\n}\n"
+    broken = "export function f(x) {\n  return x + ;\n}\n"
+    comments = "// now returns the right value\n" + original
+    has_node = shutil.which("node") is not None
+    if has_node:
+        check("a JavaScript syntax error is caught, named by the target's own path",
+              any("syntax FAILED" in i and "get-wool.js" in i
+                  for i in gen.mechanical_issues("services/minecraft-bots/actions/get-wool.js", original, broken)),
+              gen.mechanical_issues("services/minecraft-bots/actions/get-wool.js", original, broken))
+    else:
+        print("  skip JavaScript syntax check (node not installed here)")
+    check("a comments-only change is caught",
+          any("Behavior-change" in i for i in gen.mechanical_issues("x.js", original, comments)))
+    check("a real change passes", gen.mechanical_issues("x.js", original, fixed) == [])
+    check("no change at all is no failure (an empty diff is a valid outcome)",
+          gen.mechanical_issues("x.js", original, original) == [])
+    check("a Python syntax error is caught",
+          any("Python syntax FAILED" in i for i in gen.mechanical_issues("tools/x.py", "x = 1\n", "x = (\n")))
+
+    reviewed, revised = [], []
+    gen.draft = lambda problem, orig: comments
+    gen.review = lambda reviewer, problem, orig, cand: (reviewed.append(cand) or (True, "APPROVE -- f() is called by g()"))
+    gen.revise = lambda writer, problem, orig, cand, issues: (revised.append(issues) or fixed)
+    ok, final, transcript, _ = gen.run_bug_loop("t2", "f is off by one", original, "x.js")
+    check("a draft that fails them goes back for revision with no review call, then on to review",
+          ok and final == fixed and reviewed == [fixed] and len(revised) == 1 and "Behavior-change" in revised[0],
+          (ok, reviewed, revised))
+    check("and the round is in the transcript as the checks', not a reviewer's",
+          transcript[0].startswith("Round 1 (mechanical checks on coder's version): ISSUES"), transcript[:1])
+    gen.revise = lambda writer, problem, orig, cand, issues: comments
+    gen.ask_judge = lambda problem, cand, text: (True, "APPROVE -- fine")
+    ok, _, _, verdict = gen.run_bug_loop("t3", "f is off by one", original, "x.js")
+    check("a judge's APPROVE of a version that still fails them is overruled",
+          not ok and "Overruled" in (verdict or ""), verdict)
 
     print("[prompts]")
     check("the review prompt requires a runtime call path",
