@@ -1,5 +1,6 @@
-// Version: 1.1.0
+// Version: 1.1.1
 //
+// 1.1.1 (2026-11-14): shelterStep's sandbox stubs shelterShellIsStuck (home-scan.js 1.1.0).
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: beds and sleeping (part 2 of 2).
@@ -23,7 +24,7 @@ await check('Shelter goal: a finished shelter gets a bed put in it; a build nobo
     bot: { spawnPoint: new V3(0, 64, 0), inventory: { items: () => c.held }, blockAt: () => null },
     held: [], found: null, bedded: false, buildResult: null,
     // The door check (2026-10-28) is its own test below -- here the doorway already has one.
-    isDoorway: () => true, doorwayPosition: (b) => b.offset(0, 0, 3), unfinishedShelterNearHome: () => null,
+    isDoorway: () => true, doorwayPosition: (b) => b.offset(0, 0, 3), unfinishedShelterNearHome: () => null, shelterShellIsStuck: () => false,
     findShelterNearHome: () => c.found, shelterHasBed: () => c.bedded,
     // 2026-11-04: what to do comes from the residence plan, not from her own shelter.
     residencePlan: () => c.plan, completeSheltersNearHome: () => [], holdsItem: () => false, plan: null,
@@ -90,7 +91,7 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
       : bedded ? { kind: 'done', beds: 1, active: 1 } : { kind: 'bed', base: new V3(1, 64, 1), beds: 0, active: 1 }),
     completeSheltersNearHome: () => (standing ? [new V3(1, 64, 1)] : []), holdsItem: () => false,
     findShelterSite: () => new V3(1, 64, 1), shelterPositions: s.shelterPositions,
-    unfinishedShelterNearHome: () => null, isDoorway: () => false, doorwayPosition: s.doorwayPosition,
+    unfinishedShelterNearHome: () => null, shelterShellIsStuck: () => false, isDoorway: () => false, doorwayPosition: s.doorwayPosition,
     shelterMaterialCount: (b) => b.inventory.items().filter((i) => /_(planks|log)$/.test(i.name)).reduce((n, i) => n + i.count, 0),
     // 2026-10-27: runShelterGoal now registers a RAG note on completion (writeMemoryNote,
     // longterm.js) -- stubbed here same as every other cross-module function this context

@@ -1,4 +1,5 @@
-// Version: 1.1.1
+// Version: 1.1.2
+// 1.1.2 (2026-11-14): shelterStep's sandbox stubs shelterShellIsStuck (home-scan.js 1.1.0).
 // 1.1.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
@@ -169,7 +170,7 @@ await check('Residences: a bed for each active bot -- in an empty shelter first,
     builderAcquireStep: async (item) => ({ ok: true, text: `making a ${item}`, action: { type: 'craft', item } }),
     bedStep: async () => ({ ok: true, text: 'got wool.', action: { type: 'get_wool' } }),
     findShelterNearHome: () => ({ base: c.bases[0], complete: true }), // what the old code went by
-    unfinishedShelterNearHome: () => null, findShelterSite: () => new V3(20, 64, 0),
+    unfinishedShelterNearHome: () => null, shelterShellIsStuck: () => false, findShelterSite: () => new V3(20, 64, 0),
     isDoorway: () => true, doorwayPosition: (b) => b.offset(0, 0, 3), shelterPositions: () => [], shelterMaterialCount: () => 0,
     gatherPlanks: async () => null,
     completeSheltersNearHome: () => c.bases, blockedCells: [],

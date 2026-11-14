@@ -1,5 +1,7 @@
-// Version: 1.2.0
+// Version: 1.3.0
 //
+// 1.3.0 (2026-11-14): a shell whose every missing block would cut off a fixture is not an unfinished
+// shell, and shelterStep lets go of a cached site that has become one (home-scan.js 1.1.0).
 // 1.2.0 (2026-11-11): a complete shelter is not an unfinished shell, and a "build" that says it stands
 // only passes shelterStep's guard when that goal's own site checks out as complete.
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
@@ -239,9 +241,9 @@ await check('Shelters: a doorless shell near home is found again, not abandoned 
     return { spawnPoint: new V3(0, 64, 0), isABed: () => false, findBlocks: () => [],
       blockAt: (p) => ({ name: 'x', boundingBox: p.y <= 64 || solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' }) };
   };
-  const find = (bot) => {
+  const find = (bot, wouldBlockAccess = () => null) => {
     const h = vm.createContext({ bot, Math, shelterPositions: s.shelterPositions, doorwayPosition: s.doorwayPosition,
-      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24 });
+      SHELTER_ROOM: vm.runInContext('SHELTER_ROOM', s), BUILDER_PRIORITY_RADIUS: 24, wouldBlockAccess });
     vm.runInContext(between(swim, 'export function isDoorway(', 'export function isOpenDoorOrGate(') + between(actions, 'export function isShelterDoor(', 'export function shelterPositions(') +
       (between(homeScanSrc, 'const shelterGeometryPositions') + between(prioritiesSrc, 'const TOOL_NAME', 'const BUILDER_ITEM_STALL_LIMIT')), h);
     return h.unfinishedShelterNearHome();
@@ -265,6 +267,19 @@ await check('Shelters: a doorless shell near home is found again, not abandoned 
   assert.equal(find(doored(farShell, door, 'south')), null, 'a complete shelter with its door is finished, not an unfinished shell');
   assert.equal(JSON.stringify(find(doored(farShell, door, 'west'))), JSON.stringify(far), 'a wrong-way door still hands it to "build", which turns it round');
   assert.equal(JSON.stringify(find(doored(farShell.slice(3), door, 'south'))), JSON.stringify(far), 'a doored shell with blocks missing is still unfinished');
+  // 2026-11-14: the shell at (-5, 95, 11) lacked two cells that would each block a neighbouring
+  // door -- "build" left them open 439 times in 13h, and every shelter goal got it back.
+  const gaps = farShell.slice(0, 2), blocksDoor = (_bot, pos) => gaps.some((g) => g.equals(pos)) ? { fixture: 'oak_door', reason: 'the way through' } : null;
+  const nearGap = s.shelterPositions(near).slice(0, 2);
+  const blocksBoth = (_bot, pos) => [...gaps, ...nearGap].some((g) => g.equals(pos)) ? { fixture: 'oak_door' } : null;
+  assert.equal(find(doored(farShell.slice(2), door, 'south'), blocksDoor), null,
+    'a shell whose every missing block would cut off a fixture can never be finished -- not handed to "build"');
+  assert.equal(JSON.stringify(find(doored(farShell.slice(3), door, 'south'), blocksDoor)), JSON.stringify(far),
+    'one more missing block that CAN go in: still unfinished, the build has work to do');
+  assert.equal(JSON.stringify(find(shellBot([...farShell.slice(2), ...s.shelterPositions(near).slice(2)]), blocksBoth)), 'null',
+    'two stuck shells: neither');
+  assert.equal(JSON.stringify(find(shellBot([...farShell, ...s.shelterPositions(near).slice(2)]), blocksBoth)), JSON.stringify(far),
+    'the nearer shell is stuck, so the farther one that can be finished wins');
 });
 
 
@@ -277,7 +292,8 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
       registry: { blocksByName: { crafting_table: { id: 1 } } }, findBlocks: () => (c.tableNear ? [new V3(0, 64, 0)] : []) },
     held: [], tableNear: false, shell: null, siteCalls: 0, materials: 0,
     isDoorway: () => false, doorwayPosition: (b) => b.offset(0, 0, 3), heldCount: (fn) => c.held.filter((i) => fn(i.name)).reduce((n, i) => n + i.count, 0),
-    findShelterNearHome: () => null, unfinishedShelterNearHome: () => c.shell,
+    findShelterNearHome: () => null, unfinishedShelterNearHome: () => c.shell, stuck: null,
+    shelterShellIsStuck: (b) => !!c.stuck && b.equals(c.stuck),
     residencePlan: () => ({ kind: 'build', beds: 0, active: 1 }), completeSheltersNearHome: () => [],
     findShelterSite: () => { c.siteCalls++; return new V3(5, 65, 5); },
     shelterPositions: () => Array.from({ length: 60 }, (_, i) => new V3(i, 100, 0)), shelterMaterialCount: () => c.materials,
@@ -327,6 +343,12 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
   await c.shelterStep(goal, null);
   assert.equal(JSON.stringify(goal.shelterAt), JSON.stringify({ x: 41, y: 65, z: -30 }), 'a new shelter goal picks up her unfinished shell');
   assert.equal(c.siteCalls, 0, 'instead of siting a fresh one');
+  // 2026-11-14: a cached site nothing can finish is dropped, not built against until the goal gives up.
+  c.stuck = new V3(41, 65, -30); c.shell = null;
+  await c.shelterStep(goal, null);
+  assert.equal(JSON.stringify(goal.shelterAt), JSON.stringify({ x: 5, y: 65, z: 5 }), 'a stuck shell is let go for a fresh site');
+  assert.equal(c.siteCalls, 1);
+  c.stuck = null; c.shell = new V3(41, 65, -30); goal = { shelterAt: { x: 41, y: 65, z: -30 } };
 
   // 2026-10-29: wall planks from logs asked for every missing block's worth ("craft 60
   // dark_oak_planks" with 2 logs) and failed the craft every tick.

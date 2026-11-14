@@ -1,4 +1,8 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-14) -- shelterStep() drops a goal's cached site once it is a shell nothing can
+// finish (home-scan.js 1.1.0's shelterShellIsStuck), so the next tick picks another site instead
+// of failing "0 placed" against it until the goal gives up.
 //
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: the shelter and communal-shelter goal runners.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
@@ -9,7 +13,7 @@ import { writeMemoryNote } from "./longterm.js";
 import { SHELTER_ROOM, communalShelterMaterialCount, communalShelterPositions, doorwayPosition, findCommunalShelterSite, findShelterSite, performAction, shelterMaterialCount, shelterPositions } from "./actions.js";
 import { logStep } from "./goals.js";
 import { isDoorway } from "./swim-movements.js";
-import { SHELTER_SITE_RADIUS, completeSheltersNearHome, residenceChestCell, residencePlan, unfinishedShelterNearHome } from "./home-scan.js";
+import { SHELTER_SITE_RADIUS, completeSheltersNearHome, residenceChestCell, residencePlan, shelterShellIsStuck, unfinishedShelterNearHome } from "./home-scan.js";
 import { communalShelterSatisfied, communalShelterSize, findCommunalShelterNearHome } from "./priorities.js";
 import { Vec3 } from "vec3";
 import { bedStep, gatherPlanks } from "./gear-goals.js";
@@ -60,6 +64,9 @@ async function shelterStep(goal, handle) {
   // A site an earlier build picked that has since become a complete shelter is no site any more.
   if (goal.shelterAt && completeSheltersNearHome().some((b) =>
     b.x === goal.shelterAt.x && b.y === goal.shelterAt.y && b.z === goal.shelterAt.z)) {
+    goal.shelterAt = null;
+  }
+  if (goal.shelterAt && shelterShellIsStuck(new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z))) {
     goal.shelterAt = null;
   }
   const site = goal.shelterAt ? new Vec3(goal.shelterAt.x, goal.shelterAt.y, goal.shelterAt.z)

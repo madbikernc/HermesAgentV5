@@ -1,4 +1,4 @@
-// Version: 1.16.0
+// Version: 1.17.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -15,7 +15,8 @@
 // When a behavior fix lands, add the metric that proves it here (see tests/README.md), and after
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
-// Revision History: 1.16.0 | 2026-11-11 | gohome_no_path_per_bot_day, climb_legs_per_bot_day.
+// Revision History: 1.17.0 | 2026-11-14 | stuck_shelter_builds_per_bot_day.
+// 1.16.0 | 2026-11-11 | gohome_no_path_per_bot_day, climb_legs_per_bot_day.
 // 1.15.0 | 2026-11-11 | noop_shelter_builds_per_bot_day.
 // 1.14.0 | 2026-11-07 | no_path_action_failures_per_bot_day, stepped_goto_legs_per_bot_day.
 // 1.13.0 | 2026-11-07 | stores_with_own_kind_per_bot_day, chest_consolidations_per_bot_day.
@@ -294,6 +295,13 @@ const METRICS = {
     about: "shelter goal steps where \"build\" did nothing and passed as ok -- 646-3,309/bot in the 24h to 2026-11-11",
     better: "lower", tolerance: 0.5, floor: 5,
     value: (c, ctx) => perBotDay(c(/\] shelter goal: the shelter is already standing\. \(ok=true\)/), ctx),
+  },
+  // 2026-11-14 (home-scan.js 1.1.0): a shell whose every missing block would cut off a fixture can
+  // never be finished, but every shelter goal was handed it back.
+  stuck_shelter_builds_per_bot_day: {
+    about: "\"build\" placed nothing because every missing block was left open for a fixture -- 439 fleet-wide in the 13h to 2026-11-14",
+    better: "lower", tolerance: 0.5, floor: 2,
+    value: (c, ctx) => perBotDay(c(/\] shelter goal: built part of a shelter: 0 placed, \d+ still missing \(\d+ left open/), ctx),
   },
   // 2026-11-11 (swim-movements.js 1.7.0): a step up through rock was priced past the pathfinder's
   // per-move limit, so a bot that went down into a cave could not come back up (Amy, y=3, an hour).

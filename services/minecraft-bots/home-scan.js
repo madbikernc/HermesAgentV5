@@ -1,4 +1,11 @@
-// Version: 1.0.1
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-14, self-repair check: 95 "giving up ... (kind=shelter)" in 13h, all five bots):
+// unfinishedShelterNearHome() skips a shell that can never be finished -- every block it still
+// lacks would cut off a neighbouring door, bed or chest, so "build" leaves each one open on
+// purpose (wouldBlockAccess). The shell at (-5, 95, 11)'s two cells were left open 439 times:
+// "0 placed, 2 still missing (2 left open ...)" in 0ms, three failures, give up, and the next
+// shelter goal got the same shell back. New shelterShellIsStuck(), also used by shelterStep().
 //
 // 1.0.1 (2026-11-11, direct report: "they are all showing a history of build successes. are those
 // false positives?"): unfinishedShelterNearHome() no longer returns a shelter that is already
@@ -217,6 +224,13 @@ function hasShelterNearHome() {
 // path; the missing-count bail keeps open air to a handful of block lookups per base.
 const UNFINISHED_SHELL_MAX_MISSING = 8;
 
+// A shell "build" can never finish: blocks still missing, and every one of them would cut off a
+// neighbouring fixture, so build.js leaves each open on purpose and places nothing (1.1.0).
+export function shelterShellIsStuck(base) {
+  const missing = shelterGeometryPositions(base).filter((pos) => bot.blockAt(pos)?.boundingBox !== "block");
+  return missing.length > 0 && missing.every((pos) => wouldBlockAccess(bot, pos));
+}
+
 export function unfinishedShelterNearHome() {
   if (!bot.spawnPoint) return null;
   const center = bot.spawnPoint.floored();
@@ -236,7 +250,7 @@ export function unfinishedShelterNearHome() {
         }
         // Complete (nothing missing, a door the right way round) is finished, not unfinished.
         if (missing === 0 && isShelterDoor(door)) continue;
-        if (missing <= UNFINISHED_SHELL_MAX_MISSING) { best = base; bestDist = dist; }
+        if (missing <= UNFINISHED_SHELL_MAX_MISSING && !shelterShellIsStuck(base)) { best = base; bestDist = dist; }
       }
     }
   }

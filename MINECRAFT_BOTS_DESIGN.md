@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.48.0
+**Version:** 2.49.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -262,7 +262,9 @@ ran nothing, and an in-flight guard keeps the two from overlapping. Retrieve a m
   goal, seeing no door to anchor on, sited and built a second shell. `shelterStep` now gathers a
   door's 6 planks (plus 4 for a table if none is near) before building and holds them back from
   the wall count, and a new shelter goal first looks for a doorless shell near home
-  (`unfinishedShelterNearHome`, at most 8 blocks missing, never a complete one) and builds on that. **Planks are counted
+  (`unfinishedShelterNearHome`, at most 8 blocks missing, never a complete one, and never one whose
+  every missing block would cut off a neighbouring fixture -- `build` leaves those open on purpose, so
+  that shell can never finish; 2026-11-14) and builds on that. **Planks are counted
   per wood, and a craft count is items** (2026-10-29): `gatherPlanks` only counts planks of one
   species (every plank recipe is single-species; three odd planks failed 14,738 bed crafts),
   plank crafts are capped at what her logs make, `craftItem` turns an item count into recipe runs
