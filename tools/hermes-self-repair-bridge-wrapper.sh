@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Version: 1.1.1
+# Version: 1.2.0
+#
+# 1.2.0 (2026-11-13) — also fetches matrix-fleetops (optional, same as hermes-self-repair-apply-wrapper.sh)
+# for FleetOps notices: backend outages and promoted fixes whose incident recurs (hermes-self-repair-bridge.py 2.6.0).
 #
 # 1.1.1 (2026-11-08) — real bug found live, first time this service was ever actually started
 # (systemd: "status=203/EXEC"): this file, and its predecessor
@@ -28,5 +31,13 @@ BUZZ_TOKEN="$("$VAULT_GET" buzz-token password)"
 
 export MEMORY_TOKEN
 MEMORY_TOKEN="$("$VAULT_GET" memory-token password)"
+
+if FLEETOPS_MATRIX_TOKEN="$("$VAULT_GET" matrix-fleetops password 2>/dev/null)"; then
+  export FLEETOPS_MATRIX_TOKEN
+  FLEETOPS_ROOM="$("$VAULT_GET" matrix-fleetops room 2>/dev/null || true)"
+  [ -n "${FLEETOPS_ROOM:-}" ] && export FLEETOPS_ROOM
+else
+  echo "[hermes-self-repair-bridge-wrapper] matrix-fleetops not in vault — FleetOps notices disabled" >&2
+fi
 
 exec /usr/bin/python3 "$REPO_DIR/tools/hermes-self-repair-bridge.py"

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Version: 1.1.0
+# Version: 1.2.0
+#
+# 1.2.0 (2026-11-13) — generate 1.5.0: a router refusal carries the router's reason, leaked
+# reasoning is stripped, and an unresolved task is posted to FleetOps with its draft diff.
 #
 # 1.1.0 (2026-11-13) — generate 1.4.0: a 502/503/504 or dropped connection is retried, a 400 is
 # not; the review prompt requires a call path; draft/revise prompts carry today's date.
@@ -120,7 +123,7 @@ def main():
     try:
         mod.call_model("coder", "s", "u", 10)
         check("a 400 (screening) is never retried", False)
-    except urllib.error.HTTPError as exc:
+    except mod.ModelCallError as exc:
         check("a 400 (screening) is never retried", exc.code == 400 and script == ["APPROVE"], script)
     script[:] = [urllib.error.URLError("connection reset"), "APPROVE"]
     check("a dropped connection is retried", mod.call_model("coder", "s", "u", 10) == "APPROVE")
@@ -128,8 +131,53 @@ def main():
     try:
         mod.call_model("coder", "s", "u", 10)
         check("past MODEL_RETRIES the error is raised", False)
-    except urllib.error.HTTPError as exc:
+    except mod.ModelCallError as exc:
         check("past MODEL_RETRIES the error is raised", exc.code == 502 and not script)
+
+    print("[call_model: a refusal says why, and leaked reasoning is dropped]")
+    refusal = b'{"error": {"message": "request blocked by injection guard", "categories": ["role_spoof"]}}'
+
+    def refused(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(refusal))
+    urllib.request.urlopen = refused
+    try:
+        mod.call_model("coder2", "s", "u", 10)
+        check("a router refusal is raised", False)
+    except mod.ModelCallError as exc:
+        check("the error carries the router's own reason (task e185ae3c's said only 'Bad Request')",
+              "injection guard" in str(exc) and "role_spoof" in str(exc) and "coder2" in str(exc), str(exc))
+    urllib.request.urlopen = scripted
+    script[:] = ["<think>the user wants a review</think>\nAPPROVE -- the call path is goalTick"]
+    check("a whole <think> block is dropped", mod.call_model("coder", "s", "u", 10).startswith("APPROVE"))
+    script[:] = ["weighing it up...\n</think>\n\nISSUES: nothing calls the new helper"]
+    check("a reply whose opening <think> was already stripped loses everything up to </think>",
+          mod.call_model("coder", "s", "u", 10) == "ISSUES: nothing calls the new helper")
+    check("a reply without reasoning is unchanged", mod.strip_reasoning("  APPROVE  ") == "APPROVE")
+
+    print("[an unresolved task is posted to FleetOps]")
+    text = mod.build_unresolved_notice("6629eddc", "services/minecraft-bots/goal-runners.js",
+                                       ["Round 1 (coder2 reviewing coder's version): ISSUES -- a",
+                                        "Round 5 (coder reviewing coder2's version): ISSUES -- the guard is dead code"],
+                                       "ISSUES -- agree with coder", "-old\n+new\n" + "x" * 5000)
+    check("names the task and the target", "6629eddc" in text and "goal-runners.js" in text)
+    check("carries the last objection, not the first", "the guard is dead code" in text and "-- a\n" not in text)
+    check("carries the judge's view and the draft diff, cut to size",
+          "agree with coder" in text and "+new" in text and "more chars" in text and len(text) < 5000, len(text))
+    posted = []
+    mod.notice.fleetops_notice = lambda body, sender, log=None: posted.append(body)
+    mod.claim_next = lambda topic: {"id": 1, "message": {"task_id": "t1", "memory_ref": "turn:1"}}
+    mod.ack_claim = lambda cid: None
+    mod.fetch_raw_text = lambda tid, ref: "spec"
+    mod.screen = lambda raw: "l2"
+    mod.parse_task_spec = lambda raw: ("services/minecraft-bots/x.js", "problem")
+    mod.read_target_file = lambda path: "a\n"
+    mod.run_bug_loop = lambda tid, problem, original: (False, "b\n", ["Round 1: ISSUES -- no"], None)
+    rounds = []
+    mod.log_round = lambda tid, phase, n, actor, content: rounds.append(phase)
+    mod.publish_result = lambda *a: None
+    mod.process_one()
+    check("process_one() posts the deadlock and records its diff",
+          len(posted) == 1 and "t1" in posted[0] and "+b" in posted[0] and rounds == ["unresolved-diff"], (posted, rounds))
 
     print("[prompts]")
     check("the review prompt requires a runtime call path",

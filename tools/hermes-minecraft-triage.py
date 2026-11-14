@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.8.1
+# Version: 1.9.0
+#
+# 1.9.0 (2026-11-13) — direct operator request (self-repair improvements): a model backend that is
+# down or restarting is an outage, not a bot bug. A router-failure line whose error says the
+# backend is unreachable, still loading, refusing connections, timed out or answered 502/503/504
+# is now category `backend-outage`: published to minecraft-ops with no coder/coder2 diagnosis
+# (OUTAGE_CATEGORIES), and hermes-self-repair-bridge.py 2.6.0 turns it into a FleetOps notice
+# instead of a fix task. Its two fix tasks of 2026-11-13 ("muse unreachable", "Loading model")
+# were both rejected by intake screening anyway. A router failure that isn't an outage (a guard
+# block, a bad request) stays `router-failure`.
 #
 # 1.8.1 (2026-11-13) — every Buzz publish from spark's triage failed 401 (116 of 116 in six hours,
 # all of the retained journal): vault_get() gave the lookup 15s, spark's vault takes 30-60s
@@ -197,6 +206,10 @@ TRIAGE_PATTERNS = [
     ("process-exit", re.compile(r"core-dump|Main process exited"), "bot process died"),
     ("stuck-path", re.compile(r"path_reset: stuck"), "pathfinder repeatedly stuck"),
     ("goal-abandoned", re.compile(r"giving up on goal"), "a standing goal was abandoned"),
+    # Must come before router-failure: the same line, but the backend itself was down (1.9.0).
+    ("backend-outage", re.compile(r"hermes-router \w+ call failed.*(unreachable|Loading model|"
+                                  r"unavailable_error|Connection refused|Remote end closed|timed out|"
+                                  r"\b50[234]\b)"), "model backend unavailable"),
     ("router-failure", re.compile(r"hermes-router \w+ call failed"), "model backend call failed"),
     ("action-failed", re.compile(r"action '.*' failed:"), "a direct action failed"),
     # index.js 2.14.1's own DONE-validation flag: a goal reported complete with no real
@@ -215,7 +228,11 @@ TRIAGE_PATTERNS = [
 # Categories worth a coder/coder2 diagnosis per new signature; the rest are only recorded and
 # counted (high-volume, usually self-explanatory from the line itself).
 DIAGNOSE_CATEGORIES = {"crash", "oom", "process-exit", "stuck-path", "goal-abandoned",
-                       "router-failure", "action-failed", "suspicious-done", "rejected-done"}
+                       "router-failure", "action-failed", "suspicious-done", "rejected-done",
+                       "backend-outage"}
+# Published as-is, no coder/coder2 call: the line says what happened, and nothing in the bot's
+# code is at fault (1.9.0).
+OUTAGE_CATEGORIES = {"backend-outage"}
 
 
 def unit_to_persona(unit):
@@ -318,6 +335,8 @@ def triage_incident(category, label, line, unit=None):
     and occasionally still worth having), but real analysis tonight needed the snapshot itself,
     not another guess from one log line. Looked up and attached FIRST, so it's never lost even
     if the coder/coder2 calls below both fail."""
+    if category in OUTAGE_CATEGORIES:
+        return f"[{category}] {label}\n  source line: {line.strip()[:300]}"
     heapdump_note = None
     if category == "oom":
         persona = unit_to_persona(unit)

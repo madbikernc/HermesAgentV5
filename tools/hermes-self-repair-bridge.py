@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 2.5.0
+# Version: 2.6.0
+#
+# 2.6.0 (2026-11-13) — direct operator request (self-repair improvements):
+#   * "giving up on goal" is one signature per kind of goal, from the bots' new `(kind=...)` tag
+#     (goal-runners.js 1.1.0), not one for every goal: 399 of a day's 400 abandons were one
+#     residence goal, and its fix task stood for the shelter, bed and freeform ones too. The fix
+#     file is chosen by the model from the kind and the bot's log, never the emitter -- the line
+#     comes from the shared give-up path (REPORTER_EMITTED_CATEGORIES), and the problem says so.
+#   * `backend-outage` (hermes-minecraft-triage.py 1.9.0) is never a fix task: report_outage()
+#     posts it to FleetOps once per backend per OUTAGE_NOTICE_SECONDS.
+#   * A finding that is not submitted is logged once per SEEN_LOG_SECONDS per signature with a
+#     `count`, instead of one outcome line per sighting (893 of the first day's 902 lines). When
+#     the signature has a task, the line carries its `task_state`; a promoted fix whose incident
+#     still arrives is posted to FleetOps once and logged as `recurring`.
+#   * The wrapper fetches matrix-fleetops for these notices (hermes_self_repair_notice.py).
 #
 # 2.5.0 (2026-11-13) — direct operator request (self-repair fidelity pass). What the bridge
 # submits, and how, was the source of most of the pipeline's misses:
@@ -192,6 +206,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_self_repair_domains as domains_mod
+import hermes_self_repair_notice as notice  # noqa: E402
 import hermes_self_repair_outcomes as outcomes  # noqa: E402
 
 SPARK_IP = os.environ.get("SPARK_LAN_IP", "10.129.1.15")
@@ -217,6 +232,14 @@ PROCESS_EXIT_DEFER_SECONDS = int(os.environ.get("PROCESS_EXIT_DEFER_SECONDS", "1
 EMITTER_CONTEXT_LINES = 20
 MAX_TEST_DIFF_CHARS = 8000
 RETRYABLE_TASK_STATES = {"error", "incomplete", "verify-failed"}
+SEEN_LOG_SECONDS = int(os.environ.get("SEEN_LOG_SECONDS", "3600"))
+OUTAGE_NOTICE_SECONDS = int(os.environ.get("OUTAGE_NOTICE_SECONDS", "3600"))
+# Not bot-code faults: reported to FleetOps, never a fix task (2.6.0).
+OUTAGE_CATEGORIES = {"backend-outage"}
+# Categories whose log line is printed by a generic reporter, not by the code that failed:
+# "giving up on goal" comes from failGoalStep() whatever the goal, so the model picks the file
+# from the goal's kind and the bot's recent log instead (2.6.0).
+REPORTER_EMITTED_CATEGORIES = {"goal-abandoned"}
 now_fn = time.time  # the offline tests replace this
 STATE_DIR = Path(os.environ.get(
     "BRIDGE_STATE_DIR", str(Path.home() / ".hermes" / "state" / "selfrepair-bridge")))
@@ -354,7 +377,12 @@ def finding_signature(parsed):
         line = ("minecraft-bot-X.service: crashed (core dump)" if "dump" in line
                 else re.sub(r"minecraft-bot-[\w-]+", "minecraft-bot-X", line))
     elif category == "goal-abandoned":
-        line = re.sub(r"(giving up on goal after \S+ failures).*", r"\1", line)
+        # One signature per kind of goal (2.6.0): the bots' (kind=...) tag is kept, the goal's
+        # free text and the failure count are not.
+        kind = re.search(r"giving up on goal after \S+ failures \(kind=([^)]+)\)", line)
+        line = re.sub(r"(giving up on goal after) \S+ (failures).*", r"\1 N \2", line)
+        if kind:
+            line += f" (kind={kind.group(1)})"
     line = re.sub(r"\s+", " ", re.sub(r"\d+(\.\d+)?", "N", line))[:160]
     return f"{category}|{line}"
 
@@ -428,6 +456,10 @@ def build_fix_problem(parsed, emitter=None):
         lines.append("coder and coder2 disagreed on severity for this incident — treat with extra care.")
     if parsed["source_line"]:
         lines.append(f"Source log line: {parsed['source_line']}")
+    if parsed["category"] == "goal-abandoned":
+        lines.append("That line is printed by the shared give-up path whatever the goal, so the fault is "
+                     "not there: it is in the code that runs this kind of goal (the line's kind=... tag), "
+                     "and the failing steps are in the bot's log lines before it.")
     if emitter:
         lines.append(f"\nThis log line is emitted at {emitter['path']}:{emitter['line']} -- the code there:\n"
                      f"{emitter['snippet']}")
@@ -794,6 +826,48 @@ def record_egress_submission(state, caller, task_id, now):
     save_state(state)
 
 
+def note_seen(state, sig, category, reason, now):
+    """A finding that was not submitted, counted per signature and written to the outcome log at
+    most once per SEEN_LOG_SECONDS with the count since the last line (2.6.0) -- the log was 99%
+    repeat sightings. Each line for a signature that already has a task carries that task's state,
+    and a promoted fix whose incident is still arriving is posted to FleetOps once."""
+    entry = state.setdefault("seen_log", {}).setdefault(sig or "?", {"count": 0, "last": 0})
+    entry["count"] += 1
+    if now - entry["last"] < SEEN_LOG_SECONDS:
+        return
+    fields = {}
+    record = (state.get("submitted_signatures") or {}).get(sig) if sig else None
+    if record and record.get("fix"):
+        task_state = fetch_task_state_or_none(record["fix"])
+        fields = {"task_id": record["fix"], "task_state": task_state}
+        noticed = state.setdefault("recurrence_noticed", [])
+        if task_state == "promoted" and record["fix"] not in noticed:
+            noticed.append(record["fix"])
+            notice.fleetops_notice(
+                f"[self-repair] Fix task {record['fix']} was promoted, but its incident is still "
+                f"happening: {sig} ({entry['count']} sighting(s) since the last count). If the bots "
+                f"have restarted on it since it was deployed, the fix didn't fix it.", "selfrepair-bridge", log)
+            outcomes.record("recurring", task_id=record["fix"], signature=sig, count=entry["count"])
+    outcomes.record("seen", signature=sig, category=category, submitted=False, reason=reason,
+                    count=entry["count"], **fields)
+    entry.update(count=0, last=now)
+    save_state(state)
+
+
+def report_outage(state, parsed, now):
+    """A model backend outage goes to FleetOps, once per backend per OUTAGE_NOTICE_SECONDS (2.6.0)."""
+    line = parsed.get("source_line") or ""
+    m = re.search(r"hermes-router (\w+) call failed", line)
+    backend = m.group(1) if m else "?"
+    sent = state.setdefault("outage_noticed", {})
+    if now - sent.get(backend, 0) < OUTAGE_NOTICE_SECONDS:
+        return
+    sent[backend] = now
+    save_state(state)
+    notice.fleetops_notice(f"[self-repair] Model backend '{backend}' is failing the bots' calls "
+                           f"(not a bot-code bug, so no fix task): {line[:400]}", "selfrepair-bridge", log)
+
+
 def handle_minecraft_bots_buzz(finding, domain, budget, state):
     body = finding.get("body", "")
     parsed = parse_triage_body(body)
@@ -803,7 +877,11 @@ def handle_minecraft_bots_buzz(finding, domain, budget, state):
 
     def skip(reason):
         log(f"skipping incident ({reason}): {body[:120]!r}")
-        outcomes.record("seen", signature=sig, category=category, submitted=False, reason=reason)
+        note_seen(state, sig, category, reason, now)
+
+    if category in OUTAGE_CATEGORIES:
+        report_outage(state, parsed, now)
+        return skip("a model backend outage, not a bot-code bug -- reported to FleetOps")
 
     bot = finding_bot(parsed) if parsed else None
     if category == "oom" and bot:
@@ -830,7 +908,7 @@ def handle_minecraft_bots_buzz(finding, domain, budget, state):
     if not candidates:
         return skip("could not list any candidate files (read tool unavailable?)")
 
-    emitter = locate_emitter(parsed)
+    emitter = None if category in REPORTER_EMITTED_CATEGORIES else locate_emitter(parsed)
     if emitter and emitter["size"] > MAX_FILE_CHARS:
         return skip(f"emitted by {emitter['path']}:{emitter['line']}, {emitter['size']} chars -- over "
                     f"MAX_FILE_CHARS={MAX_FILE_CHARS}, not a whole-file self-repair target")

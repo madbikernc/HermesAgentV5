@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 2.21.0
+# Version: 2.22.0
+#
+# 2.22.0 (2026-11-13) — the self-repair bridge (2.6.0) writes one `seen` line per signature per
+# hour with a `count`, not one per sighting: the funnel and the before/after counts sum `count`
+# (a line without one is 1), and the funnel counts promoted fixes whose incident recurred.
 #
 # 2.21.0 (2026-11-13) — direct operator request (self-repair fidelity pass): the /selfrepair tab
 # gains "Is it working?", read from the self-repair outcome log (hermes_self_repair_outcomes.py,
@@ -1594,14 +1598,17 @@ def selfrepair_funnel(events):
     """Counts for the "Is it working?" funnel from outcome-log events (pure, offline-testable)."""
     f = {"seen": 0, "submitted_fix": 0, "submitted_test": 0, "generated": {}, "verified_ok": 0,
          "verified_failed": 0, "failed_checks": {}, "incomplete": 0, "reverted": 0,
-         "promote": 0, "skip": 0, "skip_reasons": {}}
+         "promote": 0, "skip": 0, "skip_reasons": {}, "recurring": 0}
     for e in events:
         kind = e.get("event")
         if kind == "seen":
-            f["seen"] += 1
+            n = e.get("count") or 1
+            f["seen"] += n
             if not e.get("submitted"):
                 reason = re.sub(r"\d+", "N", (e.get("reason") or "")[:70])
-                f["skip_reasons"][reason] = f["skip_reasons"].get(reason, 0) + 1
+                f["skip_reasons"][reason] = f["skip_reasons"].get(reason, 0) + n
+        elif kind == "recurring":
+            f["recurring"] += 1
         elif kind == "submitted":
             f["submitted_test" if e.get("role") == "test" else "submitted_fix"] += 1
         elif kind == "generated":
@@ -1638,9 +1645,9 @@ def selfrepair_effect(events, now=None, days=SELFREPAIR_EFFECT_DAYS):
         if not sig:
             continue
         at = e["ts"]
-        seen = [x["ts"] for x in events if x.get("event") == "seen" and x.get("signature") == sig]
-        before = sum(1 for t in seen if at - window <= t < at)
-        after = sum(1 for t in seen if at <= t < at + window)
+        seen = [(x["ts"], x.get("count") or 1) for x in events if x.get("event") == "seen" and x.get("signature") == sig]
+        before = sum(n for t, n in seen if at - window <= t < at)
+        after = sum(n for t, n in seen if at <= t < at + window)
         rows.append({"task_id": e["task_id"], "signature": sig, "approved_at": at,
                      "before": before, "after": after, "days_after": min(days, (now - at) / 86400)})
     return rows
@@ -1665,6 +1672,7 @@ def render_selfrepair_funnel():
         ["fixes left incomplete (their test failed)", f"{f['incomplete']:,}", ""],
         ["failed commits reverted", f"{f['reverted']:,}", ""],
         ["approved for promotion / declined", f"{f['promote']:,} / {f['skip']:,}", ""],
+        ["promoted fixes whose incident came back", f"{f['recurring']:,}", ""],
     ]
     body = table(["last 30 days", "count", "detail"], rows)
     effect = selfrepair_effect(events)

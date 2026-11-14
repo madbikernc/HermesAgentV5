@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-11-13) — direct operator request (self-repair improvements):
+#   * Leaked reasoning is stripped from every reply (strip_reasoning()). Task e185ae3c's security
+#     meta-review died "HTTP Error 400: Bad Request": the router's Layer 1 guard blocked it on a
+#     `</think>` (role_spoof) the other reviewer's reply carried into the prompt, together with
+#     that review's own mention of `rm -rf`. A leaked block also hid a leading APPROVE from
+#     review()'s startswith() check. The `rm -rf` half is the guard doing its job and is left alone.
+#   * A router refusal raises ModelCallError carrying what the router said (which guard, which
+#     categories), so the task's error reads as a cause, not a status line.
+#   * A deadlocked review (`unresolved`) posts a FleetOps notice -- the last objection, the judge's
+#     view and the last draft's diff -- and records that diff as a phase=unresolved-diff turn.
+#     Before, it sat in hermes-memory and nobody was told. The wrapper fetches matrix-fleetops
+#     for it (hermes_self_repair_notice.py).
 #
 # 1.4.0 (2026-11-13) — direct operator request (self-repair fidelity pass):
 #   * REVIEW_SYSTEM_PROMPT now requires the reviewer to name the call path through which the
@@ -130,6 +143,7 @@ import difflib
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -139,6 +153,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hermes_injection_guard  # noqa: E402
+import hermes_self_repair_notice as notice  # noqa: E402
 import hermes_self_repair_outcomes as outcomes  # noqa: E402
 _nous_judge = importlib.import_module("hermes-nous-judge")  # noqa: E402 -- hyphenated filename,
                                                               # same pattern hermes-dualcoder.py uses
@@ -373,6 +388,31 @@ def read_target_file(path):
     return proc.stdout
 
 
+class ModelCallError(RuntimeError):
+    """A router refusal, with what the router said: its JSON error names the guard that blocked
+    the call and why, which a bare "HTTP Error 400: Bad Request" never did (1.5.0)."""
+
+    def __init__(self, role, http_error):
+        self.code = http_error.code
+        try:
+            said = http_error.read().decode("utf-8", "replace").strip()
+        except Exception:
+            said = ""
+        super().__init__(f"{role} call: HTTP {self.code}: {said[:400] or http_error.reason}")
+
+
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S)
+
+
+def strip_reasoning(text):
+    """A reply's leaked reasoning dropped: whole <think>...</think> blocks, and everything up to a
+    closing </think> whose opening tag the server already stripped (1.5.0)."""
+    text = _THINK_BLOCK.sub("", text)
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    return text.strip()
+
+
 def call_model(role, system_prompt, user_content, max_tokens):
     """Raises RuntimeError on a truncated-mid-reasoning response, same detection
     hermes-dualcoder.py's own call_model() already established live (2026-09-05): a model can
@@ -395,7 +435,7 @@ def call_model(role, system_prompt, user_content, max_tokens):
             break
         except urllib.error.HTTPError as exc:
             if exc.code not in TRANSIENT_HTTP_CODES or attempt == MODEL_RETRIES:
-                raise
+                raise ModelCallError(role, exc) from exc
             reason = f"HTTP {exc.code}"
         except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
             if attempt == MODEL_RETRIES:
@@ -406,7 +446,7 @@ def call_model(role, system_prompt, user_content, max_tokens):
         time.sleep(MODEL_RETRY_BACKOFF_SECONDS * (attempt + 1))
     choice = result.get("choices", [{}])[0]
     message = choice.get("message", {})
-    content = (message.get("content") or "").strip()
+    content = strip_reasoning(message.get("content") or "")
     if not content and message.get("reasoning_content") and choice.get("finish_reason") == "length":
         raise RuntimeError(
             f"{role} truncated mid-reasoning at max_tokens={max_tokens} with no real answer "
@@ -615,6 +655,28 @@ def build_unresolved_bundle(path, round_count, transcript, judge_verdict):
     return "\n".join(lines)
 
 
+UNRESOLVED_NOTICE_OBJECTION_CHARS = 1500
+UNRESOLVED_NOTICE_DIFF_CHARS = 3000
+
+
+def build_unresolved_notice(task_id, path, transcript, judge_verdict, diff_text):
+    """What a deadlocked review leaves for the operator (1.5.0): the last draft's diff, the
+    objection that was never answered, and the judge's view. Before, it ended as `unresolved` in
+    hermes-memory and nobody was told."""
+    last = transcript[-1] if transcript else "(no review rounds)"
+    lines = [f"[self-repair] Task {task_id} ({path}): the two coders did not agree after "
+             f"{len(transcript)} round(s). Nothing was applied.",
+             "", "Last objection:", last[:UNRESOLVED_NOTICE_OBJECTION_CHARS]]
+    if judge_verdict:
+        lines += ["", "Judge:", judge_verdict[:UNRESOLVED_NOTICE_OBJECTION_CHARS]]
+    lines += ["", "The last draft, as a diff:",
+              diff_text[:UNRESOLVED_NOTICE_DIFF_CHARS] if diff_text.strip() else "(no change from the original)"]
+    if len(diff_text) > UNRESOLVED_NOTICE_DIFF_CHARS:
+        lines.append(f"[... {len(diff_text) - UNRESOLVED_NOTICE_DIFF_CHARS} more chars: the task's "
+                     f"phase=unresolved-diff turn in hermes-memory]")
+    return "\n".join(lines)
+
+
 def publish_result(task_id, memory_ref, outcome, message):
     """Same retry-then-log-undelivered robustness as hermes-dualcoder.py's own publish_result() --
     real 502 found live there after a fully successful run; not repeating that loss here."""
@@ -720,6 +782,11 @@ def process_one():
     if not converged:
         bundle = build_unresolved_bundle(path, len(transcript), transcript, judge_verdict)
         publish_result(task_id, memory_ref, "unresolved", bundle)
+        diff_text = compute_diff(path, original_content, candidate_content)
+        if diff_text.strip():
+            log_round(task_id, "unresolved-diff", 0, "selfrepair", diff_text)
+        notice.fleetops_notice(build_unresolved_notice(task_id, path, transcript, judge_verdict, diff_text),
+                               "selfrepair-generate", log)
         log(f"task {task_id!r}: unresolved after {len(transcript)} round(s), escalated")
         return True
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Version: 1.2.0
+# Version: 1.3.0
 #
 # Unit checks for tools/hermes-minecraft-triage.py (review MB-18/MB-19): classification of real bot
 # log lines, per-bot/per-signature dedupe with recurrence counts, and a full diagnosis queue that
@@ -9,6 +9,7 @@
 # Revision History: 1.0.0 | 2026-09-25 | Initial checks for MB-18/MB-19.
 #                   1.1.0 | 2026-11-13 | A queued incident carries that bot's recent log lines (triage 1.8.0).
 #                   1.2.0 | 2026-11-13 | No Buzz token: exit for systemd to retry, never run blind (triage 1.8.1).
+#                   1.3.0 | 2026-11-13 | A backend outage is its own category, published without a model diagnosis (triage 1.9.0).
 import importlib.util
 import os
 import queue
@@ -108,6 +109,24 @@ def no_token_exits_instead_of_running_blind():
     assert triage.VAULT_TIMEOUT_S >= 60, "spark's vault takes 30-60s"
 
 
+def backend_outage_is_not_a_bot_bug():
+    unreachable = ('[Amy] goal tick failed: hermes-router muse call failed: 502 {"error": {"message": '
+                   '"backend \'muse\' unreachable: <urlopen error [Errno 111] Connection refused>"}}')
+    loading = '[Bob] failed to self-propose a goal: hermes-router muse call failed: 503 {"error":{"message":"Loading model"}}'
+    blocked = ('[Babs] goal tick failed: hermes-router dispatch call failed: 400 {"error": {"message": '
+               '"request blocked by Layer 2 guard (mode=classifier)"}}')
+    for line, want in ((unreachable, "backend-outage"), (loading, "backend-outage"), (blocked, "router-failure")):
+        got = triage.process_message(line, "minecraft-bot-amy.service", {}, queue.Queue())
+        assert got == want, f"{line[:60]!r}: {got} != {want}"
+    real = triage.call_role
+    triage.call_role = lambda *a, **k: (_ for _ in ()).throw(AssertionError("no model call for an outage"))
+    try:
+        body = triage.triage_incident("backend-outage", "model backend unavailable", unreachable)
+    finally:
+        triage.call_role = real
+    assert body.startswith("[backend-outage] model backend unavailable") and "source line: [Amy]" in body, body
+
+
 def default_units_cover_every_bot():
     assert triage.BOT_UNITS == ["minecraft-bot-*.service"]
 
@@ -119,6 +138,7 @@ check("MB-19 a full diagnosis queue records the incident without blocking", full
 check("MB-19 every match is persisted to the events file", events_persisted_first)
 check("Self-repair: a queued incident carries that bot's own recent log lines", recent_lines_go_with_the_incident)
 check("No Buzz token: triage exits for systemd to retry instead of running blind", no_token_exits_instead_of_running_blind)
+check("A backend outage is published as one, without a model diagnosis", backend_outage_is_not_a_bot_bug)
 check("MB-18 default units cover every minecraft-bot-* unit on the host", default_units_cover_every_bot)
 print(f"{passed} triage checks passed.")
 sys.exit(0)

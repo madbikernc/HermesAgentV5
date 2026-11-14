@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.4.0
+# Version: 2.5.0
+#
+# 2.5.0 (2026-11-13) — bridge 2.6.0: one signature per kind of abandoned goal, whose fix file is
+# never the give-up line's emitter; a backend outage is a rate-limited FleetOps notice, never a
+# fix task; repeat sightings are one outcome line per hour with a count and the task's state, and
+# a promoted fix whose incident recurs is posted to FleetOps once.
 #
 # 2.4.0 (2026-11-13) — bridge 2.5.0: the fix is submitted alone with a test plan and the test task
 # follows from the applied diff (sweep_pending_tests()); the emitting file is found by searching
@@ -47,6 +52,7 @@
 # Run: python3 infra/hermes-self-repair/tests/test_bridge.py
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -392,6 +398,80 @@ def main():
     mod.process_deferred(st, {"remaining": 3})
     check("a crash with no OOM is submitted once the hold is over", len(sent) == 1 and not st.get("deferred"),
           ([p for p, _ in sent], st.get("deferred")))
+
+    print("\n[2.6.0: one signature per kind of abandoned goal]")
+    kind_bed = {"category": "goal-abandoned", "source_line": "[Bob] giving up on goal after 20 failures (kind=bed): our residences have 2 beds"}
+    kind_bed2 = {"category": "goal-abandoned", "source_line": "[Dale] giving up on goal after 18 failures (kind=bed): make a bed"}
+    kind_shelter = {"category": "goal-abandoned", "source_line": "[Bob] giving up on goal after 20 failures (kind=shelter): build a shelter"}
+    check("the same kind on two bots, two goal texts and two counts is one signature",
+          mod.finding_signature(kind_bed) == mod.finding_signature(kind_bed2), (mod.finding_signature(kind_bed), mod.finding_signature(kind_bed2)))
+    check("two kinds are two signatures (one fix task stood for all of them before)",
+          mod.finding_signature(kind_bed) != mod.finding_signature(kind_shelter), mod.finding_signature(kind_shelter))
+    check("the kind is in the signature", mod.finding_signature(kind_shelter).endswith("(kind=shelter)"), mod.finding_signature(kind_shelter))
+    check("a pre-kind line keeps the old signature, so its existing record still holds",
+          mod.finding_signature(goal_a) == "goal-abandoned|giving up on goal after N failures", mod.finding_signature(goal_a))
+    sent.clear()
+    emitter_asked = []
+    mod.locate_emitter = lambda parsed, root="services/minecraft-bots": emitter_asked.append(1) or {
+        "path": "services/minecraft-bots/goals.js", "line": 1, "size": 900, "snippet": "1: log()"}
+    clock[0] = 50_000.0
+    mod.handle_minecraft_bots_buzz({"body": triage("goal-abandoned", kind_shelter["source_line"])}, mc_domain, {"remaining": 3}, {})
+    check("an abandoned goal's fix file is the model's pick, never the give-up line's emitter",
+          emitter_asked == [] and sent and sent[0][0] == "services/minecraft-bots/swim-movements.js", (emitter_asked, sent[:1]))
+    check("and its problem says the fault is in the code that runs that kind of goal",
+          sent and "kind=shelter" in sent[0][1] and "shared give-up path" in sent[0][1], sent[0][1][:400] if sent else sent)
+    mod.locate_emitter = lambda parsed, root="services/minecraft-bots": None
+
+    print("\n[2.6.0: a backend outage is a FleetOps notice, not a fix task]")
+    notices = []
+    real_notice = mod.notice.fleetops_notice
+    mod.notice.fleetops_notice = lambda text, sender, log=None: notices.append(text) or True
+    outage = triage("backend-outage", '[Amy] goal tick failed: hermes-router muse call failed: 502 {"error": "backend \'muse\' unreachable"}')
+    sent.clear()
+    st = {}
+    clock[0] = 60_000.0
+    mod.handle_minecraft_bots_buzz({"body": outage}, mc_domain, {"remaining": 3}, st)
+    check("no fix task for an outage", sent == [] and not st.get("submitted_signatures"), sent)
+    check("FleetOps is told, naming the backend", len(notices) == 1 and "'muse'" in notices[0], notices)
+    clock[0] += 60
+    mod.handle_minecraft_bots_buzz({"body": outage}, mc_domain, {"remaining": 3}, st)
+    check("once per backend per OUTAGE_NOTICE_SECONDS, not per sighting", len(notices) == 1, notices)
+    clock[0] += mod.OUTAGE_NOTICE_SECONDS
+    mod.handle_minecraft_bots_buzz({"body": outage}, mc_domain, {"remaining": 3}, st)
+    check("and again once that has passed", len(notices) == 2, notices)
+
+    print("\n[2.6.0: repeat sightings are counted hourly, with the task's state]")
+    events_path = Path(os.environ["SELFREPAIR_OUTCOMES"])
+    events_path.write_text("")
+    notices.clear()
+    sig = mod.finding_signature(kind_bed)
+    st = {"submitted_signatures": {sig: {"fix": "fx-bed", "test": None, "submitted_at": 0.0, "attempts": 3}}}
+    task_states = {"fx-bed": "unresolved"}
+    mod.fetch_task_state_or_none = lambda task_id: task_states.get(task_id)
+    clock[0] = 100_000.0
+    body = triage("goal-abandoned", kind_bed["source_line"])
+    for i in range(30):
+        clock[0] += 20
+        mod.handle_minecraft_bots_buzz({"body": body}, mc_domain, {"remaining": 3}, st)
+    seen = [json.loads(l) for l in events_path.read_text().splitlines() if '"seen"' in l]
+    check("30 sightings in ten minutes are one outcome line, not 30", len(seen) == 1, len(seen))
+    check("that line names the task and its state", seen and seen[0].get("task_id") == "fx-bed"
+          and seen[0].get("task_state") == "unresolved", seen)
+    clock[0] += mod.SEEN_LOG_SECONDS
+    mod.handle_minecraft_bots_buzz({"body": body}, mc_domain, {"remaining": 3}, st)
+    seen = [json.loads(l) for l in events_path.read_text().splitlines() if '"seen"' in l]
+    check("the next hour's line carries the count since the last one", len(seen) == 2 and seen[1]["count"] == 30, seen[-1:])
+    check("no FleetOps notice for a fix that was never promoted", notices == [], notices)
+    task_states["fx-bed"] = "promoted"
+    clock[0] += mod.SEEN_LOG_SECONDS
+    mod.handle_minecraft_bots_buzz({"body": body}, mc_domain, {"remaining": 3}, st)
+    clock[0] += mod.SEEN_LOG_SECONDS
+    mod.handle_minecraft_bots_buzz({"body": body}, mc_domain, {"remaining": 3}, st)
+    check("a promoted fix whose incident keeps arriving is posted to FleetOps once",
+          len(notices) == 1 and "fx-bed" in notices[0] and "still happening" in notices[0], notices)
+    check("and logged as recurring", '"recurring"' in events_path.read_text())
+    mod.notice.fleetops_notice = real_notice
+    mod.fetch_task_state_or_none = real["fetch_task_state_or_none"]
 
     print("\n[context: the bot's recent log lines reach the fix problem]")
     with_context = (REPEAT_OCCURRENCE.split("\n\n")[0] +

@@ -1,4 +1,7 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-13) -- the planner's three "giving up on goal" lines use goal-runners.js 1.1.0's format,
+// `after N failures (kind=...)`, so self-repair tells one kind of abandoned goal from another.
 //
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: goalTick() and its follow-up scheduling.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
@@ -17,7 +20,7 @@ import { builderPriorityItemSatisfied, survivalPriorityItemSatisfied } from "./p
 import { CRAFTED_OBJECT_NAMES, broadcastGoalState, noteNearbyResources, recordGoalOutcome } from "./fleet-coordination.js";
 import { runBedGoal, runFoodGoal, runShelterUpgradeGoal, runToolGoal, runUpgradeToolsGoal, runWeaponGoal } from "./gear-goals.js";
 import { proposeOwnGoal, routineBlocked, selfProposeResumeAt } from "./goal-proposal.js";
-import { BUILDER_CRAFTABLE, HOME_PLACEABLE, SKILL_RECHECK_MS, farmTaskFor, guardTick, holdsItem, retireGoal, runBuilderPlacement, runFarmGoal, runRanchGoal, saveGoalIfCurrent } from "./goal-runners.js";
+import { BUILDER_CRAFTABLE, HOME_PLACEABLE, SKILL_RECHECK_MS, farmTaskFor, goalKind, guardTick, holdsItem, retireGoal, runBuilderPlacement, runFarmGoal, runRanchGoal, saveGoalIfCurrent } from "./goal-runners.js";
 import { AGENT_ID, AUTONOMY_ENABLED, IDLE_BEFORE_SELF_GOAL_MS, MAX_CONSECUTIVE_FAILURES, PERSONA_NAME, SELF_PROPOSE_GOALS, USERNAME, bot, busy, currentGoal, lastActivityAt, setBusy } from "./index.js";
 import { goalPausedForNight } from "./night-survival.js";
 import { runCommunalShelterGoal, runShelterGoal } from "./shelter-goals.js";
@@ -419,7 +422,7 @@ async function goalTick() {
       logStep(goal, `request: asked for ${parsed.count} ${parsed.item}`, false);
       goal.consecutiveFailures += 1;
       if (goal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.log(`[${USERNAME}] giving up on goal: ${goal.description}`);
+        console.log(`[${USERNAME}] giving up on goal after ${goal.consecutiveFailures} failures (kind=${goalKind(goal)}): ${goal.description}`);
         bot.chat(await narrateAction(`giving up on "${goal.description}" -- nobody could help with ${parsed.item}.`));
         recordGoalOutcome(goal.description, "gave up", `needed ${parsed.item}`);
         await broadcastGoalState("abandoned", goal.description);
@@ -436,7 +439,7 @@ async function goalTick() {
       console.log(`[${USERNAME}] goal blocked (${goal.consecutiveFailures}/` +
                   `${MAX_CONSECUTIVE_FAILURES}): ${parsed.reason}`);
       if (goal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.log(`[${USERNAME}] giving up on goal: ${goal.description}`);
+        console.log(`[${USERNAME}] giving up on goal after ${goal.consecutiveFailures} failures (kind=${goalKind(goal)}): ${goal.description}`);
         bot.chat(await narrateAction(`giving up on "${goal.description}" -- ${parsed.reason}.`));
         recordGoalOutcome(goal.description, "gave up", parsed.reason);
         await broadcastGoalState("abandoned", goal.description);
@@ -562,7 +565,7 @@ async function goalTick() {
     }
 
     if (goal.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-      console.log(`[${USERNAME}] giving up on goal: ${goal.description}`);
+      console.log(`[${USERNAME}] giving up on goal after ${goal.consecutiveFailures} failures (kind=${goalKind(goal)}): ${goal.description}`);
       bot.chat(await narrateAction(`giving up on "${goal.description}" -- ${result.text}`));
       recordGoalOutcome(goal.description, "gave up", result.text);
       await broadcastGoalState("abandoned", goal.description);

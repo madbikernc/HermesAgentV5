@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# Version: 2.19.0
+# Version: 2.20.0
+#
+# 2.20.0 (2026-11-13) — check_selfrepair_funnel(): an hourly `seen` line's `count` is summed, and
+# `recurring` is counted (hermes-fleetops-ui.py 2.22.0, bridge 2.6.0).
 #
 # 2.19.0 (2026-11-13) — check_selfrepair_funnel(): the /selfrepair "Is it working?" funnel and
 # before/after counts (hermes-fleetops-ui.py 2.21.0), from a fixture outcome log.
@@ -1966,19 +1969,22 @@ def check_selfrepair_funnel(ui):
         {"event": "submitted", "ts": t0 - 2 * day, "task_id": "tx", "role": "test", "signature": "oom|heap"},
         {"event": "decided", "ts": t0, "task_id": "fx", "action": "promote"},
         {"event": "seen", "ts": t0 + 1 * day, "signature": "oom|heap", "submitted": False, "reason": "already"},
+        {"event": "seen", "ts": t0 + 1 * day, "signature": "oom|heap", "submitted": False, "reason": "already", "count": 40},
+        {"event": "recurring", "ts": t0 + 1 * day, "task_id": "fx", "signature": "oom|heap", "count": 40},
     ]
     f = ui.selfrepair_funnel(events)
-    check("findings, fixes and tests are counted", f["seen"] == 5 and f["submitted_fix"] == 1 and f["submitted_test"] == 1, f)
+    check("findings, fixes and tests are counted (an hourly line counts its `count`)", f["seen"] == 45 and f["submitted_fix"] == 1 and f["submitted_test"] == 1, f)
     check("generation outcomes are broken down", f["generated"] == {"done": 1, "error": 1}, f["generated"])
     check("verification failures name their check", f["verified_failed"] == 1 and
           f["failed_checks"] == {"Dead-addition check FAILED -- x": 1}, f["failed_checks"])
     check("skip reasons are grouped with numbers collapsed", f["skip_reasons"].get("already submitted N") == 2, f["skip_reasons"])
     check("reverts and decisions are counted", f["reverted"] == 1 and f["promote"] == 1, f)
+    check("a promoted fix whose incident came back is counted", f["recurring"] == 1, f)
     rows = ui.selfrepair_effect(events, now=t0 + 2 * day)
     check("an approved fix shows its incident before and since",
-          len(rows) == 1 and rows[0]["before"] == 3 and rows[0]["after"] == 1, rows)
+          len(rows) == 1 and rows[0]["before"] == 3 and rows[0]["after"] == 41, rows)
     check("and how many days 'since' covers", rows and abs(rows[0]["days_after"] - 2) < 0.01, rows)
-    check("nothing approved, nothing to compare", ui.selfrepair_effect(events[:-2]) == [])
+    check("nothing approved, nothing to compare", ui.selfrepair_effect(events[:-4]) == [])
 
 
 def check_selfrepair_gate_contract(ui):

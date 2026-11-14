@@ -1,5 +1,9 @@
-// Version: 1.0.0
+// Version: 1.1.0
 //
+// 1.1.0 (2026-11-13) -- direct operator request (self-repair improvements): the "giving up on goal"
+// line names the goal's kind, `(kind=shelter)`, from goalKind(). Self-repair keyed every abandon
+// as one incident, so one fix task stood for every kind of goal failure and the models guessed
+// which code was at fault.
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: goal retirement, guard duty, builder placement, the farm and ranch runners.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
 // it; this file reads index.js's state through live imports, so nothing here may touch it
@@ -227,11 +231,17 @@ function isDedicatedRunnerGoal(goal) {
     ["weapon", "tools", "shelter_upgrade", "food"].includes(goal.survivalPriorityItem);
 }
 
+// What kind of goal this is, for the "giving up" line: the runner tag that chose it, else who set it.
+export function goalKind(goal) {
+  return goal.farmTask || goal.survivalPriorityItem || goal.builderPriorityItem || goal.standing ||
+    (goal.source === "user" ? "user" : "freeform");
+}
+
 export async function failGoalStep(goal, reason) {
   goal.consecutiveFailures += 1;
   const limit = isDedicatedRunnerGoal(goal) ? DEDICATED_RUNNER_MAX_CONSECUTIVE_FAILURES : MAX_CONSECUTIVE_FAILURES;
   if (goal.consecutiveFailures >= limit) {
-    console.log(`[${USERNAME}] giving up on goal after ${goal.consecutiveFailures} failures: ${goal.description}`);
+    console.log(`[${USERNAME}] giving up on goal after ${goal.consecutiveFailures} failures (kind=${goalKind(goal)}): ${goal.description}`);
     if (goal.standIn) standInGaveUpAt[goal.farmTask] = Date.now();
     if (goal.roleWork) roleWorkGaveUpAt[goal.farmTask] = Date.now();
     recordGoalOutcome(goal.description, "gave up", reason);

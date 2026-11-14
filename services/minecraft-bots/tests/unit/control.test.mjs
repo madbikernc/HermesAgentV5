@@ -1,4 +1,5 @@
-// Version: 1.2.1
+// Version: 1.3.0
+// 1.3.0 (2026-11-13): the "giving up on goal" line names the goal's kind (goal-runners.js 1.1.0), so self-repair can tell abandons apart.
 // 1.2.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 // 1.2.0 | 2026-11-11 | Partial drop acknowledgements and narration after releasing control.
 //
@@ -421,6 +422,25 @@ await check('Dedicated runners get a much longer failure leash than the freeform
   await c.failGoalStep(armorGoal, 'bad plan'); // the 3rd
   assert.equal(retired, true,
     'armor is Tier 1 tagged but has no dedicated runner yet -- still the freeform 3-failure limit');
+});
+
+
+await check('Giving up on a goal names its kind, so self-repair can tell one failing runner from another', async () => {
+  // 2026-11-13: self-repair keyed every "giving up on goal" line as one incident -- 399 of 400 in a
+  // day were one residence goal, but the shelter, bed and freeform abandons all shared its fix task.
+  const lines = [];
+  const c = vm.createContext({ setInterval() {}, guardedInterval() {}, Date, USERNAME: 'Amy', MAX_CONSECUTIVE_FAILURES: 3,
+    console: { log: (m) => lines.push(m), error() {} },
+    recordGoalOutcome() {}, broadcastGoalState: async () => {}, retireGoal: async () => {}, saveGoalIfCurrent: async () => {} });
+  vm.runInContext(farmGoalSrc(), c);
+  const giveUp = async (goal) => { for (let i = 0; i < 20; i++) await c.failGoalStep(goal, 'no path'); return lines.at(-1); };
+  assert.match(await giveUp({ consecutiveFailures: 0, description: 'our residences need beds', farmTask: 'bed' }),
+    /giving up on goal after 20 failures \(kind=bed\): our residences need beds/);
+  assert.match(await giveUp({ consecutiveFailures: 0, description: 'w', survivalPriorityItem: 'weapon' }), /\(kind=weapon\)/);
+  assert.match(await giveUp({ consecutiveFailures: 17, description: 'c', builderPriorityItem: 'chest' }), /\(kind=chest\)/);
+  assert.match(await giveUp({ consecutiveFailures: 0, description: 'u', source: 'user' }), /\(kind=user\)/);
+  assert.match(await giveUp({ consecutiveFailures: 0, description: 'f', source: 'self' }), /\(kind=freeform\)/);
+  assert.equal(c.goalKind({ standing: 'guard' }), 'guard');
 });
 
 

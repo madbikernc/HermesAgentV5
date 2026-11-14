@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 7.0.0
+**Version:** 7.1.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -763,15 +763,51 @@ no-op on a false premise, a comment-only edit), all "verified". A self-repair te
 - FleetOps `/selfrepair` "Is it working?": a 30-day funnel and, for each fix approved for promotion,
   its incident's occurrences in the 7 days before and since.
 
-Known limits: `index.js` (436k) and `actions.js` (248k) are still over the whole-file limit, so an
-incident they emit is now skipped rather than misdirected -- splitting them further is what makes
-those incidents fixable. A fix built on a false premise that still changes code (`58104d9`) is
+Known limits: `index.js` (436k) and `actions.js` (248k) were still over the whole-file limit, so an
+incident they emitted was skipped rather than misdirected. Since 59b098f (2026-11-13) both are split
+into subject modules, every one under the limit. A fix built on a false premise that still changes code (`58104d9`) is
 caught only by its test failing to discriminate.
+
+## Improvements pass (2026-11-13, second round): what changed, and why
+
+Measured on spark the evening after the fidelity pass: 902 outcome lines in 20 hours, 893 of them
+repeat sightings; 4 fix tasks submitted, none produced a usable patch -- two review deadlocks, two
+intake-screening blocks, one security-phase crash. Six changes, each from one of those:
+
+- **One signature per kind of abandoned goal.** The bots' give-up line now names the goal's kind,
+  `giving up on goal after N failures (kind=bed)` (`goal-runners.js` 1.1.0, `goal-tick.js` 1.1.0),
+  and the bridge (2.6.0) keys on it. Before, 399 of a day's 400 abandons were one residence goal and
+  one fix task stood for every kind. The fix file for an abandon is the model's pick from the kind
+  and the bot's log, never the emitter: that line comes from the shared give-up path, and the
+  problem text now says so.
+- **Backend outages are outages.** A router-failure line saying the backend is unreachable, loading,
+  refusing connections, timed out or answered 502/503/504 is triage's new `backend-outage` category
+  (`hermes-minecraft-triage.py` 1.9.0), published with no coder/coder2 call. The bridge never makes
+  it a fix task: it posts a FleetOps notice, once per backend per hour.
+- **The security-phase HTTP 400, diagnosed.** Task e185ae3c's meta-review was blocked by the router's
+  Layer 1 guard: the other reviewer's reply carried a leaked `</think>` (role_spoof) and mentioned
+  `rm -rf` (cmd_injection). The generator (1.5.0) strips leaked reasoning from every reply -- it
+  also hid a leading APPROVE from the review parse -- and a router refusal now raises an error
+  carrying the router's own reason instead of "Bad Request". The `rm -rf` half is the guard working
+  as designed and is not worked around.
+- **A deadlock reaches the operator.** An `unresolved` task posts a FleetOps notice: the last
+  objection, the judge's view and the last draft's diff (also recorded as a phase=unresolved-diff
+  turn). Before, it sat in hermes-memory.
+- **Repeat sightings carry the task's state.** When a signature that already has a task keeps
+  arriving, its hourly outcome line names that task and its state; a promoted fix whose incident
+  still arrives is posted to FleetOps once and logged as `recurring`.
+- **The outcome log is readable.** Sightings that aren't submitted are one line per signature per
+  hour with a `count` (`SEEN_LOG_SECONDS`); the FleetOps funnel (`hermes-fleetops-ui.py` 2.22.0)
+  sums it and counts recurrences.
+
+The FleetOps notices come from `tools/hermes_self_repair_notice.py`; the generate and bridge
+wrappers (1.1.0, 1.2.0) fetch `matrix-fleetops` for it, optional, as the apply wrapper already did.
 
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 7.1.0 | 2026-11-13 | Direct operator request. Added "Improvements pass": per-kind goal-abandon signatures, backend outages as FleetOps notices, the security-phase 400 diagnosed (leaked reasoning stripped, refusals carry the router's reason), deadlocks and recurring promoted fixes posted to FleetOps, hourly counted sightings. "Known limits" updated: index.js/actions.js are split (59b098f). |
 | 7.0.0 | 2026-11-13 | Direct operator request. Added "Fidelity pass": screening hand-off and transient retries (generate 1.3.0/1.4.0), error retries (bridge 2.4.x), skip from awaiting-completeness (gate 1.2.0), JS-aware verification with the domain test suite and revert-on-failure (verify 2.0.0, apply 2.0.0 -- reverses Step 4's "never reverted" for a failed commit), tests written from the applied fix and required to fail without it, emitter-based targeting with context, crash/OOM grouping (bridge 2.5.0, triage 1.8.0), and the outcome log + FleetOps funnel. |
 | 6.13.0 | 2026-11-10 | Added "Keeping the checkout current": `hermes-self-repair-sync.sh` + timer merge `origin/master` into the self-repair checkout every 30 minutes and push it to `nas2-selfrepair`, sharing a lock with the apply worker (1.5.0). The checkout had never been updated from GitHub since 2026-11-07. 10 checks in `tests/test_sync.py`. |
 | 6.12.0 | 2026-11-10 | Bridge 2.3.0: a minecraft-bots test task now targets one per-area `services/minecraft-bots/tests/unit/*.test.mjs` file (chosen by the same validated model call as the fix path, from those files only) instead of the 363k-char `unit.test.mjs`, which the generator always refused. 67 bridge checks. |

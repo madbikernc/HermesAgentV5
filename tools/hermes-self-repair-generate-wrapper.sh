@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Version: 1.0.1
+# Version: 1.1.0
+#
+# 1.1.0 (2026-11-13) — also fetches matrix-fleetops (optional, same as hermes-self-repair-apply-wrapper.sh)
+# for FleetOps notices: deadlocked reviews (hermes-self-repair-generate.py 1.5.0).
 #
 # 1.0.1 (2026-11-07) — real bug found live, first-ever real self-repair task: this header used to
 # claim "no BROKER_TOKEN needed — this agent never talks to the broker directly." False — Step 2's
@@ -35,6 +38,14 @@ if GUARD_TOKEN="$("$VAULT_GET" guard-token password 2>/dev/null)"; then
   export GUARD_TOKEN
 else
   echo "[hermes-self-repair-generate-wrapper] guard-token not in vault — this agent's own Layer 2 pass skipped" >&2
+fi
+
+if FLEETOPS_MATRIX_TOKEN="$("$VAULT_GET" matrix-fleetops password 2>/dev/null)"; then
+  export FLEETOPS_MATRIX_TOKEN
+  FLEETOPS_ROOM="$("$VAULT_GET" matrix-fleetops room 2>/dev/null || true)"
+  [ -n "${FLEETOPS_ROOM:-}" ] && export FLEETOPS_ROOM
+else
+  echo "[hermes-self-repair-generate-wrapper] matrix-fleetops not in vault — FleetOps notices disabled" >&2
 fi
 
 exec /usr/bin/python3 "$REPO_DIR/tools/hermes-self-repair-generate.py"
