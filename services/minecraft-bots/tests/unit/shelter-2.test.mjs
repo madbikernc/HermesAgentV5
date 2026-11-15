@@ -1,5 +1,6 @@
-// Version: 1.1.0
+// Version: 1.2.0
 //
+// 1.2.0 (2026-11-15): clear_access retries a collectBlock NoPath from where she stands (collectBlocks), not one strike and out.
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: shelter detection, building and repair (part 2 of 2).
@@ -190,7 +191,7 @@ await check('Access: "clear_access" digs what is in the way and reports which fi
   w.bot.entity = { position: new V3(2, 64, 0) };
   w.bot.pathfinder = { goto: async () => {}, setGoal() {}, movements: {} };
   const dug = [];
-  w.bot.collectBlock = { collect: async (block) => { dug.push(block.name); w.open([0, 65, 0]); }, cancelTask() {} };
+  w.bot.collectBlock = { collect: async (blocks) => { dug.push(...[].concat(blocks).map((b) => b.name)); w.open([0, 65, 0]); }, cancelTask() {} };
   w.bot.stopDigging = () => {};
   const c = context(w.bot, { Vec3: V3, isProtectedBlockName: (n) => /chest|furnace/.test(n) });
   vm.runInContext(timeoutFn + actionFn, c);
@@ -202,6 +203,33 @@ await check('Access: "clear_access" digs what is in the way and reports which fi
   assert.equal(again.ok, true, again.text);
   assert.match(again.text, /nothing's blocking/, again.text);
   assert.deepEqual(dug, ['cobblestone'], 'and it does not go looking for more work');
+});
+
+
+await check('Access: a collectBlock "No path to the goal!" beside the block is retried, not reported as still in the way', async () => {
+  // Live, 2026-11-15 (after the 26.1.2 upgrade): ~2 runs in 9 of the clear_access scenario failed
+  // "No path to the goal!" from collectBlock's own look-at-block search with the bot already beside
+  // the block. "mine" retries that through collectBlocks(); clear_access gave up on the first one.
+  const w = blockWorld();
+  w.place([0, 64, 0], 'chest');
+  w.place([0, 65, 0], 'cobblestone');
+  w.bot.entity = { position: new V3(2, 64, 0) };
+  w.bot.pathfinder = { goto: async () => {}, setGoal() {}, movements: {}, thinkTimeout: 1000, isMining: () => false };
+  let calls = 0;
+  w.bot.collectBlock = {
+    collect: async () => {
+      if (calls++ === 0) throw Object.assign(new Error('No path to the goal!'), { name: 'NoPath' });
+      w.open([0, 65, 0]);
+    },
+    cancelTask() {},
+  };
+  w.bot.stopDigging = () => {};
+  const c = context(w.bot, { Vec3: V3, isProtectedBlockName: (n) => /chest|furnace/.test(n) });
+  vm.runInContext(timeoutFn + actionFn, c);
+  const result = await c.performAction(w.bot, { type: 'clear_access' }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.equal(calls, 2, 'collect tried again after the NoPath');
+  assert.equal(w.bot.blockAt(new V3(0, 65, 0))?.boundingBox === 'block', false, 'the cobblestone is gone');
 });
 
 

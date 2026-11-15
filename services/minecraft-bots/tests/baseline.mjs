@@ -1,4 +1,4 @@
-// Version: 1.17.0
+// Version: 1.18.0
 //
 // Behavior baseline for the Minecraft bots: measures what the bots on THIS host actually did over
 // a recent window (from their systemd journals) and compares it against the committed baseline in
@@ -15,7 +15,8 @@
 // When a behavior fix lands, add the metric that proves it here (see tests/README.md), and after
 // the fix has run live for a day, --update and commit the new baseline deliberately.
 //
-// Revision History: 1.17.0 | 2026-11-14 | stuck_shelter_builds_per_bot_day.
+// Revision History: 1.18.0 | 2026-11-15 | craft_no_ingredients_per_bot_day.
+// 1.17.0 | 2026-11-14 | stuck_shelter_builds_per_bot_day.
 // 1.16.0 | 2026-11-11 | gohome_no_path_per_bot_day, climb_legs_per_bot_day.
 // 1.15.0 | 2026-11-11 | noop_shelter_builds_per_bot_day.
 // 1.14.0 | 2026-11-07 | no_path_action_failures_per_bot_day, stepped_goto_legs_per_bot_day.
@@ -319,6 +320,11 @@ const METRICS = {
     about: "\"craft <wood>_fence\" failed -- 20+/bot-day for Dale and Bob on 2026-11-04 (sticks made for one run, not eight)",
     better: "lower", tolerance: 0.5, floor: 1,
     value: (c, ctx) => perBotDay(c(/\] ranch goal: couldn't craft \w+_fence/), ctx),
+  },
+  craft_no_ingredients_per_bot_day: {
+    about: "a craft that failed \"don't have the ingredients\" -- 6 on spark in 24h on 2026-11-14, 4 of them torches; a 2x2 run the server dropped left its ingredients in the grid or on the cursor",
+    better: "lower", tolerance: 0.5, floor: 1,
+    value: (c, ctx) => perBotDay(c(/couldn't craft \w+: don't have the ingredients/), ctx),
   },
   shore_no_path_per_bot_day: {
     about: "a trip to the shore that failed No path -- ~250-310/bot in an hour on 2026-11-06, the 'shore' being the sea floor",

@@ -1,6 +1,6 @@
 # Bot Server Upgrade Plan: 1.21.11 → 26.1.2
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 
 Plan for upgrading the bot game server (`minecraft-bots.service`, muncraft `192.168.1.221:25580`)
 from Minecraft 1.21.11 to 26.1.2, trialled on a separate copy first. The human server on `:25565`
@@ -183,12 +183,13 @@ start, and verify the ping reports 1.21.11. Anything built after cutover is lost
 | 5. Go / no-go | done | 2026-11-14 | Operator gave a conditional go in advance ("if the tests pass, do the upgrade"); Phase 3 passed |
 | 6. Cutover | done | 2026-11-14 | 19:07 stop, restore point `firmament-bots.RESTORE-POINT-20261114-190757-pre-26.1.2`, unit `ExecStart` to Java 25 (old unit kept as `minecraft-bots.service.bak-pre-26.1.2`), `difficulty=easy`. A failed `cd` left the first start on Java 25 + the 1.21.11 jar for about 20s with no players; stopped, swapped, restarted. 19:08 on 26.1.2: world upgraded, seed and gamerules intact, Easy. All five bots joined; spark chain started by hand |
 | 7. Rollback | not needed | 2026-11-14 | |
-| 8. Afterwards | in progress | 2026-11-14 | Trial unit stopped, three temporary ufw rules deleted (none left on 25590). Pending: remove `minecraft-bots-trial/` and spark's `~/upgrade-trial/` after operator confirms; baseline re-record on both hosts about a day after cutover |
+| 8. Afterwards | in progress | 2026-11-15 | Trial unit stopped, three temporary ufw rules deleted (none left on 25590). `minecraft-bots-trial/` and spark's `~/upgrade-trial/` removed on operator confirmation (2026-11-14). Residual post-upgrade test failures fixed (`docs/minecraft-bots-history.md` 2.51.0 row). Pending: baseline re-record on both hosts about a day after cutover |
 
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 1.4.0 | 2026-11-15 | Phase 8 progressed: trial directories removed, residual post-upgrade test failures fixed; only the baseline re-record remains. |
 | 1.3.0 | 2026-11-14 | Phases 1, 3–6 done, 7 not needed, 8 in progress: trial passed (the two trial-only failures passed 10/10 re-run alone on both versions), cutover done under the operator's conditional go, temporary ufw rules removed. |
 | 1.2.0 | 2026-11-14 | Operator direction: the trial's game port is opened in ufw for the duration of the test, three temporary rules mirroring 25580's (no tunnel); their removal added to Phase 8's teardown. |
 | 1.1.0 | 2026-11-14 | Phases 0 and 2 done, Phase 1 in progress. New §1a with what starting turned up: Java 25 already installed, the server's own 26.x history, difficulty reset by the upgrade, the live suites' RCON hard-wired to the real server (rcon.py 1.1.0), and the firewall (tunnel). Phase 3's command and Phase 6's difficulty step updated to match. |

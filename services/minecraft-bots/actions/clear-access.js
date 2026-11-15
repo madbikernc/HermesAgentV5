@@ -1,4 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-15): the dig goes through collectBlocks() (action-movement.js) instead of a bare
+// collectBlock.collect, so a transient NoPath/Timeout from collectBlock's own look-at-block search
+// is retried from where she stands, the same as "mine" -- the live clear_access scenario failed
+// ~2 runs in 9 after the 26.1.2 upgrade on "No path to the goal!" with the bot already beside the
+// block. collectblock 1.6.0 ignores ignoreNoPath for blocks (its own "TODO: options.ignoreNoPath").
 //
 // The "clear_access" action, split out of actions.js's performActionAs() switch
 // (actions.js 2.0.0, 2026-11-10) unchanged, so a fix to it is a fix to this file alone. Called
@@ -7,7 +13,7 @@
 import { findAccessObstructions, ACCESS_SCAN_RADIUS } from "../shelter.js";
 import path from "node:path";
 import { Vec3 } from "vec3";
-import { ACTION_TIMEOUT_MS, goals, isProtectedBlockName, refreshGear, withTimeout } from "../actions.js";
+import { ACTION_TIMEOUT_MS, collectBlocks, goals, isProtectedBlockName, refreshGear, withTimeout } from "../actions.js";
 
 
 export async function clearAccessAction(bot, action, speaker, token) {
@@ -57,9 +63,9 @@ export async function clearAccessAction(bot, action, speaker, token) {
     try {
       // collectBlock, not bot.dig: the block comes back into inventory instead of being left
       // on the floor to despawn, and it equips the right tool itself -- the same reasoning
-      // "mine" already relies on. withTimeout/stopDigging per this file's own 2026-09-08 note
-      // on untimed digs.
-      await withTimeout(bot.collectBlock.collect(block, { ignoreNoPath: true }), ACTION_TIMEOUT_MS,
+      // "mine" already relies on, through the same collectBlocks() retry. withTimeout/stopDigging
+      // per this file's own 2026-09-08 note on untimed digs.
+      await withTimeout(collectBlocks(bot, token, [block]), ACTION_TIMEOUT_MS,
                         () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
       cleared++;
       console.log(`[${bot.username}] cleared a ${block.name} at ${target.position} blocking the ${target.fixture}`);

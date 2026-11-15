@@ -1,4 +1,7 @@
-// Version: 1.5.0
+// Version: 1.6.0
+// 1.6.0 | 2026-11-15 | Hostile mobs around the arena are killed at arena setup and again once the probe is up (a night skeleton's self-defense flee broke two scenarios); the held-bed check accepts a bed already placed.
+// 1.5.2 | 2026-11-15 | The probe's sleep check is pushed out of the way: at night it lay in a scenario's bed for ~140s holding control, and the goal tick never ran.
+// 1.5.1 | 2026-11-15 | The furnace scenario's cobblestone check accepts a furnace already crafted (the goal can run first).
 // 1.5.0 | 2026-11-11 | Full goal-loop regression for a completed shelter masking the new site.
 //
 // Full-bot live tests: runs a REAL bot process (index.js, as "MBProbe") against the bot-sandbox
@@ -120,7 +123,12 @@ function startProbe(memoryRoot, env = {}) {
       // Pushed out of this suite's way (2026-10-07): neither routine is what these scenarios test,
       // and a torch top-up or an access sweep taking the arbiter mid-whisper is pure flakiness.
       // Their own coverage is in live.test.mjs and unit.test.mjs.
-      MC_ACCESS_CHECK_MS: "3600000", MC_TORCH_SUPPLY_CHECK_MS: "3600000", ...env,
+      MC_ACCESS_CHECK_MS: "3600000", MC_TORCH_SUPPLY_CHECK_MS: "3600000",
+      // 2026-11-15: and sleep -- on a server night, the "existing complete shelter" scenario's probe
+      // lay in that shelter's bed until morning (~140s, holding control as ROUTINE), so its goal tick
+      // was blocked past the 150s wait; 3 failures in 8 runs, by time of day alone. The fleet shares
+      // this server, so the scenarios can't just set the time to day.
+      MC_SLEEP_CHECK_MS: "3600000", ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -155,7 +163,7 @@ async function bootProbe(memoryRoot, env) {
   // The server keeps MBProbe's inventory between runs; every scenario starts empty-handed. And its
   // game mode: a spectator probe (other probes log in as MBProbe that way) can't drop, craft or place.
   await rcon(`gamemode survival ${PROBE}`, `clear ${PROBE}`, `tp ${PROBE} ${HOME[0]} ${HOME[1]} ${HOME[2]}`, `effect give ${PROBE} minecraft:resistance 900 4 true`,
-    `effect give ${PROBE} minecraft:saturation 1 20 true`);
+    `effect give ${PROBE} minecraft:saturation 1 20 true`, ...killHostiles);
   await sleep(8000); // let its Buzz watchers prime, so injected messages count as new
 }
 
@@ -174,12 +182,22 @@ function seedGoal(root, description, extra = {}) {
   writeFileSync(goalFile(root), JSON.stringify({ description, source: "user", setBy: TESTER, createdAt: at, updatedAt: at,
     sawSuccess: false, steps: 0, consecutiveFailures: 0, log: [], actionsTaken: [], servedBySkill: true, ...extra }));
 }
+// 2026-11-15: at night a skeleton walked onto the arena and the probe's self-defense kept cancelling
+// the inventory and furnace scenarios to flee it. Untagged hostiles in a box around the arena are
+// killed at arena setup and again once the probe is up, inside RCON calls those steps already make --
+// not on a timer: every rcon.py call is a vault fetch and an SSH login, and a 5s sweep backed the
+// shared vault lock up until every RCON call timed out. Fight-or-flee's own husks are tagged mbtest
+// and left alone. The arena is far from the fleet's home, so nothing here touches the real bots.
+const HOSTILES = ["zombie", "husk", "drowned", "zombie_villager", "skeleton", "stray", "bogged", "creeper", "spider",
+  "cave_spider", "witch", "enderman", "slime", "phantom", "pillager"];
+const SWEEP = `x=${x - 40},y=${y - 30},z=${z - 40},dx=80,dy=60,dz=80`;
+const killHostiles = HOSTILES.map((m) => `kill @e[type=minecraft:${m},tag=!mbtest,${SWEEP}]`);
 async function arena() {
   await rcon(`forceload add ${x - r} ${z - r} ${x + r} ${z + r}`,
     `fill ${x - r} ${y} ${z - r} ${x + r} ${y} ${z + r} minecraft:sea_lantern`,
     `fill ${x - r + 1} ${y + 1} ${z - r + 1} ${x + r - 1} ${y + 4} ${z + r - 1} minecraft:air`,
     `kill @e[type=minecraft:item,x=${x - r},y=${y},z=${z - r},dx=${2 * r},dy=6,dz=${2 * r}]`,
-    `tp ${TESTER} ${x} ${y + 1} ${z}`, `effect give ${TESTER} minecraft:resistance 900 4 true`);
+    `tp ${TESTER} ${x} ${y + 1} ${z}`, `effect give ${TESTER} minecraft:resistance 900 4 true`, ...killHostiles);
 }
 
 // ---- scenarios -------------------------------------------------------------------------------------
@@ -303,7 +321,9 @@ scenario("Builder: a furnace she doesn't hold is crafted and placed at home by t
   await bootProbe(root, { MC_GOAL_TICK_MS: "60000" });
   const t0 = Date.now();
   await rcon(`give ${PROBE} minecraft:cobblestone 8`);
-  assert.match(await rcon(`clear ${PROBE} minecraft:cobblestone 0`), /Found 8 matching/, "cobblestone in hand before the first tick");
+  // 2026-11-15: the goal can run before this check, and then the 8 cobblestone are already a furnace.
+  const held = await rcon(`clear ${PROBE} minecraft:cobblestone 0`);
+  assert(/Found 8 matching/.test(held) || probe.since(t0, /builder furnace: crafted/), `cobblestone in hand before the first tick (${held.trim()})`);
   await probe.waitLine(/builder furnace: /, 90_000, t0);
   await probe.waitLine(/goal complete \(placed furnace at home\)/, 120_000, t0);
   assert(!probe.since(t0, /goal plan: DONE NONE/), "the planner was never asked");
@@ -330,9 +350,11 @@ scenario("Residences: a held bed goes into the empty shelter, not counted done b
   seedGoal(root, "our residences need beds -- make a bed and place it in the empty shelter near home.",
     { survivalPriorityItem: "shelter", servedBySkill: false });
   await bootProbe(root, { MC_GOAL_TICK_MS: "60000" });
-  await rcon(`give ${PROBE} minecraft:white_bed 1`);
-  assert.match(await rcon(`clear ${PROBE} minecraft:white_bed 0`), /Found 1 matching/, "bed in hand before the first tick");
   const t0 = Date.now();
+  await rcon(`give ${PROBE} minecraft:white_bed 1`);
+  // 2026-11-15: as with the furnace above, the goal can place the bed before this check runs.
+  const heldBed = await rcon(`clear ${PROBE} minecraft:white_bed 0`);
+  assert(/Found 1 matching/.test(heldBed) || probe.since(t0, /shelter goal: placed a white_bed/), `bed in hand before the first tick (${heldBed.trim()})`);
   await probe.waitLine(/shelter goal: .*\(ok=true\)/, 150_000, t0);
   const bedIn = async (bx, by, bz) => {
     for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {

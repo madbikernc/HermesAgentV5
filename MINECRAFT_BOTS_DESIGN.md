@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.50.0
+**Version:** 2.51.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 

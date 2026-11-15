@@ -1,5 +1,9 @@
-// Version: 1.0.0
+// Version: 1.1.0
 //
+// 1.1.0 (2026-11-14) -- a table-less craft run the server drops leaves its ingredients in the 2x2
+// grid (slots 1-4), where items() and recipesFor() can't see them, and leaves mineflayer's model
+// of the inventory wrong; after each table-less run craftItem resyncs the inventory from the
+// server and puts anything in the grid back (returnCraftingGrid).
 // 1.0.0 (2026-11-13) -- split out of actions.js (2.0.0) unchanged: crafting, and taking items from nearby chests.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. actions.js imports
 // it; this file reads actions.js's state through live imports, so nothing here may touch it
@@ -93,6 +97,43 @@ export async function craftItem(bot, itemName, count, tableBlock, depth = 0) {
     await bot.craft(recipe, 1, tableBlock ?? undefined);
     for (let waited = 0; waited < 1500 && held() <= had; waited += 100) {
       await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!tableBlock) await returnCraftingGrid(bot);
+  }
+}
+
+// 2026-11-14: in the 2x2 grid, mineflayer's craft() takes every run as done -- it clears the grid
+// in its own model and, unlike a table craft, never syncs or closes a window. A run the server
+// dropped leaves its ingredients in slots 1-4, which inventory.items() and recipesFor() don't
+// read: get_wool's 12 string made 2 wool with 2 string stuck in the grid. And the model it leaves
+// can be wrong outright: 3 logs "crafted 8 oak_planks", and the model then showed 4 planks and no
+// log, so the chest was never made ("need wood"). After each run the inventory is resynced from
+// the server (mineflayer's own _syncWindow, which its table crafts already use), and whatever is
+// left in the grid goes back into the inventory, so the next run (or the next craft) can use it.
+async function returnCraftingGrid(bot) {
+  if (bot._syncWindow) {
+    try {
+      await withTimeout(bot._syncWindow(bot.inventory), 3000, () => {});
+    } catch (err) {
+      console.error("craft: inventory resync after a 2x2 craft failed:", err.message);
+    }
+  }
+  // The stack she picked an ingredient from can stay on the cursor, which items() doesn't read
+  // either: live (chest scenario), 3 logs -> one run of 4 planks, the other 2 logs held on the
+  // cursor, and the second run found no log.
+  if (bot.inventory.selectedItem) {
+    try {
+      await bot.putSelectedItemRange(bot.inventory.inventoryStart, bot.inventory.inventoryEnd, bot.inventory, null);
+    } catch (err) {
+      console.error(`craft: couldn't put the ${bot.inventory.selectedItem?.name} on the cursor back:`, err.message);
+    }
+  }
+  for (let s = 1; s <= 4; s++) {
+    if (!bot.inventory.slots?.[s]) continue;
+    try {
+      await bot.putAway(s);
+    } catch (err) {
+      console.error(`craft: couldn't take ${bot.inventory.slots[s]?.name} back out of the crafting grid:`, err.message);
     }
   }
 }

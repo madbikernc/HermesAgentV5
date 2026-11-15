@@ -1,5 +1,6 @@
-// Version: 1.1.0
+// Version: 1.2.0
 //
+// 1.2.0 (2026-11-14): a dropped 2x2 craft run's ingredients come back out of the grid, and a stack left on the cursor goes back (action-crafting.js 1.1.0).
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: crafting, tools, torches and gear (part 1 of 2).
@@ -301,6 +302,56 @@ await check('Craft: a count is items wanted, not recipe runs', async () => {
   let dropped = 1;
   c.bot.craft = async (recipe, count) => { runs.push(count); if (dropped-- > 0) return; made += recipe.result.count * count; };
   assert.equal(await callsFor('torch', 16), 5, 'one run lost: a fifth, to get the 16 asked for');
+});
+
+
+await check('Craft: a dropped 2x2 run\'s ingredients come back out of the grid and are used', async () => {
+  // 2026-11-14 (live, 26.1.2 and 1.21.11 alike): 12 string made 2 white wool, with 2 string stuck in
+  // crafting-grid slots 1-2 -- mineflayer clears the grid in its own model on every run, and items()
+  // and recipesFor() never read slots 1-4. The chest-when-full scenario's planks went the same way.
+  const inv = { string: 12, wool: 0 };
+  const slots = [];
+  const synced = [];
+  let drop = 1;
+  const c = vm.createContext({ setTimeout, console,
+    bot: { registry: { itemsByName: { white_wool: { id: 1 } } },
+      inventory: { slots, count: () => inv.wool },
+      recipesFor: (_id, _m, count) => (inv.string >= 4 * count ? [{ result: { count: 1 } }] : []),
+      craft: async () => {
+        inv.string -= 4;
+        if (drop-- > 0) { for (let s = 1; s <= 4; s++) slots[s] = { name: 'string', count: 1 }; return; }
+        inv.wool += 1;
+      },
+      putAway: async (s) => { inv.string += slots[s].count; slots[s] = null; },
+      _syncWindow: async (w) => { synced.push(w); } },
+    recipeInputs: () => null, simpleSourceFor: () => null, withTimeout: (p) => p });
+  vm.runInContext(between(actions, 'async function craftItem(', 'function chestObstructed('), c);
+  await c.craftItem(c.bot, 'white_wool', 3, null);
+  assert.equal(inv.wool, 3, 'all three wool made');
+  assert(slots.every((s) => !s), 'nothing left in the grid');
+  assert.equal(synced.length, 4, 'the inventory is resynced from the server after every run (one dropped, three made)');
+  assert(synced.every((w) => w === c.bot.inventory), 'the player inventory, not some other window');
+});
+
+
+await check('Craft: an ingredient stack left on the cursor goes back and is used', async () => {
+  // 2026-11-15 (live, the chest-when-full scenario): 3 logs, one run of 4 planks, the other 2 logs
+  // held on the cursor -- which items() and recipesFor() don't read -- so "need wood".
+  const inv = { log: 3, planks: 0 };
+  const c = vm.createContext({ setTimeout, console,
+    bot: { registry: { itemsByName: { oak_planks: { id: 1 } } },
+      inventory: { slots: [], selectedItem: null, inventoryStart: 9, inventoryEnd: 45, count: () => inv.planks },
+      recipesFor: (_id, _m, count) => (inv.log >= Math.ceil(count / 4) ? [{ result: { count: 4 } }] : []),
+      craft: async () => {
+        inv.log -= 1; inv.planks += 4;
+        if (inv.log) { c.bot.inventory.selectedItem = { name: 'oak_log', count: inv.log }; inv.log = 0; }
+      },
+      putSelectedItemRange: async () => { inv.log += c.bot.inventory.selectedItem.count; c.bot.inventory.selectedItem = null; } },
+    recipeInputs: () => null, simpleSourceFor: () => null, withTimeout: (p) => p });
+  vm.runInContext(between(actions, 'async function craftItem(', 'function chestObstructed('), c);
+  await c.craftItem(c.bot, 'oak_planks', 8, null);
+  assert.equal(inv.planks, 8, 'both runs made (the old code stopped at 4)');
+  assert.equal(c.bot.inventory.selectedItem, null, 'nothing left on the cursor');
 });
 
 
