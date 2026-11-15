@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.49.0
+**Version:** 2.50.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -53,9 +53,9 @@ The host split is memory headroom, not design — `spark` carries the LLM stack,
 | Game server | `192.168.1.221:25580`, `minecraft-bots.service`, `/home/zomboid-admin/minecraft-bots/` |
 | World dir | `firmament-bots`, seed `-851936759013419345` (world reinit + bot-memory wipe 2026-11-11 via `hermes-minecraft-admin.py bots reinit-world`, no seed given; previous world `firmament-bots.bak-20261111083743`, before that `firmament-bots.bak-20261105232858`, `firmament-bots.bak-20261028213712`, `firmament-bots.bak-20261026012446` and `firmament-bots.bak-20261014022300`) |
 | RCON | port `25581`, Vaultwarden item `Hermes - Minecraft Bot RCON` |
-| Build | vanilla `server.jar`, offline mode, MC 26.1.2 — **gamerule names are snake_case** (`mob_griefing`, not `mobGriefing`) |
+| Build | vanilla `server.jar`, offline mode, MC 26.1.2 (protocol 775, the newest mineflayer 4.39.0 supports), Java 25 (`/usr/lib/jvm/java-25-openjdk-amd64/bin/java`) — upgraded from 1.21.11 2026-11-14 per `MINECRAFT_SERVER_UPGRADE_PLAN.md`; old jar kept as `server-1.21.11.jar`. **Gamerule names are snake_case** (`mob_griefing`, not `mobGriefing`). 26.x applies `server.properties`' `difficulty` at every start, so it is kept at `easy` there |
 | Firewall | LAN/Tailscale only. Offline mode means any client can claim any username; this world is not internet-facing the way the human server is |
-| Restore point | `firmament-bots.RESTORE-POINT-20260916-152257` (clean, server-stopped snapshot) |
+| Restore point | `firmament-bots.RESTORE-POINT-20261114-190757-pre-26.1.2` (clean, server-stopped snapshot of the 1.21.11 world, taken at cutover; `server.properties.bak-20261114-190757-pre-26.1.2` beside it); older `firmament-bots.RESTORE-POINT-20260916-152257` |
 
 This is **not** the human server on `:25565` (`/opt/minecraft/`) — same box, unrelated. An RCON
 fix was once applied to the wrong one (§24).
