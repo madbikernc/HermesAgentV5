@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
-# Version: 3.2.1
+# Version: 3.3.0
+#
+# 3.3.0 (2026-11-16) — real bug fix, not comment-only: `muse` was demoted resident -> on-demand
+# the same day (`infra/hermes-muse/README.md` 1.2.0), and this script was still restarting it
+# unconditionally in SPARK2_SERVICES, the exact hazard already called out for super/coder ("a
+# bare `systemctl restart` on a stopped unit starts it, which would wake a model this script has
+# no business waking") -- every manual run or `--node spark2` run would have spuriously woken a
+# sleeping muse for no reason, undoing the point of today's on-demand demotion. Moved `muse` out
+# of the unconditional list into a new on-demand check (`spark2_unit_active`), same discipline
+# `run_spark_stack()` already applies to `llama-super`/`llama-coder`. `omni` stays unconditional
+# -- it's still genuinely always-resident, confirmed live the same day. HermesAgentV6
+# `IMPLEMENTATION_PLAN.md`'s GLM-5.3-Flash prerequisite (§3.2 item 1, finding #3) cited this same
+# gap; this closes the muse half of it (omni's half was never actually a bug, since it really is
+# resident and restarting a resident role unconditionally is correct, not a hazard).
 #
 # 3.2.1 (2026-11-04) — comment-only: two notes said `super` and `coder` are "both on-demand". On
 # spark today super is always-resident (enabled, Restart=always, no idle-sleep timer) and coder's
@@ -213,13 +226,15 @@ SPARK_SERVICES=(
   hermes-presenter.service
 )
 
-# spark-2 services, same dependency-order logic: omni (vision/audio, always resident) -> muse
-# (always resident) -> spark-2's own router -> hermes-media (S10, needs Watch's Buzz/memory/broker/
-# guard). Restarted over SSH via the plain `spark2` alias (pmoney, S1's node-to-node key) — every
-# one of these runs as User=pmoney (confirmed live), so no sudo/elevated grant is needed at all.
+# spark-2 services, same dependency-order logic: omni (vision/audio, always resident) -> spark-2's
+# own router -> hermes-media (S10, needs Watch's Buzz/memory/broker/guard). Restarted over SSH via
+# the plain `spark2` alias (pmoney, S1's node-to-node key) — every one of these runs as
+# User=pmoney (confirmed live), so no sudo/elevated grant is needed at all. `muse` was
+# always-resident when this list was last written (3.2.1) but was demoted to on-demand
+# 2026-11-16 (`infra/hermes-muse/README.md` 1.2.0) — moved out of this unconditional list, see
+# `run_spark2_stack()`'s own on-demand check below.
 SPARK2_SERVICES=(
   llama-omni.service
-  llama-muse.service
   hermes-router.service
   hermes-media.service
 )
@@ -373,6 +388,16 @@ run_spark_stack() {
   done
 }
 
+# True if $1 (a spark-2 unit) is active right now -- local check under --node spark2, over SSH
+# otherwise, same local-vs-remote split restart_spark2_unit() already uses.
+spark2_unit_active() {
+  if [ "$RUN_LOCAL_SPARK2" -eq 1 ]; then
+    systemctl is-active --quiet "$1" 2>/dev/null
+  else
+    ssh "$SPARK2_SSH" "systemctl is-active --quiet $1" 2>/dev/null
+  fi
+}
+
 run_spark2_stack() {
   if [ "$RUN_LOCAL_SPARK2" -eq 1 ]; then
     log "== Spark-2: model backends + router + media (local) =="
@@ -383,6 +408,17 @@ run_spark2_stack() {
     restart_spark2_unit "$svc"
     sleep "$PAUSE_SECONDS"
   done
+
+  # On-demand — restart only if it's actually running right now, same discipline as
+  # llama-super/llama-coder on spark (run_spark_stack). A bare `systemctl restart` on a stopped
+  # unit starts it, which would spuriously wake a model this script has no business waking --
+  # exactly what would happen to muse's idle-sleep every time this runs otherwise.
+  if spark2_unit_active llama-muse.service; then
+    restart_spark2_unit llama-muse.service
+  else
+    log "llama-muse.service is not active (on-demand, normal) — not restarting/waking it"
+  fi
+  sleep "$PAUSE_SECONDS"
 }
 
 run_homed13_stack() {
