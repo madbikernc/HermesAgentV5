@@ -1,6 +1,6 @@
 # hermes-nfsensei-watch — recreate checklist
 
-**Version:** 1.0.1
+**Version:** 1.0.2
 
 Daily check of the nfSensei project blog against a fixed list of "worth evaluating switching from
 pfSense" criteria (`tools/hermes-nfsensei-watch.py`), emailing The Boss when a new post crosses one
@@ -9,7 +9,7 @@ tier as `hermes-fleet-health.timer`.
 
 Deterministic parts (fetching the blog, tracking seen posts/met criteria) are plain code; judging
 whether a given post actually satisfies a criterion goes through the fleet's own router
-(`tools/hermes-router.py`, `model: "nano"`) rather than a separate LLM dependency.
+(`tools/hermes-router.py`, `model: "dispatch"`) rather than a separate LLM dependency.
 
 ## Install
 
@@ -52,5 +52,6 @@ cat ~pmoney/.hermes/state/nfsensei_state.json
 
 | Version | Date | Change |
 |---|---|---|
+| 1.0.2 | 2026-11-16 | Doc-only fix (HermesAgentV6 `IMPLEMENTATION_PLAN.md` §7.2): line 12 said `model: "nano"`, but `tools/hermes-nfsensei-watch.py` was already fixed to `dispatch` at its own 1.2.0 (S13, `nano`'s retirement) — this file's version line was just never bumped past the 2026-08-30 consolidation to catch up. Confirmed live on `dgx-spark`: `hermes-nfsensei-watch.timer` enabled and firing cleanly on schedule, no code or runtime bug, doc drift only. |
 | 1.0.1 | 2026-08-30 | HermesAgentV5 consolidation: Usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
 | 1.0.0 | 2026-08-09 | Initial version. Ported from a draft (`skills/nfsensei_watch.py`) written in a separate session and reviewed here — swapped its placeholder OpenAI-compatible endpoint for the real router and its plaintext SMTP env vars for the real Vaultwarden-backed path `hermes-fleet-health.py` already uses. |

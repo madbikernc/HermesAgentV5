@@ -1,6 +1,19 @@
 # hermes-wiki-checkin — recreate checklist
 
-**Version:** 1.0.1
+**Version:** 1.1.0
+
+**Retired 2026-08-29, confirmed 2026-11-16.** `Sintra` and `Amy` were retired under V5's
+single-fleet-voice model (`HermesAgentV5/IMPLEMENTATION_PLAN.md` S8, "Retire Sintra and Amy;
+internal agents get prompts, not souls" — ✅ Complete 2026-08-29), whose own retirement checklist
+names `hermes-wiki-checkin-sintra.timer`/`-amy.timer` directly as units decommissioned in that
+pass. Confirmed live 2026-11-16: zero `wiki`-matching systemd units on either `dgx-spark` or
+`dgx-spark2` (`systemctl list-units --all`/`list-timers --all` both empty) — not just disabled,
+actually removed. Nothing below is running; kept as a recreate checklist / historical reference
+only, same precedent as keeping `HermesAgentV4`/`Redo` on disk. If a daily-reflection check-in
+mechanism is ever wanted again under the single-fleet-voice model, it would need a fresh version
+of this (one timer, one home room, no per-persona split), not a revival of the file below as-is.
+
+---
 
 The real mechanism behind "the wiki page updates automatically" for Sintra and Amy. Neither
 persona has crontab or systemctl access — that's a deliberate consequence of per-identity
@@ -73,5 +86,6 @@ self-report as proof.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1.0 | 2026-11-16 | Marked retired (HermesAgentV6 `IMPLEMENTATION_PLAN.md` §7.3): confirmed both `hermes-wiki-checkin-sintra.timer` and `-amy.timer` are gone from both nodes' systemd (not just disabled), consistent with `HermesAgentV5/IMPLEMENTATION_PLAN.md` S8's 2026-08-29 Sintra/Amy retirement. Nothing live needed stopping; this was a documentation-only correction. |
 | 1.0.1 | 2026-08-30 | HermesAgentV5 consolidation: Usage-example paths repointed from HermesAgentV4 to HermesAgentV5. |
 | 1.0.0 | 2026-08-03 | Initial version — real external daily trigger replacing the fabricated "self-scheduled" automation claim found on `Sintra/Daily-Blog`. |

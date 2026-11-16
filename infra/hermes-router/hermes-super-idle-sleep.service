@@ -1,3 +1,6 @@
+# NOT DEPLOYED, BY DESIGN — see infra/hermes-router/README.md §3 (2026-11-16). super is meant to
+# stay resident except when log-analyst displaces it; installing this would add a real cold-start
+# to super's first call after any 15-minute quiet stretch. Template only.
 [Unit]
 Description=Stop llama-super if it has sat idle too long (spark only, triggered by hermes-super-idle-sleep.timer)
 Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-router/README.md

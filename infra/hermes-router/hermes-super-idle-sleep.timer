@@ -1,3 +1,4 @@
+# NOT DEPLOYED, BY DESIGN — see infra/hermes-router/README.md §3 (2026-11-16). Template only.
 [Unit]
 Description=Check every 5 minutes whether llama-super has been idle long enough to stop (spark only)
 

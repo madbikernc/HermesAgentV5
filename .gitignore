@@ -11,3 +11,6 @@ __pycache__/
 # Node dependencies (services/minecraft-bots/) -- package-lock.json is tracked, the installed
 # tree itself is not, same convention as every other language's dependency directory here.
 node_modules/
+
+# Claude Code's own local tool config (per-machine permission settings) -- never committed.
+.claude/
