@@ -1,6 +1,6 @@
 # hermes-router (V4) — recreate checklist
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 
 Ordered steps to stand up `hermes-router` under HermesAgentV5's target topology
 (`IMPLEMENTATION_PLAN.md` §4, §6 Stage 2): capability endpoints reachable by either persona
@@ -28,7 +28,7 @@ versus the peer's LAN IP. (`coder` moved from spark-2 to spark 2026-08-26, then 
 | `log-analyst` | spark | 8098 | NousResearch Hermes-4.3-36B-Q4_K_M (stock), ctx 16384, q8_0 KV | on-demand, 300s idle — see `infra/hermes-log-analyst/README.md` §5 |
 | `coder` | spark-2 | 8094 | Huihui-Qwen3.8-27B-abliterated Q4_K, ctx 65536 | on-demand |
 | `coder2` | spark-2 | 8099 | GLM-4.7-Flash-Q4_K_M (stock), ctx 65536 | on-demand |
-| `muse` | spark-2 | 8090 | NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning UD-Q4_K_M (stock, text-only load) | resident |
+| `muse` | spark-2 | 8090 | NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning UD-Q4_K_M (stock, text-only load) | on-demand (demoted from resident 2026-11-16, §3a) |
 | `omni` | spark-2 | 8091 | NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock, + mmproj) | resident |
 
 Not proxied by this router: `embed` (spark :8092 and HomeD13, Qwen3-Embedding-8B-Q8_0) and
@@ -95,20 +95,27 @@ on-demand, and there is no evidence `hermes-super-idle-sleep.timer` has ever act
 (nothing currently tries to stop it), but worth resolving one way or the other rather than
 leaving the unit and the router code disagreeing about what `super` is.
 
-## 3a. `spark-2` — wake worker and idle-sleep timers for `coder` and `coder2`
+## 3a. `spark-2` — wake worker and idle-sleep timers for `coder`, `coder2`, and `muse`
 
 ```bash
 sudo cp hermes-coder-idle-sleep.service hermes-coder-idle-sleep.timer /etc/systemd/system/
 sudo cp hermes-coder2-idle-sleep.service hermes-coder2-idle-sleep.timer /etc/systemd/system/
+sudo cp hermes-muse-idle-sleep.service hermes-muse-idle-sleep.timer /etc/systemd/system/
+sudo cp hermes-model-wake-worker-spark2.service /etc/systemd/system/hermes-model-wake-worker.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-coder-idle-sleep.timer
 sudo systemctl enable --now hermes-coder2-idle-sleep.timer
+sudo systemctl enable --now hermes-muse-idle-sleep.timer
+sudo systemctl restart hermes-model-wake-worker.service
 ```
 
-(spark-2's own `hermes-model-wake-worker.py` instance and its systemd unit are not tracked in this
-repo — same untracked-on-spark gap `start-coder.sh`/`llama-coder.service` have always had, per
-`infra/hermes-coder2/README.md` §4. It needs `WAKE_TARGETS` to include both `coder` and `coder2`
-now, same file, `HERMES_NODE=spark-2` branch.)
+**Tracking gap closed 2026-11-16:** spark-2's own `hermes-model-wake-worker.py` instance's systemd
+unit is now committed as `hermes-model-wake-worker-spark2.service` — it had been running live,
+untracked under that name, since 2026-09-05 (same gap `start-coder.sh`/`llama-coder.service` have
+always had, per `infra/hermes-coder2/README.md` §4); captured verbatim from the live deployed unit
+before this edit. Its `WAKE_TARGETS` (in `tools/hermes-model-wake-worker.py`, `HERMES_NODE=spark-2`
+branch) now includes `coder`, `coder2`, and `muse` (1.8.0, added alongside `muse`'s on-demand
+demotion — `infra/hermes-muse/README.md` §2a).
 
 `coder` (2026-08-26, `tools/hermes-model-wake-worker.py` 1.2.0): moved from spark-2 to spark after
 a real execution-verified bake-off picked Qwen3.8-27B-abliterated (dense, on-demand) over the
@@ -167,14 +174,14 @@ broker code change, same as Phase 30c's own addition of the `embed` type.
 ## 5. Verify, don't assume
 
 - `curl http://127.0.0.1:8080/v1/models` on each node should list all five roles.
-- A `super` (spark), `coder`, or `coder2` (spark-2) call after real idle time should measurably
-  wake it (check `journalctl -u hermes-model-wake-worker -f` on the node that hosts it, for the
-  claim/start/report sequence) and the `/v1/chat/completions` call itself should succeed once
-  it's up.
+- A `super` (spark), `coder`, `coder2`, or `muse` (spark-2) call after real idle time should
+  measurably wake it (check `journalctl -u hermes-model-wake-worker -f` on the node that hosts it,
+  for the claim/start/report sequence) and the `/v1/chat/completions` call itself should succeed
+  once it's up.
 - After ~15 minutes of no calls, each role's own idle-sleep timer should stop it — confirm with
-  `systemctl is-active llama-super` (spark) / `llama-coder` / `llama-coder2` (spark-2) before and
-  after, not by assumption. (`super`'s own idle-sleep has no confirmed stop in its history as of
-  2026-10-07 — see §3's caveat.)
+  `systemctl is-active llama-super` (spark) / `llama-coder` / `llama-coder2` / `llama-muse`
+  (spark-2) before and after, not by assumption. (`super`'s own idle-sleep has no confirmed stop in
+  its history as of 2026-10-07 — see §3's caveat.)
 - Cross-node calls (e.g. `spark`'s router proxying to `coder` on `spark-2`) need the §1 ufw rules
   in place first, or they'll fail with a connection error, not a silent misroute.
 
@@ -182,6 +189,7 @@ broker code change, same as Phase 30c's own addition of the `embed` type.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.5.0 | 2026-11-16 | `muse` demoted resident -> on-demand (HermesAgentV6 `IMPLEMENTATION_PLAN.md` §6.1/§9.1), triggered by spark-2 measuring 118Gi/121Gi used with swap maxed, all four of its backends concurrently resident/awake. §0's role-placement table and §5's verify checklist updated. §3a renamed/expanded for `muse`'s new idle-sleep pair and `WAKE_TARGETS` entry (`tools/hermes-model-wake-worker.py` 1.8.0), and closed a real tracking gap found in the same pass: spark-2's own wake-worker systemd unit (live since 2026-09-05) is now committed as `hermes-model-wake-worker-spark2.service`, captured verbatim from the deployed unit rather than left untracked. |
 | 1.4.0 | 2026-11-04 | log-analyst fixed (16k/q8_0 KV, wake-worker displacement of an idle super); super's residency row updated to match. super/dispatch/coder units now tracked under `infra/hermes-super/`, `infra/hermes-dispatch/`, `infra/hermes-coder/`. §1 ufw block rewritten to the live, cleaned-up rules (nano 8088 and spark-side 8090,8091 removed, 8098 added). |
 | 1.3.0 | 2026-11-04 | Model-assumption sweep: added a live-verified current role/node/port/model table (§0), fixed §0 topology line (nano retired; dispatch/log-analyst on spark), noted the untracked on-node super/dispatch/coder units, recorded live ufw drift including the missing spark `8098` rule (spark-2 router cannot reach log-analyst), and §3 now mentions log-analyst on spark's wake worker. |
 | 1.2.0 | 2026-10-07 | `coder` moved from spark back to spark-2, alongside `coder2` — spark's own wake-worker/idle-sleep setup (§3) now covers `super` only; spark-2 gets its own §3a. Firewall rules in §1 flipped accordingly. Noted a live-found caveat: `super`'s on-demand config on spark looks unfinished (unit is enabled/always-restart, no confirmed idle-sleep stop ever). |

@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 1.7.0
+# Version: 1.8.0
+#
+# 1.8.0 (2026-11-16) — `muse` added to spark-2's WAKE_TARGETS (HermesAgentV6
+# IMPLEMENTATION_PLAN.md §6.1/§9.1: demoted resident -> on-demand). required_gib 35 = the real
+# byte-verified model+mmproj size (23,887,023,552 + 1,587,540,224 bytes = 23.72GiB) times the same
+# ~1.4535 margin ratio `super`/`coder2` use at this same ctx-size 65536 (23.72 * 1.4535 ≈ 34.5,
+# rounded up). `displaces=("coder", "coder2")` -- unlike their own empty tuples, given spark-2 was
+# measured at 118Gi/121Gi used with swap maxed (15/15Gi) at cutover time, all four spark-2 backends
+# concurrently resident/awake. Neither victim needs RESTORE_AFTER_DISPLACE: both are already
+# on-demand and simply wake again on their own next call. This also fixes this repo's own tracking
+# gap for spark-2's wake-worker systemd unit itself -- see infra/hermes-router/README.md §3a.
+#
+# This also brings this file's committed state in sync with spark-2's actually-deployed
+# `hermes-model-wake-worker.service` (HERMES_NODE=spark-2 in its Environment=, previously
+# untracked under that name -- infra/hermes-router/hermes-model-wake-worker-spark2.service).
 #
 # 1.7.0 (2026-11-04) — log-analyst could never wake: spark has ~21GiB free with super, dispatch,
 # embed and rerank resident, and log-analyst needs more than that at any useful context. New
@@ -164,6 +178,14 @@ else:
         # same file size as `super`'s own 17.2GB->25GiB figure, so reusing 25 directly rather than
         # re-deriving it.
         "coder2": ("http://127.0.0.1:8099/health", "llama-coder2", 25, ()),
+        # muse = NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning + mmproj, byte-verified
+        # 23,887,023,552 + 1,587,540,224 bytes (23.72GiB). 35 = 23.72GiB * the same ~1.4535 margin
+        # ratio super/coder2 use at ctx-size 65536 (34.5, rounded up). Demoted resident -> on-demand
+        # 2026-11-16 (IMPLEMENTATION_PLAN.md §6.1/§9.1) after spark-2 was measured at 118Gi/121Gi
+        # used, swap maxed -- displaces coder/coder2 (both on-demand, no restore needed) rather than
+        # the empty tuple they use for each other, since spark-2 has shown it can't always fit all
+        # four backends awake at once.
+        "muse": ("http://127.0.0.1:8090/health", "llama-muse", 35, ("coder", "coder2")),
     }
 
 # Displaced roles that must come back once the displacing role idles out -- the always-resident

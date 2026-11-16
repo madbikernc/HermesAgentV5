@@ -1,0 +1,23 @@
+[Unit]
+Description=Hermes model wake worker - brings coder/coder2/muse up on request (spark-2 only)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-coder2/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+Environment="WORKER_NAME=spark2-wake" "HERMES_NODE=spark-2"
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-wake-worker-wrapper.sh
+Restart=always
+RestartSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 # /etc/systemd/system/llama-muse.service
 [Unit]
-Description=llama.cpp server - NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (Muse, persona/override-resistance backend, spark-2, text-only load)
+Description=llama.cpp server - NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (Muse, persona/override-resistance backend, on-demand, spark-2, text-only load)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-muse/README.md
 After=network.target
 
 [Service]
@@ -8,13 +9,10 @@ Type=simple
 User=pmoney
 Group=pmoney
 ExecStart=/opt/llama.cpp/start-muse.sh
-Restart=always
-RestartSec=15
+Restart=on-failure
+RestartSec=5
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-
-[Install]
-WantedBy=multi-user.target

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 2.19.2
+# Version: 2.20.0
+#
+# 2.20.0 (2026-11-16) - `muse` demoted resident -> on-demand on both branches
+# (HermesAgentV6/IMPLEMENTATION_PLAN.md §6.1/§9.1): spark-2 was observed at 118Gi/121Gi used,
+# swap maxed 15/15Gi, with muse/omni/coder/coder2 all four concurrently resident/awake. Matches
+# the coder2 on-demand pattern -- see hermes-model-wake-worker.py 1.8.0's new WAKE_TARGETS entry
+# and infra/hermes-muse/llama-muse.service's matching Restart=on-failure/no-[Install] edit. Revert
+# is this one flag back to False plus `sudo systemctl enable --now llama-muse` on spark-2.
 #
 # 2.19.2 (2026-11-04) - comment-only: `super`'s on_demand=True looked stale (super is resident),
 # but hermes-model-wake-worker.py 1.7.0 now displaces super while log-analyst needs its memory,
@@ -370,7 +377,8 @@ if NODE == "spark":
         # coder moved to spark-2 2026-10-07 (fleet-health investigation: spark was chronically
         # at ~97% memory / swapping; coder was its single largest avoidable resident consumer).
         "coder": (f"http://{SPARK2_IP}:8094", True, "Qwen3.8-27B-abliterated", True),
-        "muse": (f"http://{SPARK2_IP}:8090", False, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
+        # muse: resident -> on-demand 2026-11-16, see this file's 2.20.0 changelog entry above.
+        "muse": (f"http://{SPARK2_IP}:8090", True, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
         "omni": (f"http://{SPARK2_IP}:8091", False, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
         # Port 8097, not the target's proposed 8088 -- that was nano's port and moving dispatch onto
         # it now that nano is retired (S13) would mean touching start-dispatch.sh, this unit, ufw,
@@ -388,7 +396,8 @@ else:
         "super": (f"http://{SPARK_IP}:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
         # coder moved here from spark 2026-10-07 -- see spark branch's own comment above.
         "coder": ("http://127.0.0.1:8094", True, "Qwen3.8-27B-abliterated", True),
-        "muse": ("http://127.0.0.1:8090", False, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
+        # muse: resident -> on-demand 2026-11-16, see spark branch's own comment above.
+        "muse": ("http://127.0.0.1:8090", True, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
         "omni": ("http://127.0.0.1:8091", False, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
         "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B-UD-Q4_K_M (stock)", False),
         # S44 (2026-10-27): re-registered -- see spark branch's own comment above.
