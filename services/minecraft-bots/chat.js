@@ -1,5 +1,11 @@
-// Version: 1.0.0
+// Version: 1.1.0
 //
+// 1.1.0 (2026-11-16) -- narrateAction() no longer calls muse. It was the highest-frequency muse
+// caller in the whole service (goal-tick.js alone has nine call sites, plus night-survival.js,
+// goal-proposal.js, goal-runners.js, mayor.js, planning.js, incoming.js and index.js) for a pure
+// rephrasing step every caller's own text already made unnecessary -- see
+// HermesAgentV6/IMPLEMENTATION_PLAN.md §5a/§9.7. Deterministic pass-through now, zero
+// router calls.
 // 1.0.0 (2026-11-10) -- split out of index.js (2.141.0) unchanged: chat and intent --
 // classifyIntent, the chat reply, narration, and what gets remembered. Its own file, under the
 // self-repair pipeline's 40000-char whole-file limit. index.js calls installChat() once at
@@ -223,21 +229,14 @@ export async function classifyIntent(speaker, message) {
   return { type: "none" };
 }
 
-// Short in-character line for an action's start/outcome -- same persona voice as a normal
-// chat reply, just a much shorter, single-purpose prompt (no history/long-term recall: an
-// action's own result text is already all the context worth having).
+// Short in-character line for an action's start/outcome. Used to ask muse to restate `text`
+// "in your own voice, without changing its meaning" -- but every caller already writes `text`
+// as a complete, first-person, chat-ready line, so the call only ever bought wording variation,
+// never real content. Every unit-test harness mock in this service already stubs this as
+// `async (t) => t` (tests/unit/_harness.mjs and friends) -- this makes that the real behavior,
+// not just the test double for it.
 export async function narrateAction(text) {
-  const reply = await callRole(
-    "muse",
-    [
-      { role: "system", content: `${persona}\n\n---\n\nYou are chatting in Minecraft's in-game ` +
-          `chat, in character. State the following in one short sentence, in your own voice, ` +
-          `without changing its meaning: "${text}"` },
-      { role: "user", content: text },
-    ],
-    { maxTokens: 40, temperature: 0.9, analysis: true },   // narrateAction: the bot's own action text
-  );
-  return reply.trim().slice(0, MAX_CHAT_LEN) || text;
+  return text.slice(0, MAX_CHAT_LEN);
 }
 
 // Direct request, 2026-09-11 ("chat/action coherence fix" -- a research pass into Project Sid's

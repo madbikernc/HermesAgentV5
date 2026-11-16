@@ -1,5 +1,7 @@
-// Version: 1.1.0
+// Version: 1.2.0
 //
+// 1.2.0 (2026-11-16): narrateAction() check -- it no longer calls muse (chat.js 1.1.0,
+// HermesAgentV6/IMPLEMENTATION_PLAN.md §5a/§9.7). Imports chatSrc from the harness.
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
 // Unit checks: fleet services: RAG, Buzz and analysis mode.
@@ -10,7 +12,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { root, index, skills, between, sleep, check, router, ragContext, slice, passedCount } from './_harness.mjs';
+import { root, index, skills, between, sleep, check, router, ragContext, slice, chatSrc, passedCount } from './_harness.mjs';
 
 
 await check('S27f analysis mode is opt-in, and the chat paths only opt in for a verified bot sender (S34)', async () => {
@@ -125,6 +127,29 @@ await check('Buzz: a (re)started bot starts reading at the newest message, never
     clearInterval(timer);
     globalThis.fetch = realFetch;
   }
+});
+
+await check('narrateAction is a deterministic pass-through, capped at MAX_CHAT_LEN, no router call (HermesAgentV6 IMPLEMENTATION_PLAN.md §5a/§9.7)', async () => {
+  // narrateAction was the highest-frequency muse caller in the whole service (goal-tick.js alone
+  // has nine call sites). It used to ask muse to restate its argument "without changing its
+  // meaning" -- every caller already writes chat-ready text, so the call only ever bought wording
+  // variation. callRole/persona are stubbed here (not omitted) so a regression that calls either
+  // is caught as "called the router", not just as a ReferenceError on an undefined name.
+  let called = false;
+  const c = vm.createContext({
+    MAX_CHAT_LEN: 50, persona: 'stub persona',
+    callRole: async () => { called = true; return 'rephrased by muse'; },
+  });
+  vm.runInContext(between(chatSrc, 'export async function narrateAction(', '// Direct request, 2026-09-11'), c);
+
+  const short = await c.narrateAction('goal complete: get a stone pickaxe.');
+  assert.equal(short, 'goal complete: get a stone pickaxe.',
+    'text must pass through unchanged -- no rephrasing call to make');
+  assert.equal(called, false,
+    'narrateAction must not call the router at all');
+
+  const long = await c.narrateAction('x'.repeat(80));
+  assert.equal(long.length, 50, 'still caps at MAX_CHAT_LEN, the same contract callers already rely on');
 });
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) console.log(`${passedCount()} unit checks passed.`);
