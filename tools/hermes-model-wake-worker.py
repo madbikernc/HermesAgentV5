@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-# Version: 1.8.0
+# Version: 1.9.0
+#
+# 1.9.0 (2026-11-16) — `reflector` added to spark-2's WAKE_TARGETS (HermesAgentV6
+# IMPLEMENTATION_PLAN.md GLM-5.3-Flash Paradigm A, Phase 2). required_gib 115 = 79.10 GiB real
+# byte-verified weights size (84,929,450,144 bytes) times the same ~1.4535 margin ratio
+# super/coder2/muse use (79.10 * 1.4535 ≈ 114.9, rounded up) -- weights-only, NOT a verified
+# KV-cache figure (log-analyst's own 1.6.0->1.7.0 history already taught this project that flat
+# ratio can undercount a large-context KV cache once). Re-measured live at first real wake
+# instead of trusting this number blind: spark-2 free memory went 4.9Gi free -> 111Gi free
+# immediately after stopping coder/coder2/muse/omni, and the model loaded successfully within
+# that headroom at ctx-size 65536/parallel 4 -- essentially zero slack against spark-2's ~121GiB
+# capacity, exactly the tight-margin risk this plan's own tradeoffs section flagged ahead of time.
+# `displaces=("coder", "coder2", "muse")` -- `omni` is NOT a WAKE_TARGETS key (always-resident,
+# on_demand=False in ROLES), so make_room() can never reach it; getting to the required headroom
+# needs a manual `sudo systemctl stop llama-omni` every time, on top of whatever this
+# displacement list auto-handles. None of the three displaced roles need RESTORE_AFTER_DISPLACE:
+# all three are already on-demand and simply wake again on their own next call.
 #
 # 1.8.0 (2026-11-16) — `muse` added to spark-2's WAKE_TARGETS (HermesAgentV6
 # IMPLEMENTATION_PLAN.md §6.1/§9.1: demoted resident -> on-demand). required_gib 35 = the real
@@ -186,6 +202,10 @@ else:
         # the empty tuple they use for each other, since spark-2 has shown it can't always fit all
         # four backends awake at once.
         "muse": ("http://127.0.0.1:8090/health", "llama-muse", 35, ("coder", "coder2")),
+        # reflector = GLM-5.3-Flash-Q2-DGX-Spark, byte-verified 84,929,450,144 bytes (79.10GiB) --
+        # see this file's own 1.9.0 changelog entry above for the required_gib derivation and the
+        # `omni` manual-stop caveat.
+        "reflector": ("http://127.0.0.1:8093/health", "llama-reflector", 115, ("coder", "coder2", "muse")),
     }
 
 # Displaced roles that must come back once the displacing role idles out -- the always-resident

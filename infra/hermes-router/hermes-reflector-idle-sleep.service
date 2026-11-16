@@ -1,0 +1,9 @@
+[Unit]
+Description=Stop llama-reflector if it has sat idle too long (spark-2 only, triggered by hermes-reflector-idle-sleep.timer) -- NOTE: the GEPA harness calls this role by direct --endpoint, bypassing the router/wake-worker, so .last_used is never populated and this timer will not actually fire during or after a real campaign. Installed for fleet-convention completeness (future router-path use) -- manual `sudo systemctl stop llama-reflector` is the real shutdown step. See infra/hermes-reflector/README.md.
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-router/README.md
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-idle-sleep.sh reflector llama-reflector 900

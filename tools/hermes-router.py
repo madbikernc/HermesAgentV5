@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 2.20.0
+# Version: 2.21.0
+#
+# 2.21.0 (2026-11-16) - new role `reflector`: GLM-5.3-Flash-Q2-DGX-Spark (stock), spark-2 only,
+# port 8093, on-demand. HermesAgentV6 IMPLEMENTATION_PLAN.md GLM-5.3-Flash Paradigm A, Phase 2 --
+# a GEPA reflection/candidate-generator backend, not an interactive tier (S31 already ran this
+# checkpoint as `super` and returned NO-GO; this is a different use case, not a reversal of that
+# finding). Called only by direct --endpoint from the GEPA harness scripts
+# (tools/hermes-gepa-coder-fix.py/-build.py), never routed through this file's own dispatch table
+# in practice, but registered here anyway for /v1/models visibility and consistency with every
+# other role. See infra/hermes-reflector/README.md.
 #
 # 2.20.0 (2026-11-16) - `muse` demoted resident -> on-demand on both branches
 # (HermesAgentV6/IMPLEMENTATION_PLAN.md §6.1/§9.1): spark-2 was observed at 118Gi/121Gi used,
@@ -380,6 +389,8 @@ if NODE == "spark":
         # muse: resident -> on-demand 2026-11-16, see this file's 2.20.0 changelog entry above.
         "muse": (f"http://{SPARK2_IP}:8090", True, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
         "omni": (f"http://{SPARK2_IP}:8091", False, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
+        # reflector: new 2026-11-16, see this file's 2.21.0 changelog entry above.
+        "reflector": (f"http://{SPARK2_IP}:8093", True, "GLM-5.3-Flash-Q2-DGX-Spark (stock)", False),
         # Port 8097, not the target's proposed 8088 -- that was nano's port and moving dispatch onto
         # it now that nano is retired (S13) would mean touching start-dispatch.sh, this unit, ufw,
         # and S12's DISPATCH_CHAT_URL standby override in the same pass for a cosmetic port-number
@@ -399,6 +410,8 @@ else:
         # muse: resident -> on-demand 2026-11-16, see spark branch's own comment above.
         "muse": ("http://127.0.0.1:8090", True, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
         "omni": ("http://127.0.0.1:8091", False, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
+        # reflector: new 2026-11-16, see spark branch's own comment above.
+        "reflector": ("http://127.0.0.1:8093", True, "GLM-5.3-Flash-Q2-DGX-Spark (stock)", False),
         "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B-UD-Q4_K_M (stock)", False),
         # S44 (2026-10-27): re-registered -- see spark branch's own comment above.
         "coder2": ("http://127.0.0.1:8099", True, "GLM-4.7-Flash-Q4_K_M (stock)", False),

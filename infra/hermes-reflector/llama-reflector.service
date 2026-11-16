@@ -1,0 +1,18 @@
+# /etc/systemd/system/llama-reflector.service
+[Unit]
+Description=llama.cpp server - GLM-5.3-Flash-Q2-DGX-Spark (Reflector, GEPA reflection/candidate-generator backend, on-demand, spark-2)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-reflector/README.md
+After=network.target
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+ExecStart=/opt/llama.cpp/start-reflector.sh
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal

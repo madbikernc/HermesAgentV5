@@ -1,6 +1,6 @@
 # hermes-router (V4) — recreate checklist
 
-**Version:** 1.6.0
+**Version:** 1.7.0
 
 Ordered steps to stand up `hermes-router` under HermesAgentV5's target topology
 (`IMPLEMENTATION_PLAN.md` §4, §6 Stage 2): capability endpoints reachable by either persona
@@ -30,6 +30,7 @@ versus the peer's LAN IP. (`coder` moved from spark-2 to spark 2026-08-26, then 
 | `coder2` | spark-2 | 8099 | GLM-4.7-Flash-Q4_K_M (stock), ctx 65536 | on-demand |
 | `muse` | spark-2 | 8090 | NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning UD-Q4_K_M (stock, text-only load) | on-demand (demoted from resident 2026-11-16, §3a) |
 | `omni` | spark-2 | 8091 | NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock, + mmproj) | resident |
+| `reflector` | spark-2 | 8093 | GLM-5.3-Flash-Q2-DGX-Spark (stock) | on-demand, GEPA reflection backend only — see `infra/hermes-reflector/README.md` |
 
 Not proxied by this router: `embed` (spark :8092 and HomeD13, Qwen3-Embedding-8B-Q8_0) and
 `rerank` (spark :8093, Qwen3-Reranker-0.6B-Q8_0). The `llama-super`/`llama-dispatch`/`llama-coder`
@@ -44,8 +45,8 @@ rule on each node — not a new general opening, the same LAN-scoped posture Con
 node-to-node traffic already uses (`IMPLEMENTATION_PLAN.md` §4e):
 
 ```bash
-# On spark-2 — allow spark to reach muse/omni/coder/coder2:
-sudo ufw allow from 10.129.1.15 to any port 8090,8091,8094,8099 proto tcp
+# On spark-2 — allow spark to reach muse/omni/coder/coder2/reflector:
+sudo ufw allow from 10.129.1.15 to any port 8090,8091,8093,8094,8099 proto tcp
 
 # On spark — allow spark-2 to reach super/log-analyst, and dispatch for S12 standby failover:
 sudo ufw allow proto tcp from 10.129.1.17 to any port 8095,8098
@@ -107,19 +108,26 @@ is the intended end state. They stay in the repo as a template only, for if stay
 deliberately revisited; don't `cp`/`enable` them without that being a real decision, since it
 changes `super`'s latency behavior for every caller.
 
-## 3a. `spark-2` — wake worker and idle-sleep timers for `coder`, `coder2`, and `muse`
+## 3a. `spark-2` — wake worker and idle-sleep timers for `coder`, `coder2`, `muse`, and `reflector`
 
 ```bash
 sudo cp hermes-coder-idle-sleep.service hermes-coder-idle-sleep.timer /etc/systemd/system/
 sudo cp hermes-coder2-idle-sleep.service hermes-coder2-idle-sleep.timer /etc/systemd/system/
 sudo cp hermes-muse-idle-sleep.service hermes-muse-idle-sleep.timer /etc/systemd/system/
+sudo cp hermes-reflector-idle-sleep.service hermes-reflector-idle-sleep.timer /etc/systemd/system/
 sudo cp hermes-model-wake-worker-spark2.service /etc/systemd/system/hermes-model-wake-worker.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now hermes-coder-idle-sleep.timer
 sudo systemctl enable --now hermes-coder2-idle-sleep.timer
 sudo systemctl enable --now hermes-muse-idle-sleep.timer
+sudo systemctl enable --now hermes-reflector-idle-sleep.timer
 sudo systemctl restart hermes-model-wake-worker.service
 ```
+
+**`reflector`'s idle-sleep timer is installed but inert for its actual use case** — see
+`infra/hermes-reflector/README.md` §2a: the GEPA harness calls it by direct `--endpoint`, never
+through this router's dispatch, so `.last_used` is never written and the timer never fires.
+Manual `sudo systemctl stop llama-reflector` is the real shutdown step for this one role.
 
 **Tracking gap closed 2026-11-16:** spark-2's own `hermes-model-wake-worker.py` instance's systemd
 unit is now committed as `hermes-model-wake-worker-spark2.service` — it had been running live,
@@ -185,7 +193,7 @@ broker code change, same as Phase 30c's own addition of the `embed` type.
 
 ## 5. Verify, don't assume
 
-- `curl http://127.0.0.1:8080/v1/models` on each node should list all five roles.
+- `curl http://127.0.0.1:8080/v1/models` on each node should list all roles, including `reflector`.
 - A `super` call made while it's displaced (spark), or a `coder`/`coder2`/`muse` call after real
   idle time (spark-2), should measurably wake it (check `journalctl -u hermes-model-wake-worker -f`
   on the node that hosts it, for the claim/start/report sequence) and the `/v1/chat/completions`
@@ -194,7 +202,10 @@ broker code change, same as Phase 30c's own addition of the `embed` type.
   should stop them — confirm with `systemctl is-active llama-coder` / `llama-coder2` / `llama-muse`
   (spark-2) / `llama-log-analyst` (spark) before and after, not by assumption. `super` is the
   deliberate exception: it has no idle-sleep timer installed at all (§3) and should stay running
-  except when `log-analyst` displaces it.
+  except when `log-analyst` displaces it. `reflector` is a different exception: its timer is
+  installed but never fires in practice (it's called by direct `--endpoint`, not through the
+  router), so confirm its shutdown with a manual `sudo systemctl stop llama-reflector` instead of
+  waiting on the timer.
 - Cross-node calls (e.g. `spark`'s router proxying to `coder` on `spark-2`) need the §1 ufw rules
   in place first, or they'll fail with a connection error, not a silent misroute.
 
@@ -202,6 +213,7 @@ broker code change, same as Phase 30c's own addition of the `embed` type.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.7.0 | 2026-11-16 | New role `reflector` added (HermesAgentV6 `IMPLEMENTATION_PLAN.md` GLM-5.3-Flash Paradigm A, Phase 2): GLM-5.3-Flash-Q2-DGX-Spark on `spark-2`, port 8093, on-demand, a GEPA reflection backend only — see `infra/hermes-reflector/README.md`. §0's role table, §1's ufw rule (8093 added to the spark-to-spark-2 block), §3a's install block and idle-sleep pair, and §5's verify checklist all updated. Flagged plainly: this role's idle-sleep timer is installed for fleet-convention completeness but never actually fires, since the GEPA harness calls it by direct `--endpoint` rather than through this router. |
 | 1.6.0 | 2026-11-16 | Resolved `super`'s on-demand/systemd caveat (HermesAgentV6 `IMPLEMENTATION_PLAN.md` §7.4), open since 1.2.0/1.4.0: confirmed live that `super`'s unit Description already describes the intended hybrid (resident, displaced on demand) rather than claiming "always-resident", and that `hermes-super-idle-sleep.service`/`.timer` were never actually installed on `spark` (`is-enabled` → `not-found`) — not an unfinished migration, the intended end state. Rewrote §3 and §5 to say so plainly instead of flagging it as unreconciled; removed the idle-sleep `cp`/`enable` lines from §3's install block and added a "not deployed" header comment to both committed unit files so they read as a template, not a missed step. |
 | 1.5.0 | 2026-11-16 | `muse` demoted resident -> on-demand (HermesAgentV6 `IMPLEMENTATION_PLAN.md` §6.1/§9.1), triggered by spark-2 measuring 118Gi/121Gi used with swap maxed, all four of its backends concurrently resident/awake. §0's role-placement table and §5's verify checklist updated. §3a renamed/expanded for `muse`'s new idle-sleep pair and `WAKE_TARGETS` entry (`tools/hermes-model-wake-worker.py` 1.8.0), and closed a real tracking gap found in the same pass: spark-2's own wake-worker systemd unit (live since 2026-09-05) is now committed as `hermes-model-wake-worker-spark2.service`, captured verbatim from the deployed unit rather than left untracked. |
 | 1.4.0 | 2026-11-04 | log-analyst fixed (16k/q8_0 KV, wake-worker displacement of an idle super); super's residency row updated to match. super/dispatch/coder units now tracked under `infra/hermes-super/`, `infra/hermes-dispatch/`, `infra/hermes-coder/`. §1 ufw block rewritten to the live, cleaned-up rules (nano 8088 and spark-side 8090,8091 removed, 8098 added). |
