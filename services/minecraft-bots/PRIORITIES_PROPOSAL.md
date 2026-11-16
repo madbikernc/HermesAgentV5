@@ -1,6 +1,6 @@
 # Minecraft Bots — Proposed Tactical/Prioritization Model
 
-**Version:** 2.0.0
+**Version:** 2.1.0
 
 This is a **proposal**, not yet implemented. It supersedes nothing until reviewed — `PRIORITIES.md`
 still describes what the fleet actually does today, including the six open review questions it
@@ -207,6 +207,14 @@ separately discovered to need it. This directly supersedes the narrower framing 
 is now "every priority gets this, automatically, by the same general mechanism," not one bespoke
 runner for weapons specifically.
 
+**What actually shipped instead, noted 2026-11-16:** `8c64da8` (2026-10-12) built exactly the
+"one bespoke runner for weapons specifically" this paragraph argued against —
+`weaponStep()`/`runWeaponGoal()`, the same per-category shape as every other existing runner
+(Bed/Farm/Shelter/Ranch), plus `toolStep`/`runToolGoal` alongside it. The single general
+cross-cutting chokepoint this section describes was not built then and still isn't (confirmed
+live via `git log`, 2026-11-16) — see §4's status table for exactly what state each piece of
+this proposal is actually in.
+
 ---
 
 ## 2. The roles, reconsidered
@@ -293,7 +301,7 @@ Only the Tier 3 remainder — Tier 1/2 are identical for everyone and listed onc
 
 ---
 
-## 4. Rough implementation shape (not yet built — for scoping, not a commitment)
+## 4. Rough implementation shape (mostly built — see the status table below for what shipped)
 
 - A new, role-agnostic `nextSurvivalPriority()` (Tier 1), checked in `proposeOwnGoal()` **before**
   any role-specific ladder — mirrors `nextSoldierPriority()`'s shape but applies to every bot. It
@@ -347,6 +355,31 @@ Only the Tier 3 remainder — Tier 1/2 are identical for everyone and listed onc
 
 ---
 
+## Status (added 2026-11-16, against the §4 build list above)
+
+This proposal was treated as "not yet built" by at least one downstream doc (HermesAgentV6
+`IMPLEMENTATION_PLAN.md`) well after most of it had shipped. Checked against real commits
+(`e96c6d8`, `30acf9c`, `8c64da8`) rather than assumed; a few bullets below are "likely done,
+not independently re-verified this pass" rather than confirmed, called out as such.
+
+| §4 item | Status | Date | Notes |
+|---|---|---|---|
+| Universal Tier 1 `nextSurvivalPriority()` | done | 2026-10-11 | `e96c6d8`: "New universal Tier 1 survival ladder" |
+| Fleet-shared `nextBuilderPriority()` + claim mechanism | done | 2026-10-11 | `e96c6d8`: `claimBuilderItem`/`myBuilderClaim`/`releaseBuilderItem` |
+| Merged "beds"/"shelter" into one per-bot capacity check | done | 2026-10-11 | `e96c6d8`: "Merged the independently-satisfiable 'beds'/'shelter' checklist items into one real count" |
+| Tightened `hasHollowInterior()` (solid walls/door) | done | 2026-10-11 | `e96c6d8`: "Shelter definition tightened... complete walls/ceiling/floor, a real door" — the cave-void-connection check specifically not independently re-verified this pass |
+| Periodic shelter-integrity re-check | done | 2026-10-11 | `e96c6d8`: `checkShelterIntegrity()`, self-repairs on a timer |
+| Communal-shelter material tiering (`isShelterMaterial` stone-or-better) | done | 2026-10-12 | `30acf9c`: `isCommunalShelterMaterial()` |
+| Communal-shelter "iron tools fleet-wide" trigger | done | 2026-10-12 | `30acf9c`: `fleetHasReachedIronTools()` |
+| Resource-gathering override: one general chokepoint | **not built** | — | What shipped instead (`8c64da8`) is a bespoke per-category runner (`weaponStep`/`toolStep`), the same shape as every other runner — not this bullet's single cross-cutting substitution rule. Still genuinely open; no concrete design beyond this paragraph exists yet (see `PRIORITIES.md` §7) |
+| Crafting-table-memory check extended to furnace/chest/beds + shelter room-check | partially done | 2026-10-11 | `e96c6d8` covers furnace (`PRIORITIES.md` §7: "existing crafting table/furnace... now gets written to shared world memory too"); chest/beds and the shelter-remaining-room extension not independently re-verified this pass |
+| `storeSurplusNearHome` promoted to standing cadence | done | 2026-10-11 | `e96c6d8`: "Gave surplus-storing and location-sharing a standing cadence" |
+| Farmer/Herder `priorities` arrays; Soldier drops weapon/armor lines | likely done, not re-verified | 2026-10-11 | `PRIORITIES.md` §8 confirms the Farmer/Herder half directly ("(A) resolved there"); Soldier's list specifically dropping the weapon/armor lines not independently re-checked this pass |
+| New `minecraft-guard-anchor` claim + escort split | done | 2026-10-11 | `e96c6d8`: `holdsGuardAnchor`, new "escort" standing priority |
+| "Recover a teammate's gear" / `RECOVERY` tier hook | not verified | — | Not mentioned in either commit message; not checked this pass |
+
+---
+
 ## Revision History
 
 | Version | Date | Change |
@@ -356,3 +389,4 @@ Only the Tier 3 remainder — Tier 1/2 are identical for everyone and listed onc
 | 1.2.0 | 2026-10-11 | Farmer/Herder priority lists rewritten to a shared three-step shape: build the pen/farm, populate it, then gather and store on an ongoing basis. |
 | 1.3.0 | 2026-10-11 | Closed a real gap, confirmed against the live code: today's "beds" and "shelter" checklist items are independently satisfiable, so both can report done while most beds sit outside any shelter. Tier 1 item 2 now requires a bed *inside* a qualifying shelter specifically; Tier 2 merges "beds" and "shelter" into one sheltered-bed-capacity item, moved up to run right after the table instead of fourth/fifth. New open question (PROPOSAL-REVIEW 5): multiple small shelters (my lean) vs. one larger shelter design. |
 | 2.0.0 | 2026-10-11 | Restructuring: adopted the operator's precise shelter definition (fully sealed, a real door, no cave connection, a bed) as stricter than the current code; resolved PROPOSAL-REVIEW 5 to one individual shelter per bot as the baseline, with a single later communal shelter (stone tier or better) gated on the fleet reaching iron tools, as an addition, not a replacement; added shelter-integrity repair as the top item in Tier 1, ranked above even getting a weapon; added the resource-gathering override as a rule that cuts across every tier rather than a per-category runner, directly superseding `PRIORITIES.md` REVIEW D's narrower framing; stated "nothing supersedes defense" as the document's one absolute, governing rule. |
+| 2.1.0 | 2026-11-16 | Correction, caught while investigating a downstream doc (HermesAgentV6 `IMPLEMENTATION_PLAN.md`) that was treating this entire proposal as unbuilt: most of §4's build list shipped in `e96c6d8`/`30acf9c` (2026-10-11/12), checked against real commits rather than assumed. Added a §4 status table (required by this project's own implementation-plan convention now that it's evident this doc has a real rollout). Noted in §1 that the resource-gathering override's general cross-cutting mechanism specifically was **not** what got built — `8c64da8` shipped a bespoke per-category runner instead (`weaponStep`/`toolStep`), the one genuinely still-open item from this proposal's own build list. |

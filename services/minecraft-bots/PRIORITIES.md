@@ -1,6 +1,6 @@
 # Minecraft Bots — Priorities & Decisions
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 This is a review document, not code: a map of every place the bots decide "what do I do right
 now" and "what matters more than what else," so the actual priorities can be checked against what
@@ -114,14 +114,13 @@ the unrestricted freeform path at all, unlike every other role:
 4. **Otherwise** → stand guard near home. This is a *standing* goal (`goal.standing === "guard"`)
    — no planner calls while it holds, ends only when a higher Soldier priority above fires.
 
-**(REVIEW D, the big one):** Step 1 ("get a weapon") sets the *directive* deterministically, but
-nothing executes it deterministically — it falls straight through to the generic LLM planner (§6),
-the same way Builder's old crafting-table/furnace/chest items used to (§6's fixed bug). Live logs
-show this is currently the fleet's most common failure mode: the planner repeatedly *claims*
-"DONE, I have a sword" without actually having one — rejected every time by the inventory check,
-but re-attempted from scratch next cycle rather than ever reliably mining ore / crafting planks and
-sticks / checking a chest in sequence. Builder/Bed/Farm/Shelter/Ranch all got a dedicated
-deterministic runner for exactly this class of problem. **Should "get a basic weapon" get one too?**
+**(REVIEW D — fixed 2026-10-12, `8c64da8`, stale below since.)** This section used to say step 1
+("get a weapon") fell through to the generic LLM planner and was the fleet's most common failure
+mode (Luke/Mark's `attack_win_rate` 0.846→0.167, a "no sword" goal firing 360×/24h). It now has a
+dedicated deterministic runner, same shape as Builder/Bed/Farm/Shelter/Ranch:
+`weaponStep()`/`runWeaponGoal()` (`gear-goals.js`), imported and called live from `goal-tick.js`
+(`import ... runWeaponGoal ... from "./gear-goals.js"`, `await runWeaponGoal(...)`), unit-tested
+(132/132 passing per `8c64da8`'s own commit message). `toolStep` (pickaxe) shipped alongside it.
 
 ---
 
@@ -167,15 +166,22 @@ freeform self-proposal) is pattern-matched once (`farmTaskFor()`) to decide whic
 | Ranching words (`ranch`, `breed`, `pen`...) | `runRanchGoal` | None |
 | Bed words (`make`/`craft`/`place`... `bed`) | `runBedGoal` | None |
 | Shelter words | `runShelterGoal` | None |
+| Tool words (satisfied by *any* pickaxe) | `runToolGoal` | None |
 | `goal.standing === "guard"` | `guardTick` | None |
 | Target item already in inventory | Completes immediately | None |
 | A matching stored skill | Replays the recorded step sequence | None, until it runs out of steps |
-| **Everything else** (weapons, tools, ore, exploration, "upgrade my gear"...) | Generic planner (`parseGoalStep`/`planNextStep`) | **Every single step** |
+| **Everything else** (ore, exploration, anything not tagged/matched below...) | Generic planner (`parseGoalStep`/`planNextStep`) | **Every single step** |
+
+**Corrected 2026-10-12, stale above since:** weapon goals aren't in this table at all — they're
+tagged by `proposeOwnGoal()` (`goal.survivalPriorityItem === "weapon"`) and routed to
+`runWeaponGoal` in `goal-tick.js`, checked *ahead of* this whole `farmTaskFor` dispatch, the same
+way `shelter`/`food`/`tools`(-upgrade) are. So weapons, tools, and "upgrade my gear" all now have
+dedicated deterministic runners — only ore and exploration are left in the generic-planner bucket
+this table's last row describes (§4-REVIEW D, now fixed).
 
 The deterministic runners exist precisely *because* the generic planner is unreliable for anything
 with a real multi-step material dependency — each one was added after a live incident where the
-planner either never acted or hallucinated completion. **The weapon/tool/ore category is the
-largest piece of the bot's actual job that still has no deterministic runner** (§4-REVIEW D).
+planner either never acted or hallucinated completion.
 
 A goal ends one of three ways:
 - **Done**, verified against real state (inventory/equipped/placed-near-home — never a bare LLM
@@ -189,9 +195,10 @@ cadence. A role's enforced priority (§4, §5) is checked **before** freeform se
 always wins when both would otherwise apply.
 
 **(REVIEW F):** Given up after 3 failures with no deterministic fallback (§6 table's last row) just
-means the *same* unmet need gets re-proposed again later, often verbatim — "get a sword" in the
-logs recurs for hours. Is 3 the right give-up threshold for this category specifically, independent
-of whether a dedicated runner gets built?
+means the *same* unmet need gets re-proposed again later, often verbatim. "Get a sword" no longer
+recurs this way (weapon goals have a dedicated runner now, §6), but ore/exploration still can. Is
+3 the right give-up threshold for what's left in that bucket, independent of whether it ever gets
+its own runner?
 
 ---
 
@@ -210,13 +217,21 @@ Fixed this review cycle, all unit- and (where the test harness reaches that code
 - `get_wool` (and only `get_wool` so far) now wanders to look for a sheep instead of failing
   instantly if none is in her immediate 32-block radius. (`actions.js` 1.84.0)
 
+Fixed since this review (added here rather than rewriting the section above, 2026-11-16):
+- **§4/§6: deterministic "get a basic weapon" runner, `8c64da8` (2026-10-12).** Was the single
+  biggest observed source of repeated, hours-long goal failure in live logs. `weaponStep()`/
+  `runWeaponGoal()` (`gear-goals.js`), live-wired in `goal-tick.js`, 132/132 unit tests passing.
+  `toolStep`/`runToolGoal` shipped alongside it.
+
 Still open, not yet fixed:
-- **§4/§6: no deterministic "get a basic weapon" runner.** The single biggest observed source of
-  repeated, hours-long goal failure in live logs — the planner hallucinating "DONE" on a sword/axe/
-  pickaxe/furnace it never actually made.
 - **Other raw-material searches may share `get_wool`'s old bug.** Only `get_wool` has been checked
   and fixed; anything else that scans `bot.entities`/a block search once and gives up without a
   wander fallback hasn't been individually audited yet.
+- **The fully general version of the resource-gathering override remains unbuilt** — recognizing
+  a missing resource from *any* action's failure text (ore, wool, food, coal, not just the
+  weapon/tool/plank cases that now have dedicated runners) and auto-substituting "go get X"
+  generically. Speculative, no concrete design or failing case driving it yet
+  (`PRIORITIES_PROPOSAL.md` §4) — not a scoped bug fix the way the weapon runner was.
 
 ---
 
@@ -247,3 +262,4 @@ simultaneous attackers; E: leave beehive/ranch last; F: leave the threshold at 3
 |---|---|---|
 | 1.0.0 | 2026-10-11 | Initial version, written for review alongside a world/memory reset. |
 | 1.1.0 | 2026-10-11 | Noted disposition of all six review questions against `PRIORITIES_PROPOSAL.md`. |
+| 1.2.0 | 2026-11-16 | Correction (HermesAgentV6 `IMPLEMENTATION_PLAN.md` §5a/§9.8): REVIEW D, §6's routing table, and §7/§8's "still open" framing all said the weapon-runner gap was unfixed — it was actually fixed hours after this file's 1.1.0, same review period, by `8c64da8` (2026-10-12). Updated §4, §6, §7, §8 to say so; added §6's missing `runToolGoal` table row (`tool` words, satisfied by any pickaxe); reframed the one genuinely still-open item as the fully general "any missing resource" override, which has no concrete design yet. |
