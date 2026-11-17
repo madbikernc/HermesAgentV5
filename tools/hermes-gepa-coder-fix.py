@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+#
+# 1.0.1 (2026-11-17) - bug fix, found before Phase 3's first real campaign: make_reflection_lm()
+# never passed extra_body={"reasoning_effort": "low"} to call_backend(), so a real reflector
+# (GLM-5.3-Flash) run would have reproduced the exact S31 truncation failure the Phase 2 README
+# documented as resolved -- Phase 1's dry run never caught this because it pointed reflection at
+# coder, not reflector. Hardcoded on (not a new CLI flag): this function's only real caller going
+# forward is reflector, and the field is a harmless no-op for any other model's chat template.
 #
 # Initial version (2026-11-16) — HermesAgentV6 IMPLEMENTATION_PLAN.md GLM-5.3-Flash Paradigm A,
 # Phase 1: a GEPA (gepa-ai/gepa, pip-installed into an isolated /opt/gepa-venv -- see
@@ -153,7 +160,8 @@ def make_reflection_lm(endpoint, model):
     """Matches gepa's LanguageModel protocol exactly: (prompt: str | list[dict]) -> str."""
     def _call(prompt):
         messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": prompt}]
-        return call_backend(endpoint, model, messages, max_tokens=8000, timeout=300)
+        return call_backend(endpoint, model, messages, max_tokens=8000, timeout=300,
+                             extra_body={"reasoning_effort": "low"})
     return _call
 
 

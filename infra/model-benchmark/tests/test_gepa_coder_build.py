@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-11-17) - new check: make_reflection_lm() passes extra_body={"reasoning_effort":
+# "low"} to call_backend() -- regression coverage for hermes-gepa-coder-build.py 1.0.1's bug fix,
+# found before Phase 3's first real campaign against the real reflector backend.
 #
 # Offline checks for hermes-gepa-coder-build.py (HermesAgentV6 IMPLEMENTATION_PLAN.md GLM-5.3-Flash
 # Paradigm A, Phase 1). See test_gepa_coder_fix.py's own header for the shared rationale
@@ -180,6 +184,19 @@ def main():
     check("one reflective record per trajectory", len(records) == len(batch), str(len(records)))
     check("every record has Inputs/Generated Outputs/Feedback",
           all({"Inputs", "Generated Outputs", "Feedback"} <= set(r) for r in records), str(records))
+
+    print("\n[make_reflection_lm(): passes reasoning_effort=low to call_backend (1.0.1 regression)]")
+    captured = {}
+
+    def recording_backend(endpoint, model, messages, max_tokens=4000, timeout=180, extra_body=None):
+        captured["extra_body"] = extra_body
+        return "feedback text"
+
+    mod.call_backend = recording_backend
+    reflection_lm = mod.make_reflection_lm("http://fake-reflector:1/v1", "reflector")
+    reflection_lm("some prompt")
+    check("reasoning_effort=low is sent to the reflection model",
+          captured.get("extra_body") == {"reasoning_effort": "low"}, str(captured))
 
     print(f"\n{CHECKS[0]} checks, {len(FAILURES)} failed")
     if FAILURES:

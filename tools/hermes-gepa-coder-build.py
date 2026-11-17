@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.0.1
+#
+# 1.0.1 (2026-11-17) - same bug fix as hermes-gepa-coder-fix.py 1.0.1: make_reflection_lm() now
+# passes extra_body={"reasoning_effort": "low"} -- found before Phase 3's first real campaign,
+# would otherwise have reproduced S31's truncation failure the first time reflector was used as a
+# real reflection_lm.
 #
 # Initial version (2026-11-16) — HermesAgentV6 IMPLEMENTATION_PLAN.md GLM-5.3-Flash Paradigm A,
 # Phase 1: a GEPA adapter wrapping the existing fleet_coder_build suite
@@ -139,7 +144,8 @@ class BuildGEPAAdapter(gepa.GEPAAdapter):
 def make_reflection_lm(endpoint, model):
     def _call(prompt):
         messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": prompt}]
-        return call_backend(endpoint, model, messages, max_tokens=8000, timeout=300)
+        return call_backend(endpoint, model, messages, max_tokens=8000, timeout=300,
+                             extra_body={"reasoning_effort": "low"})
     return _call
 
 
