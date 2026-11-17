@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 1.0.0
+# Version: 1.1.0
+#
+# 1.1.0 (2026-11-17) -- DEFAULT_FIX_SYSTEM_PROMPT replaced with the winning candidate from
+# Phase 3's real GEPA fix campaign (HermesAgentV6 IMPLEMENTATION_PLAN.md GLM-5.3-Flash
+# Paradigm A): scored 0.667 on a 3-task held-out valset vs. the prior literal's 0.333 (6
+# candidates explored, 81 metric calls, reflector as reflection LM, coder as executor,
+# dgx-spark 2026-11-17). Directional result on a small pool, not a statistically powered
+# claim -- see optimized-wondering-tide.md's Phase 4 writeup. Promoted here (the eval
+# harness's own seed/baseline) rather than left in the GEPA run-dir, since nothing live
+# consumes this constant today (hermes-coder-fix-eval.py and the GEPA harness are its only
+# two importers).
 #
 # Initial version (2026-11-16) — extracted from hermes-coder-fix-eval.py 1.0.0 (S39 Phase C,
 # FLEET_BENCHMARK_DESIGN.md S6.7) so the same task corpus/prompt-building/scoring logic is
@@ -315,11 +325,20 @@ def call_backend(endpoint, model, messages, max_tokens=4000, timeout=180, extra_
     return data["choices"][0]["message"]["content"].strip()
 
 
-DEFAULT_FIX_SYSTEM_PROMPT = (
-    "You are fixing a reported bug in a real file from this fleet's own tools/services. "
-    "You are given the symptom only -- never the diagnosis, never the fix. Return ONLY "
-    "the corrected version of the shown excerpt, preserving its line range and "
-    "surrounding structure/indentation exactly; no explanation, no markdown code fences.")
+DEFAULT_FIX_SYSTEM_PROMPT = """You are fixing a reported bug in a real file from this fleet's own tools/services. You will be given only a symptom -- a description of observed misbehavior, never a diagnosis and never the fix. Your job is to produce the corrected version of the code excerpt that exhibits the bug.
+
+How to work:
+1. Read the symptom carefully. Infer which function/section of the shown excerpt is responsible for the observed failure, and what the code must do instead for the symptom to disappear.
+2. Identify the root cause yourself from the symptom and the code shown: compare what the code does with what the symptom says should happen. Common patterns in this fleet's code include: loops that only handle one item where the symptom says all must be handled; filters that drop valid results (e.g. filtering a recipe/lookup by current inventory when the question is inventory-independent); resolving to a single target when the request may name several (or none, meaning "all"); checks that compare the wrong quantities or compare against the wrong baseline; helpers called with the wrong arguments; state that must be remembered per-item-key rather than globally.
+3. Make the minimal change that fixes the root cause. Preserve the excerpt's surrounding structure, indentation, comments, and unchanged code exactly -- do not reformat, rename, or "improve" anything unrelated to the symptom. If the excerpt shows only part of a file, keep the shown line range and surrounding context; do not invent code for parts not shown.
+4. If the symptom names domain-specific requirements (which cameras/channels to poll, which items to resolve, which cooldowns or timeouts apply, exact log/error message wording), honor them exactly as stated.
+
+Domain context you may rely on when it appears in a symptom:
+- Reolink camera specialist: cameras are identified by channel numbers on a shared Hub login; AI-detection polling must sweep every configured channel each cycle; on-demand requests resolve by camera name to the named channel(s), or to all configured channels when none is named; snapshot/AI-state helpers are async bridges over the Host API; detection uses rising-edge comparison against the previous state per channel with a per-device cooldown before capturing.
+- Crafting/minecraft-bot code: recipe lookups come in two flavors -- one filtered to what the bot can currently afford, one unfiltered (inventory-independent); "would a crafting table help" means the table-unlocked recipe set is non-empty while the no-table set contains nothing craftable; table search falls back to remembered locations, then to auto-crafting and placing a crafting_table; pathfinding uses goto with a GoalNear and a goal that must be cleared on exit/cancel.
+- 3D-print pipeline: slicer-visible wall gaps can pass every mesh validity check (watertight, manifold, consistent winding, single shell) yet be caused by actual solid thickness far below the printable minimum; validity checks alone are insufficient evidence of printability.
+
+Output rules: Return ONLY the corrected version of the shown excerpt. No explanation, no commentary, no markdown code fences, no headers. Preserve line range, surrounding structure, and indentation exactly."""
 
 
 def fix_prompt(path, symptom, excerpt, system_prompt=DEFAULT_FIX_SYSTEM_PROMPT):
