@@ -1,6 +1,6 @@
 # spark2 Staged-Candidate Benchmark Results (live run)
 
-**Version:** 1.15.0
+**Version:** 1.16.0
 
 Real results from actually executing `spark2-candidate-sequencing-runbook.md`, in progress. Every
 number below came from a live run against the fleet on 2026-10-24/25 — none of this is estimated or
@@ -614,10 +614,118 @@ traffic once a candidate's memory footprint got big enough to make the contentio
 worked around by stopping the bots for the duration, not yet solved at the tooling level for a future
 large-candidate run that can't do the same).
 
+## Phase 7 — self-repair coding-capability bake-off, direct operator follow-up (2026-11-19)
+
+Separate from Phases 1-6's general staged-candidate sweep: direct operator request specifically to
+find a more capable `coder`/`coder2` backend for self-repair, whose real production numbers
+(`FLEET_SELFREPAIR_DESIGN.md` §9) showed 0 of 7 fix attempts promoted and 5 of 7 never producing a
+usable draft at all -- a non-convergence problem, not a prompting one (GEPA's same-day prompt
+optimization, commit `5527ea6`, already shipped and didn't close this gap in production). Scored
+against `fleet_coder_fix`/`fleet_coder_build` directly (`hermes-coder-fix-eval.py`/
+`hermes-coder-build-eval.py`), not the Phase 1-6 general suite battery -- these two suites are the
+ones that actually exercise convergence/reliability, the measured failure mode.
+
+### Candidates tested
+
+Fresh same-day baselines for the live incumbents, plus every realistically-available local
+candidate: `reflector` (GLM-5.3-Flash-Q2-DGX-Spark, already deployed, free to try), two staged-but-
+never-benchmarked files found at `/mnt/hermes-data/models/coder2-candidates/` (Devstral-Small-2507-
+Q5_K_M, 16.7GB, Mistral agentic-coding-tuned; Seed-OSS-36B-Instruct-UD-Q4_K_XL, 22GB, ByteDance),
+and a re-test of `Qwen3-Coder-Next-UD-Q4_K_M` (46GB) -- shelved in Phase 5 above on a "mixed,
+not a clean win" read that leaned on `fleet_dualcoder_precision`, a suite now confirmed noisy
+(every candidate tested across both this run and Phase 2-6 scores at or near 0.000 on it,
+incumbents included).
+
+| Model | Size | `fleet_coder_fix` timeouts | `fleet_coder_build` timeouts | build fixture |
+|---|---|---|---|---|
+| `coder` incumbent (Qwen3.8-27B-abliterated) | 15.65GiB | 4/10 | 4/8 | 0.667 |
+| `coder2` incumbent (GLM-4.7-Flash-Q4_K_M) | 17.2GiB | 1/10 | 0/8 | 0.333 |
+| `reflector` (GLM-5.3-Flash-Q2-DGX-Spark) | 79.10GiB | 10/10 -- disqualified | 7/8 | n/a |
+| Devstral-Small-2507-Q5_K_M | 16.7GB | 1/10 | 0/8 | 0.333 |
+| Seed-OSS-36B-Instruct-UD-Q4_K_XL | 22GB | disqualified, same root cause as `reflector` (too slow for the harness's timeout budget) | | |
+| **Qwen3-Coder-Next-UD-Q4_K_M** | 45.92GiB | **0/10** | **0/8** | **0.667** |
+
+`reflector` and Seed-OSS are both disqualified on raw latency against the harness's timeout
+budget, independent of quality -- the GEPA-reflection use case `reflector` was actually deployed
+for tolerates this; a reactive fix-generation role used to tolerate it too (self-repair has no
+latency constraint), but not at this harness's current per-call timeout. Devstral is a solid,
+easily-deployable second place. **Qwen3-Coder-Next is the clean winner**: zero timeouts on both
+suites -- the best reliability result of any candidate tested across Phases 1-7 -- and ties
+`coder`'s best fixture score while beating `coder2`'s. This directly targets the measured
+production failure mode (non-convergence), unlike `fleet_dualcoder_precision`'s score, which
+Phase 5 over-weighted.
+
+### Promotion attempt 1 (2026-11-19, aborted): reflector wake caused a real OOM/restart-storm incident
+
+Woke `reflector` (79GB) for this bake-off without stopping `hermes-model-wake-worker` first and
+without checking live free memory -- `coder`/`coder2`/`muse`/`omni` were already using ~101 of
+121GiB (not the ~115GiB figure some docs cite, which describes headroom only after all four are
+stopped). This OOM-killed `coder` then `coder2`; manually stopping `reflector` to recover was
+fought by the wake-worker auto-reviving it, producing a real restart storm that knocked `muse`
+into `failed` state. Detected mid-run from escalating fork notifications, recovered fully (all
+four backends verified healthy via `/v1/models`, memory back to steady state, wake-worker
+restarted) -- no valid benchmark data survived from the reflector run itself, redone afterward.
+Full incident writeup and the corrected procedure: see memory
+`spark2-wakeworker-and-capacity-lesson-20261119`.
+
+### Promotion attempt 2 (2026-11-19, aborted): direct swap didn't fit even in the best case
+
+Followed the corrected procedure (wake-worker stopped first, idle-sleep paused, live `free -h`
+checked) and edited `coder`'s service to point at the new model, then started it directly via
+`systemctl start`. **OOM-killed during load** (~3.5 min in), taking `omni` (a resident production
+role) down with it in the same memory crunch. Caught immediately, reverted cleanly, verified all
+four backends healthy. Real finding: with `coder2` and `muse` both stopped and only `omni`
+resident (spark-2's best case under its then-current residency pattern), only ~41GiB was
+available -- less than the new model's 45.92GiB file size alone, before any KV-cache overhead.
+This wasn't a tight-margin problem, the model plainly didn't fit. Root cause of the OOM in both
+attempt 2 and (indirectly) attempt 1: the service was started with a direct `systemctl start`
+after a manual edit, never going through `hermes-model-wake-worker`'s own `make_room()` free-
+memory check -- the one mechanism that exists specifically to prevent this.
+
+### Promotion attempt 3 (2026-11-19, succeeded): freed headroom by demoting `omni`, retried through the real safety path
+
+Direct operator decision: demote `omni` to on-demand (identical pattern to `muse`'s own
+2026-11-16 demotion) rather than accept a smaller/lesser candidate or expand context. `omni` was
+the only backend on spark-2 still pinned always-resident; `coder2` and `muse` were already
+on-demand. See `infra/hermes-omni/README.md` 1.1.0, `infra/hermes-router/README.md` 1.8.0,
+`hermes-router.py` 2.22.0, and `hermes-model-wake-worker.py` 1.10.0 for the full deploy (new
+`omni` `WAKE_TARGETS` entry, `required_gib` 33 from its byte-verified 22.12GiB model+mmproj;
+`coder`'s own `required_gib` raised 23→67 for the new 45.92GiB model, `displaces` changed from
+`()` to `("muse", "omni")` -- deliberately not `coder2`, since the dualcoder draft/review loop
+needs both alive together).
+
+Verified `omni`'s new on-demand round trip through the router (stopped manually, a real call woke
+it and answered correctly in 28.8s), then retried `coder`'s promotion **through a real
+`/v1/chat/completions` router call instead of a direct `systemctl start`** -- the actual fix for
+both prior incidents, since this path exercises `make_room()`'s free-memory check for real instead
+of bypassing it. `journalctl` confirmed the exact sequence: displaced `muse`, then `omni`, reached
+91.3GiB free (required: 67GiB), started `coder` cleanly. Verified with a real coding prompt
+(sane, non-garbage output). **The concurrent case that actually matters for self-repair** --
+`coder` (45.9GB) and `coder2` (17.2GB) both active together for the dualcoder draft/review loop --
+measured at **41GiB available**, comfortably clear, both answering correctly.
+
+**Real, accepted constraint found in the same pass**: with `coder`/`coder2`/`muse` all freshly
+active, a 4th role (`omni`) wake was **cleanly refused** ("needs ~33GiB free, only 17.2GiB
+available... stop another resident backend first") -- no OOM, just a clean, safe error, because
+`make_room()` correctly declined to displace backends that were busy or too-recently woken.
+spark-2 still cannot run all four coding/vision backends at once; `omni` now simply shares the
+same on-demand contention `muse` has lived with since 2026-11-16. This is the intended tradeoff
+the operator accepted when choosing this path, not a new bug.
+
+One benign slip during deployment, noted for completeness: a mis-constructed verification command
+deleted the redundant `/opt/hermes-models/Qwen3-Coder-Next-UD-Q4_K_M.gguf` staging copy (intended
+as a check, not a delete). The production copy at `/mnt/hermes-data/models/` -- sha256-verified,
+actively in use -- was untouched; no functional impact, but it wasn't an authorized deletion.
+
+**Final verified state**: `coder` = Qwen3-Coder-Next-UD-Q4_K_M (promoted), `coder2` unchanged
+(GLM-4.7-Flash-Q4_K_M -- already performing well, and the dualcoder review step benefits from two
+different model families rather than converging both slots on one), `omni` now on-demand.
+
 ## Revision History
 
 | Version | Date | Change |
 |---|---|---|
+| 1.16.0 | 2026-11-19 | Added Phase 7: direct operator follow-up to find a more capable self-repair coding backend. Tested `reflector`, Devstral-Small-2507, Seed-OSS-36B, and a re-test of Qwen3-Coder-Next-UD-Q4_K_M against fresh `coder`/`coder2` baselines on `fleet_coder_fix`/`fleet_coder_build` directly (not the general suite battery) -- Qwen3-Coder-Next wins cleanly (0/10 and 0/8 timeouts, best of any candidate tested in this doc). Promoting it took three attempts: a reflector-wake OOM/restart-storm (recovered, see memory `spark2-wakeworker-and-capacity-lesson-20261119`), a direct-swap OOM showing the model simply didn't fit in spark-2's best case (~41GiB available, needs 45.92GiB), and a successful retry that demoted `omni` to on-demand (mirroring `muse`'s 2026-11-16 demotion) and went through `hermes-model-wake-worker`'s real `make_room()` safety path instead of a direct `systemctl start` -- the actual fix for both earlier OOMs. Verified the dualcoder-relevant concurrent case (`coder`+`coder2` together, 41GiB free) and found a new accepted constraint: all four spark-2 backends still can't run at once, a 4th wake is now cleanly refused rather than OOMing. `coder` promoted; `coder2` left unchanged. |
 | 1.0.0 | 2026-10-24 | Initial version — real Phase 1 results from the first live execution of the sequencing runbook: guard candidate's full Tier 0/3 numbers (Tier 2 blocked by a tooling gap, stated plainly), the rerank candidate excluded as a confirmed byte-identical duplicate of the live incumbent, and the embed candidate's real latency delta against a live, read-only-measured incumbent baseline (accuracy unmeasured, correctly not attempted). |
 | 1.1.0 | 2026-10-24 | Added Phase 2 Qwen3-4B and Qwen3-8B full-battery results. Qwen3-8B surfaced a real harness gap: 7/10 `fleet_coder_fix` and 4/8 `fleet_coder_build` tasks timed out outright at 8B (zero timeouts at 4B on the same settings) — surviving-subset judge scores flagged as not comparable at face value until the harness's timeout is made size-aware. |
 | 1.2.0 | 2026-10-25 | Completed Phase 2 with Ministral-8B-Instruct-2410 results, plus a cross-candidate findings section: `fleet_dualcoder_precision` precision axis is 0/3 for all three Phase 2 candidates (likely task-calibration issue), coder_fix/coder_build judge-only axes are near-1.000 for all three while every objective axis is weak (judge-calibration concern, not candidate-specific), and the Qwen3-8B timeout spike did not reproduce on similarly-sized Ministral-8B (model-specific, not a simple size threshold). No Phase 2 candidate qualifies as outperforming a live incumbent. |

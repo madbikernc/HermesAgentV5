@@ -8,13 +8,10 @@ Type=simple
 User=pmoney
 Group=pmoney
 ExecStart=/opt/llama.cpp/start-omni.sh
-Restart=always
-RestartSec=15
+Restart=on-failure
+RestartSec=5
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
-
-[Install]
-WantedBy=multi-user.target

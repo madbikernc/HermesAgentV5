@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 2.21.0
+# Version: 2.22.0
+#
+# 2.22.0 (2026-11-19) - `omni` demoted resident -> on-demand on both branches, same pattern as
+# muse's own 2.20.0 entry: spark-2 has no room to keep every backend pinned resident once a
+# larger coder candidate needs to fit. Matches hermes-model-wake-worker.py 1.10.0's new
+# WAKE_TARGETS entry and infra/hermes-omni/llama-omni.service's matching Restart=on-failure/
+# no-[Install] edit. Revert is this one flag back to False plus
+# `sudo systemctl enable --now llama-omni` on spark-2. Same change also promotes `coder`'s own
+# metadata string to "Qwen3-Coder-Next-UD-Q4_K_M" (abliterated False, replacing
+# Qwen3.8-27B-abliterated) -- caught and fixed one real gap live during deployment: this
+# changelog entry originally claimed that update without the code actually doing it.
 #
 # 2.21.0 (2026-11-16) - new role `reflector`: GLM-5.3-Flash-Q2-DGX-Spark (stock), spark-2 only,
 # port 8093, on-demand. HermesAgentV6 IMPLEMENTATION_PLAN.md GLM-5.3-Flash Paradigm A, Phase 2 --
@@ -385,10 +395,13 @@ if NODE == "spark":
         "super": ("http://127.0.0.1:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
         # coder moved to spark-2 2026-10-07 (fleet-health investigation: spark was chronically
         # at ~97% memory / swapping; coder was its single largest avoidable resident consumer).
-        "coder": (f"http://{SPARK2_IP}:8094", True, "Qwen3.8-27B-abliterated", True),
+        # Promoted to Qwen3-Coder-Next-UD-Q4_K_M 2026-11-19, see this file's 2.22.0 changelog
+        # entry above -- not an abliterated fork, unlike the model it replaced.
+        "coder": (f"http://{SPARK2_IP}:8094", True, "Qwen3-Coder-Next-UD-Q4_K_M", False),
         # muse: resident -> on-demand 2026-11-16, see this file's 2.20.0 changelog entry above.
         "muse": (f"http://{SPARK2_IP}:8090", True, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
-        "omni": (f"http://{SPARK2_IP}:8091", False, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
+        # omni: resident -> on-demand 2026-11-19, see this file's 2.22.0 changelog entry above.
+        "omni": (f"http://{SPARK2_IP}:8091", True, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
         # reflector: new 2026-11-16, see this file's 2.21.0 changelog entry above.
         "reflector": (f"http://{SPARK2_IP}:8093", True, "GLM-5.3-Flash-Q2-DGX-Spark (stock)", False),
         # Port 8097, not the target's proposed 8088 -- that was nano's port and moving dispatch onto
@@ -406,10 +419,11 @@ else:
     ROLES = {
         "super": (f"http://{SPARK_IP}:8095", True, "Huihui-GLM-4.7-Flash-abliterated", True),
         # coder moved here from spark 2026-10-07 -- see spark branch's own comment above.
-        "coder": ("http://127.0.0.1:8094", True, "Qwen3.8-27B-abliterated", True),
+        "coder": ("http://127.0.0.1:8094", True, "Qwen3-Coder-Next-UD-Q4_K_M", False),
         # muse: resident -> on-demand 2026-11-16, see spark branch's own comment above.
         "muse": ("http://127.0.0.1:8090", True, "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning (stock, text-only load)", False),
-        "omni": ("http://127.0.0.1:8091", False, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
+        # omni: resident -> on-demand 2026-11-19, see spark branch's own comment above.
+        "omni": ("http://127.0.0.1:8091", True, "NVIDIA-Nemotron-3.5-Bolt-74B-A9B (stock)", False),
         # reflector: new 2026-11-16, see spark branch's own comment above.
         "reflector": ("http://127.0.0.1:8093", True, "GLM-5.3-Flash-Q2-DGX-Spark (stock)", False),
         "dispatch": (f"http://{SPARK_IP}:8097", False, "Qwen3.6-35B-A3B-UD-Q4_K_M (stock)", False),

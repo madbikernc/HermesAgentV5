@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-# Version: 1.9.0
+# Version: 1.10.0
+#
+# 1.10.0 (2026-11-19) — `omni` added to spark-2's WAKE_TARGETS (demoted resident -> on-demand,
+# hermes-router.py 2.22.0): byte-verified model+mmproj size 22,018,326,528 + 1,733,692,736 bytes
+# = 23,752,019,264 bytes (22.12GiB), times the same ~1.4535 margin ratio super/coder2/muse use at
+# ctx-size 65536 (22.12 * 1.4535 ≈ 32.1, rounded up to 33). `displaces=("coder", "coder2",
+# "muse")`, matching reflector's own victim set — all three are already on-demand, so none need
+# RESTORE_AFTER_DISPLACE. This supersedes the 1.9.0 note below about `omni` needing a manual
+# `sudo systemctl stop llama-omni` every time: it's now a real WAKE_TARGETS entry, so `make_room()`
+# can both start it on demand and stop it to make room for another role (`coder`'s own
+# `displaces` tuple now includes it — see that entry's own comment). Driven by `coder`'s S39
+# self-repair coding-capability bake-off needing a 45.9GiB candidate to fit on a node that had no
+# free headroom left while every backend stayed pinned resident/on-demand-but-undisplaceable.
 #
 # 1.9.0 (2026-11-16) — `reflector` added to spark-2's WAKE_TARGETS (HermesAgentV6
 # IMPLEMENTATION_PLAN.md GLM-5.3-Flash Paradigm A, Phase 2). required_gib 115 = 79.10 GiB real
@@ -187,7 +199,16 @@ else:
         # Qwen3.8 passed all correctness checks. On-demand rather than always-resident since coding
         # tasks tolerate the wake latency. 23 = 15.65GiB real size * the same ~1.45 margin ratio
         # super's own 17.2GB->25GiB figure used.
-        "coder": ("http://127.0.0.1:8094/health", "llama-coder", 23, ()),
+        # coder = Qwen3-Coder-Next-UD-Q4_K_M, byte-verified 49,301,055,488 bytes (45.92GiB) --
+        # promoted 2026-11-19 over the former Huihui-Qwen3.8-27B-abliterated (15.65GiB) after the
+        # S39 self-repair coding-capability bake-off found zero timeouts on fleet_coder_fix/
+        # fleet_coder_build vs. the old model's 4/10 and 4/8 (see
+        # infra/model-benchmark/spark2-candidate-results.md Phase 7). 67 = 45.92GiB * the same
+        # ~1.4535 margin ratio super/coder2/muse/omni use at ctx-size 65536 (45.92 * 1.4535 ≈
+        # 66.76, rounded up). `displaces=("muse", "omni")` -- deliberately NOT `coder2`, since the
+        # dualcoder draft/review loop needs both coder and coder2 alive together; stopping coder2
+        # right as coder wakes would thrash the one workflow this promotion is for.
+        "coder": ("http://127.0.0.1:8094/health", "llama-coder", 67, ("muse", "omni")),
         # S44 (2026-10-27): "coder2" re-added -- GLM-4.7-Flash-Q4_K_M now, not Muse-Glimmer-30B
         # (see hermes-router.py 2.19.0's changelog), the replacement model decision 1.5.0's own
         # removal comment said was pending. Byte-verified 18,474,983,296 bytes (17.2GiB) -- the
@@ -203,9 +224,13 @@ else:
         # four backends awake at once.
         "muse": ("http://127.0.0.1:8090/health", "llama-muse", 35, ("coder", "coder2")),
         # reflector = GLM-5.3-Flash-Q2-DGX-Spark, byte-verified 84,929,450,144 bytes (79.10GiB) --
-        # see this file's own 1.9.0 changelog entry above for the required_gib derivation and the
-        # `omni` manual-stop caveat.
+        # see this file's own 1.9.0 changelog entry above for the required_gib derivation. The
+        # `omni` manual-stop caveat that entry originally flagged is resolved -- see the 1.10.0
+        # entry above and omni's own WAKE_TARGETS entry below.
         "reflector": ("http://127.0.0.1:8093/health", "llama-reflector", 115, ("coder", "coder2", "muse")),
+        # omni = NVIDIA-Nemotron-3.5-Bolt-74B-A9B + mmproj -- see this file's own 1.10.0 changelog
+        # entry above for the required_gib derivation.
+        "omni": ("http://127.0.0.1:8091/health", "llama-omni", 33, ("coder", "coder2", "muse")),
     }
 
 # Displaced roles that must come back once the displacing role idles out -- the always-resident

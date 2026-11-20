@@ -1,0 +1,9 @@
+[Unit]
+Description=Stop llama-omni if it has sat idle too long (spark-2 only, triggered by hermes-omni-idle-sleep.timer)
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-router/README.md
+
+[Service]
+Type=oneshot
+User=pmoney
+Group=pmoney
+ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-model-idle-sleep.sh omni llama-omni 900
