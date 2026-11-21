@@ -1,6 +1,6 @@
 # HermesAgentV5 — Implementation Plan
 
-**Version:** 3.88.0
+**Version:** 3.91.0
 **Status:** S1–S16 complete (S10's network isolation half is an operator checklist, not yet executed; S12's
 merged mode stays deliberately deferred, per S1's own numbers). S13/S14 were added after a post-S12 currency
 audit found real, live drift the original twelve stages hadn't closed — nano still running, several
@@ -158,6 +158,7 @@ or in `../HermesAgentV4/IMPLEMENTATION_PLAN.md` §6's per-stage accounts.
 | S42 | The communal shelter never gets repaired once built — a direct report ("there is a large shelter with many beds, but it has holes or missing parts. They are not repairing it as a large structure") | ✅ **Done 2026-10-22.** Root-caused in code: `findCommunalShelterNearHome()`, the communal structure's own damage detector (mirrors `findShelterNearHome()` exactly — complete/damaged/null, at least half solid to count as a real target), already existed and was already correct. Its only caller was `communalShelterStep()`, which only runs while a bot is actively pursuing the one-time "build the communal shelter" self-propose goal — and `nextBuilderPriority()` stops ever proposing that goal again the instant `communalShelterSatisfied()` first returns `true`. Once built and bedded, nothing ever looked at it again; a creeper, a stray dig, or an explosion could open a hole in the fleet's one shared bedroom and it would simply stay open. Fix: `index.js` 2.120.0 adds `checkCommunalShelterIntegrity()`, a standalone ROUTINE-tier timer exactly mirroring the existing `checkShelterIntegrity()` (which already self-heals the small individual shelter), targeting the communal geometry and re-running `build_communal_shelter` with the real width/depth already reported — that action's own "already standing" early return makes a call against a genuinely intact structure a safe no-op. Two new `unit.test.mjs` 1.33.0 checks and one new `live.test.mjs` 1.20.0 scenario, all verified live on spark (143 unit, 6 triage, 5 rag-server, 1/1 live — a real hole knocked in a real 5x5 communal shelter via RCON, filled back in by the real action), then deployed to all nine bots across both nodes |
 | S43 | Generalize shelter repair beyond S42 — direct follow-up ("it should recognize: any number of individual shelters; larger shelters as defined by contiguous walls roof and floor, broken only by doors") | ✅ **Done 2026-10-22.** S42's fix still only handled one shelter at a time, via two hand-coded fixed geometries. `shelter.js` 1.3.2 adds `shelterRoomsNear()`/`holesIn()`: reuses `coveredInterior()`'s already-proven, radius-bounded, hole-tolerant flood fill (new optional `radius` and `stopAtDoors` parameters, every existing caller unchanged) instead of `shelterInteriorsNear()`'s strict `enclosedInterior()`, which can only ever answer "is this fully sealed right now" — one hole makes that fill leak without bound and the structure stops reading as a shelter at all. A hole is flagged by a local, shape-agnostic test (a passable, non-door cell surrounded by mostly-solid neighbours), gated by `MIN_SHELTER_ROOM_SPAN` to a room wide enough for that test to mean anything — narrower rooms are deliberately left to the unchanged `findShelterNearHome()` mechanism. New `"patch_shelter"` action (`actions.js` 1.93.0) fills a given hole list directly, no geometry, no door. `index.js` 2.121.0 merges `checkShelterIntegrity()`/`checkCommunalShelterIntegrity()` back into one unified check. **Three real bugs found live, none caught by any mock, each fixed and documented in place:** (1) the neighbour-count heuristic false-positived every interior cell of a 1-wide room (same count a real hole has) — fixed with the span gate. (2) `coveredInterior()`'s fill has never stopped at a doorway (correct for its original living-space caller) and walked straight through a real door into the open world — fixed with `stopAtDoors`. (3) a hole exactly at a corner is invisible to the face-only (`STEPS_6`) flood fill, since its own path back to the interior is two steps, not one — recorded as a `[FLAGGED]` named limitation, not fixed, since the realistic damage case (flat wall/floor/roof) is unaffected and a diagonal fill trades it for an unmeasured broader risk. Verified live on spark: 147 unit checks (3 new general-detection tests, 1 new patch-action test, 1 new unified-check test), both live scenarios passing independently (the original S42 one and a new one proving the full real-hole → general-detection → patch pipeline end to end against the real server), then deployed to all nine bots across both nodes |
 | S44 | Model-swap rollout + `spark`/`spark-2` rebalance, acting on S39's four unpromoted candidate findings | 🟡 Mostly executed — verified live 2026-11-04: `coder2` (GLM-4.7-Flash), `omni` (Nemotron-3.5-Bolt) and `muse` (Nemotron-3-Nano-Omni, text-only) are serving on `spark-2`; `log-analyst` first started 2026-11-04 after a resize and a wake-worker change (see S44's log-analyst item). Originally: planned 2026-10-27, pending the `FLEET_BENCHMARK_DESIGN.md` §9 promotion-gate decision. Four candidates from the 2026-10-24/25 `spark-2` bake-off (`infra/model-benchmark/spark2-candidate-results.md`) beat their live incumbent and still sit as curated, unpromoted `MODEL_SWAP_RECOMMENDATIONS` rows on `hermes-fleetops-ui`'s `/recommendations` page. Plan: force-retire the `coder2` zombie service (marked retired 2026-10-20, confirmed still `active` 2026-10-24), land GLM-4.7-Flash-Q4_K_M in its freed dualcoder-review slot on `spark-2`, split a new dedicated log-analyst role onto `spark` (Hermes-4.3-36B-Q4_K_M, off `super`'s own duty), and rebind `omni`/`muse` to Nemotron-3.5-Bolt-74B-A9B / Nemotron-3-Nano-Omni-30B-A3B-Reasoning (text-only) respectively — placed to recover `spark-2`'s headroom deficit (11-14GB free vs. `spark`'s 27GB) rather than just re-slot each candidate where its incumbent sat. |
+| S47 | Firmament Finance Tracker — Intuit + direct-bank (Wells Fargo, Fidelity, Merrill Lynch, Truliant FCU, Citibank, Chase via Plaid) + direct Schwab (Trader API) + Privacy.com transaction download, correlation, categorization, spending/income/subscription reporting | 📋 Planned 2026-11-20, not executed — gated on S47a confirming the operator's real Intuit product (Mint is dead; Credit Karma has no API), Privacy.com's plan tier, Plaid's actual coverage for the six named institutions, and Schwab's Trader API - Individual approval, before anything else can be built against real data |
 
 ---
 
@@ -5563,6 +5564,121 @@ never given its own S-number either, per the S20 record above).
 
 ---
 
+### S47 — Firmament Finance Tracker: Intuit + direct-bank + direct Schwab transaction download, Privacy.com correlation, expense categorization, spending/income/subscription reporting
+
+**Planned; not executed.** Direct operator request, 2026-11-19 (extended 2026-11-20). Full design:
+[`FINANCE_TRACKER_DESIGN.md`](FINANCE_TRACKER_DESIGN.md) (new document, 1.2.0) — this section is the
+plan-level summary and build sequence; that file is the spec of record, the same split S23/S38/S39/S40
+draw for their own design docs.
+
+**The gap this closes.** The fleet has no view of the operator's personal finances today. The request:
+download transactions from Intuit for the operator's accounts, download transactions directly from the
+operator's own named institutions — Wells Fargo, Fidelity, Merrill Lynch, Truliant Federal Credit Union,
+Citibank, and Chase — regardless of whether a usable QuickBooks company file exists, download Schwab
+investment-account transactions directly via Schwab's own API, download transaction detail from
+Privacy.com via its API, correlate a Privacy.com virtual-card charge with the matching line on its
+funding bank account, categorize expenses across every account, and produce reports — spending,
+income vs. expenses, subscriptions/repeat charges, and further report types later without a rebuild.
+
+**Researched before being specified, the same discipline S25/S38 already applied to their own
+premises — and this one found a real blocking gap, not a clean vendor pick.** Mint, Intuit's own
+personal-finance product, shut down in March 2024 with no API successor (users were steered to Credit
+Karma, which has no public developer API at all). The only Intuit product with a live public API today
+is QuickBooks (Online or Self-Employed) — a bookkeeping product, not a Mint-style tracker. `S47a`
+(design doc §2) is a hard, blocking gate: **which Intuit product, if any, the operator actually has**
+must be confirmed before anything past it can be built, the same role S38a's vendor decision played for
+Market Watch, at higher stakes — here the answer might be "no live Intuit path exists," not just "which
+free source wins." A second, third-party-reported (not Intuit-confirmed) limitation is carried the same
+way: QuickBooks' own raw bank-feed "For Review" items may not be exposed by the public API at all, only
+transactions already added/matched into the books. Privacy.com's half is the clean side of this
+design — a real, current, documented API — gated only on the operator's plan tier including API access
+(Privacy Plus/$5-mo or higher, not the free Personal plan).
+
+**A second, independent access path was added on direct operator request, 2026-11-19: pull transactions
+straight from six named institutions** — Wells Fargo (bank), Fidelity, Merrill Lynch, Truliant Federal
+Credit Union, Citibank (credit card), and Chase (credit card) — rather than depending solely on whatever
+ends up inside a QuickBooks company file. None of the six publishes a retail developer API of its own;
+the CFPB's Section 1033 "open banking" rule, which would have forced one, is enjoined and under rewrite
+as of this writing, so the real path is a licensed data aggregator with its own bank agreements. Plaid is
+the chosen candidate — a real, documented API, and (the fact that makes this tractable for a personal
+build) a genuinely free Trial plan for developer teams created on or after 2026-04-15, covering real
+production data for up to 10 linked accounts across an eight-product bundle including both Transactions
+and Investments. Coverage is confirmed for two of the six — Chase via JPMorganChase's own renewed
+(September 2025) Plaid data-access agreement, and Wells Fargo via Plaid's own published institution
+page — and unconfirmed for the other four (Citibank, Truliant FCU, Fidelity, Merrill Lynch), to be
+checked directly before `S47a` is called done. Design doc §2a has the full per-institution evidence and
+the Plaid Link mechanics, including the one real new constraint this path adds: Plaid Link's one-time
+per-institution consent step needs a real browser session and, unlike Intuit's OAuth redirect, cannot be
+automated headlessly.
+
+**A third access path, added the next day on direct operator request (2026-11-20): read Schwab investment
+accounts directly, not through Plaid.** Schwab turns out to be a real exception among every institution
+checked so far — it runs its own official, retail-individual-facing developer API (the Trader API,
+successor to the discontinued TD Ameritrade API), with a product literally named "Trader API -
+Individual" for exactly this use. Access needs two separate manual approval gates (developer-account
+review, then product-access review) with no published turnaround time, and API pricing was not confirmed
+(expected free like its TD Ameritrade predecessor, but unverified). The most significant finding:
+Schwab's refresh token appears to last only about 7 days with no programmatic renewal — far more
+demanding than Intuit's ~100-day staleness or Plaid's occasional per-Item lapse — and whether the daily
+sync's own routine use extends that window is itself unconfirmed. No sandbox was found for this product
+either, so live verification may be the only way to test it at all. Design doc §2b has the full writeup.
+
+**Correlation has one more real open measurement, not assumed.** Whether a Privacy.com virtual-card
+charge posts to its funding account as its own line item or as a batched settlement is unverifiable
+from this repo — design doc §5 specifies the join heuristic (amount + a ±3-day date window) for the
+per-purchase case and names the batched case as a fallback shape, to be settled against the operator's
+real QuickBooks data in `S47a`/`S47c`, not guessed at here.
+
+**Categorization follows Market Watch's S38h shape exactly, not a new mechanism.** Rule-based first
+(`categories.yaml`, editable like `tags.yaml`/`feeds.yaml`/`topics.yaml`), an LLM fallback through
+`dispatch` for whatever the rules miss (screened by Layer 1/2, same sanitization S38h's tag-scout
+already built), every low-confidence verdict queued for a Matrix reply rather than guessed into a
+report.
+
+**Build sequence** (detail in the design doc §14): **S47a** vendor/access decision — Intuit, Privacy.com,
+Plaid's coverage/tier for the six named institutions (§2a), and Schwab's Trader API - Individual approval
+(§2b) — blocking; **S47b** `tools/hermes_finance_common.py` + `finance.db` schema +
+`tools/hermes-finance-sync.py`'s ingest half for every confirmed source (Intuit's `TransactionList` pull
+with refresh-token rotation, Plaid's `/transactions/sync` cursor-based pull plus Investments endpoints for
+any brokerage account, and Schwab's Trader API pull) + one `hermes-finance-auth-setup.py` consent script
+covering all three one-time flows — the Schwab one built to be re-run routinely given §2b's ~7-day
+refresh-token cliff; **S47c** the Privacy.com half, correlation, rule-based categorization; **S47d** the
+`dispatch` categorization fallback; **S47e** `tools/hermes-finance-report.py`; **S47f**
+`tools/hermes-finance-gate.py`; **S47g** offline tests + live verification; **S47h** (optional follow-on)
+a `/finance` page on `hermes-fleetops-ui.py`, sequenced after real data exists to browse, the same way
+S38i followed S38a-h.
+
+#### Risks and open questions
+
+Full list in the design doc §13; four worth repeating here because they block or complicate everything
+else: (1) `S47a` itself — if the operator has no live QuickBooks Online/Self-Employed company file with
+real accounts connected, this stage's Intuit half cannot be built against a current Intuit product at
+all, and needs a different premise entirely (not assumed here); (2) four of the six directly-named
+institutions (Citibank, Truliant FCU, Fidelity, Merrill Lynch) have unconfirmed Plaid coverage, and Plaid
+Link's one-time consent step cannot be automated headlessly, unlike Intuit's OAuth redirect; (3) Schwab's
+refresh token appears to expire in ~7 days with no programmatic renewal — if confirmed, the most demanding
+re-consent cadence of any source here, and worth a monitored "about to expire" alert rather than discovery
+via a failed sync; (4) this is the most sensitive data this fleet has handled — real balances, real
+spending, real merchant names — and the new `finance.db` store and every Vaultwarden secret this stage
+adds (Intuit's, Plaid's, Schwab's, Privacy.com's) must stay out of the git tree, the same way `market.db`
+already does by living under `/mnt/hermes-data/`.
+
+**Exit gate.** A real transaction pull from every confirmed source — Intuit where applicable, Plaid for
+whichever of the six named institutions §2a confirms, Schwab, and Privacy.com — each confirmed against
+the operator's own account activity; a real correlated pair; a real weekly spending report and monthly
+income-vs-expense/subscriptions report, citing real numbers an operator can check independently against
+their own statements; and a real `finance <command>` reply through the actual gate and actual Matrix
+round trip, not a dry run.
+
+**Benchmark evaluation (`CLAUDE.md` 1.3.0), recorded 2026-11-19.** Evaluated against
+`FLEET_BENCHMARK_DESIGN.md` §4 — no new scenario needed. `S47b/c/e/f` make no model call at all; `S47d`'s
+categorization fallback is the same shape and role as Market Watch's S38h tag-scout — a one-off advisory
+classification through `dispatch`'s existing Tier 0 general-capability coverage, never the source of an
+un-reviewed fact. Not coding capability on `coder`/`coder2`, so the §6.7/§6.8 candidate-table rule does
+not apply. Full record: `FINANCE_TRACKER_DESIGN.md` §15.
+
+---
+
 ### 5.1 Hard ordering constraints
 
 - S2 (memory) **before** S3 (pointer envelopes) — nothing to point at otherwise
@@ -5642,6 +5758,10 @@ never given its own S-number either, per the S20 record above).
   the S9/registry-before-S20 line above is: S38's MVP makes no model call at all, but any vendor-supplied
   free text that might reach a model later (a company description, an index-membership note) must go
   through the router's Layer 1/2 first, same as every other inbound call.
+- **S22 (screener) before S47** — already satisfied, same reasoning as S22-before-S38. S47's sync/
+  correlation/report path makes no model call at all; `S47d`'s categorization fallback is the one real
+  call, and it is screened by the router's Layer 1/2 first, same as every other inbound call, before it
+  ever reaches `dispatch`.
 
 ---
 
@@ -5864,3 +5984,6 @@ reference chain across two retired repos settles it in favour of forking.
 | 3.86.0 | 2026-10-27 | **S44 added: direct operator request to turn S39's four unpromoted bake-off findings into a model-swap-plus-load-rebalance plan.** Covers `hermes-fleetops-ui`'s `MODEL_SWAP_RECOMMENDATIONS` rows -- GLM-4.7-Flash-Q4_K_M into dualcoder-review on `spark-2` (replacing the confirmed-still-resident `coder2`), a new dedicated log-analyst role on `spark` (Hermes-4.3-36B-Q4_K_M, split off `super`'s own duty), `omni` rebound to Nemotron-3.5-Bolt-74B-A9B, `muse` rebound to Nemotron-3-Nano-Omni-30B-A3B-Reasoning (text-only) -- sized from `infra/model-benchmark/spark2-candidate-sequencing-runbook.md`'s roster table and placed to recover `spark-2`'s headroom deficit (11-14GB free vs. `spark`'s 27GB) rather than re-slot each candidate where its incumbent happened to sit. Names the `coder2` zombie-service bug (marked retired 2026-10-20, confirmed still active 2026-10-24) as a hard prerequisite, and S35 (untracked backend launch scripts) as an opportunistic close-out since the rollout requires hand-editing those same host-local files. Planned only -- no model deployed, no service touched. Minor bump -- a new stage added, nothing prior reversed. |
 | 3.87.0 | 2026-11-04 | **S44 status corrected from "planned" to live-verified**: `coder2`/`omni`/`muse` swaps confirmed serving on `spark-2`; `log-analyst` installed but never started — new open item recording why (29GiB wake threshold vs ~21GiB free, and the threshold itself omits the 16GiB 64k-ctx KV cache; true need ≈37GiB). Added a §4.5 sub-table of every model backend as read live off both nodes, correcting `dispatch`'s quant (UD-Q4_K_M, not Q8). Minor bump — new open item and snapshot, no prior record rewritten. |
 | 3.88.0 | 2026-11-04 | S44's log-analyst open item resolved and recorded with measurements (16k/q8_0 KV, 22.9GiB, wake-worker displacement of an idle super, hermes-logs fallback, ufw 8098); §4.5 super/log-analyst rows updated; S35 marked covered for every live backend now that super/dispatch/coder units and start scripts are tracked. |
+| 3.89.0 | 2026-11-19 | **S47 added: direct operator request** — download Intuit transactions, download Privacy.com transaction detail via its API, correlate a Privacy.com charge with its matching bank-account line, categorize expenses across all accounts, report on spending/income-vs-expense/subscriptions. Full spec in new `FINANCE_TRACKER_DESIGN.md` (1.0.0). Vendor research done before writing the plan-level summary down, same discipline S25/S38 already applied: Mint is confirmed shut down (2024) with no API successor, so `S47a` — confirming which real Intuit product, if any, the operator has — is a hard blocking gate, not a formality; Privacy.com's API is live and documented but needs a paid plan tier, and the exact posting shape of a Privacy.com charge on its funding account is a real open measurement against the operator's own data, not assumed. Categorization reuses S38h's rule-plus-`dispatch`-fallback shape exactly. New §5.1 ordering constraint (S22 before S47, already satisfied). Planned only — nothing built, no model deployed. Minor bump — a new stage added, nothing prior reversed. |
+| 3.90.0 | 2026-11-19 | **S47 extended: direct operator request** — added a second, independent access path (design doc §2a) to pull transactions straight from six named institutions (Wells Fargo, Fidelity, Merrill Lynch, Truliant Federal Credit Union, Citibank, Chase) rather than depending solely on an unconfirmed QuickBooks company file. Research done before specifying: none of the six publishes a retail developer API; the CFPB's Section 1033 open-banking rule that would have forced one is enjoined and under rewrite as of this writing; Plaid is the chosen aggregator, confirmed live/current for Chase (JPMorganChase's own renewed September 2025 data-access agreement) and listed for Wells Fargo on Plaid's own institutions page, unconfirmed for Citibank/Truliant FCU/Fidelity/Merrill Lynch; Plaid's new free Trial plan (real production data, up to 10 Items, developer teams from 2026-04-15) fits this scope if the fleet's own team qualifies, flagged unconfirmed. `S47a`'s scope widened to cover this vendor/tier decision too; `S47b` widened to build both Intuit's and Plaid's ingest halves together. `FINANCE_TRACKER_DESIGN.md` now 1.1.0. Planned only — nothing built, no model deployed. Minor bump — a new access path added alongside the existing one, nothing prior reversed. |
+| 3.91.0 | 2026-11-20 | **S47 extended again: direct operator request** — added a third, independent access path (design doc §2b) to read Schwab investment accounts directly via Schwab's own Trader API, rather than through Plaid. Schwab is the first institution found with a genuine retail-individual developer API (successor to the discontinued TD Ameritrade API), gated on two manual approval reviews with no published SLA and unconfirmed pricing. Biggest finding: Schwab's refresh token appears to last only ~7 days with no programmatic renewal (community-reported, not Schwab-confirmed) — the most demanding re-consent cadence of any source in this design if confirmed, versus Intuit's ~100-day staleness or Plaid's occasional per-Item lapse; whether routine daily use extends it is itself unconfirmed. No sandbox found either, so live verification may be the only way to test it. `S47a`'s scope widened again to cover Schwab's approval/pricing; `S47b` widened to build all three ingest halves together. `FINANCE_TRACKER_DESIGN.md` now 1.2.0. Planned only — nothing built, no model deployed. Minor bump — a new vendor path added alongside the existing two, nothing prior reversed. |
