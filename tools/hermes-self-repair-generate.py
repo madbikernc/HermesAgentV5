@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.7.0
+#
+# 1.7.0 (2026-11-20) — direct operator request, "see what went wrong and fix" (self-repair review
+# follow-up): two tasks were found stale -- 83661fa53e2a414d (8 days) and 3a40b7d4a3e64347 (62
+# days), both stuck reading state="done" forever with NO matching job ever created in the broker
+# at all. submit_apply_job() now retries once after a 10s delay (the same shape publish_result()
+# already uses for its own MEMORY_URL/BUZZ_URL posts) and, on a second failure, marks the task
+# "apply-submit-failed" (a terminal state, not "done") and posts a FleetOps notice via
+# hermes_self_repair_notice.py -- instead of silently logging a warning and leaving the task
+# looking exactly like one still quietly in progress. The diff itself is unaffected either way:
+# it was and still is durably recorded in the phase="diff" turn regardless of whether the broker
+# hand-off succeeds, so a human can resubmit it by hand from that record. Companion fix in
+# hermes-self-repair-apply.py 2.1.0 covers the other half of the same failure class (a broker job
+# that WAS created but died after exhausting its attempts, also found leaving its task stuck at
+# "done" -- task fa2eb82b21af45b8).
 #
 # 1.6.0 (2026-11-14) — direct operator request: the verify gate's cheap deterministic checks run
 # on every draft, before a reviewer sees it (mechanical_issues()): the syntax check
@@ -632,22 +646,44 @@ def run_security_phase(task_id, candidate_content):
     return sec_coder, sec_coder2, meta_on_coder, meta_on_coder2
 
 
-def submit_apply_job(task_id):
+def submit_apply_job(task_id, path):
     """Deterministic hand-off to Step 3, not an application of anything — this function only ever
     POSTs a job description to the broker. job id == task_id (not a random id) so a retried
     publish/enqueue is a no-op duplicate on the broker's own side (POST /jobs dedups by id),
-    never a second apply attempt for the same task. Best-effort: a failure here is logged, not
-    fatal to this task's own 'done' result, since the diff is already durably recorded in
-    hermes-memory's phase="diff" turn regardless — a human or a later manual submit can still
-    trigger Step 3 from that record."""
-    try:
-        _post(f"{BROKER_URL}/jobs", {
-            "id": task_id, "type": "selfrepair-apply", "payload": {"task_id": task_id},
-        }, BROKER_TOKEN)
-        log(f"task {task_id!r}: selfrepair-apply job submitted")
-    except Exception as exc:
-        log(f"task {task_id!r}: could not submit selfrepair-apply job ({exc}) — diff is still "
-            f"recorded in hermes-memory (phase=diff turn) for a manual/later submit")
+    never a second apply attempt for the same task.
+
+    Retries once after a short delay, the same shape publish_result() already uses for its own
+    MEMORY_URL/BUZZ_URL posts. Real gap found live 2026-11-20: a silent failure here used to leave
+    the task sitting at state="done" forever, with no broker job ever created and nothing to tell
+    a human it never reached Step 3 — two tasks were found stale this way, 8 and 62 days old,
+    neither visible as a problem anywhere. On final failure this now marks the task
+    "apply-submit-failed" (a terminal state, not "done") and posts a FleetOps notice, so it shows
+    up instead of silently vanishing — the diff itself is unaffected either way, since it is
+    already durably recorded in hermes-memory's phase="diff" turn and a human can resubmit the
+    broker job by hand from that record once the underlying issue (broker down, etc.) is fixed."""
+    for attempt in range(2):
+        try:
+            _post(f"{BROKER_URL}/jobs", {
+                "id": task_id, "type": "selfrepair-apply", "payload": {"task_id": task_id},
+            }, BROKER_TOKEN)
+            log(f"task {task_id!r}: selfrepair-apply job submitted")
+            return
+        except Exception as exc:
+            if attempt == 0:
+                log(f"task {task_id!r}: could not submit selfrepair-apply job ({exc}), "
+                    f"retrying once after 10s")
+                time.sleep(10)
+                continue
+            log(f"task {task_id!r}: could not submit selfrepair-apply job again after retry "
+                f"({exc}) — marking apply-submit-failed so this doesn't silently read as 'done' "
+                f"forever; the diff is still recorded in hermes-memory for a manual submit")
+            set_task_state(task_id, "apply-submit-failed")
+            notice.fleetops_notice(
+                f"[self-repair] Task {task_id} ({path}) converged and passed security review, but "
+                f"handing it to Step 3 (the apply worker) failed twice: {exc}. Nothing was applied. "
+                f"The diff is recorded in hermes-memory (phase=diff turn) for a manual "
+                f"selfrepair-apply resubmit once the underlying issue is fixed.",
+                "selfrepair-generate", log)
 
 
 def compute_diff(path, original_content, candidate_content):
@@ -864,7 +900,7 @@ def process_one():
     log(f"task {task_id!r}: done, converged after {len(transcript)} round(s), "
         f"diff is {len(diff_text)} chars")
     if diff_text.strip():
-        submit_apply_job(task_id)
+        submit_apply_job(task_id, path)
     else:
         log(f"task {task_id!r}: empty diff (byte-identical) — no selfrepair-apply job to submit")
     return True

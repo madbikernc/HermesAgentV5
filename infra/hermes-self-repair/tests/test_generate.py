@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 1.3.0
+# Version: 1.4.0
+#
+# 1.4.0 (2026-11-20) — generate 1.7.0: submit_apply_job() retries a failed broker POST once, then
+# marks the task "apply-submit-failed" and posts a FleetOps notice, instead of leaving it reading
+# "done" forever with no broker job and no human-visible signal (two real tasks were found stuck
+# this way, 8 and 62 days stale).
 #
 # 1.3.0 (2026-11-14) — generate 1.6.0: the verify gate's syntax and behavior-change checks run on
 # every draft before review, a failure goes back for revision without a model call, and a judge's
@@ -227,6 +232,43 @@ def main():
     check("the review prompt requires a runtime call path",
           "call path" in mod.REVIEW_SYSTEM_PROMPT and "ISSUES" in mod.REVIEW_SYSTEM_PROMPT)
     check("draft/revise prompts carry today's date", time.strftime("%Y-%m-%d") in mod.dated(mod.DRAFT_SYSTEM_PROMPT))
+
+    print("[submit_apply_job: a broker POST that never succeeds is visible, not silent (2026-11-20)]")
+    gen2 = load()
+    gen2.time.sleep = lambda s: None  # no real 10s wait in a test
+    calls = []
+    gen2._post = lambda *a, **k: (calls.append(a) or {})
+    gen2.submit_apply_job("tX", "services/minecraft-bots/x.js")
+    check("a clean POST succeeds on the first try, no retry needed", len(calls) == 1)
+
+    calls.clear()
+    states, posted2 = [], []
+    gen2.set_task_state = lambda tid, state: states.append((tid, state))
+    gen2.notice.fleetops_notice = lambda body, sender, log=None: posted2.append((body, sender))
+
+    def fail_once_then_ok(*a, **k):
+        calls.append(a)
+        if len(calls) == 1:
+            raise OSError("connection refused")
+        return {}
+    gen2._post = fail_once_then_ok
+    gen2.submit_apply_job("tY", "tools/y.py")
+    check("a transient failure is retried once before giving up", len(calls) == 2, calls)
+    check("a retry that then succeeds leaves the task alone (no state change, no notice)",
+          states == [] and posted2 == [])
+
+    calls.clear()
+    def always_fail(*a, **k):
+        calls.append(a)
+        raise OSError("broker unreachable")
+    gen2._post = always_fail
+    gen2.submit_apply_job("tZ", "tools/z.py")
+    check("two failed attempts, then give up", len(calls) == 2, calls)
+    check("the task is marked apply-submit-failed, not left reading 'done' forever",
+          states == [("tZ", "apply-submit-failed")], states)
+    check("a FleetOps notice is posted naming the task and the path",
+          len(posted2) == 1 and "tZ" in posted2[0][0] and "tools/z.py" in posted2[0][0]
+          and posted2[0][1] == "selfrepair-generate", posted2)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

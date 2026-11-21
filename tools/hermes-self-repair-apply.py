@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-# Version: 2.0.0
+# Version: 2.1.0
+#
+# 2.1.0 (2026-11-20) — direct operator request, "see what went wrong and fix" (self-repair review
+# follow-up): run_job() now sets state="apply-failed" at the exact moment it exhausts
+# MAX_ATTEMPTS and escalates, instead of leaving the task reading "done" forever. Real gap found
+# live: task fa2eb82b21af45b8 (2026-11-07, this pipeline's first-ever live task) hit the
+# then-untriggered corrupt-patch bug, its broker job correctly went 'dead' after 3 attempts, and
+# escalate() correctly fired a FleetOps notice + email at the time -- but nothing ever updated
+# hermes-memory's own task state, so 13 days later the task still read "done", which
+# hermes-self-repair-bridge.py's ACTIVE_TASK_STATES reads as "still in progress", making a
+# permanently-failed task indistinguishable from one quietly working unless a human went digging
+# into the broker's jobs.db by hand. "apply-failed" is a terminal state (outside
+# ACTIVE_TASK_STATES already, no change needed there), the same role "verify-failed" already plays
+# for the verification-failure path a few lines below in do_apply(). Companion fix in
+# hermes-self-repair-generate.py 1.7.0 covers the other half of the same failure class (a broker
+# job that was never created in the first place, also found leaving its task stuck at "done" --
+# tasks 83661fa53e2a414d and 3a40b7d4a3e64347).
 #
 # 2.0.0 (2026-11-13) — direct operator request (self-repair fidelity pass). Verification now
 # proves something for the code this pipeline actually fixes:
@@ -769,6 +785,7 @@ def run_job(job):
     attempts = load_attempts(task_id)
     if attempts >= MAX_ATTEMPTS:
         escalate(task_id, "refusing further attempts until reset")
+        set_task_state(task_id, "apply-failed")
         return 1, f"already at {attempts} attempts for task {task_id}, escalated instead of retrying"
 
     exit_code, error = do_apply(task_id)
@@ -779,7 +796,19 @@ def run_job(job):
         attempts += 1
         save_attempts(task_id, attempts)
         if attempts >= MAX_ATTEMPTS:
+            # Real gap found live 2026-11-20: escalate() already posts a FleetOps notice + email
+            # here, but nothing ever updated this task's own hermes-memory state -- it stayed
+            # "done" forever (the state do_apply() requires to even attempt applying), which
+            # ACTIVE_TASK_STATES in hermes-self-repair-bridge.py reads as "still in progress", so a
+            # task whose apply permanently failed looked identical to one quietly working. Found
+            # via task fa2eb82b21af45b8 (2026-11-07's first-ever live task): its broker job
+            # correctly went 'dead' after 3 attempts and escalate() fired, but 13 days later the
+            # task itself still read "done" in hermes-memory, invisible to any human or UI
+            # checking task state rather than digging into broker/jobs.db by hand. "apply-failed"
+            # is a terminal state (not in ACTIVE_TASK_STATES), same role "verify-failed" already
+            # plays for the verification-failure path just below in do_apply().
             escalate(task_id, error)
+            set_task_state(task_id, "apply-failed")
     # exit_code == 2 (refused, not retryable) intentionally does NOT touch the attempt counter —
     # a fundamentally wrong request (bad state, unparseable diff, denied path) will never succeed
     # on retry, so counting it toward MAX_ATTEMPTS and escalating would be noise, not signal.

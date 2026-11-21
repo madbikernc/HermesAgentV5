@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 7.2.0
+**Version:** 7.3.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -251,6 +251,30 @@ offer, which will require `state == "verified"` before ever proposing anything t
 broker job itself still reports success once the mechanical apply succeeds — "did the git
 operation work" and "is this fix trustworthy enough to promote" are tracked as two separate
 concerns, not conflated into one exit code.
+
+**Two more terminal states, added 2026-11-20 after a real review found two failure classes that
+used to leave a task reading `done` forever** — both play the same role `verify-failed` already
+does, just one step earlier in the pipeline:
+- **`apply-failed`** (`hermes-self-repair-apply.py` 2.1.0) — the mechanical `git apply`/commit/push
+  itself failed and retries were exhausted (`run_job()`'s `MAX_ATTEMPTS`). The broker job correctly
+  goes `dead` and `escalate()` correctly fires either way; what was missing was ever reflecting
+  that back onto the task's own state, which stayed `done` — indistinguishable from "still working"
+  to `hermes-self-repair-bridge.py`'s `ACTIVE_TASK_STATES` and to anyone reading task state instead
+  of digging into the broker's `jobs.db`. Found live via task `fa2eb82b21af45b8` (2026-11-07's
+  first-ever real task, above): its job had been sitting `dead` for 13 days while the task still
+  read `done`.
+- **`apply-submit-failed`** (`hermes-self-repair-generate.py` 1.7.0) — the OTHER half: Step 2 never
+  even got as far as creating a broker job (`submit_apply_job()`'s own `POST /jobs` failed and the
+  prior version only logged a warning). Now retries once after 10s, then marks this state and posts
+  a FleetOps notice instead of silently moving on. Found live via two tasks with no matching job in
+  the broker's database at all — one 8 days stale, one 62 days stale (predating this worker's own
+  2026-09-18 hand-off code).
+
+Neither state is in `hermes-self-repair-bridge.py`'s `ACTIVE_TASK_STATES`, so both correctly read as
+concluded/not-active immediately — no change needed there. The diff itself is never lost either
+way: it is durably recorded in the task's `phase="diff"` hermes-memory turn regardless of whether
+the broker hand-off or the apply itself succeeds, so a human can always resubmit by hand from that
+record once the underlying cause (a corrupt patch, a down broker, etc.) is understood.
 
 **Post-promotion** (`tools/hermes-self-repair-verify-live.py`, `check-service <unit>`) polls
 `systemctl is-active`, same shape as `hermes-remediate-worker.py`'s own `do_restart_service()`.
@@ -828,6 +852,7 @@ generator never touches.
 
 | Version | Date | Change |
 |---|---|---|
+| 7.3.0 | 2026-11-20 | Direct operator request, "see what went wrong and fix" (a routine review-queue check found 4 silently-stranded tasks). Two new terminal states close the gap: `apply-failed` (apply 2.1.0) when the mechanical apply itself exhausts its retries, `apply-submit-failed` (generate 1.7.0) when Step 2 can't even hand a job to the broker after one retry — both used to leave a task reading `done` forever, invisible to anyone not reading the broker's `jobs.db` directly. Neither needs an `ACTIVE_TASK_STATES` change (both already read as concluded). Found and explained by task fa2eb82b21af45b8 (apply-failed) and two older tasks with no broker job at all (apply-submit-failed, one predating this worker's 2026-09-18 hand-off code). |
 | 7.2.0 | 2026-11-14 | Direct operator request. Added "Pre-review checks": verify's syntax and behavior-change checks run on every draft before review (generate 1.6.0), with the `node --check` package-type finding. |
 | 7.1.0 | 2026-11-13 | Direct operator request. Added "Improvements pass": per-kind goal-abandon signatures, backend outages as FleetOps notices, the security-phase 400 diagnosed (leaked reasoning stripped, refusals carry the router's reason), deadlocks and recurring promoted fixes posted to FleetOps, hourly counted sightings. "Known limits" updated: index.js/actions.js are split (59b098f). |
 | 7.0.0 | 2026-11-13 | Direct operator request. Added "Fidelity pass": screening hand-off and transient retries (generate 1.3.0/1.4.0), error retries (bridge 2.4.x), skip from awaiting-completeness (gate 1.2.0), JS-aware verification with the domain test suite and revert-on-failure (verify 2.0.0, apply 2.0.0 -- reverses Step 4's "never reverted" for a failed commit), tests written from the applied fix and required to fail without it, emitter-based targeting with context, crash/OOM grouping (bridge 2.5.0, triage 1.8.0), and the outcome log + FleetOps funnel. |
