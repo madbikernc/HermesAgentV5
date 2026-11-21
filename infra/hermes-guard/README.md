@@ -1,6 +1,6 @@
 # hermes-guard — recreate checklist
 
-**Version:** 4.3.0
+**Version:** 4.4.0
 
 Layer 2 of screening (HermesAgentV5 S5, `../../HermesAgentV5/IMPLEMENTATION_PLAN.md`). **Live
 model since S22d (2026-10-09), verified 2026-11-04:** `proventra/mdeberta-v3-base-prompt-injection`
@@ -206,6 +206,50 @@ Zero false positives at every gate, including deliberate hard negatives. This se
 badly under-sensitive. The replacement decision is `IMPLEMENTATION_PLAN.md` S22b; until it lands, Layer 2
 should be understood as catching explicit jailbreak phrasing and nothing else.
 
+## Classifier verdicts are now confirmed before blocking (2026-11-20, hermes-guard 2.3.0)
+
+**Why.** `hermes-guard-report` flagged `node=selfrepair` as a repeated blocked caller: 5 blocks in
+72h, all scored 0.97-0.997 MALICIOUS. Pulled the actual screened text behind them — ordinary
+Minecraft-bots incident write-ups (`"The bot's self-defense module is calling a non-existent
+method \`nearestEntity\`..."`, `"a goal claimed complete with no real success behind it..."`), not
+attacks. Fleet-wide, this had quietly dropped **13 of 85 self-repair tasks (~15%) since
+2026-11-13** — real incidents that never reached a model at all, a separate cost from the
+coder-model quality gap tracked elsewhere in this project. Direct operator request: fix the guard
+itself, without exempting self-repair's intake call from screening.
+
+**What changed.** In `classifier` mode, a MALICIOUS verdict is no longer returned as final — it is
+first confirmed by asking the stock LLM the same yes/no question `llm` mode uses
+(`GUARD_SYSTEM`, byte-identical, via `GUARD_LLM_URL`/`GUARD_LLM_ROLE` — `dispatch`'s own
+already-resident loopback backend, `127.0.0.1:8097` on spark, never on-demand). Only a confirmed
+NO downgrades the verdict to BENIGN; a confirmed YES, or confirmation itself failing (unreachable,
+timeout, off-format reply), keeps MALICIOUS. The classifier alone still decides every BENIGN
+verdict with zero added latency — confirmation only fires on the minority of calls the classifier
+flags, so ordinary fleet traffic is unaffected.
+
+**Measured, both corpora:**
+
+| Set | Classifier alone | Classifier + confirm |
+|---|---|---|
+| Official 36-case set (`hermes-guard-eval.py`) | TP=17 FP=1 acc=0.944 | TP=17 FP=0 acc=0.972 |
+| 13 real self-repair intake blocks (2026-11-13 → 2026-11-19 production traffic) | 13/13 blocked (0 recovered) | 1/13 blocked (12 recovered) |
+
+Zero true positives lost on either corpus: `dispatch` alone is 18/18 on the 36-case set, so every
+case the classifier correctly flags, `dispatch` also independently flags — confirmation can only
+remove a false positive, never a true one, which is exactly what the numbers show. The one
+self-repair case that stays blocked is itself genuinely ambiguous: an incident report about the
+**egress** guard denying an outbound call, phrased as "Fix X's own behavior... NEVER weaken,
+bypass, or special-case Y" — `dispatch` flags it independently too, so this is not a regression,
+it's the confirmation step doing its job on a hard case.
+
+**Rollback:** `GUARD_CONFIRM=0` (one-line unit edit) returns to classifier-only blocking.
+Confirmation depends on `dispatch` (always resident on spark, not cross-node); on confirmation
+failure the classifier's own MALICIOUS verdict is kept, not discarded, so a `dispatch` outage
+degrades to today's classifier-only behavior rather than opening a new bypass.
+
+**Not done, and deliberately so:** no change to self-repair's own intake `screen()` call, no new
+header or role exemption, no per-caller special case anywhere in this service. Every MALICIOUS
+verdict from every caller now gets the same confirmation pass.
+
 ## The verdict log is a catch log, not a screening log
 
 `hermes-router.py`'s `memory_log_guard_verdict()` fires only on a non-clean outcome, so the `guard-log`
@@ -266,6 +310,7 @@ elapsed time and leaves the judgement to the reader.
 
 | Version | Date | Change |
 |---|---|---|
+| 4.4.0 | 2026-11-20 | **Classifier verdicts are now confirmed before blocking.** Direct operator request, after `hermes-guard-report` flagged `node=selfrepair` as a repeated blocked caller (5/72h, all 0.97-0.997 MALICIOUS on ordinary incident-triage text — 13/85 self-repair tasks, ~15%, blocked at intake since 2026-11-13). `hermes-guard.py` 2.3.0: a classifier-mode MALICIOUS verdict is now confirmed via `dispatch`'s stock-LLM question before blocking; a confirmed NO downgrades to BENIGN, a confirmed YES or a failed confirmation keeps MALICIOUS. Measured: 36-case set TP=17 FP=0 (was FP=1); 13 real self-repair blocks drop to 1/13 (was 13/13), with zero true positives lost on either corpus. `GUARD_CONFIRM=0` is the rollback. Self-repair's own intake screening is untouched — no exemption, no header, no per-caller special case. |
 | 1.0.0 | 2026-08-29 | Initial version — S5: `hermes-guard.py` built, weights downloaded (HF gate had already cleared), deployed on Watch, wired into `hermes-router.py` as Layer 2, verdicts logged to `hermes-memory`. |
 | 2.0.0 | 2026-10-09 | **Major — reverses what this file implied about Layer 2's coverage.** Added the S22a measurement: this checkpoint is a jailbreak detector deployed where an indirect-injection detector was needed, per its own model card, and the composite L1+L2 gate catches 6 of 18 attacks (indirect 1/6, paraphrased 1/6) with zero false positives. Records three things not to do — do not trust a clean verdict as safety, do not retune `THRESHOLD` (no cutoff separates the distributions; best achievable accuracy 0.722), do not upgrade to the 86M (same label set per its card) — and that the `guard-log` verdict log is a catch log that can never contain a false negative, contrary to `memory_log_guard_verdict()`'s own docstring. |
 | 3.0.0 | 2026-10-09 | **Major — Layer 2 is no longer Prompt Guard 2.** S22c swapped it for a stock LLM asked a narrow yes/no question: 18/18 on the case set, all three bands 6/6, verified end to end through the router. Records that `omni`, the chosen independent arm, was measured non-viable (94.4% timeout at 6-way concurrency against `dispatch`'s 0%) and that `dispatch` is therefore an interim arm with the independence objection unresolved; the measured latency cost (~150ms to ~380-460ms sequential, ~1.2s p50 under concurrency, paid on every router request); and that rollback is the one-line `GUARD_MODE=classifier`. |

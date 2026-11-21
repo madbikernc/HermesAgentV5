@@ -29,15 +29,22 @@ Environment="GUARD_PORT=8096"
 # concurrency) and does not double the load on `dispatch`.
 #
 # ROLLBACK, in order of preference:
-#   1. GUARD_MODE=llm with GUARD_LLM_URL=http://127.0.0.1:8097 / GUARD_LLM_ROLE=dispatch
+#   1. GUARD_CONFIRM=0 (classifier-only blocking, see 2.3.0 below)
+#   2. GUARD_MODE=llm with GUARD_LLM_URL=http://127.0.0.1:8097 / GUARD_LLM_ROLE=dispatch
 #      (18/18, but ~1.2s p50 under concurrency and no independence)
-#   2. GUARD_MODEL_DIR=/mnt/hermes-data/models/prompt-guard-2-22m (the original, 4/18)
+#   3. GUARD_MODEL_DIR=/mnt/hermes-data/models/prompt-guard-2-22m (the original, 4/18)
 Environment="GUARD_MODE=classifier"
 Environment="GUARD_MODEL_DIR=/mnt/hermes-data/models/mdeberta-prompt-injection"
-# Retained for rollback option 1; ignored while GUARD_MODE=classifier. MUST stay a backend, never
-# hermes-router (port 8080) -- the router screens every request it proxies through this service, so
-# a router URL would screen its own screening calls forever. hermes-guard.py refuses to start if
-# GUARD_LLM_URL looks like the router.
+# 2.3.0 (2026-11-20): a classifier MALICIOUS verdict is confirmed via GUARD_LLM_URL/GUARD_LLM_ROLE
+# below (the same question GUARD_MODE=llm asks) before blocking -- see README's "Classifier
+# verdicts are now confirmed" section. Measured: recovers 12 of 13 real self-repair intake blocks
+# and removes the classifier's one false positive on the 36-case set, with zero true positives
+# lost on either. GUARD_CONFIRM=0 is the one-line rollback to classifier-only blocking.
+Environment="GUARD_CONFIRM=1"
+# Doubles as the confirmation backend above. MUST stay a backend, never hermes-router (port 8080)
+# -- the router screens every request it proxies through this service, so a router URL would
+# screen its own screening calls forever. hermes-guard.py refuses to start if GUARD_LLM_URL looks
+# like the router.
 Environment="GUARD_LLM_URL=http://127.0.0.1:8097"
 Environment="GUARD_LLM_ROLE=dispatch"
 ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-guard-wrapper.sh
