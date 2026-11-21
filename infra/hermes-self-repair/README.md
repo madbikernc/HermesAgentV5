@@ -1,6 +1,6 @@
 # hermes-self-repair — the full stepped plan, Steps 0–8
 
-**Version:** 7.3.0
+**Version:** 7.4.0
 
 All nine steps of the self-repair coding plan (Steps 0–8 discussed 2026-09-18) now exist. Step 0 — the
 NAS2-tracking checkout `HermesAgentV5-selfrepair` with `origin`=GitHub and
@@ -275,6 +275,43 @@ concluded/not-active immediately — no change needed there. The diff itself is 
 way: it is durably recorded in the task's `phase="diff"` hermes-memory turn regardless of whether
 the broker hand-off or the apply itself succeeds, so a human can always resubmit by hand from that
 record once the underlying cause (a corrupt patch, a down broker, etc.) is understood.
+
+**A third, different failure class, tackled the same day: Step 2's own claim can go stale with no
+one left to notice.** The two states above cover a job or a broker POST failing *after* Step 2
+hands off — but Step 2 (`hermes-self-repair-generate.py`) claims a Buzz message and **acks it
+immediately** (`ack_claim()`, "this can run many minutes"), and unlike the broker's own leased job
+claims, **Buzz has no lease and never redelivers an acked message.** If that process dies —
+OOM, a crash mid-model-call, a systemd restart — between claiming a task and ever calling
+`publish_result()` for it, the task is stuck forever in whatever state it last reached, and
+nothing else in the fleet will ever revisit it. This is exactly what happened to task
+`5d67197666f84642`: stuck at `state="security-meta-review"` for 189 hours, one of its two
+meta-review calls logged and then nothing — the process died between them, not a caught exception
+(`run_security_phase()`'s caller already wraps it in a generic `except Exception` that would have
+published `state="error"` otherwise).
+
+**The fix (`hermes-self-repair-generate.py` 1.8.0):** a periodic sweep,
+`sweep_stale_claims()`/`fetch_stale_claimed_tasks()`, runs from `main()`'s own loop — once
+immediately on startup, then every `SELF_REPAIR_SWEEP_INTERVAL_SECONDS` (default 10m). It finds
+any task sitting in one of this process's own active-processing states (`drafting`,
+`third-party-review`, `static-scan`, `security-review`, `security-meta-review`, or
+`review-round-N`) whose hermes-memory `updated_at` is older than `SELF_REPAIR_CLAIM_STALE_SECONDS`
+(default 1h — generous against `MODEL_TIMEOUT_SECONDS`=1500s × up to 3 attempts per call, several
+calls per task), marks it `state="error"` with an explanatory turn, and posts a FleetOps notice —
+the exact manual recovery already done by hand for task `5d67197666f84642`, now automatic.
+Running the sweep on every startup is what makes this self-healing across a restart: the new
+process immediately cleans up whatever its crashed predecessor left behind, rather than waiting a
+full sweep interval. Read-only, direct-sqlite against hermes-memory's own database, the same
+established pattern `hermes-fleetops-ui.py`/`hermes-guard-report.py`/
+`hermes-self-repair-list.py` already use for a "which tasks" query hermes-memory's own HTTP
+`/tasks` route cannot answer (POST-only, plus GET-by-id).
+
+**Deliberately does NOT auto-resubmit the original incident.** Recovering the task's *state* and
+auto-resubmitting the underlying *incident* are different decisions: `hermes-self-repair-apply.py`'s
+own circuit breaker already stops retrying a known failure and escalates instead of looping
+forever, for exactly the same reason — a payload that crashed this process once could crash it
+again, and an automatic retry loop on that payload would just repeat the crash. A human decides
+whether to resubmit, the same chokepoint every other failure class in this pipeline already routes
+through.
 
 **Post-promotion** (`tools/hermes-self-repair-verify-live.py`, `check-service <unit>`) polls
 `systemctl is-active`, same shape as `hermes-remediate-worker.py`'s own `do_restart_service()`.
@@ -852,6 +889,7 @@ generator never touches.
 
 | Version | Date | Change |
 |---|---|---|
+| 7.4.0 | 2026-11-20 | Direct operator request, "tackle it" (the stale-claim gap flagged but not built in 7.3.0). Added "A third, different failure class": `hermes-self-repair-generate.py` 1.8.0's periodic `sweep_stale_claims()`, recovering a task left claimed forever by a worker that died mid-run -- Buzz's claim/ack has no lease, unlike the broker's own leased job claims, so nothing else was ever going to revisit it. Runs on every startup (self-healing across a restart) and every `SELF_REPAIR_SWEEP_INTERVAL_SECONDS` thereafter; marks a stale claim `state="error"` with a turn and a FleetOps notice, deliberately without auto-resubmitting the original incident. Found/fixed via task 5d67197666f84642 (189h stuck at `security-meta-review`). |
 | 7.3.0 | 2026-11-20 | Direct operator request, "see what went wrong and fix" (a routine review-queue check found 4 silently-stranded tasks). Two new terminal states close the gap: `apply-failed` (apply 2.1.0) when the mechanical apply itself exhausts its retries, `apply-submit-failed` (generate 1.7.0) when Step 2 can't even hand a job to the broker after one retry — both used to leave a task reading `done` forever, invisible to anyone not reading the broker's `jobs.db` directly. Neither needs an `ACTIVE_TASK_STATES` change (both already read as concluded). Found and explained by task fa2eb82b21af45b8 (apply-failed) and two older tasks with no broker job at all (apply-submit-failed, one predating this worker's 2026-09-18 hand-off code). |
 | 7.2.0 | 2026-11-14 | Direct operator request. Added "Pre-review checks": verify's syntax and behavior-change checks run on every draft before review (generate 1.6.0), with the `node --check` package-type finding. |
 | 7.1.0 | 2026-11-13 | Direct operator request. Added "Improvements pass": per-kind goal-abandon signatures, backend outages as FleetOps notices, the security-phase 400 diagnosed (leaked reasoning stripped, refusals carry the router's reason), deadlocks and recurring promoted fixes posted to FleetOps, hourly counted sightings. "Known limits" updated: index.js/actions.js are split (59b098f). |

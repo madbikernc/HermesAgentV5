@@ -1,5 +1,28 @@
 #!/usr/bin/env python3
-# Version: 1.7.0
+# Version: 1.8.0
+#
+# 1.8.0 (2026-11-20) — direct operator request, "tackle it" (the stale-claim gap flagged but not
+# built in 1.7.0's own fix, below). Buzz's claim/ack has no lease, unlike the broker's own leased
+# job claims (hermes-broker.py's reap_expired_leases()) -- ack_claim() permanently consumes a
+# message the moment it's claimed, so a process that dies (OOM, crash, systemd restart) between
+# claiming a task and calling publish_result() for it leaves that task stuck forever in whatever
+# intermediate state it last reached, with nothing else ever able to redeliver it. Found live:
+# task 5d67197666f84642 sat at state="security-meta-review" for 189 hours, one of two meta-review
+# calls completed and then nothing. New periodic sweep (sweep_stale_claims(), run from main()'s
+# own loop, once immediately on startup and then every SELF_REPAIR_SWEEP_INTERVAL_SECONDS, default
+# 10m): finds any task sitting in one of this process's own active-processing states
+# (CLAIMED_STATES, or review-round-N) with no hermes-memory update in
+# SELF_REPAIR_CLAIM_STALE_SECONDS (default 1h), marks it "error" with an explanatory turn, and
+# posts a FleetOps notice -- the exact manual correction done by hand for task 5d67197666f84642,
+# now automatic, and self-healing on every restart (the sweep's first run, immediately on
+# startup, is what lets a freshly restarted process clean up whatever its crashed predecessor
+# left behind). Deliberately does NOT auto-resubmit the original incident -- same "a stuck job
+# needs a human, not an unbounded retry loop" posture hermes-self-repair-apply.py's own circuit
+# breaker already takes, since a payload that crashed this process once could do so again.
+# Read-only, direct-sqlite against hermes-memory's own database (MEMORY_DB), the same established
+# pattern hermes-fleetops-ui.py/hermes-guard-report.py/hermes-self-repair-list.py already use for
+# "which tasks" queries hermes-memory's own HTTP /tasks route cannot answer (POST-only, plus
+# GET-by-id).
 #
 # 1.7.0 (2026-11-20) — direct operator request, "see what went wrong and fix" (self-repair review
 # follow-up): two tasks were found stale -- 83661fa53e2a414d (8 days) and 3a40b7d4a3e64347 (62
@@ -163,12 +186,20 @@
 #                                `selfrepair-apply` job on convergence, never to claim or apply one
 #                                itself (that is Step 3's separate worker process)
 #   CLAIMANT                     default "hermes-self-repair-generate"
+#   MEMORY_DB                    default /mnt/hermes-data/memory/memory.db — read-only, same path
+#                                hermes-fleetops-ui.py/hermes-guard-report.py/
+#                                hermes-self-repair-list.py already read this exact table from.
+#                                Used only by the stale-claim sweep below (1.8.0); this process has
+#                                no other direct filesystem access to hermes-memory's database.
+#   SELF_REPAIR_CLAIM_STALE_SECONDS   default 3600 (1h) — see fetch_stale_claimed_tasks()
+#   SELF_REPAIR_SWEEP_INTERVAL_SECONDS default 600 (10m) — how often main() runs that sweep
 
 import difflib
 import importlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -211,6 +242,10 @@ META_REVIEW_MAX_TOKENS = int(os.environ.get("META_REVIEW_MAX_TOKENS", "6000"))
 CLAIMANT = os.environ.get("CLAIMANT", "hermes-self-repair-generate")
 BROKER_URL = os.environ.get("BROKER_URL", f"http://{SPARK_IP}:8100").rstrip("/")
 BROKER_TOKEN = os.environ.get("BROKER_TOKEN", "")
+
+MEMORY_DB = os.environ.get("MEMORY_DB", "/mnt/hermes-data/memory/memory.db")
+CLAIM_STALE_SECONDS = int(os.environ.get("SELF_REPAIR_CLAIM_STALE_SECONDS", str(60 * 60)))
+SWEEP_INTERVAL_SECONDS = int(os.environ.get("SELF_REPAIR_SWEEP_INTERVAL_SECONDS", str(10 * 60)))
 
 SELF_REPAIR_READ_TOOL = os.environ.get(
     "SELF_REPAIR_READ_TOOL", str(Path.home() / "HermesAgentV5" / "tools" / "hermes-self-repair-read.py"))
@@ -686,6 +721,99 @@ def submit_apply_job(task_id, path):
                 "selfrepair-generate", log)
 
 
+# --- Stale-claim recovery (1.8.0) ----------------------------------------------------------------
+#
+# Buzz's claim/ack has no lease: ack_claim() (process_one(), called immediately on claim, "this
+# can run many minutes across many router calls") permanently consumes the message. Unlike the
+# broker's own leased job claims (reap_expired_leases(), hermes-broker.py), nothing in this fleet
+# ever redelivers an acked Buzz message. If this process dies -- OOM, a systemd restart, a crash
+# mid-model-call -- between claiming a task and calling publish_result() for it, the task is
+# stuck forever in whatever intermediate state it last reached, and nothing else will ever revisit
+# it. Found live 2026-11-20: task 5d67197666f84642 sat at state="security-meta-review" for 189
+# hours, one of two meta-review calls completed and then nothing -- consistent with the process
+# being killed between those two calls, not a caught exception (run_security_phase() is already
+# wrapped in a generic `except Exception` that would have published state="error" otherwise).
+#
+# These are exactly the states this process itself sets while actively working a just-claimed
+# task, via set_task_state() in run_bug_loop()/run_security_phase() -- i.e. ACTIVE_TASK_STATES
+# (hermes-self-repair-bridge.py) minus "done"/"verified"/"awaiting-completeness"/
+# "promotion-approved", which this process never sets itself (ownership of those four belongs to
+# hermes-self-repair-apply.py once a task reaches "done", not to this one).
+CLAIMED_STATES = {"drafting", "third-party-review", "static-scan", "security-review",
+                  "security-meta-review"}
+
+
+def ro_memory_db():
+    return sqlite3.connect(f"file:{MEMORY_DB}?mode=ro", uri=True, timeout=15)
+
+
+def fetch_stale_claimed_tasks(now=None):
+    """Self-repair tasks sitting in one of this process's OWN active-processing states
+    (CLAIMED_STATES, or "review-round-N") whose hermes-memory `updated_at` is older than
+    CLAIM_STALE_SECONDS (default 1h -- generous against MODEL_TIMEOUT_SECONDS=1500s x up to 3
+    attempts per call, several calls per task). Read-only, direct sqlite -- hermes-memory's /tasks
+    HTTP route is POST-only plus GET-by-id, no bulk "which tasks" query exists over HTTP
+    (tools/hermes-self-repair-list.py's own header), so this follows the same established
+    read-only pattern hermes-fleetops-ui.py/hermes-guard-report.py/hermes-self-repair-list.py
+    already use against this exact file. `agent LIKE 'selfrepair%'` is NOT filtered here (unlike
+    those three) because this process only ever needs to recognize its OWN five state names,
+    which no other self-repair component (or anything else in this fleet) ever writes."""
+    now = time.time() if now is None else now
+    cutoff = now - CLAIM_STALE_SECONDS
+    conn = ro_memory_db()
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, state, updated_at FROM tasks WHERE updated_at < ?", (cutoff,)
+        ).fetchall()
+        return [dict(r) for r in rows
+                if r["state"] in CLAIMED_STATES or r["state"].startswith("review-round-")]
+    finally:
+        conn.close()
+
+
+def recover_stale_claim(task_id, stale_state, age_seconds):
+    """Marks a task found by fetch_stale_claimed_tasks() as "error" -- a real, catch-all failure,
+    not a guess at what actually went wrong -- logs a turn explaining why, and posts a FleetOps
+    notice naming it. Resubmitting it is a human decision: generate.py's own circuit breaker
+    philosophy already stops auto-retrying on a known failure rather than looping forever
+    (hermes-self-repair-apply.py's escalate()), and auto-resubmitting a payload that may have
+    genuinely crashed this process (not just gotten unlucky) could do exactly that."""
+    hours = age_seconds / 3600
+    note = (f"Found stuck at state={stale_state!r} for {hours:.1f}h with no further progress. "
+            f"Buzz's claim/ack has no lease or redelivery, so the worker process that claimed "
+            f"this task appears to have died (crash, OOM, or restart) before finishing it, and "
+            f"nothing else was ever going to revisit it on its own. Recovered by this process's "
+            f"own stale-claim sweep (hermes-self-repair-generate.py 1.8.0).")
+    try:
+        _post(f"{MEMORY_URL}/turns", {
+            "task_id": task_id, "agent": "selfrepair", "role": "assistant",
+            "raw": json.dumps({"phase": "stale-claim-recovery", "note": note}),
+        }, MEMORY_TOKEN)
+    except Exception as exc:
+        log(f"task {task_id!r}: logging stale-claim-recovery turn failed: {exc}")
+    set_task_state(task_id, "error")
+    notice.fleetops_notice(
+        f"[self-repair] Task {task_id} was stuck at {stale_state!r} for {hours:.1f}h -- its "
+        f"worker appears to have died mid-run. Marked error; nothing was applied. Resubmit the "
+        f"original incident by hand if it should be retried.", "selfrepair-generate", log)
+    log(f"task {task_id!r}: recovered from stale claim ({stale_state!r}, {hours:.1f}h stale)")
+
+
+def sweep_stale_claims():
+    """Best-effort, never fatal to the main loop that calls it between ordinary claims -- a sweep
+    failure (hermes-memory's db momentarily locked, etc.) just means the next scheduled sweep
+    tries again, same posture hermes-self-repair-bridge.py's own periodic sweeps already take."""
+    try:
+        stale = fetch_stale_claimed_tasks()
+    except Exception as exc:
+        log(f"stale-claim sweep failed: {exc}")
+        return
+    now = time.time()
+    for row in stale:
+        recover_stale_claim(row["id"], row["state"], now - row["updated_at"])
+
+
 def compute_diff(path, original_content, candidate_content):
     """The ONLY place a diff is produced -- deterministically, from two known strings, no model
     involved. See this file's own header for why a model is never asked to author the diff
@@ -914,8 +1042,16 @@ def main():
     if not Path(SELF_REPAIR_READ_TOOL).exists():
         sys.exit(f"SELF_REPAIR_READ_TOOL not found: {SELF_REPAIR_READ_TOOL}")
     log(f"watching Buzz topic 'selfrepair', polling every {POLL_SECONDS}s, "
-        f"roles=(coder, coder2), max_rounds={MAX_ROUNDS}, max_file_chars={MAX_FILE_CHARS}")
+        f"roles=(coder, coder2), max_rounds={MAX_ROUNDS}, max_file_chars={MAX_FILE_CHARS}, "
+        f"stale-claim sweep every {SWEEP_INTERVAL_SECONDS}s "
+        f"(stale after {CLAIM_STALE_SECONDS}s with no progress)")
+    last_sweep = 0.0  # 0.0, not time.time(): run the sweep on the very first iteration too, so a
+                       # freshly restarted process immediately recovers whatever its predecessor
+                       # left stranded, rather than waiting a full SWEEP_INTERVAL_SECONDS first.
     while True:
+        if time.time() - last_sweep >= SWEEP_INTERVAL_SECONDS:
+            sweep_stale_claims()
+            last_sweep = time.time()
         try:
             did_work = process_one()
         except Exception as exc:

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# Version: 1.4.0
+# Version: 1.5.0
+#
+# 1.5.0 (2026-11-20) — generate 1.8.0: fetch_stale_claimed_tasks()/sweep_stale_claims() recover a
+# task left claimed forever by a worker that died mid-run (Buzz's claim/ack has no lease). A real
+# temp-sqlite-backed check, same shape test_guard_report.py's own fetch_turns() test already uses
+# against this exact tasks table: a stale task in one of this process's own owned states comes
+# back, a fresh one in the same state is left alone, a stale terminal-state task is never touched,
+# and a lookup failure is swallowed rather than raised.
 #
 # 1.4.0 (2026-11-20) — generate 1.7.0: submit_apply_job() retries a failed broker POST once, then
 # marks the task "apply-submit-failed" and posts a FleetOps notice, instead of leaving it reading
@@ -28,6 +35,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
@@ -269,6 +277,72 @@ def main():
     check("a FleetOps notice is posted naming the task and the path",
           len(posted2) == 1 and "tZ" in posted2[0][0] and "tools/z.py" in posted2[0][0]
           and posted2[0][1] == "selfrepair-generate", posted2)
+
+    print("[fetch_stale_claimed_tasks / sweep_stale_claims: a dead worker's claim is recovered (2026-11-20)]")
+    gen3 = load()
+    db_fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(db_fd)
+    try:
+        now = time.time()
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, agent TEXT NOT NULL, topic TEXT, "
+            "state TEXT NOT NULL, memory_ref TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+        )
+        rows = [
+            # a real orphan: stuck in an owned state, long past the staleness cutoff
+            ("stale1", "selfrepair", "security-meta-review", now - 8 * 3600),
+            # the exact same state, but recent -- this process may still be working it right now
+            ("fresh1", "selfrepair", "security-meta-review", now - 60),
+            # a review round, stale -- the "review-round-N" prefix match, not an exact name
+            ("stale2", "selfrepair", "review-round-3", now - 2 * 3600),
+            # a terminal state, stale -- not this process's to recover, regardless of age
+            ("old-done", "selfrepair", "done", now - 999999),
+            ("old-error", "selfrepair-apply", "error", now - 999999),
+        ]
+        for tid, agent, state, updated in rows:
+            conn.execute(
+                "INSERT INTO tasks (id, agent, topic, state, created_at, updated_at) "
+                "VALUES (?, ?, 'selfrepair', ?, ?, ?)", (tid, agent, state, updated, updated))
+        conn.commit()
+        conn.close()
+
+        gen3.MEMORY_DB = db_path
+        stale = gen3.fetch_stale_claimed_tasks(now=now)
+        stale_ids = sorted(r["id"] for r in stale)
+        check("only the two genuinely stale, process-owned tasks come back",
+              stale_ids == ["stale1", "stale2"], stale_ids)
+        check("a fresh task in the same state is left alone (still plausibly in progress)",
+              "fresh1" not in stale_ids)
+        check("a stale terminal-state task is never touched (not this process's to recover)",
+              "old-done" not in stale_ids and "old-error" not in stale_ids)
+
+        states3, posted3, turns3 = [], [], []
+        gen3.set_task_state = lambda tid, state: states3.append((tid, state))
+        gen3.notice.fleetops_notice = lambda body, sender, log=None: posted3.append((body, sender))
+        gen3._post = lambda url, payload, *a, **k: (turns3.append(payload) or {})
+        gen3.sweep_stale_claims()
+        check("sweep_stale_claims() recovers both, in the order fetch returned them",
+              states3 == [("stale1", "error"), ("stale2", "error")], states3)
+        check("each recovery posts a turn naming the real stuck state",
+              len(turns3) == 2 and "security-meta-review" in turns3[0]["raw"]
+              and "review-round-3" in turns3[1]["raw"], turns3)
+        check("each recovery posts a FleetOps notice naming the task",
+              len(posted3) == 2 and "stale1" in posted3[0][0] and "stale2" in posted3[1][0],
+              posted3)
+
+        print("[sweep_stale_claims: a lookup failure is logged, never raised]")
+        gen3.fetch_stale_claimed_tasks = lambda now=None: (_ for _ in ()).throw(sqlite3.OperationalError("locked"))
+        try:
+            gen3.sweep_stale_claims()
+            check("a sweep failure does not raise -- the main loop must keep polling", True)
+        except Exception as exc:
+            check("a sweep failure does not raise -- the main loop must keep polling", False, str(exc))
+    finally:
+        try:
+            os.unlink(db_path)
+        except OSError:
+            pass
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:
