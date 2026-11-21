@@ -1,4 +1,7 @@
-// Version: 1.3.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-11-20): the shelterStep sandbox stubs recordKnownShelter() (shelter-goals.js 1.2.0's
+// new known_shelters.json write on a successful build).
 //
 // 1.3.0 (2026-11-14): a shell whose every missing block would cut off a fixture is not an unfinished
 // shell, and shelterStep lets go of a cached site that has become one (home-scan.js 1.1.0).
@@ -297,6 +300,8 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
     residencePlan: () => ({ kind: 'build', beds: 0, active: 1 }), completeSheltersNearHome: () => [],
     findShelterSite: () => { c.siteCalls++; return new V3(5, 65, 5); },
     shelterPositions: () => Array.from({ length: 60 }, (_, i) => new V3(i, 100, 0)), shelterMaterialCount: () => c.materials,
+    // recordKnownShelter() (shelter-memory.js, new) is exercised directly in shelter-1.test.mjs.
+    recordKnownShelter: async () => {},
     gatherPlanks: async (_handle, count) => {
       calls.push({ type: 'gatherPlanks', count });
       return c.held.filter((i) => i.name.endsWith('_planks')).reduce((n, i) => n + i.count, 0) >= count ? null

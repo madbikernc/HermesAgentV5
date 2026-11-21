@@ -49,7 +49,7 @@ import { milkAction } from "./actions/milk.js";
 import { enchantAction } from "./actions/enchant.js";
 import { FOOD_NAMES } from "./action-vocab.js";
 import { BREEDING_FOOD, SEED_NAMES, loadPenLocation } from "./action-world.js";
-export { STORE_CANDIDATE_LIMIT, consolidationPending, findConsolidation, findKnownChestWithItem, isUtilityUsable, itemFamily, loadKnownChests, noteUtilityOutcome, openChestAt, rankStoreChests, recordChestSnapshot, takeConsolidationHint } from "./action-chests.js";
+export { STORE_CANDIDATE_LIMIT, chestKey, consolidationPending, findConsolidation, findKnownChestWithItem, isUtilityUsable, itemFamily, loadKnownChests, noteUtilityOutcome, openChestAt, rankStoreChests, recordChestSnapshot, takeConsolidationHint } from "./action-chests.js";
 export { claimBuilderItem, holdsGuardAnchor, myBuilderClaim, nearbyBeds, releaseBuilderItem } from "./action-claims.js";
 export { chestObstructed, craftItem, tryTakeFromNearbyChest, tryTakeFromThisChest } from "./action-crafting.js";
 export { attemptBoatCrossing, clearCellForPlacement, collectBlocks, ensureBoat, isClearableCover, loadActionPlugins, refreshGear, withTimeout } from "./action-movement.js";

@@ -1,4 +1,18 @@
-// Version: 1.1.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-20, direct request: "if they find a village, they should be able to recognize
+// that existing village homes are shelters", same report's "didn't seem to recognize even when
+// there were enough viable shelters already built"): residencePlan()'s own bed count now also
+// counts qualifying shape-agnostic rooms (shelterRoomsNear(), shelter.js) -- any sealed, damage-
+// free, wide-enough room with a real bed in it, not only the Builder's own fixed 2x3 shape. See
+// qualifyingFoundRoomsNearHome()'s own header for why this can never double-count a Builder
+// shelter. Every qualifying found room is also recorded into known_shelters.json
+// (shelter-memory.js, new file) -- same report's "shelter and bed locations should be stored in
+// world memory."
+//
+// 1.2.0 (2026-11-20, direct report: "the minecraft bots are making way more chests than they
+// need"): new isNearHome(), backing incoming.js's "chest_built" listener -- is a teammate's newly
+// placed chest close enough to be the same base as hers.
 //
 // 1.1.0 (2026-11-14, self-repair check: 95 "giving up ... (kind=shelter)" in 13h, all five bots):
 // unfinishedShelterNearHome() skips a shell that can never be finished -- every block it still
@@ -20,9 +34,11 @@
 // and BOT_USERNAMES back from index.js, only inside functions.
 
 import { SHELTER_ROOM, doorwayPosition, isShelterDoor, isUtilityUsable, shelterPositions } from "./actions.js";
-import { wouldBlockAccess } from "./shelter.js";
+import { MIN_SHELTER_ROOM_SPAN, horizontalSpan, shelterRoomsNear, wouldBlockAccess } from "./shelter.js";
+import { recordKnownShelter } from "./shelter-memory.js";
 import { isDoorway } from "./swim-movements.js";
-import { BOT_USERNAMES, bot } from "./index.js";
+import { BOT_USERNAMES, USERNAME, bot } from "./index.js";
+import { Vec3 } from "vec3";
 
 // Planning: runAction, the goal-step parser, planNextStep and goal-conflict arbitration: in planning.js (split out 2026-11-10).
 // §15.6: Builder's own infrastructure priority ladder -- crafting table -> furnace -> chest ->
@@ -33,6 +49,15 @@ import { BOT_USERNAMES, bot } from "./index.js";
 // reality, don't trust a self-report" discipline TECH_TREE_STAGES' own mayorHasStageItem()
 // already established for the fleet-wide curriculum, applied here to one role's own checklist.
 export const BUILDER_PRIORITY_RADIUS = 24;
+
+// Direct report, 2026-11-20 ("making way more chests than they need"): backs the "chest_built"
+// Buzz listener (incoming.js) -- whether a teammate's freshly placed chest is close enough to be
+// the SAME base (so her own stale "every chest full" reading should be cleared) or an unrelated
+// one at a distant base. Same BUILDER_PRIORITY_RADIUS bound countUsableNearHome() itself already
+// checks chests against, horizontal only (matching this file's other near-home checks).
+export function isNearHome(point) {
+  return !!bot.spawnPoint && Math.hypot(point.x - bot.spawnPoint.x, point.z - bot.spawnPoint.z) <= BUILDER_PRIORITY_RADIUS;
+}
 
 function blockIdsByName(names) {
   return names.map((n) => bot.registry.blocksByName[n]?.id).filter((id) => id !== undefined);
@@ -298,10 +323,65 @@ export function residenceChestCell(base) {
     bot.blockAt(p)?.boundingBox !== "block" && !bot.isABed(bot.blockAt(p)) && !wouldBlockAccess(bot, p, "chest")) ?? null;
 }
 
+// Direct request, 2026-11-20 ("if they find a village, they should be able to recognize that
+// existing village homes are shelters" -- alongside the same report's "didn't seem to recognize
+// even when there were enough viable shelters already built"). completeSheltersNearHome()'s
+// fixed SHELTER_ROOM geometry (2x3) can only ever match the Builder's own exact shape -- a
+// village house, or any other hand-built room, never qualifies no matter how sound it is.
+// shelterRoomsNear() (shelter.js) already finds any door-sealed room near a point, any shape or
+// size, so it is reused here for COUNTING -- restricted to rooms wide enough on both axes
+// (MIN_SHELTER_ROOM_SPAN) that holesIn()'s own damage check is actually meaningful (a narrower
+// room always reports zero holes whether or not it is really damaged -- see holesIn()'s own
+// header), with zero holes AND a real bed inside. That width floor is also what keeps this from
+// ever double-counting one of the Builder's OWN shelters: SHELTER_ROOM is 2 wide, narrower than
+// MIN_SHELTER_ROOM_SPAN, so this only ever finds residences completeSheltersNearHome() could
+// never see in the first place. Deliberately passive: a qualifying found room is counted toward
+// the fleet's housing, never furnished or claimed (no bed or chest is ever placed into one) --
+// "recognize as a shelter," not "move in and renovate."
+function roomBedCells(room) {
+  const cells = [];
+  for (const key of room.inside) {
+    const [x, y, z] = key.split(",").map(Number);
+    const pos = new Vec3(x, y, z);
+    if (bot.isABed(bot.blockAt(pos))) cells.push(pos);
+  }
+  return cells;
+}
+
+// Direct request, 2026-11-20 ("shelter and bed locations should be stored in world memory"):
+// every qualifying found room (a village house, say) is also recorded into known_shelters.json
+// (shelter-memory.js) -- fire-and-forget, since this runs from residencePlan(), called
+// synchronously from several places (survivalPriorityItemSatisfied, shelterCapacityNeeded)
+// that cannot themselves go async. Throttled per room: this scan reruns on every goal tick while
+// a shelter goal is active, far more often than the record is ever worth refreshing.
+const FOUND_ROOM_RECORD_THROTTLE_MS = 10 * 60_000;
+const foundRoomRecordedAt = new Map(); // "x,y,z" (room.anchor) -> Date.now() of the last write
+
+function qualifyingFoundRoomsNearHome() {
+  if (!bot.spawnPoint) return [];
+  const rooms = shelterRoomsNear(bot, bot.spawnPoint.floored(), SHELTER_SITE_RADIUS);
+  return rooms.filter((room) => {
+    if (room.holes.size > 0) return false;
+    const { width, depth } = horizontalSpan(room.inside);
+    if (width < MIN_SHELTER_ROOM_SPAN || depth < MIN_SHELTER_ROOM_SPAN) return false;
+    if (!roomBedCells(room).length) return false;
+    const key = `${room.anchor.x},${room.anchor.y},${room.anchor.z}`;
+    const now = Date.now();
+    if (!foundRoomRecordedAt.has(key) || now - foundRoomRecordedAt.get(key) > FOUND_ROOM_RECORD_THROTTLE_MS) {
+      foundRoomRecordedAt.set(key, now);
+      recordKnownShelter(room.anchor, { hasBed: true, source: "found" })
+        .catch((err) => console.error(`[${USERNAME}] known-shelters write failed:`, err.message));
+    }
+    return true;
+  });
+}
+
 export function residencePlan() {
   const shelters = completeSheltersNearHome();
+  const foundRooms = qualifyingFoundRoomsNearHome();
   const active = activeBotCount();
-  const beds = shelters.reduce((n, base) => n + shelterBedCount(base), 0);
+  const beds = shelters.reduce((n, base) => n + shelterBedCount(base), 0) +
+    foundRooms.reduce((n, room) => n + Math.ceil(roomBedCells(room).length / 2), 0);
   // A shelter with no room for a chest (two beds) is a full residence as it stands.
   const chestless = shelters.find((base) => shelterHasBed(base) && !shelterHasChest(base) && residenceChestCell(base));
   if (chestless) return { kind: "chest", base: chestless, beds, active };

@@ -1,18 +1,24 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-20, direct report: "chests and free slots should be in world memory, and
+// checked by other bots... before... planning to build new ones"): checkInventoryFull() now
+// checks the shared known_chests.json registry for a chest near home with real room before
+// trusting her own stale storageBlockedUntil reading and deciding a new chest is needed.
 //
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: dropping, trash, inventory insurance, saplings and lighting.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
 // it; this file reads index.js's state through live imports, so nothing here may touch it
 // before index.js has run (only declarations live here).
 
-import { DARK_LIGHT_LEVEL, performAction } from "./actions.js";
+import { DARK_LIGHT_LEVEL, loadKnownChests, performAction } from "./actions.js";
 import * as arbiter from "./arbiter.js";
-import { countUsableNearHome } from "./home-scan.js";
+import { BUILDER_PRIORITY_RADIUS, countUsableNearHome } from "./home-scan.js";
 import { TOOL_RANK } from "./priorities.js";
 import { routineBlocked } from "./goal-proposal.js";
 import { AUTONOMY_ENABLED, HOME_LIGHTING_MAINTAINER, USERNAME, bot, goals } from "./index.js";
-import { INVENTORY_FULL_SLOTS, INVENTORY_MAIN_HOTBAR_SLOTS, makeHomeChest, storageBlockedUntil, storeSurplusValuables } from "./upkeep-inventory.js";
+import { INVENTORY_FULL_SLOTS, INVENTORY_MAIN_HOTBAR_SLOTS, makeHomeChest, setStorageBlockedUntil, storageBlockedUntil, storeSurplusValuables } from "./upkeep-inventory.js";
 import { torchBatch } from "./upkeep-world.js";
+import { Vec3 } from "vec3";
 
 
 const DROP_DISTANCE = 6;
@@ -119,8 +125,27 @@ function junkToDrop(items) {
 const EXTRA_CHEST_RETRY_MS = 10 * 60_000;
 let extraChestRetryAt = 0;
 
+// Direct report, 2026-11-20 ("chests and free slots should be in world memory, and checked by
+// other bots... before... planning to build new ones"): storageBlockedUntil only ever reflects
+// THIS bot's own last failed store -- it stays stale, reading "every chest full," even once the
+// shared known-chests registry (known_chests.json, action-chests.js) already shows real room
+// nearby, whether another bot just emptied one, someone else's snapshot of the same chest was
+// simply more recent than her own last attempt, or that attempt was just unlucky. A chest never
+// snapshotted at all (freeSlots undefined) is given the benefit of the doubt, same as a chest
+// findBlocks just found that known_chests.json has never opened.
+async function knownChestHasRoomNearHome() {
+  const home = bot.spawnPoint;
+  if (!home) return false;
+  const known = await loadKnownChests();
+  return Object.values(known).some((entry) => {
+    const pos = new Vec3(entry.position.x, entry.position.y, entry.position.z);
+    return pos.distanceTo(home) <= BUILDER_PRIORITY_RADIUS && entry.freeSlots !== 0;
+  });
+}
+
 export async function checkInventoryFull() {
   if (!AUTONOMY_ENABLED || routineBlocked("checkInventoryFull") || bot.isSleeping) return;
+  if (storageBlockedUntil && bot.spawnPoint && (await knownChestHasRoomNearHome())) setStorageBlockedUntil(0);
   const emptySlots = INVENTORY_MAIN_HOTBAR_SLOTS - bot.inventory.items().length;
   const chestsFull = Date.now() < storageBlockedUntil;
   // 2026-11-04 (direct request: "when a chest is full, they should build another chest"): every

@@ -1,4 +1,11 @@
-// Version: 1.3.3
+// Version: 1.4.0
+//
+// 1.4.0 (2026-11-20, direct report: "they built residences, then mined blocks from them... built
+// more"): new doorAnchors(), fed into refreshLivingSpace() alongside bedAnchors() -- a shelter's
+// shell is now protected from the moment its door exists, not only once a bed has been placed
+// inside it (a separate, later step). See doorAnchors()'s own header for the full story.
+// horizontalSpan() also exported, for home-scan.js's new village-house/found-shelter recognition
+// (same report: "they should be able to recognize that existing village homes are shelters").
 //
 // 1.3.3 (2026-11-02, direct report: "they keep enclosing themselves inside a residence with
 // un-necessary blocks"): holesIn() counted a bed, chest or door as solid, so a floor cell in a
@@ -381,6 +388,46 @@ export function bedAnchors(bot, extra = null) {
   return anchors;
 }
 
+// Direct report, 2026-11-20 ("they built residences, then mined blocks from them... built
+// more"): bedAnchors() alone leaves a freshly built shelter completely unprotected until its bed
+// goes in -- residencePlan() places the bed as a SEPARATE, later step (shelter-goals.js), while
+// "build" places the walls AND the door in one call (actions/build.js) -- so a just-finished
+// shell sits open to an ordinary "mine stone/dirt" step for however long the gap before her bed
+// lasts, unless it happens to fall within SHELL_RADIUS of a bed or bot.spawnPoint already. Anchors
+// every real door/gate the same way bedAnchors() anchors every bed: one cell in from each side of
+// the doorway (whichever side is genuinely "inside" fills from there; the far side, if it is open
+// terrain, is bounded by the same SHELL_RADIUS/isCovered test this file's own dig-protection
+// feature already relies on, so it cannot flood arbitrary outdoor ground). A side effect, not
+// incidental: this also shields a FOUND structure -- a village house, say -- the moment a bot is
+// simply near its door, with no bed of hers in it at all.
+let doorBlockIds = null;
+function doorIds(bot) {
+  if (doorBlockIds?.length) return doorBlockIds;
+  doorBlockIds = Object.keys(bot.registry?.blocksByName || {})
+    .filter((name) => isDoorwayName(name))
+    .map((name) => bot.registry.blocksByName[name].id);
+  return doorBlockIds;
+}
+
+export function doorAnchors(bot) {
+  const anchors = [];
+  const push = (pos) => {
+    if (!pos || anchors.length >= SHELL_MAX_ANCHORS) return;
+    if (anchors.some((other) => other.distanceTo(pos) < 1.5)) return;
+    anchors.push(pos);
+  };
+  const ids = doorIds(bot);
+  const matching = ids.length ? ids : (block) => isDoorwayName(block?.name); // registry missing (a test stub)
+  for (const pos of bot.findBlocks({ matching, maxDistance: BED_SEARCH_DISTANCE, count: 32 }) || []) {
+    if (anchors.length >= SHELL_MAX_ANCHORS) break;
+    const block = bot.blockAt(pos);
+    const sides = block && doorPassageSides(bot, block);
+    if (!sides) continue;
+    for (const side of sides) push(side[0]);
+  }
+  return anchors;
+}
+
 // The ways out, grouped by column: an interior cell you can step sideways out of the living space
 // from. Grouped by (x, z) and not counted per cell because a doorway is a column two or three
 // cells tall and is one way out, not three.
@@ -410,7 +457,7 @@ function exitColumns(bot, inside) {
 // safeToBreak() is asked thousands of times per path search, so the answer has to already be a
 // Set lookup by the time pathfinding reaches it.
 export function refreshLivingSpace(bot, extra = null) {
-  const anchors = bedAnchors(bot, extra);
+  const anchors = [...bedAnchors(bot, extra), ...doorAnchors(bot)];
   const inside = new Set();
   for (const anchor of anchors) coveredInterior(bot, anchor, inside);
   bot.livingSpace = { anchors, inside, cells: shellAround(bot, inside),
@@ -575,7 +622,10 @@ function solidFaceNeighbourCount(bot, cell) {
 
 // The horizontal footprint `inside` actually occupies -- both axes, since a hallway one cell
 // wide in Z but ten long in X is exactly as narrow a case as a 1x1 room for holesIn()'s purposes.
-function horizontalSpan(inside) {
+// Exported 2026-11-20: home-scan.js's residence count needs the same "wide enough for holesIn()
+// to mean anything" test, to decide which shelterRoomsNear() results are safe to treat as
+// verified-undamaged (see its own qualifyingFoundRoomsNearHome()).
+export function horizontalSpan(inside) {
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
   for (const key of inside) {
     const [x, , z] = key.split(",").map(Number);

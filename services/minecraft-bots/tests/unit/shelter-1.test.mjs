@@ -1,4 +1,6 @@
-// Version: 1.1.1
+// Version: 1.2.0
+// 1.2.0 (2026-11-20): new check for shelter-memory.js's known_shelters.json (load/record,
+// merge-upsert by door position, built vs. found).
 // 1.1.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
@@ -10,7 +12,46 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { prioritiesSrc, indexOnly, homeScanSrc, actionCases, actions, index, swim, arbiter, V3, between, context, shelter, sleep, passed, check, farmGoalSrc, shelterFns, shelterWorld, room, slice, passedCount } from './_harness.mjs';
+import { prioritiesSrc, indexOnly, homeScanSrc, actionCases, actions, index, swim, arbiter, V3, between, context, shelter, sleep, passed, check, farmGoalSrc, shelterFns, shelterWorld, room, slice, shelterMemorySrc, passedCount } from './_harness.mjs';
+
+
+await check('Shelter memory: known_shelters.json records a residence by its door, merging updates', async () => {
+  // Direct request, 2026-11-20 ("shelter and bed locations should be stored in world memory").
+  const files = {};
+  const c = vm.createContext({ console: { log() {}, error() {} },
+    process: { env: { MC_MEMORY_ROOT: '.' } },
+    readFile: async (f) => { if (!(f in files)) throw new Error('ENOENT'); return files[f]; },
+    writeFile: async (f, data) => { files[f] = data; }, mkdir: async () => {}, path: { dirname: () => '.' } });
+  vm.runInContext(between(shelterMemorySrc, 'const KNOWN_SHELTERS_FILE'), c);
+  assert.deepEqual(Object.keys(await c.loadKnownShelters()), [], 'nothing recorded yet');
+
+  await c.recordKnownShelter(new V3(5, 64, 3), { source: 'built' });
+  let known = await c.loadKnownShelters();
+  assert.equal(Object.keys(known).length, 1);
+  // Not a whole-object deepEqual: loadKnownShelters() JSON.parses inside the vm, so its plain
+  // objects belong to a different realm than a {}-literal written here -- compared field by field.
+  assert.equal(known['5,64,3'].door.x, 5); assert.equal(known['5,64,3'].door.y, 64); assert.equal(known['5,64,3'].door.z, 3);
+  assert.equal(known['5,64,3'].source, 'built');
+  assert.equal(known['5,64,3'].hasBed, false);
+  assert.equal(known['5,64,3'].hasChest, false);
+
+  // A later update merges in -- it does not forget what was already known.
+  await c.recordKnownShelter(new V3(5, 64, 3), { hasBed: true });
+  known = await c.loadKnownShelters();
+  assert.equal(known['5,64,3'].hasBed, true);
+  assert.equal(known['5,64,3'].source, 'built', 'still remembers where this one came from');
+
+  await c.recordKnownShelter(new V3(5, 64, 3), { hasChest: true });
+  known = await c.loadKnownShelters();
+  assert.equal(known['5,64,3'].hasChest, true);
+  assert.equal(known['5,64,3'].hasBed, true, 'and still has its bed');
+
+  // A found room (a village house, say) is its own distinct kind, never confused with a built one.
+  await c.recordKnownShelter(new V3(100, 70, 2), { hasBed: true, source: 'found' });
+  known = await c.loadKnownShelters();
+  assert.equal(Object.keys(known).length, 2);
+  assert.equal(known['100,70,2'].source, 'found');
+});
 
 
 await check('Communal shelter: fleet-wide iron-tool evidence, never a bare claim', async () => {

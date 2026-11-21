@@ -1,11 +1,21 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-20, direct report: "checked by other bots before... looking through chests"):
+// the plain-inspection path (no item named) now skips a chest the shared known_chests.json
+// registry already snapshotted within CHEST_INSPECT_FRESH_MS, instead of walking there anyway
+// just to relearn the same contents.
 //
 // The "loot" action, split out of actions.js's performActionAs() switch
 // (actions.js 2.0.0, 2026-11-10) unchanged, so a fix to it is a fix to this file alone. Called
 // through ACTION_HANDLERS with performActionAs's own arguments; ok()/fail() build its result.
 
 import path from "node:path";
-import { ACTION_TIMEOUT_MS, CHEST_SEARCH_RADIUS, LOOT_GROUPS, chestObstructed, findKnownChestWithItem, gearCategoryNames, goals, hopToward, noteUtilityOutcome, recordChestSnapshot, refreshGear, tryTakeFromNearbyChest, tryTakeFromThisChest, wanderAndRetryFind, withTimeout } from "../actions.js";
+import { ACTION_TIMEOUT_MS, CHEST_SEARCH_RADIUS, LOOT_GROUPS, chestKey, chestObstructed, findKnownChestWithItem, gearCategoryNames, goals, hopToward, loadKnownChests, noteUtilityOutcome, recordChestSnapshot, refreshGear, tryTakeFromNearbyChest, tryTakeFromThisChest, wanderAndRetryFind, withTimeout } from "../actions.js";
+
+// Direct report, 2026-11-20 ("checked by other bots before... looking through chests"): a plain
+// "look in a chest" is worth doing to learn something -- not worth a whole walk there just to
+// relearn what the fleet-shared registry already told everyone CHEST_INSPECT_FRESH_MS ago.
+const CHEST_INSPECT_FRESH_MS = 5 * 60_000;
 
 
 export async function lootAction(bot, action, speaker, token) {
@@ -101,14 +111,24 @@ export async function lootAction(bot, action, speaker, token) {
   }
 
   // No item named -- this is a plain inspection, not a withdrawal: open the nearest reachable
-  // chest, snapshot its real contents into known_chests.json for the whole fleet to see
-  // (§19/§27's own "remembering and redacting are the same operation" design), and take
-  // nothing. This is now the ONLY case that opens a chest without a specific target in mind.
+  // chest NOT ALREADY FRESHLY KNOWN -- the shared known_chests.json registry is exactly what
+  // this action itself keeps current, so a chest any bot opened within CHEST_INSPECT_FRESH_MS is
+  // not worth a trip just to relearn the same thing -- snapshot its real contents into
+  // known_chests.json for the whole fleet to see (§19/§27's own "remembering and redacting are
+  // the same operation" design), and take nothing. This is now the ONLY case that opens a chest
+  // without a specific target in mind.
+  const known = await loadKnownChests();
   let sawObstruction = false;
+  let sawFresh = false;
   for (const pos of positions) {
     if (token.cancelled) return ok("stopped on the way to a chest.");
     const chestBlock = bot.blockAt(pos);
     if (!chestBlock) continue;
+    const seenAt = known[chestKey(pos)]?.lastSeenAt;
+    if (seenAt && Date.now() - Date.parse(seenAt) < CHEST_INSPECT_FRESH_MS) {
+      sawFresh = true;
+      continue;
+    }
     if (chestObstructed(bot, chestBlock)) {
       noteUtilityOutcome("chest", chestBlock.position, false);
       sawObstruction = true;
@@ -151,5 +171,7 @@ export async function lootAction(bot, action, speaker, token) {
   }
   return fail(sawObstruction
     ? "found chests nearby, but they're all obstructed."
+    : sawFresh
+    ? "already know what's in the chests nearby -- nothing new to check."
     : "found chests nearby, but couldn't reach or open any of them.");
 }

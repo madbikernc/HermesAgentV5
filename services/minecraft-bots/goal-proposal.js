@@ -1,4 +1,9 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-20, direct report: "built residences, then mined blocks from them, built more"):
+// the Tier 1 "shelter" survival priority now claims "shelter_capacity" (claimBuilderItem(), the
+// same key Tier 2 already uses) before committing to it, so two bots going idle in the same
+// window don't both start a new shelter for the one shortage.
 //
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: self-proposed goals and routine-skip reporting.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
@@ -36,9 +41,23 @@ export async function proposeOwnGoal() {
   // food; the others build the residences.
   const roleWork = await nextRoleWork();
   if (survival?.name === "shelter" && roleWork) survival = null;
+  // Direct report, 2026-11-20 ("built residences, then mined blocks from them, built more"):
+  // "shelter" is the one Tier 1 item that is ALSO shared fleet infrastructure, unlike weapon/food/
+  // armor (personal, no coordination needed). Every OTHER shared item -- crafting_table/furnace/
+  // chest, and this exact same work again under its Tier 2 name "shelter_capacity" -- already
+  // goes through claimBuilderItem() so two idle bots don't converge on the same gap, but this
+  // Tier 1 copy never did. Several bots going idle in the same window (the common case right
+  // after a shelter drops out of the count) each independently saw "shelter" unmet and each
+  // committed to building one, with nothing to stop more than one actually going up for the one
+  // shortage. Reuses Tier 2's own "shelter_capacity" claim key -- it is the same contested
+  // resource under two names, not two separate ones.
+  if (survival?.name === "shelter" && !(await claimBuilderItem(bot, "shelter_capacity"))) survival = null;
   if (survival) {
     setCurrentGoal(newGoal({ description: survival.directive, source: "self" }));
     currentGoal.survivalPriorityItem = survival.name;
+    // Released by retireGoal() (goal-runners.js) when this goal ends, success or not -- the same
+    // mechanism Tier 2's own "shelter_capacity" claim already relies on.
+    if (survival.name === "shelter") currentGoal.builderPriorityItem = "shelter_capacity";
     await saveGoal(PERSONA_NAME, currentGoal);
     await broadcastGoalState("active", survival.directive);
     console.log(`[${USERNAME}] Survival priority goal (${survival.name}): ${survival.directive}`);

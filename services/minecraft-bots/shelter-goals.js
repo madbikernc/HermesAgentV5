@@ -1,4 +1,8 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-20, direct request: "shelter and bed locations should be stored in world
+// memory"): every confirmed build/bed/chest records its residence's door into the new
+// known_shelters.json (shelter-memory.js), alongside the existing fuzzy RAG note.
 //
 // 1.1.0 (2026-11-14) -- shelterStep() drops a goal's cached site once it is a shell nothing can
 // finish (home-scan.js 1.1.0's shelterShellIsStuck), so the next tick picks another site instead
@@ -14,6 +18,7 @@ import { SHELTER_ROOM, communalShelterMaterialCount, communalShelterPositions, d
 import { logStep } from "./goals.js";
 import { isDoorway } from "./swim-movements.js";
 import { SHELTER_SITE_RADIUS, completeSheltersNearHome, residenceChestCell, residencePlan, shelterShellIsStuck, unfinishedShelterNearHome } from "./home-scan.js";
+import { recordKnownShelter } from "./shelter-memory.js";
 import { communalShelterSatisfied, communalShelterSize, findCommunalShelterNearHome } from "./priorities.js";
 import { Vec3 } from "vec3";
 import { bedStep, gatherPlanks } from "./gear-goals.js";
@@ -50,6 +55,12 @@ async function shelterStep(goal, handle) {
     const cell = residenceChestCell(plan.base);
     if (!cell) return { ok: false, text: "the residence has no free floor for a chest." };
     const placed = await performAction(bot, { type: "place", item: "chest", at: { x: cell.x, y: cell.y, z: cell.z } }, USERNAME, handle);
+    // Direct request, 2026-11-20 ("shelter and bed locations should be stored in world memory"):
+    // this residence's own door is the stable key -- see shelter-memory.js's own header.
+    if (placed.ok) {
+      recordKnownShelter(doorwayPosition(plan.base), { hasChest: true })
+        .catch((err) => console.error(`[${USERNAME}] known-shelters write failed:`, err.message));
+    }
     return { ...placed, action: { type: "place", item: "chest" } };
   }
   if (plan.kind === "bed") {
@@ -58,6 +69,10 @@ async function shelterStep(goal, handle) {
     // in other covered spots nearby, and each one sent her off for wool for another.
     const cells = SHELTER_ROOM.map(([dx, dz]) => plan.base.offset(dx, 0, dz)).map(({ x, y, z }) => ({ x, y, z }));
     const placed = await performAction(bot, { type: "place_bed", near: plan.base, cells }, USERNAME, handle);
+    if (placed.ok) {
+      recordKnownShelter(doorwayPosition(plan.base), { hasBed: true })
+        .catch((err) => console.error(`[${USERNAME}] known-shelters write failed:`, err.message));
+    }
     return { ...placed, action: { type: "place_bed" } };
   }
   if (!bot.spawnPoint) return { ok: false, text: "don't know where home is yet." };
@@ -110,6 +125,10 @@ async function shelterStep(goal, handle) {
   if (built.built && !completeSheltersNearHome().some((b) => b.equals(site))) {
     return { ...built, ok: false, built: false, text: `${built.text} -- but it doesn't check out as a complete shelter.`,
       action: { type: "build" } };
+  }
+  if (built.built) {
+    recordKnownShelter(doorwayPosition(site), { source: "built" })
+      .catch((err) => console.error(`[${USERNAME}] known-shelters write failed:`, err.message));
   }
   return { ...built, action: { type: "build" } };
 }

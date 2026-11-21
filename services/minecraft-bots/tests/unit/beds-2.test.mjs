@@ -1,4 +1,11 @@
-// Version: 1.1.1
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-20): the shelterStep/runShelterGoal sandboxes stub recordKnownShelter()
+// (shelter-goals.js 1.2.0's new known_shelters.json write on every build/bed/chest); one test
+// captures the calls and checks both the build and the bed record the residence's own door.
+//
+// 1.2.0 (2026-11-20): the shelter_capacity sandbox stubs qualifyingFoundRoomsNearHome()'s new
+// dependencies (shelterRoomsNear/horizontalSpan/MIN_SHELTER_ROOM_SPAN, home-scan.js 1.3.0).
 //
 // 1.1.1 (2026-11-14): shelterStep's sandbox stubs shelterShellIsStuck (home-scan.js 1.1.0).
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
@@ -29,6 +36,8 @@ await check('Shelter goal: a finished shelter gets a bed put in it; a build nobo
     // 2026-11-04: what to do comes from the residence plan, not from her own shelter.
     residencePlan: () => c.plan, completeSheltersNearHome: () => [], holdsItem: () => false, plan: null,
     bedStep: async () => ({ ok: true, text: 'got wool.', action: { type: 'get_wool' } }),
+    // recordKnownShelter() (shelter-memory.js, new) is exercised directly in shelter-1.test.mjs.
+    recordKnownShelter: async () => {},
     findShelterSite: () => new V3(41, 65, -30), shelterPositions: () => [], shelterMaterialCount: () => 0,
     performAction: async (_bot, action) => {
       calls.push(action);
@@ -66,7 +75,7 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
   // "Shelter goal: a finished shelter gets a bed" check above.
   // A door already held: the door-planks check (2026-10-28) has its own test above.
   const inv = [{ name: 'oak_log', count: 3 }, { name: 'white_bed', count: 1 }, { name: 'oak_door', count: 1 }];
-  let standing = false, bedded = false; const calls = []; const done = [];
+  let standing = false, bedded = false; const calls = []; const done = []; const shelterRecords = [];
   const performAction = async (b, action) => {
     calls.push(action.type + (action.item ? `:${action.item}` : '') + (action.block ? `:${action.block}` : ''));
     // 70, not 60: the shelter's own room grew from 2x2 to 2x3 (2026-10-11), needing more material
@@ -97,6 +106,13 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
     // longterm.js) -- stubbed here same as every other cross-module function this context
     // already injects.
     writeMemoryNote: async () => {}, PERSONA_NAME: 'amy', SHELTER_SITE_RADIUS: 48,
+    // Direct request, 2026-11-20 ("shelter and bed locations should be stored in world
+    // memory"): recordKnownShelter() (shelter-memory.js, new) captured, not just swallowed, so
+    // this test can confirm both the build and the bed record this residence's own door.
+    // {...door}/{...updates}: both are plain objects built inside the vm (a different realm), so
+    // a direct deepEqual against a {}-literal written here would fail on realm identity alone --
+    // copied into this (outer) realm first.
+    recordKnownShelter: async (door, updates) => { shelterRecords.push({ door: { ...door }, updates: { ...updates } }); },
     SHELTER_ROOM: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]] });
   vm.runInContext(farmGoalSrc(), c);
   const goal = { description: 'go home and build a small shelter there', createdAt: Date.now(), consecutiveFailures: 0 };
@@ -104,6 +120,11 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
   assert.deepEqual(calls, ['craft:oak_planks', 'build', 'place_bed']);
   assert.deepEqual(done, ['done']);
   assert.deepEqual({ ...goal.shelterAt }, { x: 1, y: 64, z: 1 });
+  const door = s.doorwayPosition(new V3(1, 64, 1));
+  assert.deepEqual(shelterRecords, [
+    { door: { x: door.x, y: door.y, z: door.z }, updates: { source: 'built' } },
+    { door: { x: door.x, y: door.y, z: door.z }, updates: { hasBed: true } },
+  ], 'the build and the bed each record this residence into known_shelters.json');
 });
 
 
@@ -283,11 +304,14 @@ await check('Builder: shelter_capacity counts the bots in the game -- beds for t
   let world = residenceWorld({ online: ['Amy', 'Babs', 'Steve'], shelters: [
     { base: new V3(0, 64, 0), bed: true, chest: true }, { base: new V3(10, 64, 0), bed: true, chest: true }] });
   const c = vm.createContext({ BOT_USERNAMES: new Set(['Babs', 'Amy', 'Mark', 'Luke', 'Mayor', 'Bob', 'Nell', 'Wade', 'Dale']),
-    SHELTER_ROOM: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]], Math,
+    SHELTER_ROOM: [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]], SHELTER_SITE_RADIUS: 48, Math, Vec3: V3,
     countUsableNearHome: () => 1, countNearHome: () => 1, getAchievements: () => ['bred:cow'],
     fleetHasReachedIronTools: () => false, communalShelterSatisfied: () => true,
     countQualifyingSheltersNearHome: () => world.bases.length, hasOwnShelterWithBed: () => true,
     completeSheltersNearHome: () => world.bases, wouldBlockAccess: () => null,
+    // No found (village-house-shaped) rooms in these worlds -- qualifyingFoundRoomsNearHome()
+    // (home-scan.js 1.3.0) is exercised separately in chests-2.test.mjs.
+    shelterRoomsNear: () => [], horizontalSpan: () => ({ width: 0, depth: 0 }), MIN_SHELTER_ROOM_SPAN: 3,
     shelterHasBed: (b) => c.bot.isABed(c.bot.blockAt(b)) });
   const use = (w) => { world = w; c.bot = w.bot; };
   use(world);

@@ -1,4 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-20, direct report: "the minecraft bots are making way more chests than they
+// need"): makeHomeChest() now broadcasts "chest_built" (new setStorageBlockedUntil setter added
+// for incoming.js's listener, which clears a teammate's own stale reading) -- storageBlockedUntil
+// was purely local per bot, so several bots hitting the same full-chest shortage within the same
+// ~20-minute backoff window each built an extra chest, none aware a teammate had already fixed it.
 //
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: hunger, ripe crops, give requests, surplus storage and the home chest.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
@@ -176,6 +182,8 @@ export const INVENTORY_MAIN_HOTBAR_SLOTS = 36;
 // storing pauses for STORAGE_BACKOFF_MS instead of walking back to the same full chests.
 const STORAGE_BACKOFF_MS = 20 * 60_000;
 export let storageBlockedUntil = 0;
+// For modules split out of this file: an imported binding is read-only there.
+export function setStorageBlockedUntil(value) { storageBlockedUntil = value; }
 function noteStoreResult(result) {
   if (result.ok) {
     storageBlockedUntil = 0;
@@ -395,6 +403,16 @@ export async function makeHomeChest(handle) {
         writeMemoryNote({ scope: "world", persona: PERSONA_NAME, text: `Built a chest near ` +
           `(${at.x}, ${at.y}, ${at.z}), as of ${new Date().toISOString()}.` })
           .catch((err) => console.error(`[${USERNAME}] chest memory write failed:`, err.message));
+        // Direct report, 2026-11-20 ("making way more chests than they need"): storageBlockedUntil
+        // is purely local to each bot's own process -- several bots noticing the same full-chest
+        // shortage within the same ~20-minute backoff window each built an extra chest of her own,
+        // none of them aware a teammate had already fixed it. Same best-effort Buzz broadcast
+        // threat/death/delivery acks already use (fleet-coordination.js): every bot hears it, and
+        // the "chest_built" listener (incoming.js) clears HER OWN stale reading too, near home,
+        // so the next checkInventoryFull tries this new chest before anyone adds another.
+        buzzPublish(AGENT_ID, "minecraft-coordination",
+          JSON.stringify({ type: "chest_built", x: at.x, y: at.y, z: at.z }))
+          .catch((err) => console.error(`[${USERNAME}] chest-built broadcast failed:`, err.message));
       }
     }
     return placed;

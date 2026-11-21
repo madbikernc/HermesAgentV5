@@ -1,4 +1,7 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-20): new case -- a bedless, freshly built shell is protected from its door alone
+// (shelter.js 1.4.0's doorAnchors()).
 //
 // 1.2.0 (2026-11-15): clear_access retries a collectBlock NoPath from where she stands (collectBlocks), not one strike and out.
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
@@ -76,6 +79,24 @@ await check('Shelter walls: a hole in a wall is a second way out, so it can be f
   d.w.open([d.base.x - 1, d.base.y, d.base.z]);
   d.c.refreshLivingSpace(d.w.bot, d.base);
   assert.equal(d.c.wouldBlockAccess(d.w.bot, d.base.offset(-1, 0, 0)), null, 'with a hole too, the hole can be repaired');
+});
+
+
+await check('Shelter walls: a freshly built shell with no bed yet is still protected, from its door', async () => {
+  // Direct report, 2026-11-20 ("they built residences, then mined blocks from them... built
+  // more"): the shell goes up WITH its door in the same "build" call (actions/build.js); the bed
+  // goes in as a separate, later step (shelter-goals.js) -- so until then, bedAnchors() alone had
+  // nothing to anchor on here at all unless the shelter happened to sit within SHELL_RADIUS of
+  // bot.spawnPoint (refreshLivingSpace's own `extra`). doorAnchors() (shelter.js 1.4.0) closes
+  // that gap: the door itself is enough.
+  const c = shelter();
+  const w = blockWorld();
+  room(w, { baseX: 0, baseZ: 0 }); // walls, roof, floor and a real door -- no bed
+  const far = new V3(500, 64, 500); // bot.spawnPoint, nowhere near this shelter
+  const space = c.refreshLivingSpace(w.bot, far);
+  assert(space.anchors.length > 0, 'the door itself anchored the scan, with no bed and no spawnPoint nearby');
+  assert(c.isInsideLivingSpace(w.bot, new V3(0, 64, 0)), 'the room interior was reached from the door');
+  assert(c.isLivingSpaceWall(w.bot, new V3(1, 65, 0)), 'and its wall is protected without a bed in it');
 });
 
 

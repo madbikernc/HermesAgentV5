@@ -1,4 +1,7 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-20): chestKey() exported, for loot.js's plain-inspection path (direct report:
+// "checked by other bots before... looking through chests").
 //
 // 1.0.0 (2026-11-13) -- split out of actions.js (2.0.0) unchanged: the known-chests record, store ranking, consolidation, and utility-block usability.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. actions.js imports
@@ -27,7 +30,10 @@ import { ACTION_TIMEOUT_MS, FOOD_NAMES, goals } from "./action-vocab.js";
 // delete-this-one-item operation that could drift from reality.
 const KNOWN_CHESTS_FILE = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/known_chests.json`;
 
-function chestKey(position) {
+// Exported 2026-11-20 for loot.js's plain-inspection path (direct report: "checked by other
+// bots before... looking through chests"): the same key recordChestSnapshot() itself writes
+// under, so a caller can look up one exact chest's own last-known freshness directly.
+export function chestKey(position) {
   return `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}`;
 }
 

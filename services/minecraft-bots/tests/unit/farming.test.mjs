@@ -1,4 +1,7 @@
-// Version: 1.1.1
+// Version: 1.2.0
+// 1.2.0 (2026-11-20): asserts proposeOwnGoal() claims "shelter_capacity" (claimBuilderItem) before
+// committing to the Tier 1 "shelter" item, and tags the goal so the claim is released on end
+// (goal-proposal.js 1.1.0).
 // 1.1.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
@@ -257,9 +260,21 @@ await check('Role work: the Farmer farms and the Herder ranches on their own, no
   c.myRole = { primary: ROLES.MINER };
   penned = 0;
   assert.equal(await c.nextRoleWork(), null, 'any other role: none');
-  assert.match(between(index, 'async function proposeOwnGoal(', 'if (myRole?.primary === ROLES.SOLDIER)'),
+  const proposeSrc = between(index, 'async function proposeOwnGoal(', 'if (myRole?.primary === ROLES.SOLDIER)');
+  assert.match(proposeSrc,
     /nextSurvivalPriority\(\)[\s\S]*nextRoleWork\(\)[\s\S]*survival\?\.name === "shelter" && roleWork[\s\S]*builderPriorityCandidates\(\)/,
     'after Tier 1 survival -- except the fleet-wide residence item, which yields to it -- ahead of the Builder checklist');
+  // Direct report, 2026-11-20 ("built residences, then mined blocks from them, built more"):
+  // the Tier 1 "shelter" item is shared fleet infrastructure same as Tier 2's own
+  // "shelter_capacity" -- claimed the same way, before committing, so two idle bots don't both
+  // start one for the same shortage; the claim is released by retireGoal() (goal-runners.js)
+  // when the goal ends because it is tagged with the same builderPriorityItem field Tier 2 uses.
+  assert.match(proposeSrc,
+    /survival\?\.name === "shelter" && roleWork[\s\S]*survival\?\.name === "shelter" && !\(await claimBuilderItem\(bot, "shelter_capacity"\)\)[\s\S]*if \(survival\)/,
+    'the Tier 1 shelter item is claimed before committing to it, same key as Tier 2');
+  assert.match(proposeSrc,
+    /survival\.name === "shelter"\) currentGoal\.builderPriorityItem = "shelter_capacity"/,
+    'and tagged so retireGoal() releases that claim when the goal ends');
 });
 
 

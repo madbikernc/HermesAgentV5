@@ -1,4 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-20, direct report: "the minecraft bots are making way more chests than they
+// need"): watchFleetTopics' "minecraft-coordination" listener gets a new "chest_built" branch --
+// hearing a teammate's freshly placed chest near home clears HER OWN stale storageBlockedUntil
+// reading (upkeep-inventory.js's new setStorageBlockedUntil) instead of leaving her to build a
+// redundant one once her own backoff lets her.
 //
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: incoming chat and commands: new goals, stop, and the incoming queue.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
@@ -13,8 +19,10 @@ import { classifyIntent, generateReply, maybeRemember, narrateAction } from "./c
 import { runAction } from "./planning.js";
 import { noteIronToolEvidence } from "./priorities.js";
 import { GIVE_CLAIM_WINDOW_MS, broadcastGoalState, canSpareForRequest, giveClaims, noteNearbyResources, otherBotActivityAt, otherBotGoalSeenAt, otherBotGoals, pendingGiveRequest, recordGoalOutcome, withinSquadAssistRange } from "./fleet-coordination.js";
+import { isNearHome } from "./home-scan.js";
 import { AGENT_ID, MATRIX_USER_ID, MAX_CHAT_LEN, MAYOR_USERNAME, PERSONA_NAME, USERNAME, bot, busy, currentGoal, isActingCoordinator, isAnotherBot, isMayor, lastActivityAt, lastMayorSeenAt, setBusy, setCurrentGoal, setLastActivityAt, setLastMayorSeenAt } from "./index.js";
 import { creditCurriculumEvidence } from "./mayor.js";
+import { setStorageBlockedUntil } from "./upkeep-inventory.js";
 
 
 // Setting a goal is a fast, synchronous-feeling operation (a disk write, not a physical
@@ -269,6 +277,16 @@ export function watchFleetTopics() {
         giveClaims.get(payload.requestId)?.claimants.add(payload.donor);
       } else if (payload.type === "delivered" && payload.forPlayer === USERNAME) {
         console.log(`[${USERNAME}] drop reported: ${payload.count} ${payload.item} from ${payload.donor}; pickup unverified`);
+      } else if (payload.type === "chest_built") {
+        // Direct report, 2026-11-20 ("making way more chests than they need"): makeHomeChest's
+        // own broadcast (upkeep-inventory.js) -- a teammate just placed a new, empty chest. If
+        // it's near HER home too, her own storageBlockedUntil may be a stale "every chest full"
+        // reading from before this one existed; clear it so the next checkInventoryFull gives the
+        // new chest a real try before anyone builds yet another.
+        if (isNearHome(payload)) {
+          setStorageBlockedUntil(0);
+          console.log(`[${USERNAME}] heard ${msg.from_agent} built a chest near home -- giving storage another try first.`);
+        }
       } else if (payload.type === "scout") {
         // Direct request, 2026-09-11 ("ask the other bots to look near themselves... they
         // add/update their knowledge of nearby resources into global world memory"). Same

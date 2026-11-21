@@ -1,4 +1,8 @@
-// Version: 1.6.0
+// Version: 1.6.2
+// 1.6.2 (2026-11-20): shelterMemorySrc exported, the raw source of the new shelter-memory.js
+// (known_shelters.json), for its own direct unit checks.
+// 1.6.1 (2026-11-20): setStorageBlockedUntil added to SPLIT_SETTERS (upkeep-inventory.js's own
+// new setter, the "chest_built" fleet-coordination fix).
 // 1.6.0 (2026-11-13): `actions` joins the eight action-*.js modules actions.js 3.0.0 was split into.
 // `index` also carries the twelve modules index.js 3.0.0 was split into, in their
 // original order, imports dropped, so a slice that spans two of them still reads as one piece. A
@@ -68,7 +72,7 @@ export class V3 {
 
 const SPLIT_SETTERS = { setBusy: 'busy', setCurrentGoal: 'currentGoal', setLastActivityAt: 'lastActivityAt',
   setLastMayorSeenAt: 'lastMayorSeenAt', setPendingGiveRequest: 'pendingGiveRequest', setLastHarvestAt: 'lastHarvestAt',
-  setSurplusCleanupDueAt: 'surplusCleanupDueAt' };
+  setSurplusCleanupDueAt: 'surplusCleanupDueAt', setStorageBlockedUntil: 'storageBlockedUntil' };
 function unsetter(text) {
   const call = new RegExp(String.raw`(?<![\w$.])(` + Object.keys(SPLIT_SETTERS).join('|') + String.raw`)\(`, 'g');
   let out = '';
@@ -172,6 +176,7 @@ export const passedCount = () => passed;
 
 // ---- 2026-09-24 follow-up: remaining gaps from the review ----------------------------------------
 export const longterm = await readFile(root + 'longterm.js', 'utf8');
+export const shelterMemorySrc = await readSource('shelter-memory.js');
 
 // Builder-item claims (2026-10-11, PRIORITIES_PROPOSAL.md Tier 2 PR2): same shape as bedWorld's
 // own claims directory + shared-store mock, just a {item, claimedAt} value instead of a position.
