@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-# Version: 1.1.1
+# Version: 1.2.0
+#
+# 1.2.0 (2026-11-22) — direct operator request, after a real run (task financetrack-cat2-c50d227d19)
+# died with a bare "HTTP Error 400: Bad Request" on its revise call. Traced via the guard log: Layer
+# 1 blocked on `role_spoof`, matched `</think>` -- coder2's review reply leaked a reasoning-model
+# `<think>` tag into `content`, which then got carried verbatim into the next prompt (revise()
+# includes the previous reviewer's reply text), and the router correctly-if-accidentally flagged
+# the leaked tag as a role-spoofing attempt. This is the exact bug class
+# hermes-self-repair-generate.py already found and fixed in its own 1.5.0 (2026-11-13, task
+# e185ae3c) via strip_reasoning() -- ported here verbatim, since this file never got the
+# equivalent fix despite sharing the same reasoning-model reviewer (coder2) and the same
+# reply-feeds-into-the-next-prompt shape. call_model() is the single chokepoint every model reply
+# passes through (draft/review/revise/security_review/meta_review), so applying it there once
+# covers all of them -- the same reasoning self-repair's own call_model() already follows.
+# ask_judge() is untouched: its reply goes only into the final bundle, never back into another
+# call_model() prompt, so a leaked tag there can't trigger this chain reaction.
 #
 # 1.1.1 (2026-11-04) — comment-only: the placement note said coder2 sits on spark-2 so the two coding
 # backends never share a node. Both have been on spark-2 since coder moved there 2026-10-07
@@ -122,6 +137,7 @@
 
 import json
 import os
+import re
 import sys
 import time
 import importlib
@@ -301,6 +317,19 @@ def log_round(task_id, phase, round_num, actor, content):
         log(f"log_round failed (task {task_id!r}, phase {phase!r}, round {round_num}): {exc}")
 
 
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S)
+
+
+def strip_reasoning(text):
+    """A reply's leaked reasoning dropped: whole <think>...</think> blocks, and everything up to a
+    closing </think> whose opening tag the server already stripped (ported verbatim from
+    hermes-self-repair-generate.py 1.5.0, 1.2.0 here)."""
+    text = _THINK_BLOCK.sub("", text)
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    return text.strip()
+
+
 def call_model(role, system_prompt, user_content, max_tokens=1500):
     """Raises RuntimeError on a truncated-mid-reasoning response (empty `content` with real
     `reasoning_content` and finish_reason='length') rather than returning an empty string --
@@ -320,7 +349,7 @@ def call_model(role, system_prompt, user_content, max_tokens=1500):
     result = _post(f"{ROUTER_URL}/v1/chat/completions", body, timeout=MODEL_TIMEOUT_SECONDS)
     choice = result.get("choices", [{}])[0]
     message = choice.get("message", {})
-    content = (message.get("content") or "").strip()
+    content = strip_reasoning(message.get("content") or "")
     if not content and message.get("reasoning_content") and choice.get("finish_reason") == "length":
         raise RuntimeError(
             f"{role} truncated mid-reasoning at max_tokens={max_tokens} with no real answer "

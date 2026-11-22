@@ -1,6 +1,6 @@
 # hermes-dualcoder — recreate checklist
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 Bounded, auditable dual-agent code review (direct operator request, 2026-09-05). `coder` and
 `coder2` (GLM-4.7-Flash-Q4_K_M stock since S44, 2026-10-27 — formerly Muse Glimmer 30B;
@@ -8,6 +8,18 @@ Bounded, auditable dual-agent code review (direct operator request, 2026-09-05).
 until they agree or a round cap is hit, then both write independent security reviews and cross-check
 each other's review. See `tools/hermes-dualcoder.py`'s own header for the full state machine and
 `tools/hermes-nous-judge.py`'s role as a bounded tie-breaker before any human escalation.
+
+**Leaked reasoning is stripped since 2026-11-22 (`hermes-dualcoder.py` 1.2.0).** A reasoning model
+(`coder2`) can leak a `<think>...</think>` tag into its reply's `content` field; since every
+review/revise/security call feeds the previous reply back into the next prompt, an unstripped
+tag got carried forward and the router's own Layer 1 guard correctly flagged it as `role_spoof`
+— a bare `HTTP Error 400: Bad Request` that killed the task (real incident: task
+`financetrack-cat2-c50d227d19`). `call_model()` now strips it via `strip_reasoning()`, ported
+verbatim from `hermes-self-repair-generate.py` 1.5.0, which already carried the identical fix
+(task `e185ae3c`, 2026-11-13) — this file just never got the equivalent port until now despite
+sharing the same reasoning-model reviewer and the same reply-feeds-the-next-prompt shape. Offline
+tests: `infra/hermes-dualcoder/tests/test_dualcoder.py` (new, 12 checks) — no offline test
+existed for this file at all before this.
 
 ## 1. Deploy
 
@@ -83,3 +95,4 @@ behavior that must never happen at the round cap, the judge call, or the judge v
 | 1.1.0 | 2026-09-05 | Security phase now runs a real static-analysis pass (`infra/hermes-code-security-scan/`) before either model's security review, feeding real findings into both prompts as grounding — see `tools/hermes-dualcoder.py` 1.1.0's own changelog. |
 | 1.0.0 | 2026-09-05 | Initial version — dual-coder review orchestrator, direct operator request following the real coder/coder2 bake-off. |
 | 1.2.0 | 2026-11-04 | Model-assumption sweep: `coder2` is GLM-4.7-Flash-Q4_K_M (stock) since S44, not Muse Glimmer 30B — updated the intro and the known-issues note on `start-coder2.sh` flags. |
+| 1.3.0 | 2026-11-22 | Direct operator request, after a real task died on a leaked `<think>` tag tripping the router's Layer 1 guard. `call_model()` now strips leaked reasoning (`strip_reasoning()`, ported from `hermes-self-repair-generate.py` 1.5.0) before any reply is reused in the next prompt. New offline test suite, `tests/test_dualcoder.py` (12 checks) — none existed before. |
