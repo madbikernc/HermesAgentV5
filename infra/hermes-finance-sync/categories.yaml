@@ -1,0 +1,75 @@
+# S47 Firmament Finance Tracker categorization rules — one rule per line:
+# `category | match_type | pattern`.
+#
+# Operator-edited directly, same convention as infra/hermes-market-sync/tags.yaml/feeds.yaml/
+# topics.yaml. tools/hermes_finance_common.py's load_categories() reads this file verbatim;
+# categorize_transaction() matches a transaction's merchant name/memo against these rules in
+# order and returns the FIRST category whose pattern matches — unlike Market Watch's own tags
+# (one ticker can carry many tags), a transaction gets exactly one category. Blank lines and
+# lines starting with # are ignored.
+#
+# Despite the .yaml extension, this is NOT real YAML — flat delimited text, same precedent as
+# tags.yaml/feeds.yaml/topics.yaml, so no PyYAML dependency anywhere in this repo.
+#
+# The only currently-valid match_type is `keyword` (case-insensitive substring match).
+#
+# This is a seed, not an exhaustive list — FINANCE_TRACKER_DESIGN.md §6 frames the taxonomy
+# below as "including but not limited to." Extend it as real transaction data (once S47a/b land)
+# shows gaps. `Transfer` is semantically load-bearing, not a cosmetic bucket: §6/§9 exclude
+# `category = 'Transfer'` from income/expense totals, since a transfer between the operator's own
+# accounts would otherwise double-count real spending already categorized once on the other side.
+#
+# Order matters: rules are checked top to bottom, first match wins. A more specific pattern that
+# could be shadowed by a broader one listed later (or vice versa) should be reordered deliberately,
+# not left to coincidence.
+
+Groceries | keyword | whole foods
+Groceries | keyword | trader joe
+Groceries | keyword | safeway
+Groceries | keyword | kroger
+Groceries | keyword | aldi
+Groceries | keyword | grocery
+Dining | keyword | starbucks
+Dining | keyword | mcdonald
+Dining | keyword | chipotle
+Dining | keyword | doordash
+Dining | keyword | restaurant
+Transportation | keyword | uber
+Transportation | keyword | lyft
+Transportation | keyword | shell oil
+Transportation | keyword | chevron
+Transportation | keyword | exxon
+Transportation | keyword | parking
+Utilities | keyword | electric
+Utilities | keyword | water utility
+Utilities | keyword | internet service
+Utilities | keyword | comcast
+Housing | keyword | rent payment
+Housing | keyword | mortgage
+Subscriptions & Software | keyword | netflix
+Subscriptions & Software | keyword | spotify
+Subscriptions & Software | keyword | adobe
+Subscriptions & Software | keyword | subscription
+Entertainment | keyword | amc theatres
+Entertainment | keyword | ticketmaster
+Entertainment | keyword | steam games
+Shopping | keyword | amazon
+Shopping | keyword | target
+Shopping | keyword | best buy
+Health & Medical | keyword | cvs pharmacy
+Health & Medical | keyword | walgreens
+Health & Medical | keyword | urgent care
+Insurance | keyword | insurance
+Travel | keyword | delta air
+Travel | keyword | southwest air
+Travel | keyword | marriott
+Travel | keyword | hilton
+Travel | keyword | airbnb
+Income | keyword | payroll
+Income | keyword | direct deposit
+Transfer | keyword | online xfer
+Transfer | keyword | transfer to
+Transfer | keyword | transfer from
+Fees & Interest | keyword | overdraft fee
+Fees & Interest | keyword | atm fee
+Fees & Interest | keyword | interest charge
