@@ -1,4 +1,6 @@
-// Version: 1.6.2
+// Version: 1.6.3
+// 1.6.3 (2026-11-22): shelterWorld() takes an optional `water` list, for findShelterSite()'s new
+// shallow-water tolerance (action-shelter.js 1.1.0).
 // 1.6.2 (2026-11-20): shelterMemorySrc exported, the raw source of the new shelter-memory.js
 // (known_shelters.json), for its own direct unit checks.
 // 1.6.1 (2026-11-20): setStorageBlockedUntil added to SPLIT_SETTERS (upkeep-inventory.js's own
@@ -452,10 +454,17 @@ export const shelterFns = () => {
   return c;
 };
 
-export function shelterWorld({ groundY = (x, z) => 63, blocked = [] } = {}) {
+export function shelterWorld({ groundY = (x, z) => 63, blocked = [], water = [] } = {}) {
   const b = new Set(blocked.map((p) => `${p.x},${p.y},${p.z}`));
-  return { blockAt: (p) => (p.y <= groundY(p.x, p.z) || b.has(`${p.x},${p.y},${p.z}`)
-    ? { name: 'grass_block', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' }) };
+  // water: 2026-11-22, for findShelterSite()'s own shallow-water tolerance -- overrides whatever
+  // groundY/blocked would otherwise report at that exact position.
+  const w = new Set(water.map((p) => `${p.x},${p.y},${p.z}`));
+  return { blockAt: (p) => {
+    const key = `${p.x},${p.y},${p.z}`;
+    if (w.has(key)) return { name: 'water', boundingBox: 'empty' };
+    return p.y <= groundY(p.x, p.z) || b.has(key)
+      ? { name: 'grass_block', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' };
+  } };
 }
 
 // ---- 2026-10-07: access to chests/beds/doors, shelter walls, tunnelling torches --------------

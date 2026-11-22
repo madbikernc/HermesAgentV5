@@ -1,4 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-22, direct report: "it looks like pure chaos, with little measurable
+// success" a day into the fresh world): setupPathfinding() now debounces mineflayer-
+// pathfinder's own 'chunkColumnLoad' reset trigger (CHUNK_RESET_DEBOUNCE_MS) -- the specific,
+// previously-unidentified frequency driver behind the astar.js promise-backlog leak run-bot.sh
+// has tracked since September. See the new code's own header for the confirmed mechanism.
 //
 // 1.0.0 (2026-11-10) -- split out of index.js (2.138.0) unchanged: the bot's pathfinder setup --
 // SwimMovements and its costs (liquid, entity, dig), the blocks it may never break, the
@@ -243,6 +249,47 @@ export function setupPathfinding(bot, { username: USERNAME }) {
   // them) to bound the worst case far short of where it was.
   bot.pathfinder.thinkTimeout = 1000;
   bot.pathfinder.tickTimeout = 20;
+
+  // Direct report, 2026-11-22 ("re-init the world... it looks like pure chaos, with little
+  // measurable success"): a day into the fresh world, several bots were OOM-crashing 10-17x/day
+  // (Dale 17, Babs 12, Wade 10) -- this run-bot.sh's own header has tracked the SAME promise-
+  // backlog leak since September as "architectural... needs chunking searches to actually
+  // yield." Chunking already exists (thinkTimeout/tickTimeout above); what was never addressed
+  // is FREQUENCY. Confirmed against mineflayer-pathfinder 2.4.5's own index.js: its
+  // 'chunkColumnLoad' handler calls resetPath('chunk_loaded') -- throwing away the current
+  // search's progress and starting a fresh, fully-synchronous compute() burst -- whenever a
+  // newly-loaded chunk is merely ADJACENT to one the current search has already visited, with no
+  // debounce of its own (the exact "recompute FREQUENCY isn't something this codebase can bound
+  // without patching mineflayer-pathfinder directly" gap this file's own searchRadius comment
+  // already named). Walking through previously-explored terrain near an established base almost
+  // never re-triggers this (every nearby chunk is already loaded); walking through brand-new
+  // terrain -- exactly what 9 bots do nonstop for their first day in a fresh world -- re-
+  // triggers it on nearly every step. Debounced here, in OUR OWN code, rather than patched into
+  // the vendored library file (which a future `npm install` would silently discard): the
+  // plugin's own listener still runs, just not more often than CHUNK_RESET_DEBOUNCE_MS apart --
+  // a skipped reset costs nothing but following a slightly stale path for a few more ticks,
+  // which the search's own ongoing extension (compute() keeps growing the SAME path otherwise)
+  // already tolerates. Deliberately conservative: only engages if there's exactly the one
+  // listener mineflayer-pathfinder itself registers (confirmed live: none of
+  // mineflayer-collectblock/-pvp/-tool listen for this event either) -- any other count means
+  // this assumption no longer holds, so it leaves the plugin's own behavior untouched rather
+  // than guess.
+  const CHUNK_RESET_DEBOUNCE_MS = 500;
+  const chunkLoadListeners = bot.listeners("chunkColumnLoad");
+  if (chunkLoadListeners.length === 1) {
+    const [originalChunkColumnLoad] = chunkLoadListeners;
+    bot.removeListener("chunkColumnLoad", originalChunkColumnLoad);
+    let lastChunkResetAt = 0;
+    bot.on("chunkColumnLoad", (chunk) => {
+      const now = Date.now();
+      if (now - lastChunkResetAt < CHUNK_RESET_DEBOUNCE_MS) return;
+      lastChunkResetAt = now;
+      originalChunkColumnLoad(chunk);
+    });
+  } else {
+    console.error(`[${USERNAME}] pathfinding: expected exactly one chunkColumnLoad listener, ` +
+      `found ${chunkLoadListeners.length} -- skipping the chunk-load reset debounce`);
+  }
 
   // Real-data visibility into navigation, not a guess: astar's own result status
   // ('success'/'partial'/'noPath'/'timeout') for every path (re)computation, so a bad

@@ -1,4 +1,6 @@
-// Version: 1.2.0
+// Version: 1.3.0
+// 1.3.0 (2026-11-22): new checks for findShelterSite()'s shallow-water tolerance and
+// shelterPositions()'s whole-footprint floor (action-shelter.js 1.1.0).
 // 1.2.0 (2026-11-20): new check for shelter-memory.js's known_shelters.json (load/record,
 // merge-upsert by door position, built vs. found).
 // 1.1.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
@@ -120,10 +122,12 @@ await check('Shelters: any mix of plain building blocks; never sand, gravel, val
   // its lintel rejoins the wall count, and the floor under the room is included too.
   // Also 2026-10-11: the room itself grew from 2x2 to 2x3 (a real door and a bed could never both
   // fit in 2x2 -- SHELTER_ROOM's own header comment has the full account).
-  // 13 full wall columns x 3 (39) + the doorway column's lintel (1) + a 4x5 roof (20) + a 2x3
-  // floor (6) = 66.
-  assert.equal(c.shelterPositions(new V3(0, 64, 0)).length, 66,
-    '13 full wall columns x 3, + the doorway column\'s lintel, + a 4x5 roof, + a 2x3 floor');
+  // 13 full wall columns x 3 (39) + the doorway column's lintel (1) + a 4x5 roof (20) + a 4x5
+  // floor (20) = 80. 2026-11-22: the floor grew from the 2x3 room (6) to the whole 4x5 footprint
+  // (20) -- see action-shelter.js 1.1.0's own header for why (filling shallow water under the
+  // walls, not just the room).
+  assert.equal(c.shelterPositions(new V3(0, 64, 0)).length, 80,
+    '13 full wall columns x 3, + the doorway column\'s lintel, + a 4x5 roof, + a 4x5 floor');
   const doorPos = c.doorwayPosition(new V3(0, 64, 0));
   assert.deepEqual({ x: doorPos.x, y: doorPos.y, z: doorPos.z }, { x: 0, y: 64, z: 3 },
     'the doorway sits at the lower door cell, excluded from the generic fill above');
@@ -235,6 +239,42 @@ await check('Shelters: the site is a flat, clear 4x5 within 4 blocks of home, ev
   const raised = c.findShelterSite(shelterWorld({ groundY: () => 64 }), home);
   assert.equal(raised.y, 65, 'the ground is a block higher than spawn');
   assert.equal(c.findShelterSite(shelterWorld({ groundY: (x, z) => 63 + ((x + z) & 1) }), home), null, 'nowhere flat');
+});
+
+
+await check('Shelters: a shallow pond in the footprint is filled instead of refusing the site', async () => {
+  // Direct follow-up, 2026-11-22 ("it looks like pure chaos, with little measurable success" --
+  // a day into the fresh world, shelter_site_failures_per_bot_day: 123.2, zero beds placed --
+  // then "or, start leveling land to make it useable"): one column of shallow water over solid
+  // ground is exactly the "a pond is in the way" case this now tolerates -- the site still gets
+  // found, and shelterPositions()'s own floor (the whole footprint now, not just the room) names
+  // that cell, so build.js's ordinary wall-placement loop fills it in -- no new logic needed.
+  const c = shelterFns();
+  const home = new V3(0, 64, 0);
+  const shallow = c.findShelterSite(shelterWorld({ water: [new V3(1, 63, 1)] }), home);
+  assert.deepEqual([shallow.x, shallow.y, shallow.z], [0, 64, 0], 'one shallow-water column does not disqualify the site');
+  assert(c.shelterPositions(shallow).some((p) => p.x === 1 && p.y === 63 && p.z === 1),
+    "the water cell is in the floor build.js will place -- it's what actually gets filled");
+  assert.equal(c.shelterPositions(new V3(0, 64, 0)).filter((p) => p.y === 63).length, 20,
+    'the floor covers the whole 4x5 footprint, not just the 6-cell room');
+
+  // Too deep to fill cheaply: refused, same as before this change. Flooded wide enough (every
+  // column a radius-4 search could possibly reach, same coverage the crowded-core test below
+  // uses) that there is no shallower alternative site nearby to fall back to instead.
+  const deepWater = [];
+  for (let x = -5; x <= 6; x++) {
+    for (let z = -5; z <= 7; z++) { deepWater.push(new V3(x, 63, z)); deepWater.push(new V3(x, 62, z)); }
+  }
+  const deep = c.findShelterSite(shelterWorld({ water: deepWater }), home);
+  assert.equal(deep, null, '2-block-deep water is not a buildable floor');
+
+  // A pond is fine; a lake is not -- flooding the same wide area, only 1 block deep this time,
+  // still refuses rather than accepting a fully submerged site (every one of its 20 columns
+  // would need filling, past MAX_FILLABLE_COLUMNS).
+  const lakeWater = [];
+  for (let x = -5; x <= 6; x++) for (let z = -5; z <= 7; z++) lakeWater.push(new V3(x, 63, z));
+  const lake = c.findShelterSite(shelterWorld({ water: lakeWater }), home);
+  assert.equal(lake, null, 'a fully submerged area is still refused, not an endless fill');
 });
 
 

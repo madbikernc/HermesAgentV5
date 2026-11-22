@@ -1,4 +1,8 @@
-// Version: 1.3.0
+// Version: 1.3.1
+//
+// 1.3.1 (2026-11-22): the materials test's fake craft yield raised 70 -> 80, matching
+// shelterPositions()'s wider floor (action-shelter.js 1.1.0) so it still gathers enough in one
+// craft call.
 //
 // 1.3.0 (2026-11-20): the shelterStep/runShelterGoal sandboxes stub recordKnownShelter()
 // (shelter-goals.js 1.2.0's new known_shelters.json write on every build/bed/chest); one test
@@ -78,10 +82,12 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
   let standing = false, bedded = false; const calls = []; const done = []; const shelterRecords = [];
   const performAction = async (b, action) => {
     calls.push(action.type + (action.item ? `:${action.item}` : '') + (action.block ? `:${action.block}` : ''));
-    // 70, not 60: the shelter's own room grew from 2x2 to 2x3 (2026-10-11), needing more material
-    // than one craft call used to provide -- a second call here would mean a second 'craft' entry
-    // in `calls` below, which this test treats as a regression (one craft, then build, not two).
-    if (action.type === 'craft') { inv.push({ name: 'oak_planks', count: 70 }); return { ok: true, text: 'crafted planks' }; }
+    // 80, not 70: shelterPositions()'s own floor grew from the 2x3 room (6 cells) to the whole
+    // 4x5 footprint (20 cells, action-shelter.js 1.1.0) -- needing more material than one craft
+    // call used to provide, same reasoning the room's earlier 2x2->2x3 growth (2026-10-11) already
+    // forced here. A second call would mean a second 'craft' entry in `calls` below, which this
+    // test treats as a regression (one craft, then build, not two).
+    if (action.type === 'craft') { inv.push({ name: 'oak_planks', count: 80 }); return { ok: true, text: 'crafted planks' }; }
     if (action.type === 'build') { standing = true; return { ok: true, text: 'built a small shelter', built: true }; }
     if (action.type === 'place_bed') { bedded = true; return { ok: true, text: 'placed a bed', bedAt: new V3(1, 64, 2) }; }
     return { ok: false, text: '?' };

@@ -1,4 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-22, direct report: "it looks like pure chaos, with little measurable success",
+// direct follow-up: "or, start leveling land to make it useable"): a shelter site may now
+// include up to MAX_FILLABLE_COLUMNS floor columns of shallow water over solid ground --
+// shelterPositions() floors the whole 4x5 footprint (new SHELTER_FOOTPRINT), not just the room,
+// so build.js's existing wall-placement loop fills the water in with no new logic of its own.
 //
 // 1.0.0 (2026-11-13) -- split out of actions.js (2.0.0) unchanged: shelter materials and geometry, shelter and communal-shelter sites, crop age, drop collection, farm status.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. actions.js imports
@@ -47,6 +53,13 @@ export function communalShelterMaterialCount(bot) {
 // the room is base..base+(1,0,2), walls three high round it with a doorway at (0, *, 3), and a 4x5
 // roof on top. index.js's hasShelterNearHome() checks this same shape.
 export const SHELTER_ROOM = [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]];
+// The shelter's own 4x5 footprint (the room plus the wall margin around it) -- shared by
+// findShelterSiteAtRadius() below (what ground a site needs) and shelterPositions() (what floor
+// it actually places), so a site that search finds buildable and the floor build.js places
+// always agree on what "the floor" covers. Matches findShelterSiteAtRadius's own ox -1..2, oz
+// -1..3 loop exactly.
+const SHELTER_FOOTPRINT = [];
+for (let dx = -1; dx <= 2; dx++) for (let dz = -1; dz <= 3; dz++) SHELTER_FOOTPRINT.push([dx, dz]);
 // Direct report, 2026-10-11 ("a shelter needs... a real door, not an opening or arch... no other
 // openings... with at least one bed"): the doorway used to exclude all three wall-height cells at
 // (0, 0..2, 2) from the generic fill, leaving a bare, permanent gap -- nothing ever placed a door
@@ -88,7 +101,13 @@ export function shelterPositions(base) {
   for (let dx = -1; dx <= 2; dx++) {
     for (let dz = -1; dz <= 3; dz++) roof.push(base.offset(dx, 3, dz));
   }
-  const floor = SHELTER_ROOM.map(([dx, dz]) => base.offset(dx, -1, dz));
+  // 2026-11-22: the WHOLE footprint's floor, not just the room's -- see SHELTER_FOOTPRINT's own
+  // header. On ordinary dry land every one of these cells is already solid (findShelterSiteAtRadius
+  // already required it), so build.js's "skip if already solid" loop no-ops on all of them,
+  // exactly as before; on a water-tolerant site (same report), this is what actually gets the
+  // shallow water under the walls filled in -- no new placement logic needed, the existing
+  // "place against whatever's already solid" loop does it the same way it places any other wall.
+  const floor = SHELTER_FOOTPRINT.map(([dx, dz]) => base.offset(dx, -1, dz));
   return [...walls, ...floor, ...roof];
 }
 
@@ -128,6 +147,34 @@ export function doorItemFor(bot) {
 // completely different mechanism.
 const SHELTER_SITE_SEARCH_RINGS = [4, 8, 16, 32, 48];
 
+// Direct report, 2026-11-22 ("it looks like pure chaos, with little measurable success"), direct
+// follow-up requests the same breath ("if the spawn is unsuitable... seek a better place", "or
+// start leveling land to make it useable"): the fresh world's spawn landed the whole fleet
+// somewhere water-heavy (shelter_site_failures_per_bot_day: 123.2, zero beds placed in 24h) --
+// every floor column used to need ALREADY-dry ground, so a pond anywhere inside a candidate's
+// 4x5 disqualified it outright however good the rest of the spot was. A column whose floor is
+// shallow water over solid ground (MAX_FILL_DEPTH or less) now counts too, bounded by
+// MAX_FILLABLE_COLUMNS so a genuine lake still refuses rather than accepting a mostly-submerged
+// site -- shelterPositions()'s own floor (now the whole footprint, not just the room) is what
+// actually gets these filled, by the ordinary wall-placement loop, no new logic needed there.
+const MAX_FILL_DEPTH = 1;
+const MAX_FILLABLE_COLUMNS = 6;
+
+// "dry" (solid already, nothing to fill), "fill" (shallow water over solid ground,
+// MAX_FILL_DEPTH or less -- build.js will fill it in), or null (too deep, lava, open air with
+// nothing solid under it, or anything else that isn't a buildable floor).
+function floorKind(bot, floorPos) {
+  const block = bot.blockAt(floorPos);
+  if (block?.boundingBox === "block") return "dry";
+  if (block?.name !== "water") return null;
+  for (let depth = 1; depth <= MAX_FILL_DEPTH; depth++) {
+    const below = bot.blockAt(floorPos.offset(0, -depth, 0));
+    if (below?.boundingBox === "block") return "fill";
+    if (below?.name !== "water") return null; // lava, air, anything else below: too uncertain to fill
+  }
+  return null; // still water past MAX_FILL_DEPTH -- too deep to fill cheaply
+}
+
 function findShelterSiteAtRadius(bot, home, radius) {
   const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
   const clear = (p) => {
@@ -141,14 +188,15 @@ function findShelterSiteAtRadius(bot, home, radius) {
         const base = new Vec3(hx + dx, hy + dy, hz + dz);
         const dist = Math.hypot(dx, dz) + Math.abs(dy) * 0.5;
         if (dist >= bestDist) continue;
-        let ok = true;
-        for (let ox = -1; ox <= 2 && ok; ox++) {
-          for (let oz = -1; oz <= 3 && ok; oz++) {
-            ok = bot.blockAt(base.offset(ox, -1, oz))?.boundingBox === "block";
-            for (let oy = 0; oy <= 3 && ok; oy++) ok = clear(base.offset(ox, oy, oz));
-          }
+        let ok = true, fillable = 0;
+        for (const [ox, oz] of SHELTER_FOOTPRINT) {
+          if (!ok) break;
+          const kind = floorKind(bot, base.offset(ox, -1, oz));
+          if (kind === null) { ok = false; break; }
+          if (kind === "fill" && ++fillable > MAX_FILLABLE_COLUMNS) { ok = false; break; }
+          for (let oy = 0; oy <= 3 && ok; oy++) ok = clear(base.offset(ox, oy, oz));
         }
-        const outside = base.offset(0, 0, 4); // in front of the doorway
+        const outside = base.offset(0, 0, 4); // in front of the doorway -- kept dry, not fillable
         ok = ok && bot.blockAt(outside.offset(0, -1, 0))?.boundingBox === "block" && clear(outside) && clear(outside.offset(0, 1, 0));
         if (ok) { best = base; bestDist = dist; }
       }

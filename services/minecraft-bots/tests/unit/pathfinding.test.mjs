@@ -1,4 +1,6 @@
-// Version: 1.2.1
+// Version: 1.3.0
+// 1.3.0 (2026-11-22): new checks for setupPathfinding's chunkColumnLoad reset debounce
+// (pathfinding.js 1.1.0) and its own safety gate when the listener count isn't exactly one.
 // 1.2.1 (2026-11-13): index.js 3.0.0 -- the breath listener is the named onLowBreath(), registered by index.js; the check registers it.
 //
 // 1.2.0 (2026-11-11): far below the goal under rock, stepped goto climbs (swim-movements.js 1.7.0).
@@ -258,6 +260,70 @@ await check('Pathfinding: setupPathfinding installs the costs, unbreakable block
   assert.deepEqual(installed, ['doors', 'stepped']);
   for (let i = 0; i < 4; i++) bot.emit('path_reset', 'dig_error');
   assert.equal(movements.canDig, false, 'four dig_errors in a burst force walk-only pathing');
+});
+
+
+// 2026-11-22 (pathfinding.js 1.1.0): the real frequency driver behind the long-tracked astar.js
+// promise-backlog leak, found and fixed: mineflayer-pathfinder's own 'chunkColumnLoad' listener
+// resets the whole search on every newly-loaded adjacent chunk, no debounce of its own -- cheap
+// near an established base (every nearby chunk already loaded) but firing on nearly every step
+// while exploring brand-new terrain, exactly what a fresh world's first day looks like.
+await check('Pathfinding: setupPathfinding debounces mineflayer-pathfinder\'s own chunk-load reset trigger', async () => {
+  const src = await readFile(root + 'pathfinding.js', 'utf8');
+  class Movements { constructor() { this.blocksCantBreak = new Set(); this.exclusionAreasPlace = []; this.canDig = true; } }
+  let now = 1000;
+  const bot = new EventEmitter();
+  Object.assign(bot, {
+    registry: { blocksArray: [] },
+    pathfinder: { setMovements(m) { this.movements = m; } }, pvp: {}, collectBlock: {},
+    entity: { position: new V3(0, 64, 0) }, entities: {}, blockAt: () => null,
+  });
+  // Stands in for mineflayer-pathfinder's own listener, registered before setupPathfinding runs
+  // (loadPlugin happens before it, same real order index.js uses).
+  const originalCalls = [];
+  bot.on('chunkColumnLoad', (chunk) => originalCalls.push(chunk));
+  const c = vm.createContext({ console: { log() {}, error() {} }, Vec3: V3, SwimMovements: Movements,
+    setTimeout, Date: { now: () => now },
+    installDoorSupport: () => {}, installSteppedGoto: () => {},
+    isProtectedBlockName: () => false, wouldBlockAccess: () => true });
+  vm.runInContext(between(src, 'function setupPathfinding'), c);
+  c.setupPathfinding(bot, { username: 'Amy' });
+
+  bot.emit('chunkColumnLoad', 'a');
+  assert.deepEqual(originalCalls, ['a'], 'the first chunk load still resets, same as before');
+
+  now += 100;
+  bot.emit('chunkColumnLoad', 'b');
+  assert.deepEqual(originalCalls, ['a'], 'a second chunk load inside the debounce window is skipped');
+
+  now += 500;
+  bot.emit('chunkColumnLoad', 'c');
+  assert.deepEqual(originalCalls, ['a', 'c'], 'once the debounce window has passed, the reset fires again');
+});
+
+
+await check('Pathfinding: an unexpected chunkColumnLoad listener count leaves mineflayer-pathfinder alone', async () => {
+  // The whole debounce is gated on finding EXACTLY the one listener the plugin itself registers
+  // -- confirmed live that no other plugin (collectblock/pvp/tool) listens for this event
+  // either. Anything else (none, or more than one) means that assumption no longer holds, so
+  // this skips the rewrite entirely rather than guess which listener is the real one.
+  const src = await readFile(root + 'pathfinding.js', 'utf8');
+  class Movements { constructor() { this.blocksCantBreak = new Set(); this.exclusionAreasPlace = []; this.canDig = true; } }
+  const errors = [];
+  const bot = new EventEmitter();
+  Object.assign(bot, {
+    registry: { blocksArray: [] },
+    pathfinder: { setMovements(m) { this.movements = m; } }, pvp: {}, collectBlock: {},
+    entity: { position: new V3(0, 64, 0) }, entities: {}, blockAt: () => null,
+  });
+  const c = vm.createContext({ console: { log() {}, error: (msg) => errors.push(msg) }, Vec3: V3, SwimMovements: Movements,
+    setTimeout, Date,
+    installDoorSupport: () => {}, installSteppedGoto: () => {},
+    isProtectedBlockName: () => false, wouldBlockAccess: () => true });
+  vm.runInContext(between(src, 'function setupPathfinding'), c);
+  c.setupPathfinding(bot, { username: 'Amy' }); // zero chunkColumnLoad listeners registered
+  assert.equal(bot.listeners('chunkColumnLoad').length, 0, 'nothing was added in place of a listener that was never there');
+  assert.match(errors[0] ?? '', /expected exactly one chunkColumnLoad listener, found 0/);
 });
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) console.log(`${passedCount()} unit checks passed.`);
