@@ -1,4 +1,6 @@
-// Version: 1.3.0
+// Version: 1.3.1
+// 1.3.1 (2026-11-22): the farmTask-to-targetItem gap bound widened 1400 -> 1800 -- goal-tick.js
+// 1.2.0's new opportunistic-gather dispatch (gatherBlock) now sits in that same block too.
 // 1.3.0 (2026-11-22): new check that ranchStep() looks for livestock near home before gathering
 // pen material (goal-runners.js 1.2.0).
 // 1.2.0 (2026-11-20): asserts proposeOwnGoal() claims "shelter_capacity" (claimBuilderItem) before
@@ -135,9 +137,10 @@ await check('Farm goals: a missing hoe is fetched (loot, then craft) and the har
 
 
 await check('Farm goals: holding a crop, or a DONE claim, never finishes one -- only a harvest', async () => {
-  // 1400, not 900: 2026-10-12's new weapon-goal dispatch (its own header comment included) sits
-  // in this same block, between farmTask routing and the "already holding the target" shortcut.
-  assert.match(index, /goal\.farmTask \?\?= farmTaskFor\(goal\.description\);[\s\S]{0,1400}if \(goal\.targetItem && holdsItem\(goal\.targetItem\)\)/,
+  // 1800, not 1400: 2026-11-22's new opportunistic-gather dispatch (its own header comment
+  // included, goal-tick.js 1.2.0) sits in this same block too, after the weapon-goal dispatch
+  // 2026-10-12 already added here.
+  assert.match(index, /goal\.farmTask \?\?= farmTaskFor\(goal\.description\);[\s\S]{0,1800}if \(goal\.targetItem && holdsItem\(goal\.targetItem\)\)/,
     'farm/ranch/weapon routing runs before the "already holding the target" shortcut and the skill lookup');
   const w = farmGoalWorld([{ ok: false, text: "couldn't start a farm: tilled 0, planted 0 (the grass_block didn't turn to farmland)." }]);
   await w.tick(); await w.tick(); await w.tick();

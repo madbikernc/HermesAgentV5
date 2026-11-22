@@ -1,4 +1,10 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-22, direct report: "if they find themselves near a minable resource... they
+// should gather it"): new runOpportunisticGatherGoal(), the dedicated runner for a goal tagged
+// by priorities.js's new nextOpportunisticGather() (goal-proposal.js) -- one performAction
+// "mine" call against the exact block already spotted when the goal was proposed, done the
+// moment it succeeds. goalKind() now names it too, for the "giving up on goal" line.
 //
 // 1.2.0 (2026-11-22, direct report: "don't start building corrals until suitable livestock are
 // identified in range"): ranchStep() checks for two animals of one kind near home BEFORE
@@ -240,7 +246,7 @@ function isDedicatedRunnerGoal(goal) {
 // What kind of goal this is, for the "giving up" line: the runner tag that chose it, else who set it.
 export function goalKind(goal) {
   return goal.farmTask || goal.survivalPriorityItem || goal.builderPriorityItem || goal.standing ||
-    (goal.source === "user" ? "user" : "freeform");
+    goal.opportunisticGather || (goal.source === "user" ? "user" : "freeform");
 }
 
 export async function failGoalStep(goal, reason) {
@@ -256,6 +262,26 @@ export async function failGoalStep(goal, reason) {
     return;
   }
   await saveGoalIfCurrent(goal);
+}
+
+// Direct report, 2026-11-22 ("if they find themselves near a minable resource... they should
+// gather it"). The dedicated runner for a goal tagged by priorities.js's own
+// nextOpportunisticGather() -- unlike weapon/food/tools, the exact block was already found when
+// the goal was proposed, so there's nothing to decide here: one "mine" call against it, done the
+// moment that succeeds (mine's own internal retry -- a remembered spot, then a wander -- covers
+// the case where she's drifted off or someone else got there first). Not added to
+// DEDICATED_RUNNER_FARM_TASKS: unlike survival/infrastructure items, nothing depends on this
+// succeeding -- a short, ordinary failure leash is correct, not a reason to camp on it.
+const OPPORTUNISTIC_GATHER_COUNT = 4;
+export async function runOpportunisticGatherGoal(goal, takeControl, getHandle, replaced) {
+  if (replaced() || !(await takeControl())) return;
+  const result = await performAction(bot, { type: "mine", block: goal.gatherBlock, count: OPPORTUNISTIC_GATHER_COUNT }, USERNAME, getHandle());
+  getHandle()?.release();
+  if (result.cancelled || replaced()) return;
+  logStep(goal, `opportunistic gather: ${result.text}`, result.ok, { type: "mine", block: goal.gatherBlock });
+  console.log(`[${USERNAME}] opportunistic gather: ${result.text} (ok=${result.ok})`);
+  if (result.ok) return completeGoal(goal, `gathered nearby ${goal.gatherBlock}`);
+  await failGoalStep(goal, result.text);
 }
 
 // Crops ripen on their own schedule (tens of minutes), so a farm goal plants, then waits -- holding

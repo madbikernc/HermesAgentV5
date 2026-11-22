@@ -1,4 +1,11 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-22, direct report: "bots need to be opportunistic... if they find themselves
+// near a minable resource other than wood or grass, they should gather it... particularly true
+// of in-ground/underground resources like coal, ore, redstone, lapis lazuli"): new
+// nextOpportunisticGather(), checked last in proposeOwnGoal() (goal-proposal.js), right before
+// the freeform LLM self-propose call -- a real ore vein already visible right now is strictly
+// better grounding than that call guessing "gathering a resource" from nothing.
 //
 // 1.1.0 (2026-11-22, direct report: "don't try to build a beehive unless the components are
 // there"): the beehive checklist item now also requires holding 3+ honeycomb, or a real bee
@@ -10,7 +17,7 @@
 // pipeline's 40000-char whole-file limit. bot, USERNAME and the rest are read back from
 // index.js, only inside functions.
 
-import { FLEE_ONLY_MOBS, communalDoorwayPosition, communalShelterPositions, getAchievements, holdsGuardAnchor, isCommunalShelterMaterial, nearestHostile } from "./actions.js";
+import { FLEE_ONLY_MOBS, MINE_SEARCH_RADIUS, communalDoorwayPosition, communalShelterPositions, getAchievements, getResourceBlockNames, holdsGuardAnchor, isCommunalShelterMaterial, nearestHostile } from "./actions.js";
 import { hasWeapon } from "./equipment.js";
 import { BUILDER_PRIORITY_RADIUS, completeSheltersNearHome, countNearHome, countUsableNearHome, residenceDirective, residencePlan, shelterGeometryPositions, shelterHasBed } from "./home-scan.js";
 import { heldCount } from "./goal-runners.js";
@@ -464,5 +471,38 @@ export async function nextSoldierPriority() {
   // separate gap flagged for confirmation (not assumed) before promising it, not silently built.
   return { name: "escort", directive: "patrol more broadly rather than anchoring in one spot -- " +
     "stay ready to respond to a squad call or help a teammate before resuming your own patrol." };
+}
+
+// Direct report, 2026-11-22 ("bots need to be opportunistic. if they find themselves near a
+// minable resource other than wood or grass, they should gather it. This is particularly true
+// of in-ground or underground resources like coal, ore, redstone, lapis lazuli, and so on").
+// Checked last in proposeOwnGoal(), right before the costly freeform LLM self-propose call --
+// that prompt already tells the model "gathering a resource" is a perfectly fine thing to
+// invent on its own, but a real vein already visible right now is strictly better grounding
+// than a guess, the same "deterministic beats a guess when the real data is right there"
+// reasoning every earlier tier in this file already follows. getResourceBlockNames()
+// (action-search.js) is every "_ore" block name plus ancient_debris, derived from this server's
+// own real block registry, not a hand-maintained list -- the same source noteNearbyResources()
+// and "explore" already trust. "_log"/"_stem" (wood) are dropped here since the operator named
+// "other than wood or grass" explicitly: wood already has its own well-covered gathering path
+// (gatherPlanks and every tool/weapon/shelter step that calls it), and grass was never in this
+// list to begin with. Soldiers never reach this call (nextSoldierPriority above never returns
+// null for a Soldier-primary bot) -- consistent with their own domain, fighting and guarding only.
+export function nextOpportunisticGather() {
+  const blockIds = getResourceBlockNames(bot)
+    .filter((name) => !name.endsWith("_log") && !name.endsWith("_stem"))
+    .map((name) => bot.registry.blocksByName[name]?.id)
+    .filter((id) => id !== undefined);
+  if (!blockIds.length) return null;
+  const positions = bot.findBlocks({ matching: blockIds, maxDistance: MINE_SEARCH_RADIUS, count: 1 });
+  if (!positions.length) return null;
+  const block = bot.blockAt(positions[0]);
+  if (!block) return null;
+  // Same tool-tier gate "mine"/"explore" already apply -- no point proposing a vein she can't
+  // yet break. Coal/redstone-adjacent exceptions have no harvestTools entry at all and pass
+  // through by hand; iron/copper/gold/diamond/emerald/lapis all require one.
+  if (block.harvestTools && !bot.inventory.items().some((item) => block.harvestTools[item.type])) return null;
+  return { name: "opportunistic_gather", block: block.name,
+    directive: `there's some ${block.name} right nearby -- worth mining while you're here.` };
 }
 

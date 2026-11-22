@@ -1,4 +1,9 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-22, direct report: "if they find themselves near a minable resource... they
+// should gather it"): a goal tagged with gatherBlock (priorities.js's new
+// nextOpportunisticGather(), via goal-proposal.js) now dispatches to goal-runners.js's new
+// runOpportunisticGatherGoal(), never the freeform planner.
 //
 // 1.1.0 (2026-11-13) -- the planner's three "giving up on goal" lines use goal-runners.js 1.1.0's format,
 // `after N failures (kind=...)`, so self-repair tells one kind of abandoned goal from another.
@@ -20,7 +25,7 @@ import { builderPriorityItemSatisfied, survivalPriorityItemSatisfied } from "./p
 import { CRAFTED_OBJECT_NAMES, broadcastGoalState, noteNearbyResources, recordGoalOutcome } from "./fleet-coordination.js";
 import { runBedGoal, runFoodGoal, runShelterUpgradeGoal, runToolGoal, runUpgradeToolsGoal, runWeaponGoal } from "./gear-goals.js";
 import { proposeOwnGoal, routineBlocked, selfProposeResumeAt } from "./goal-proposal.js";
-import { BUILDER_CRAFTABLE, HOME_PLACEABLE, SKILL_RECHECK_MS, farmTaskFor, goalKind, guardTick, holdsItem, retireGoal, runBuilderPlacement, runFarmGoal, runRanchGoal, saveGoalIfCurrent } from "./goal-runners.js";
+import { BUILDER_CRAFTABLE, HOME_PLACEABLE, SKILL_RECHECK_MS, farmTaskFor, goalKind, guardTick, holdsItem, retireGoal, runBuilderPlacement, runFarmGoal, runOpportunisticGatherGoal, runRanchGoal, saveGoalIfCurrent } from "./goal-runners.js";
 import { AGENT_ID, AUTONOMY_ENABLED, IDLE_BEFORE_SELF_GOAL_MS, MAX_CONSECUTIVE_FAILURES, PERSONA_NAME, SELF_PROPOSE_GOALS, USERNAME, bot, busy, currentGoal, lastActivityAt, setBusy } from "./index.js";
 import { goalPausedForNight } from "./night-survival.js";
 import { runCommunalShelterGoal, runShelterGoal } from "./shelter-goals.js";
@@ -145,6 +150,13 @@ async function goalTick() {
     // already controls, so there's no ambiguous wording to misroute the way a regex could.
     if (goal.survivalPriorityItem === "weapon") {
       await runWeaponGoal(goal, takeControl, () => handle, replaced);
+      return;
+    }
+    // Direct report, 2026-11-22 ("if they find themselves near a minable resource... they
+    // should gather it"): tagged by nextOpportunisticGather() (priorities.js, via
+    // goal-proposal.js), the same creation-time tagging weapon/tools/shelter use above.
+    if (goal.gatherBlock) {
+      await runOpportunisticGatherGoal(goal, takeControl, () => handle, replaced);
       return;
     }
     if (goal.targetItem && holdsItem(goal.targetItem)) {

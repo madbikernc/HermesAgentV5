@@ -1,4 +1,9 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-22, direct report: "bots need to be opportunistic... if they find themselves
+// near a minable resource other than wood or grass, they should gather it"): proposeOwnGoal()
+// now checks priorities.js's new nextOpportunisticGather() right after the Soldier-priority
+// block, ahead of the freeform LLM self-propose call.
 //
 // 1.1.0 (2026-11-20, direct report: "built residences, then mined blocks from them, built more"):
 // the Tier 1 "shelter" survival priority now claims "shelter_capacity" (claimBuilderItem(), the
@@ -19,7 +24,7 @@ import { newGoal, saveGoal } from "./goals.js";
 import { ROLES } from "./roles.js";
 import { narrateAction } from "./chat.js";
 import { arbitrateGoalConflict } from "./planning.js";
-import { builderPriorityCandidates, nextBuilderPriority, nextSoldierPriority, nextSurvivalPriority } from "./priorities.js";
+import { builderPriorityCandidates, nextBuilderPriority, nextOpportunisticGather, nextSoldierPriority, nextSurvivalPriority } from "./priorities.js";
 import { broadcastGoalState, otherGoalsNote, recentGoalOutcomes, recordGoalOutcome, roleBiasNote } from "./fleet-coordination.js";
 import { nextRoleWork } from "./gear-goals.js";
 import { holdsItem } from "./goal-runners.js";
@@ -138,6 +143,22 @@ export async function proposeOwnGoal() {
       bot.chat(await narrateAction(`${priority.name === "guard" ? "standing guard duty" : priority.name}: ${priority.directive}`));
       return;
     }
+  }
+
+  // Direct report, 2026-11-22 ("if they find themselves near a minable resource other than wood
+  // or grass, they should gather it"). Checked last, right before the LLM call below: a real ore
+  // vein already visible right now beats that call guessing one up -- see
+  // nextOpportunisticGather()'s own header (priorities.js) for the full reasoning.
+  const gather = nextOpportunisticGather();
+  if (gather) {
+    setCurrentGoal(newGoal({ description: gather.directive, source: "self" }));
+    currentGoal.opportunisticGather = gather.name;
+    currentGoal.gatherBlock = gather.block;
+    await saveGoal(PERSONA_NAME, currentGoal);
+    await broadcastGoalState("active", gather.directive);
+    console.log(`[${USERNAME}] opportunistic gather (${gather.block}): ${gather.directive}`);
+    bot.chat(await narrateAction(`might as well grab this while I'm here: ${gather.directive}`));
+    return;
   }
 
   const gearNote = describeGear(bot);

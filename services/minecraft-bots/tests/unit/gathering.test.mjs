@@ -1,4 +1,6 @@
-// Version: 1.1.1
+// Version: 1.2.0
+// 1.2.0 (2026-11-22): new checks for nextOpportunisticGather() (priorities.js 1.2.0) and its
+// dedicated runner, runOpportunisticGatherGoal() (goal-runners.js 1.3.0).
 // 1.1.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
@@ -10,7 +12,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actions, index, arbiter, V3, between, actionFn, timeoutFn, makeBot, context, sleep, check, goalTickContext, slice, passedCount } from './_harness.mjs';
+import { actions, index, prioritiesSrc, arbiter, V3, between, actionFn, timeoutFn, makeBot, context, sleep, check, goalTickContext, slice, passedCount } from './_harness.mjs';
 
 
 await check('MB-11 fallback coordinator accepted once Mayor is unreachable; server echoes ignored', async () => {
@@ -104,6 +106,72 @@ await check('Collect: a path timeout mid-dig lets the swing finish, then retries
   bot.collectBlock.collect = async () => { attempts++; throw new Error('digging aborted'); };
   await assert.rejects(c.collectBlocks(bot, { cancelled: false }, [log]), /digging aborted/);
   assert.equal(attempts, 1, 'a non-path error is not retried');
+});
+
+await check('Opportunistic gather: a nearby ore she can break becomes a goal; wood and an unmet tool tier do not', async () => {
+  // Direct report, 2026-11-22 ("bots need to be opportunistic. if they find themselves near a
+  // minable resource other than wood or grass, they should gather it... particularly true of
+  // in-ground or underground resources like coal, ore, redstone, lapis lazuli").
+  const items = [];
+  let lastMatching = null;
+  const bot = { inventory: { items: () => items },
+    // oak_log has a real registry id too -- a test that only omitted it from the registry
+    // wouldn't actually prove the "_log"/"_stem" exclusion filter is doing anything.
+    registry: { blocksByName: { coal_ore: { id: 10 }, iron_ore: { id: 11 }, oak_log: { id: 12 } } },
+    findBlocks: () => [], blockAt: () => null };
+  const c = vm.createContext({ bot,
+    getResourceBlockNames: () => ['coal_ore', 'iron_ore', 'oak_log'], MINE_SEARCH_RADIUS: 32 });
+  vm.runInContext(between(prioritiesSrc, 'export function nextOpportunisticGather('), c);
+
+  assert.equal(c.nextOpportunisticGather(), null, 'nothing nearby');
+
+  bot.findBlocks = (opts) => { lastMatching = opts.matching; return [{ x: 1, y: 64, z: 1 }]; };
+  bot.blockAt = () => ({ name: 'coal_ore' }); // no harvestTools entry -- minable by hand
+  const coal = c.nextOpportunisticGather();
+  assert.deepEqual(lastMatching, [10, 11], 'oak_log (id 12) dropped from the search -- wood is not opportunistic');
+  assert.equal(coal.name, 'opportunistic_gather');
+  assert.equal(coal.block, 'coal_ore');
+
+  bot.blockAt = () => ({ name: 'iron_ore', harvestTools: { 999: true } });
+  assert.equal(c.nextOpportunisticGather(), null, 'needs a pickaxe she does not have yet');
+  items.push({ type: 999, name: 'stone_pickaxe' });
+  assert.equal(c.nextOpportunisticGather().block, 'iron_ore', 'now holds the right tool');
+});
+
+
+await check('Opportunistic gather: a tagged goal mines the spotted block once and finishes; real failures still give up', async () => {
+  const calls = []; const outcomes = [];
+  let reply = { ok: true, text: 'collected some coal_ore.' };
+  const bot = makeBot();
+  bot.chat = () => {};
+  bot.spawnPoint = new V3(0, 64, 0);
+  const goal = { description: "there's some coal_ore right nearby -- worth mining while you're here.",
+    source: 'self', opportunisticGather: 'opportunistic_gather', gatherBlock: 'coal_ore',
+    log: [], steps: 0, consecutiveFailures: 0 };
+  const c = goalTickContext(bot, { currentGoal: goal,
+    performAction: async (_b, action) => { calls.push(action); return reply; },
+    narrateAction: async (t) => t, recordGoalOutcome: (_d, outcome) => outcomes.push(outcome), broadcastGoalState: async () => {} });
+  await c.goalTick();
+  // calls[0] was built inside the vm realm (performAction's own argument object literal), not
+  // reference-equal to an outer-realm literal even when structurally identical -- spread it out.
+  assert.deepEqual(calls.map((a) => ({ ...a })), [{ type: 'mine', block: 'coal_ore', count: 4 }]);
+  assert.deepEqual(outcomes, ['done']);
+  assert.equal(vm.runInContext('currentGoal', c), null, 'goal retired on success');
+
+  reply = { ok: false, text: 'could not find any coal_ore nearby.' };
+  const failGoal = { description: 'mine coal_ore', opportunisticGather: 'opportunistic_gather', gatherBlock: 'coal_ore',
+    log: [], steps: 0, consecutiveFailures: 0 };
+  const c2 = goalTickContext(bot, { currentGoal: failGoal,
+    performAction: async (_b, action) => { calls.push(action); return reply; },
+    narrateAction: async (t) => t, recordGoalOutcome: (_d, outcome) => outcomes.push(outcome), broadcastGoalState: async () => {} });
+  await c2.goalTick(); await c2.goalTick(); await c2.goalTick();
+  assert.equal(outcomes.filter((o) => o === 'gave up').length, 1, 'three real failures give up, like every other dedicated runner');
+
+  assert.match(index, /if \(goal\.gatherBlock\) \{\s+await runOpportunisticGatherGoal/,
+    'goalTick dispatches a gatherBlock-tagged goal to the dedicated runner, not the freeform planner');
+  assert.match(index,
+    /const gather = nextOpportunisticGather\(\);[\s\S]*?currentGoal\.gatherBlock = gather\.block;[\s\S]*?return;[\s\S]*?const gearNote = describeGear/,
+    'proposeOwnGoal tags the goal before falling through to the freeform LLM self-propose call');
 });
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) console.log(`${passedCount()} unit checks passed.`);
