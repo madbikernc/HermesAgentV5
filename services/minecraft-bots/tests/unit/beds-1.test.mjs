@@ -1,4 +1,7 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-22): the Tier-2 test's sandbox stubs the beehive candidate's new heldCount()
+// check (priorities.js 1.1.0); new dedicated check for the honeycomb/nest-or-hive gate itself.
 //
 // 1.1.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
@@ -66,7 +69,10 @@ await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims t
     hasOwnShelterWithBed: () => false,
     residencePlan: () => (shelterCount >= 3 ? { kind: 'done', beds: 3, active: 3 } : { kind: 'build', beds: shelterCount, active: 3 }),
     residenceDirective: (plan) => `our residences have ${plan.beds} beds for ${plan.active} active bots`,
-    countNearHome: (names) => (names[0] === 'beehive' ? beehive : 0),
+    countNearHome: (names) => (names.includes('beehive') ? beehive : 0),
+    // heldCount() (goal-runners.js, 2026-11-22): the beehive candidate also needs honeycomb held
+    // or a nest/hive already found -- none of either here, same as the prior stub's default.
+    heldCount: () => 0,
     // 2026-10-27: crafting_table/furnace/chest now go through countUsableNearHome (real
     // interaction outcomes, isUtilityUsable in actions.js), not bare countNearHome -- this slice
     // doesn't include that function's own definition, so it's stubbed here same as every other
@@ -109,6 +115,30 @@ await check('Tier 2: builderPriorityCandidates merges beds+shelter, and claims t
   assert.match(communalItem.directive, /at least 4 beds/);
   communalDone = true;
   assert(!names().includes('communal_shelter'), 'already satisfied -- drops off the list');
+});
+
+
+await check('Tier 2: a beehive is only proposed once honeycomb is held or a nest/hive is known nearby', async () => {
+  // Direct report, 2026-11-22 ("bots should not decide to do something until there is evidence
+  // that it can be done... don't try to build a beehive unless the components are there"):
+  // planks were never the real blocker -- a beehive needs 3 honeycomb, which only ever comes
+  // from a bee nest/hive already found.
+  let honeycomb = 0, found = 0;
+  const c = vm.createContext({ bot: { registry: { blocksByName: {} }, players: {} },
+    hasOwnShelterWithBed: () => true, residencePlan: () => ({ kind: 'done', beds: 1, active: 1 }),
+    // names.length === 1 distinguishes the plain "does a beehive already exist" check (always
+    // no, here) from the new two-name nest/hive-to-harvest-from check (the `found` toggle).
+    countNearHome: (names) => (names.includes('beehive') && names.length === 1 ? 0 : found),
+    countUsableNearHome: () => 1, countQualifyingSheltersNearHome: () => 1,
+    getAchievements: () => ['bred:cow'], fleetHasReachedIronTools: () => false, communalShelterSatisfied: () => true,
+    heldCount: () => honeycomb, BOT_USERNAMES: new Set(['amy']) });
+  vm.runInContext(between(index, 'function builderPriorityCandidates(', 'function nextBuilderPriority('), c);
+  const has = () => c.builderPriorityCandidates().some((x) => x.name === 'beehive');
+  assert.equal(has(), false, 'no honeycomb held, no nest/hive found: not a candidate');
+  honeycomb = 3;
+  assert.equal(has(), true, 'holding enough honeycomb already is real evidence it can be done');
+  honeycomb = 0; found = 1;
+  assert.equal(has(), true, 'a real bee nest/hive known nearby is evidence too, even with no honeycomb yet');
 });
 
 

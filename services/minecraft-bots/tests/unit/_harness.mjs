@@ -1,4 +1,8 @@
-// Version: 1.6.3
+// Version: 1.6.4
+// 1.6.4 (2026-11-22): chestMemoryStubs()/chestMemorySrc follow action-chests.js 1.2.0's move to
+// rag-backend.js's memRead/memWrite (KNOWN_CHESTS_FILE -> KNOWN_CHESTS_PATH, path "world/
+// known_chests.json") -- stubs memRead/memWrite instead of readFile/writeFile/mkdir/path, and
+// the chestKey() slice starts at the renamed constant so KNOWN_CHESTS_PATH is in scope.
 // 1.6.3 (2026-11-22): shelterWorld() takes an optional `water` list, for findShelterSite()'s new
 // shallow-water tolerance (action-shelter.js 1.1.0).
 // 1.6.2 (2026-11-20): shelterMemorySrc exported, the raw source of the new shelter-memory.js
@@ -632,14 +636,14 @@ export function residenceWorld({ online, shelters }) {
 // 2026-11-07 (actions.js 1.106.0): chests are chosen by what the fleet knows they hold, and one kind
 // of item split between two chests is brought together.
 export function chestMemoryStubs(known) {
-  const files = { k: JSON.stringify(known) };
+  const files = { 'world/known_chests.json': JSON.stringify(known) };
   return {
-    Vec3: V3, FOOD_NAMES: ['bread', 'beef'], KNOWN_CHESTS_FILE: 'k', path: { dirname: () => '.' }, CHEST_SEARCH_RADIUS: 128,
-    readFile: async (f) => { if (!(f in files)) throw new Error('ENOENT'); return files[f]; },
-    writeFile: async (f, data) => { files[f] = data; }, mkdir: async () => {},
+    Vec3: V3, FOOD_NAMES: ['bread', 'beef'], CHEST_SEARCH_RADIUS: 128,
+    memRead: async (f) => { if (!(f in files)) throw new Error('ENOENT'); return files[f]; },
+    memWrite: async (f, data) => { files[f] = data; },
   };
 }
-export const chestMemorySrc = between(actions, 'function chestKey(', '// The read-side counterpart');
+export const chestMemorySrc = between(actions, 'const KNOWN_CHESTS_PATH', '// The read-side counterpart');
 export function chestMemory(known = {}) {
   const c = vm.createContext({ ...chestMemoryStubs(known), console: { log() {}, error() {} } });
   vm.runInContext(chestMemorySrc, c);

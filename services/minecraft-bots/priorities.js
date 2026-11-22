@@ -1,4 +1,8 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-22, direct report: "don't try to build a beehive unless the components are
+// there"): the beehive checklist item now also requires holding 3+ honeycomb, or a real bee
+// nest/hive known nearby to get it from -- planks alone were never the real blocker.
 //
 // 1.0.0 (2026-11-10) -- split out of index.js (2.144.0) unchanged: what to work on next -- the
 // survival, tool-upgrade, shelter-reface, builder and soldier priority lists, the communal
@@ -9,6 +13,7 @@
 import { FLEE_ONLY_MOBS, communalDoorwayPosition, communalShelterPositions, getAchievements, holdsGuardAnchor, isCommunalShelterMaterial, nearestHostile } from "./actions.js";
 import { hasWeapon } from "./equipment.js";
 import { BUILDER_PRIORITY_RADIUS, completeSheltersNearHome, countNearHome, countUsableNearHome, residenceDirective, residencePlan, shelterGeometryPositions, shelterHasBed } from "./home-scan.js";
+import { heldCount } from "./goal-runners.js";
 import { BOT_ROLES, ROLES } from "./roles.js";
 import { SELF_DEFENSE_RANGE } from "./self-defense.js";
 import { isDoorway } from "./swim-movements.js";
@@ -298,7 +303,16 @@ export function builderPriorityCandidates() {
   // Added 2026-09-11 ("nest" again -> "wire honey/wax into Builder's ... priority list"). Sits
   // AFTER the operator's original five (crafting table/furnace/chest/beds/shelter) rather than
   // among them -- a beehive is a nice-to-have sustainable resource, not core survival infra.
-  if (countNearHome(["beehive"]) < 1) {
+  // Direct report, 2026-11-22 ("bots should not decide to do something until there is evidence
+  // that it can be done... don't try to build a beehive unless the components are there"): a
+  // beehive is 6 planks and 3 honeycomb, and honeycomb only ever comes from a bee nest/hive
+  // already found. countNearHome(["beehive"]) < 1 alone used to propose crafting one with zero
+  // evidence she could ever actually finish it -- planks are never the blocker, honeycomb is.
+  // Now also requires either holding enough already, or a real nest/hive known nearby to get it
+  // from.
+  const HONEYCOMB_FOR_BEEHIVE = 3;
+  if (countNearHome(["beehive"]) < 1 &&
+      (heldCount((n) => n === "honeycomb") >= HONEYCOMB_FOR_BEEHIVE || countNearHome(["bee_nest", "beehive"]) >= 1)) {
     candidates.push({ name: "beehive", directive: "craft a beehive (needs planks and honeycomb) and place it near home" });
   }
   // 2026-09-25: nothing ever asked for ranching. Last on the list: a pen near home with a breeding

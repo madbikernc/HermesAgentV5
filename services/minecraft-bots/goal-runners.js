@@ -1,4 +1,10 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-22, direct report: "don't start building corrals until suitable livestock are
+// identified in range"): ranchStep() checks for two animals of one kind near home BEFORE
+// gathering fence/gate material or picking a build site, not only after the pen already stands.
+// pickRanchSpecies() takes a plain point now, not a pen, so this pre-pen check and the existing
+// post-pen one share the same real-world lookup.
 //
 // 1.1.0 (2026-11-13) -- direct operator request (self-repair improvements): the "giving up on goal"
 // line names the goal's kind, `(kind=shelter)`, from goalKind(). Self-repair keyed every abandon
@@ -347,15 +353,32 @@ function woodKind() {
 
 const RANCH_SPECIES_RADIUS = 64; // matches herd_to_pen's own search (actions.js HERD_SEARCH_RADIUS)
 
-function pickRanchSpecies(pen) {
+// Direct report, 2026-11-22 ("bots should not decide to do something until there is evidence
+// that it can be done... don't start building corrals until suitable livestock are identified
+// in range"): takes a plain point, not a pen -- ranchStep() below needs this answer BEFORE a
+// pen exists, to decide whether building one is even worth starting.
+function pickRanchSpecies(point) {
   return LIVESTOCK.map((species) => [species, Object.values(bot.entities)
-    .filter((e) => e.name === species && e.position.distanceTo(pen.center) <= RANCH_SPECIES_RADIUS).length])
+    .filter((e) => e.name === species && e.position.distanceTo(point) <= RANCH_SPECIES_RADIUS).length])
     .filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 }
 
 async function ranchStep(goal, handle) {
   const pen = await loadPenLocation();
   if (!pen) {
+    // Fence/gate material and a build site used to get gathered and spent before ever checking
+    // whether two animals of one kind exist anywhere near home -- real time and material for a
+    // pen nothing could ever occupy. Checked first now, the same RANCH_SPECIES_RADIUS the
+    // post-pen step below already relies on, just centered on home since there's no pen center
+    // yet. goal.ranchSpecies, once set here, carries straight into that step unchanged.
+    if (!goal.ranchSpecies) {
+      goal.ranchSpecies = pickRanchSpecies(bot.spawnPoint ?? bot.entity.position);
+      if (!goal.ranchSpecies) {
+        const looked = await performAction(bot, { type: "explore" }, USERNAME, handle);
+        if (looked.cancelled) return { ...looked, action: { type: "explore" } };
+        return { ok: false, text: "no two animals of one kind anywhere near home -- went looking before building a pen.", action: { type: "explore" } };
+      }
+    }
     const fences = heldCount((n) => n.endsWith("_fence") && !n.endsWith("_fence_gate"));
     // 2026-11-01: planks first -- a fence craft is 4 planks and 2 sticks (1 more plank) for 3 fences.
     const tableType = bot.registry.blocksByName.crafting_table;
@@ -378,7 +401,7 @@ async function ranchStep(goal, handle) {
     if (!site) return { ok: false, text: "couldn't find a flat, open 5x5 spot near home for a pen." };
     return { ...(await performAction(bot, { type: "build_pen", at: site }, USERNAME, handle)), action: { type: "build_pen" } };
   }
-  const species = goal.ranchSpecies ?? pickRanchSpecies(pen);
+  const species = goal.ranchSpecies ?? pickRanchSpecies(pen.center);
   if (!species) {
     // 2026-11-06: none in sight is no reason to stand by the pen -- walking out loads new ground,
     // and its animals with it.

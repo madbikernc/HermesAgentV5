@@ -1,4 +1,6 @@
-// Version: 1.2.0
+// Version: 1.3.0
+// 1.3.0 (2026-11-22): new check that ranchStep() looks for livestock near home before gathering
+// pen material (goal-runners.js 1.2.0).
 // 1.2.0 (2026-11-20): asserts proposeOwnGoal() claims "shelter_capacity" (claimBuilderItem) before
 // committing to the Tier 1 "shelter" item, and tags the goal so the claim is released on end
 // (goal-proposal.js 1.1.0).
@@ -379,6 +381,40 @@ await check('Ranch goals: a species whose animals are gone is chosen again; with
   assert.equal(calls.at(-1), 'explore', `no animals in sight: she walks out to find some -- ${step.text}`);
   assert.match(between(actionCases, '    case "herd_to_pen": {', '\n    case "'), /<= HERD_SEARCH_RADIUS\)/, 'herd_to_pen looks HERD_SEARCH_RADIUS out');
   assert.match(actions, /const HERD_SEARCH_RADIUS = 64;/);
+});
+
+
+await check('Ranch goals: no pen is built until two animals of one kind are found near home', async () => {
+  // Direct report, 2026-11-22 ("bots should not decide to do something until there is evidence
+  // that it can be done"... "don't start building corrals until suitable livestock are
+  // identified in range"): fence/gate material and a build site used to get gathered and spent
+  // before ever checking for livestock at all. Holds enough planks already (farmGoalSrc()'s own
+  // slice carries gear-goals.js's REAL gatherPlanks, not a stubbable one, so this isolates the
+  // livestock check itself rather than material-gathering, already covered elsewhere).
+  const calls = [];
+  const entities = {};
+  const inv = [{ name: 'oak_planks', count: 64 }];
+  const c = vm.createContext({ console: { log() {}, error() {} }, Date, USERNAME: 'Dale', MAX_CONSECUTIVE_FAILURES: 3,
+    bot: { chat() {}, spawnPoint: new V3(0, 64, 0), entity: { position: new V3(0, 64, 0) },
+      inventory: { items: () => inv }, registry: { blocksByName: {} }, findBlocks: () => [], entities },
+    Vec3: V3, performAction: async (_b, action) => { calls.push(action.type); return { ok: true, text: 'done' }; },
+    farmStatus: () => ({ ripe: 0, growing: 0 }), narrateAction: async (t) => t, recordGoalOutcome() {},
+    broadcastGoalState: async () => {}, retireGoal: async () => {}, saveGoalIfCurrent: async () => {},
+    logStep: () => {}, loadPenLocation: async () => null, LIVESTOCK: ['chicken', 'cow'],
+    BREEDING_FOOD: { chicken: ['wheat_seeds'], cow: ['wheat'] }, countInPen: () => 0, findPenSite: () => new V3(5, 64, 5) });
+  vm.runInContext(farmGoalSrc(), c);
+  const goal = {};
+  let step = await c.ranchStep(goal, null);
+  assert.deepEqual(calls, ['explore'], 'no animals anywhere: went looking, never touched fence material or a build site');
+  assert.equal(goal.ranchSpecies, null, 'nothing found yet');
+
+  // Two cows show up near home -- real evidence a pen would actually be worth building.
+  entities[1] = { name: 'cow', position: new V3(2, 64, 0) };
+  entities[2] = { name: 'cow', position: new V3(3, 64, 0) };
+  calls.length = 0;
+  step = await c.ranchStep(goal, null);
+  assert.equal(goal.ranchSpecies, 'cow', 'two cows near home are enough evidence to proceed');
+  assert.notEqual(calls[0], 'explore', `now it actually tries to build, not just look around: ${step.text}`);
 });
 
 

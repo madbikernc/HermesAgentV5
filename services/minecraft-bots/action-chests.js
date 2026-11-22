@@ -1,4 +1,9 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-22, direct report: "check that *all* discovered resources and structures are
+// stored in world memory, available to both spark nodes"): known_chests.json moved from its own
+// per-host file to world/known_chests.json, read/written through rag-backend.js's memRead/
+// memWrite -- fleet-wide now, the same proxy every other world note already uses.
 //
 // 1.1.0 (2026-11-20): chestKey() exported, for loot.js's plain-inspection path (direct report:
 // "checked by other bots before... looking through chests").
@@ -9,8 +14,7 @@
 // before actions.js has run (only declarations live here).
 
 import { Vec3 } from "vec3";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { memRead, memWrite } from "./rag-backend.js";
 import { withTimeout } from "./action-movement.js";
 import { CHEST_SEARCH_RADIUS, hopToward } from "./action-search.js";
 import { ACTION_TIMEOUT_MS, FOOD_NAMES, goals } from "./action-vocab.js";
@@ -23,12 +27,24 @@ import { ACTION_TIMEOUT_MS, FOOD_NAMES, goals } from "./action-vocab.js";
 // dedup-based, built for "is this roughly the same fact as one already noted," not "replace this
 // chest's exact contents with what's true right now." A chest's contents change every time
 // anyone opens it, so this needs real point-in-time overwrites, not a growing pile of similar
-// notes -- same "small shared JSON file under the durable mount" pattern PEN_FILE already uses,
-// keyed by chest position (rounded -- a chest occupies one exact block, no need for
+// notes, keyed by chest position (rounded -- a chest occupies one exact block, no need for
 // SwimMovements-style fuzziness). Recording a FULL snapshot on every real interaction means
 // "redaction" is a side effect of always writing the current truth, never a separate
 // delete-this-one-item operation that could drift from reality.
-const KNOWN_CHESTS_FILE = `${(process.env.MC_MEMORY_ROOT || "/mnt/hermes-data/minecraft-memory")}/known_chests.json`;
+//
+// 2026-11-22 (direct report: "check that *all* discovered resources and structures are stored
+// in world memory, available to both spark nodes"): this used to be its own per-host JSON file
+// under MC_MEMORY_ROOT, documented (MINECRAFT_BOTS_DESIGN.md) as "spark2 keeps its own copy" --
+// a chest spark2's own bots found was invisible to spark's bots, and vice versa (confirmed live:
+// two independently-written files, same size, different lastSeenAt timestamps per entry). Moved
+// under world/ and read/written through rag-backend.js's own memRead/memWrite instead -- the
+// SAME proxy every "found X near (Y)" note already uses, which already makes spark2's bots
+// transparently read/write spark's copy over HTTP (spark2 has no RAG index of its own) rather
+// than stand up a second, independent sharing mechanism. A ".json" path under world/ is already
+// in the remote server's own path whitelist (hermes-minecraft-rag-server.py's ALLOWED_PATH), and
+// the ingest/reindex script only ever globs "*.md" there, so this is never swept into the
+// embedded corpus by accident.
+const KNOWN_CHESTS_PATH = "world/known_chests.json";
 
 // Exported 2026-11-20 for loot.js's plain-inspection path (direct report: "checked by other
 // bots before... looking through chests"): the same key recordChestSnapshot() itself writes
@@ -39,7 +55,7 @@ export function chestKey(position) {
 
 export async function loadKnownChests() {
   try {
-    return JSON.parse(await readFile(KNOWN_CHESTS_FILE, "utf8"));
+    return JSON.parse(await memRead(KNOWN_CHESTS_PATH));
   } catch {
     return {};
   }
@@ -47,8 +63,7 @@ export async function loadKnownChests() {
 
 async function saveKnownChests(data) {
   try {
-    await mkdir(path.dirname(KNOWN_CHESTS_FILE), { recursive: true });
-    await writeFile(KNOWN_CHESTS_FILE, JSON.stringify(data, null, 2), "utf8");
+    await memWrite(KNOWN_CHESTS_PATH, JSON.stringify(data, null, 2));
   } catch (err) {
     console.error("known_chests: failed to persist:", err.message);
   }

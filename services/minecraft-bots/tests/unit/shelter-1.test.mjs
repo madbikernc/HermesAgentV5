@@ -1,4 +1,7 @@
-// Version: 1.3.0
+// Version: 1.3.1
+// 1.3.1 (2026-11-22): "Shelter memory" test follows shelter-memory.js 1.1.0's move to
+// rag-backend.js's memRead/memWrite (KNOWN_SHELTERS_FILE -> KNOWN_SHELTERS_PATH) -- stubs
+// memRead/memWrite instead of readFile/writeFile/mkdir, slice starts at the renamed constant.
 // 1.3.0 (2026-11-22): new checks for findShelterSite()'s shallow-water tolerance and
 // shelterPositions()'s whole-footprint floor (action-shelter.js 1.1.0).
 // 1.2.0 (2026-11-20): new check for shelter-memory.js's known_shelters.json (load/record,
@@ -21,10 +24,9 @@ await check('Shelter memory: known_shelters.json records a residence by its door
   // Direct request, 2026-11-20 ("shelter and bed locations should be stored in world memory").
   const files = {};
   const c = vm.createContext({ console: { log() {}, error() {} },
-    process: { env: { MC_MEMORY_ROOT: '.' } },
-    readFile: async (f) => { if (!(f in files)) throw new Error('ENOENT'); return files[f]; },
-    writeFile: async (f, data) => { files[f] = data; }, mkdir: async () => {}, path: { dirname: () => '.' } });
-  vm.runInContext(between(shelterMemorySrc, 'const KNOWN_SHELTERS_FILE'), c);
+    memRead: async (f) => { if (!(f in files)) throw new Error('ENOENT'); return files[f]; },
+    memWrite: async (f, data) => { files[f] = data; } });
+  vm.runInContext(between(shelterMemorySrc, 'const KNOWN_SHELTERS_PATH'), c);
   assert.deepEqual(Object.keys(await c.loadKnownShelters()), [], 'nothing recorded yet');
 
   await c.recordKnownShelter(new V3(5, 64, 3), { source: 'built' });

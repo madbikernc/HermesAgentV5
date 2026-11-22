@@ -1,4 +1,7 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-22): stubs heldCount() for the beehive candidate's new honeycomb check
+// (priorities.js 1.1.0).
 //
 // Unit checks: builder priorities and placement.
 // Split out of ../unit.test.mjs on 2026-11-10. Run every file: node tests/unit.test.mjs;
@@ -106,6 +109,7 @@ await check('Tier 2: builderPriorityItemSatisfied stays in lockstep with builder
   let usable = 0;
   const c = vm.createContext({ bot: { registry: { blocksByName: {} } },
     countNearHome: () => 0, countUsableNearHome: () => usable, hasOwnShelterWithBed: () => false,
+    heldCount: () => 0, // the beehive candidate's own new honeycomb check (goal-runners.js, 2026-11-22)
     residencePlan: () => ({ kind: 'done', beds: 1, active: 1 }),
     countQualifyingSheltersNearHome: () => 0, communalShelterSatisfied: () => false,
     getAchievements: () => [], fleetHasReachedIronTools: () => false,
