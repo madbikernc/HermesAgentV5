@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 2.24.0
+# Version: 2.24.1
+#
+# 2.24.1 (2026-11-23) — real bug, found live on the first real deploy: visiting /budget before
+# tools/hermes-budget-import.py had ever run (finance.db doesn't exist yet) crashed both modes
+# with a raw sqlite3.OperationalError ("unable to open database file") -- connect(readonly=True)
+# opens by URI with `mode=ro`, which cannot create a missing file the way a plain connect()
+# could, so it raises instead. section()'s own generic error box caught it, but a first-deploy
+# "no data yet" state deserves the same plain FINANCE_DB_MISSING_NOTE message render_budget_
+# report() already showed for a DB with zero rows, not a stack trace. Both render functions now
+# check finance_common.FINANCE_DB.is_file() before ever connecting. Patch bump -- a bug fix, no
+# new behavior.
 #
 # 2.24.0 (2026-11-23) — direct operator request: /budget gains two modes, Planning (2.23.0's own
 # sortable/filterable list, unchanged) and a new Report, selected by a `mode` query param and a
@@ -3219,6 +3229,16 @@ def budget_field_options():
     return seen
 
 
+# connect(readonly=True) opens the DB file by URI with `mode=ro`, which -- unlike a plain
+# read-write connect() -- cannot create a missing file and instead raises sqlite3.OperationalError
+# ("unable to open database file"). Both render functions below check this FIRST and return a
+# plain, friendly note instead: real on the very first deploy, before hermes-budget-import.py has
+# ever run, and section()'s own generic exception-to-error-box fallback is the right backstop for
+# an unexpected failure, not the expected one.
+FINANCE_DB_MISSING_NOTE = ('<p class="empty">No transactions imported yet — run '
+                           'tools/hermes-budget-import.py against a real export first.</p>')
+
+
 def render_budget(query):
     """Bucket/payee/account filters and payee/amount sort all arrive as GET query params, the
     same server-side-filter shape render_backlog's own `state` dropdown already uses -- not a new
@@ -3227,6 +3247,8 @@ def render_budget(query):
     never named still needs no code change, plus a reviewed checkbox) -- a new interaction shape
     for this file (every other write route here is a bulk checkbox-select over same-shaped rows,
     never a per-row inline edit), posting to /budget/classify."""
+    if not finance_common.FINANCE_DB.is_file():
+        return FINANCE_DB_MISSING_NOTE
     bucket_filter = (query.get("bucket") or [""])[0]
     payee_filter = (query.get("payee") or [""])[0].strip()
     account_filter = (query.get("account") or [""])[0]
@@ -3361,6 +3383,8 @@ def render_budget_report(query):
     as the blank fillable PDF; a transaction manually filed under a field the worksheet never
     named still counts toward its bucket's subtotal (an "(unlisted field)" catch-all row) --
     never silently dropped, the same discipline every other total in this codebase holds to."""
+    if not finance_common.FINANCE_DB.is_file():
+        return FINANCE_DB_MISSING_NOTE
     conn = finance_common.connect(readonly=True)
     try:
         months = [r[0] for r in conn.execute(
@@ -3395,8 +3419,7 @@ def render_budget_report(query):
         conn.close()
 
     if not months:
-        return ('<p class="empty">No transactions imported yet -- run '
-                'tools/hermes-budget-import.py against a real export first.</p>')
+        return FINANCE_DB_MISSING_NOTE
 
     def bucket_rows(bucket):
         known = finance_common.WORKSHEET_TAXONOMY.get(bucket, [])
