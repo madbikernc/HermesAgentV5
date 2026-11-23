@@ -1,4 +1,8 @@
-// Version: 1.3.0
+// Version: 1.4.0
+// 1.4.0 (2026-11-23): new check for mine.js 1.2.0's whole-tree expansion -- a wood target now
+// mines the rest of the trunk and its attached leaves, not just whichever single log
+// findBlocks/rankMineTargets happened to hand back.
+//
 // 1.3.0 (2026-11-22): new checks for mine.js 1.1.0's wood-family climb-to-surface fallback
 // (action-search.js 1.1.0's climbTowardSurface()), and that ore/stone never triggers it.
 // 1.2.0 (2026-11-22): new checks for nextOpportunisticGather() (priorities.js 1.2.0) and its
@@ -228,5 +232,53 @@ await check('Mine: ore/stone never climbs toward the surface -- underground is e
   assert.equal(result.ok, false);
   assert.match(result.text, /couldn't find any coal_ore nearby, even after looking around\./);
 });
+
+await check('Mine: felling a tree mines the whole trunk and its leaves, not just the base log', async () => {
+  // Direct report, 2026-11-23 ("if a bot mines a tree for wood, they should mine the whole
+  // tree, not just what's at ground level... pick up any dropped items... replant any
+  // saplings"): mine.js 1.2.0's expandWholeTree() floods out from whichever single log
+  // findBlocks/rankMineTargets happened to hand back (the base, per gatherPlanks' own typical
+  // "mine oak_log 1") to the rest of that same tree's trunk and its attached leaves.
+  // collectBlocks already walks to and picks up every drop from every block it digs, so that's
+  // the "pick up any dropped items" half for free; replanting any sapling that drops is
+  // checkSaplings' own job (upkeep-home.js), unchanged by this fix.
+  const bot = makeBot();
+  bot.registry = { blocks: { 1: { name: 'oak_log' }, 2: { name: 'oak_leaves' } },
+    blocksByName: { oak_log: { id: 1 }, oak_leaves: { id: 2 } } };
+  const world = new Map();
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  const put = (x, y, z, type) => {
+    const name = type === 1 ? 'oak_log' : type === 2 ? 'oak_leaves' : 'air';
+    world.set(`${x},${y},${z}`, { position: new V3(x, y, z), type, name, boundingBox: type ? 'block' : 'empty' });
+  };
+  // The trunk: three logs stacked, two attached leaves. A second, unrelated tree's own base log
+  // 10 blocks away -- never adjacent to the first tree's blocks, so it must stay untouched.
+  put(0, 64, 0, 1); put(0, 65, 0, 1); put(0, 66, 0, 1);
+  put(0, 67, 0, 2); put(1, 66, 0, 2);
+  put(10, 64, 10, 1);
+  bot.blockAt = (p) => world.get(key(p)) ?? { position: p, type: 0, name: 'air', boundingBox: 'empty' };
+  bot.entity = { position: new V3(0, 64, 0) };
+  // Only the base log of the first tree is what findBlocks happens to hand back here -- exactly
+  // the old, narrow "just what's at ground level" result this fix exists to go beyond.
+  bot.findBlocks = () => [new V3(0, 64, 0)];
+  const collected = [];
+  bot.collectBlock = { collect: async (blocks) => collected.push(...blocks.map((b) => key(b.position))), cancelTask() {} };
+
+  const extras = { Vec3: V3, resolveBlockFamily: () => [1], itemNamesForMinedBlocks: () => ['oak_log'],
+    tryTakeFromNearbyChest: async () => null, visitRememberedSpot: async () => [],
+    wanderAndRetryFind: async () => [], climbTowardSurface: async () => {},
+    filterAwayFromOtherBots: (b, p) => p, isProtectedBlockName: () => false,
+    MINE_SEARCH_RADIUS: 32, CONTENTION_SEARCH_OVERFETCH: 3, isLivingSpaceWall: () => false };
+  const c = context(bot, extras);
+  vm.runInContext(timeoutFn + actionFn, c);
+
+  const result = await c.performAction(bot, { type: 'mine', block: 'oak_log', count: 1 }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual([...collected].sort(), ['0,64,0', '0,65,0', '0,66,0', '0,67,0', '1,66,0'].sort(),
+    'the whole trunk and its attached leaves were mined, not just the base log');
+  assert(!collected.includes('10,64,10'), 'a different, merely nearby tree must never be swept in');
+  assert.match(result.text, /oak_leaves/, 'the leaves she actually collected are reported too');
+});
+
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) console.log(`${passedCount()} unit checks passed.`);

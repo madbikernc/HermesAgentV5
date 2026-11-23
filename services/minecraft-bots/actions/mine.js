@@ -1,4 +1,13 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-23, direct report "if a bot mines a tree for wood, they should mine the whole
+// tree... pick up any dropped items... replant any saplings"): a wood-family target now expands
+// to the whole tree -- expandWholeTree()'s own comment below has the detail -- instead of
+// stopping at whichever single log findBlocks/rankMineTargets happened to hand back (almost
+// always the exposed base, per gatherPlanks' own typical "mine oak_log 1"). collectBlocks
+// already walks to and picks up every drop from every block it digs, so pulling the leaves into
+// that same list is the entire "pick up dropped items" fix; replanting any sapling that drops is
+// already checkSaplings' job (upkeep-home.js) and needed no change at all.
 //
 // 1.1.0 (2026-11-22, direct report "some of the bots are underground, deep... thus no wood --
 // they should know to climb out to the surface to get wood"): a wood-family search (oak_log and
@@ -18,6 +27,63 @@ import { ACTION_TIMEOUT_MS, CONTENTION_SEARCH_OVERFETCH, MINE_DROPS, MINE_RANKIN
 // resource climbTowardSurface() exists for. Never ore/stone: those are legitimately underground,
 // and climbing toward the surface to look for them would be actively wrong.
 const WOOD_BLOCK_RE = /_(log|stem)$/;
+
+// orthogonal only -- a tree's own logs and leaves are always face-connected in vanilla
+// generation, and this keeps the search cheap and exact (no diagonal leak into a block that
+// just happens to sit next to, rather than belong to, the same tree).
+const TREE_NEIGHBORS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+// A real dark oak or giant jungle trunk can be 2x2; jungle canopies are the largest leaf volume
+// in the game. Generous enough for any of that, while still bounding a flood fill that could
+// otherwise run away if two trees' canopies happen to touch.
+const TREE_TRUNK_CAP = 48;
+const TREE_LEAF_CAP = 96;
+
+// Every block matching `matches`, reachable from `startPositions` by a chain of face-adjacent
+// matching blocks -- `startPositions` themselves are never returned (the caller already has
+// those; this only finds what's newly connected to them).
+function connectedBlocks(bot, startPositions, matches, cap) {
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  const seen = new Set(startPositions.map(key));
+  const found = [];
+  const queue = [...startPositions];
+  while (queue.length && found.length < cap) {
+    const pos = queue.shift();
+    for (const [dx, dy, dz] of TREE_NEIGHBORS) {
+      const next = pos.offset(dx, dy, dz);
+      const k = key(next);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const block = bot.blockAt(next);
+      if (!block || !matches(block)) continue;
+      found.push(block);
+      queue.push(next);
+      if (found.length >= cap) break;
+    }
+  }
+  return found;
+}
+
+// Direct report, 2026-11-23 ("mine the whole tree, not just what's at ground level... pick up
+// any dropped items"): the rest of `seed`'s own trunk -- every block of the exact same id
+// connected to it (never resolveBlockFamily's whole cross-species id list the caller searched
+// with, so this can never jump from one tree into a different, merely-nearby one) -- plus, for a
+// real species log (a nether stem has no comparable leaf canopy, so skipped entirely), its
+// attached leaves, found the same way starting from every trunk block just found. Returns only
+// the EXTRA blocks (seed excluded, exactly like connectedBlocks()'s own contract); the caller
+// still has seed.
+function expandWholeTree(bot, seed) {
+  // A real mineflayer Block always has a numeric .type; this only guards against ever matching
+  // "b.type === undefined" against every neighbor whose own .type also happens to be unset,
+  // which would flood the whole cap instead of stopping at the tree's real edge.
+  if (seed.type === undefined) return [];
+  const trunk = connectedBlocks(bot, [seed.position], (b) => b.type === seed.type, TREE_TRUNK_CAP - 1);
+  if (!seed.name.endsWith("_log")) return trunk;
+  const leafId = bot.registry.blocksByName?.[seed.name.replace(/_log$/, "_leaves")]?.id;
+  if (leafId === undefined) return trunk;
+  const leaves = connectedBlocks(bot, [seed.position, ...trunk.map((b) => b.position)],
+    (b) => b.type === leafId, TREE_LEAF_CAP);
+  return [...trunk, ...leaves];
+}
 
 
 export async function mineAction(bot, action, speaker, token) {
@@ -128,17 +194,35 @@ export async function mineAction(bot, action, speaker, token) {
     return fail(`need a better tool for ${collectedNames} -- one of: ${needed.join(", ")}.`);
   }
 
+  // Whole tree, not just the log(s) findBlocks happened to hand back -- see expandWholeTree()'s
+  // own comment. Deduped since stillNeed > 1 can select two exposed logs off the same tall tree.
+  let mineBlocks = blocks;
+  if (blocks.some((b) => WOOD_BLOCK_RE.test(b.name))) {
+    const seenKey = new Set(blocks.map((b) => `${b.position.x},${b.position.y},${b.position.z}`));
+    const extra = [];
+    for (const b of blocks.filter((b) => WOOD_BLOCK_RE.test(b.name))) {
+      for (const t of expandWholeTree(bot, b)) {
+        const k = `${t.position.x},${t.position.y},${t.position.z}`;
+        if (seenKey.has(k)) continue;
+        seenKey.add(k);
+        extra.push(t);
+      }
+    }
+    mineBlocks = [...blocks, ...extra];
+  }
+
   try {
-    await withTimeout(collectBlocks(bot, token, blocks), ACTION_TIMEOUT_MS,
+    await withTimeout(collectBlocks(bot, token, mineBlocks), ACTION_TIMEOUT_MS,
                        () => { bot.collectBlock.cancelTask(); bot.stopDigging(); });
   } catch (err) {
     if (token.cancelled) return ok("stopped mining early.");
-    if (err.name === "NoPath" || /no path/i.test(err.message)) noteMineUnreachable(bot, blocks);
+    if (err.name === "NoPath" || /no path/i.test(err.message)) noteMineUnreachable(bot, mineBlocks);
     return fail(`had trouble mining ${collectedNames}: ${err.message}`);
   } finally {
     if (!token.cancelled) await refreshGear(bot); // may have picked up something worth wearing/wielding
   }
   if (token.cancelled) return ok("stopped mining early.");
-  return ok(chestMatch ? `took ${chestMatch.count} ${chestMatch.name} from a chest and collected some ${collectedNames}.`
-    : `collected some ${collectedNames}.`);
+  const minedNames = [...new Set(mineBlocks.map((b) => b.name))].join(", ");
+  return ok(chestMatch ? `took ${chestMatch.count} ${chestMatch.name} from a chest and collected some ${minedNames}.`
+    : `collected some ${minedNames}.`);
 }
