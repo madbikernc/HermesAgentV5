@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-# Version: 2.23.0
+# Version: 2.24.0
+#
+# 2.24.0 (2026-11-23) — direct operator request: /budget gains two modes, Planning (2.23.0's own
+# sortable/filterable list, unchanged) and a new Report, selected by a `mode` query param and a
+# small tab strip rather than a new route -- both read the same finance.db. Report emulates the
+# real "Budget Worksheet.pdf" layout for one selected month at a time (a month picker, defaulting
+# to the most recent month on file): every worksheet field prints even at $0.00 (same as the
+# blank fillable PDF), each bucket gets a subtotal, Essential/Discretionary get their own totals
+# per the worksheet's own two-tier grouping (new `ESSENTIAL_BUCKETS`/`DISCRETIONARY_BUCKETS`),
+# and `Income` (this module's own addition, not on the real worksheet) prints as a separate
+# top-of-page figure, never folded into either total. A transaction manually filed under a field
+# the worksheet never named still counts toward its bucket's subtotal via an "(unlisted field)"
+# catch-all row -- a fixed-field report that silently dropped real spending outside its own known
+# field list would be worse than Planning's flat list, not an improvement on it. Unclassified and
+# excluded (Transfer) amounts for the selected month are named and summed in a note rather than
+# silently missing from the totals, the same "never silently drop" discipline the rest of this
+# codebase holds to.
 #
 # 2.23.0 (2026-11-23) — direct operator request: a new "Budget" tab (/budget), Fidelity's Budget
 # Worksheet taxonomy (FINANCE_TRACKER_DESIGN.md §6/§7) applied to every synced transaction. Reads
@@ -603,6 +619,15 @@ code,.mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; f
        margin:10px 0; border-radius:3px; }
 .err b { color:var(--bad); }
 .empty { color:var(--dim); font-style:italic; padding:8px 0; }
+.mode-tabs { margin:4px 0 14px; font-size:13px; }
+.mode-tabs a { color:var(--dim); text-decoration:none; margin-right:16px; }
+.mode-tabs a:hover { text-decoration:underline; }
+.mode-tabs span.active { color:var(--accent); font-weight:600; margin-right:16px; }
+table.worksheet-bucket { margin-bottom:6px; }
+table.worksheet-bucket th { font-size:13px; }
+td.indent { padding-left:26px; color:var(--dim); }
+tr.subtotal td { font-weight:600; border-top:1px solid var(--line); }
+p.worksheet-total { font-size:14px; margin:10px 0; }
 .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px;
         border:1px solid var(--line); }
 .s-proposed { color:var(--warn); border-color:var(--warn); }
@@ -3316,19 +3341,163 @@ def render_budget(query):
                     body_rows, numeric={3}))
 
 
+# The worksheet's own two-tier grouping (FINANCE_TRACKER_DESIGN.md §6a) -- "Income" is this
+# module's own addition and deliberately appears in neither list, the same way the real PDF shows
+# it as a separate top-of-page figure rather than an essential/discretionary line.
+ESSENTIAL_BUCKETS = ["Housing", "Groceries", "Healthcare", "Transportation",
+                     "Debt & Monthly Obligations", "Child & Dependent Care"]
+DISCRETIONARY_BUCKETS = ["Personal Care", "Gifts", "Recreational", "Entertainment"]
+
+
+def money(cents):
+    return f"${abs(cents) / 100:,.2f}"
+
+
+def render_budget_report(query):
+    """Direct operator request: "Report" mode emulates the real Fidelity Budget Worksheet layout
+    -- the same bucket/field structure WORKSHEET_TAXONOMY already carries -- computed from
+    classified transactions for one selected month, rather than Planning mode's flat sortable
+    list. A field the worksheet names but no transaction has hit yet still prints at $0.00, same
+    as the blank fillable PDF; a transaction manually filed under a field the worksheet never
+    named still counts toward its bucket's subtotal (an "(unlisted field)" catch-all row) --
+    never silently dropped, the same discipline every other total in this codebase holds to."""
+    conn = finance_common.connect(readonly=True)
+    try:
+        months = [r[0] for r in conn.execute(
+            "SELECT DISTINCT substr(date, 1, 7) AS m FROM transactions ORDER BY m DESC")]
+        month = (query.get("month") or [""])[0]
+        if month not in months:
+            month = months[0] if months else ""
+
+        sums = {}
+        if month:
+            for bucket, field, cents in conn.execute("""
+                SELECT b.bucket, b.field, SUM(t.amount_cents) FROM transactions t
+                JOIN budget_classifications b ON b.source = t.source AND b.txn_id = t.txn_id
+                WHERE b.bucket IS NOT NULL AND substr(t.date, 1, 7) = ?
+                GROUP BY b.bucket, b.field
+            """, (month,)):
+                sums[(bucket, field or "")] = cents
+            unclassified_cents = conn.execute("""
+                SELECT COALESCE(SUM(t.amount_cents), 0) FROM transactions t
+                LEFT JOIN budget_classifications b ON b.source = t.source AND b.txn_id = t.txn_id
+                WHERE (b.bucket IS NULL AND (b.classified_by IS NULL OR b.classified_by != 'excluded'))
+                      AND substr(t.date, 1, 7) = ?
+            """, (month,)).fetchone()[0]
+            excluded_cents = conn.execute("""
+                SELECT COALESCE(SUM(t.amount_cents), 0) FROM transactions t
+                JOIN budget_classifications b ON b.source = t.source AND b.txn_id = t.txn_id
+                WHERE b.classified_by = 'excluded' AND substr(t.date, 1, 7) = ?
+            """, (month,)).fetchone()[0]
+        else:
+            unclassified_cents = excluded_cents = 0
+    finally:
+        conn.close()
+
+    if not months:
+        return ('<p class="empty">No transactions imported yet -- run '
+                'tools/hermes-budget-import.py against a real export first.</p>')
+
+    def bucket_rows(bucket):
+        known = finance_common.WORKSHEET_TAXONOMY.get(bucket, [])
+        rows, seen, subtotal = [], set(), 0
+        for field in known:
+            cents = sums.get((bucket, field), 0)
+            subtotal += cents
+            seen.add(field)
+            rows.append((field, cents))
+        for (b, f), cents in sums.items():
+            if b == bucket and f not in seen:
+                subtotal += cents
+                rows.append((f or "(unlisted field)", cents))
+        return rows, subtotal
+
+    def section_html(buckets):
+        parts, section_total = [], 0
+        for bucket in buckets:
+            rows, subtotal = bucket_rows(bucket)
+            section_total += subtotal
+            field_rows = "".join(
+                f'<tr><td class="indent">{esc(field)}</td>'
+                f'<td class="num">{money(cents)}</td></tr>'
+                for field, cents in rows)
+            parts.append(
+                f'<table class="worksheet-bucket"><thead><tr><th>{esc(bucket)}</th>'
+                f'<th></th></tr></thead><tbody>{field_rows}'
+                f'<tr class="subtotal"><td>{esc(bucket.upper())} SUBTOTAL</td>'
+                f'<td class="num">{money(subtotal)}</td></tr></tbody></table>')
+        return "".join(parts), section_total
+
+    income_cents = sum(c for (b, _f), c in sums.items() if b == "Income")
+    essential_html, essential_total = section_html(ESSENTIAL_BUCKETS)
+    discretionary_html, discretionary_total = section_html(DISCRETIONARY_BUCKETS)
+
+    month_opts = "".join(
+        f'<option value="{esc(m)}"{" selected" if m == month else ""}>{esc(m)}</option>'
+        for m in months)
+    picker = (f'<form method="get"><input type="hidden" name="mode" value="report">'
+              f'<select name="month">{month_opts}</select> <button type="submit">show</button>'
+              f'</form>')
+
+    extra_notes = []
+    if unclassified_cents:
+        extra_notes.append(f'{money(unclassified_cents)} in unclassified transactions this '
+                           f'month is excluded from every total below — fix them in Planning '
+                           f'mode to include them.')
+    if excluded_cents:
+        extra_notes.append(f'{money(excluded_cents)} in transfers between your own accounts is '
+                           f'excluded, the same way the real worksheet never counts those.')
+    note = (f'Emulates Fidelity\'s own "Budget Worksheet" layout, computed from classified '
+            f'transactions for {esc(month)}. ' + " ".join(extra_notes))
+
+    return (
+        picker
+        + f'<p class="note">{note}</p>'
+        + f'<p><b>Monthly income (classified)</b> '
+          f'<span class="num">{money(income_cents)}</span></p>'
+        + '<h2>Monthly Essential Expenses (things you need to have)</h2>'
+        + essential_html
+        + f'<p class="worksheet-total"><b>TOTAL MONTHLY ESSENTIAL EXPENSES</b> '
+          f'<span class="num">{money(essential_total)}</span></p>'
+        + '<h2>Monthly Discretionary Expenses (things you would like to have)</h2>'
+        + discretionary_html
+        + f'<p class="worksheet-total"><b>TOTAL MONTHLY DISCRETIONARY EXPENSES</b> '
+          f'<span class="num">{money(discretionary_total)}</span></p>'
+        + f'<p class="worksheet-total"><b>= TOTAL MONTHLY EXPENSES</b> '
+          f'<span class="num">{money(essential_total + discretionary_total)}</span></p>'
+    )
+
+
 def page_budget(query=None):
     query = query or {}
     saved = (query.get("saved") or [""])[0] == "1"
     banner = '<p class="note">Saved.</p>' if saved else ""
-    body = banner + section(
-        "Budget",
-        "Fidelity's Budget Worksheet taxonomy applied to every synced transaction "
-        "(tools/hermes-budget-import.py), built on top of this page's own granular "
-        "categorizer (categories.yaml). Rule-matched rows show as \"unreviewed\" until "
-        "confirmed; anything the rules can't place shows as \"needs review\" — flagged, not "
-        f"guessed. Data lives in <span class=\"mono\">{esc(str(finance_common.FINANCE_DB))}</span> "
-        "on this host — local-only, never in git.",
-        lambda: render_budget(query))
+    mode = (query.get("mode") or [""])[0]
+    if mode != "report":
+        mode = "planning"
+    tabs = (
+        '<p class="mode-tabs">'
+        + ('<span class="active">Planning</span>' if mode == "planning"
+           else '<a href="/budget?mode=planning">Planning</a>')
+        + ('<span class="active">Report</span>' if mode == "report"
+           else '<a href="/budget?mode=report">Report</a>')
+        + '</p>'
+    )
+    if mode == "report":
+        body = banner + tabs + section(
+            "Budget — Report",
+            "A worksheet-shaped view of one month at a time, not a sortable list — see "
+            "Planning to fix a category.", lambda: render_budget_report(query))
+    else:
+        body = banner + tabs + section(
+            "Budget — Planning",
+            "Fidelity's Budget Worksheet taxonomy applied to every synced transaction "
+            "(tools/hermes-budget-import.py), built on top of this page's own granular "
+            "categorizer (categories.yaml). Rule-matched rows show as \"unreviewed\" until "
+            "confirmed; anything the rules can't place shows as \"needs review\" — flagged, not "
+            f"guessed. Data lives in <span class=\"mono\">{esc(str(finance_common.FINANCE_DB))}"
+            "</span> on this host — local-only, never in git.",
+            lambda: render_budget(query))
     return shell("Budget", body)
 
 

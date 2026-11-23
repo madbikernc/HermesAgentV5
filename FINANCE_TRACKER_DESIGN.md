@@ -1,6 +1,6 @@
 # Firmament Finance Tracker — Target Design
 
-**Version:** 1.5.0
+**Version:** 1.6.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-11-19. `IMPLEMENTATION_PLAN.md`'s **S47**
 is the stage that tracks building this and points back here for the full spec — the same split S23/S38/
@@ -406,6 +406,20 @@ reviewed checkbox — posted to the page's fourth write route, `/budget/classify
 bucket/field always stamps it reviewed regardless of the checkbox: a fix is a review decision, not
 optionally one.
 
+**Two modes, direct operator request: Planning and Report.** The page above — filter/sort/fix a
+category — is **Planning** mode, unchanged. **Report** mode (`?mode=report`, a small tab switch, not
+a new route) emulates the real `Budget Worksheet.pdf` layout for one selected month at a time (a month
+picker, defaulting to the most recent month on file): every worksheet field prints even at `$0.00`
+(same as the blank fillable PDF), each bucket gets a subtotal, and `Essential`/`Discretionary` get
+their own totals per the worksheet's own two-tier grouping — `Income` prints separately, as the real
+worksheet's own top-of-page figure, never folded into either total. A transaction manually filed under
+a field the worksheet never named still counts toward its bucket's subtotal (an `(unlisted field)`
+catch-all row) — a fixed-field report that silently dropped real spending outside the worksheet's own
+named fields would be strictly worse than Planning's flat list, not an improvement on it.
+Unclassified and excluded (`Transfer`) amounts for the selected month are named and summed in a note
+rather than silently missing from the totals — the same discipline every other total in this design
+holds to (§6/§9).
+
 ---
 
 ## 7. Storage `[PROPOSED]`
@@ -719,3 +733,4 @@ S47d's real verdicts, once live, turn out to need a different role than `dispatc
 | 1.3.0 | 2026-11-22 | **S47c's categorization half built and committed** (`tools/hermes_finance_common.py`'s `load_categories()`/`categorize_transaction()`, `infra/hermes-finance-sync/categories.yaml` seed) — found, while picking a small task to trial-run through `hermes-dualcoder.py`, that §6's rule-based matching needs no real vendor/account access and so isn't actually gated on S47a/b the way the Build status table previously implied for all of S47c; only the Privacy.com sync/correlation half of that stage still is. Build status row split accordingly. Minor bump — a build-progress update, nothing in the design itself changed. |
 | 1.4.0 | 2026-11-22 | **Added §2c, Quicken Simplifi vendor research** — discovered while building S47c's `categories.yaml` from the operator's real transaction export that the file is a Quicken Simplifi CSV export, not an Intuit product; Simplifi was sold out of Intuit in 2016 and §2's Mint/QuickBooks research never covered it. Checked with the same live-verification bar §2/§3 hold to: Simplifi has no public developer API (confirmed by Simplifi's own community forum's repeated, still-open requests for one, and no developer portal, MCP server, or transaction-read endpoint found anywhere) — CSV export is the only avenue. Does not resolve §2's own blocking `[UNKNOWN]` (whether the operator separately has a real QuickBooks company file); narrows it instead. §2 (cross-reference), §13 (new item 16), §14/Build status (S47a wording) updated to match. Minor bump — a new vendor section added alongside the existing paths, nothing prior reversed. |
 | 1.5.0 | 2026-11-23 | **Added §6a, built: Fidelity Budget Worksheet classification** — direct operator request, evaluated against the real `Budget Worksheet.pdf` (`P:\Private\Budgeting\`). New files: `infra/hermes-finance-sync/budget_buckets.yaml` (granular category → worksheet bucket/field, operator-reviewed mapping table), `tools/hermes-budget-import.py` (CSV ingest + classify, pulls forward a CSV-only slice of S47b's `accounts`/`transactions` schema and S47h's fleetops-ui page, both ungated from S47a per §6a's own reasoning). `hermes_finance_common.py` 1.1.0 adds `FINANCE_DB`/`SCHEMA`/`connect()`, `WORKSHEET_TAXONOMY`, `load_budget_buckets()`, `classify_budget()`'s reviewed-match-then-rule-then-unclassified priority order (the operator's own reviewed corrections treated as a RAG result, direct operator request), and `set_budget_classification()`. `hermes-fleetops-ui.py` 2.23.0 adds the `/budget` tab and its `/budget/classify` write route (the file's fourth, and first shaped as one form per row). Verified against the real Simplifi export (read live, never committed): 1,871 real transactions imported, 651 rule-classified, 1,220 correctly flagged for review (dominated by Privacy.com-masked merchants and general retail, both already known, separately-scoped gaps) — then re-verified that a single operator correction propagates forward via the reviewed-match lookup, confirming the RAG-reuse requirement actually works end to end, not just unit-tested in isolation. Also found, while cross-checking the real data against this build: a real `categories.yaml` bug (§13 item 17) in the operator's own direct edit (a newer `Dad:Brookdale` rule permanently shadowed by an older, more specific `Home:Rent` rule) — flagged, not fixed, since it's the operator's own data file. §7 (`budget_classifications` table, build-status annotations on `accounts`/`transactions`), §13 (new item 17), §14/Build status (S47b/c/h scope) updated to match. Minor bump — a new section and new tables/files added, nothing prior reversed. |
+| 1.6.0 | 2026-11-23 | **§6a extended, built: `/budget` gains Planning/Report modes, direct operator request.** Planning is the existing filter/sort/fix-a-category view, unchanged. Report (`hermes-fleetops-ui.py` 2.24.0, `?mode=report`) emulates the real `Budget Worksheet.pdf` layout for one selected month — every worksheet field prints even at $0.00, each bucket subtotals, Essential/Discretionary total separately per the worksheet's own two-tier grouping, Income prints as its own top-of-page figure, and a transaction manually filed under a field the worksheet never named still counts toward its bucket's subtotal (an "(unlisted field)" catch-all) rather than being silently dropped. Verified live against the real Simplifi data (November 2026): computed totals cross-checked against an independent direct SQL query, matched exactly. §6a updated to match. Minor bump — a new mode added to an already-built tab, nothing prior reversed. |
