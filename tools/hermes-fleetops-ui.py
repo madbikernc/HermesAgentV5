@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 2.25.0
+# Version: 2.25.1
+#
+# 2.25.1 (2026-11-23) — real bug, reported live: the Budget Planning row's "reviewed" checkbox
+# looked inactive. The HTML itself was clean (checked out byte for byte against the live page,
+# no stray `disabled`, no escaping bug) -- the real gap was theming: 2.25.0's new per-row
+# `<input type="text">` bucket/field fields were this page's first-ever text inputs and got none
+# of the dark-theme styling every other control here has (the existing rule only ever targeted
+# `input[type=search]`), and the reviewed checkbox had no styling at all, so the whole row read as
+# unstyled browser-default controls dropped next to one themed dark Save button -- easy to read as
+# "not part of the active UI." `input[type=text]` now shares the existing dark input/select
+# styling; checkboxes get `accent-color:var(--accent)` (themes the native check/box to match,
+# every checkbox on this page, not just Budget's); `label { cursor:pointer }` makes every
+# checkbox's own label (this page has exactly two: this one and Market Watch's "track anyway")
+# visibly clickable. Patch bump -- a visual bug fix, no behavior change.
 #
 # 2.25.0 (2026-11-23) — direct operator request: Planning's bucket/field inputs become real
 # dependent dropdowns instead of one flat, all-buckets-merged field <datalist>. New
@@ -664,8 +677,11 @@ p.worksheet-total { font-size:14px; margin:10px 0; }
 .r-warn { color:var(--warn); border-color:var(--warn); }
 details { margin:6px 0; }
 details summary { cursor:pointer; padding:4px 0; }
-input[type=search],select { background:#1b1f27; color:var(--fg); border:1px solid var(--line);
-       border-radius:3px; padding:5px 8px; font:inherit; }
+input[type=search],input[type=text],select { background:#1b1f27; color:var(--fg);
+       border:1px solid var(--line); border-radius:3px; padding:5px 8px; font:inherit; }
+input[type=checkbox] { accent-color:var(--accent); width:14px; height:14px; vertical-align:middle;
+       cursor:pointer; }
+label { cursor:pointer; }
 button { background:#1b1f27; color:var(--accent); border:1px solid var(--line); border-radius:3px;
        padding:4px 10px; font:inherit; cursor:pointer; }
 button:hover { border-color:var(--accent); }
