@@ -1,4 +1,10 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-22, direct investigation "why are no shelters built?") -- classifyIntent's
+// ACTION BUILD now becomes an ACTION GOAL ("build a small shelter near home") instead of a raw
+// one-off build. Live evidence: every bot that heard Mayor's compound residence-shortage
+// directive ran ONE ungated "build" and failed instantly, repeatedly, for hours -- see the fix's
+// own comment at the BUILD verb below for the full story.
 //
 // 1.1.0 (2026-11-16) -- narrateAction() no longer calls muse. It was the highest-frequency muse
 // caller in the whole service (goal-tick.js alone has nine call sites, plus night-survival.js,
@@ -187,7 +193,22 @@ export async function classifyIntent(speaker, message) {
       if (item) return { type: "action", action: { type: "trade", item } };
     }
     if (verb === "HARVEST") return { type: "action", action: { type: "harvest" } };
-    if (verb === "BUILD") return { type: "action", action: { type: "build" } };
+    // Direct investigation, 2026-11-22 ("why are no shelters built?"): live evidence on spark2 --
+    // every bot that heard Mayor's own residence-shortage directive ("build a new shelter near
+    // home: a small sealed room with complete walls, a roof, a floor and a real door, then a bed
+    // and a chest inside") immediately ran ONE raw "build" action and failed instantly ("need N
+    // building blocks ... only have 0"), over and over, for hours -- never gathering material,
+    // never caching a site, because a one-off ACTION has no next tick to retry on. ACTION BUILD's
+    // own doc text ("no parameters") and ACTION GOAL's ("not a single one-off task") should have
+    // told the classifier apart, but a compound multi-step directive kept landing on BUILD anyway.
+    // shelter-goals.js's own header already fixed this exact anti-pattern once for the freeform
+    // self-propose planner ("the Builder's 'build a small shelter' went to the planner... A
+    // shelter goal now runs directly") -- this is the same fix for classifyIntent's one-off path:
+    // route through setNewGoal (incoming.js) instead, so farmTaskFor tags it "shelter" and
+    // runShelterGoal's own site-caching and dirt/plank-gathering gate every attempt.
+    if (verb === "BUILD") {
+      return { type: "action", action: { type: "goal", description: "build a small shelter near home" } };
+    }
     if (verb === "EXPLORE") {
       const feature = (parts[2] || "").toLowerCase();
       return { type: "action", action: SCOUT_FEATURE_BLOCKS[feature] ? { type: "explore", feature } : { type: "explore" } };

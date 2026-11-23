@@ -11,6 +11,10 @@ line; each new version's entry goes at the top of the list below. (Each action's
 
 ## Versions
 
+### 3.1.0 (2026-11-22)
+
+Re-exports action-search.js 1.1.0's new `climbTowardSurface()` (direct report: "some of the bots are underground, deep... thus no wood -- they should know to climb out to the surface to get wood"), used by actions/mine.js's wood-family fallback.
+
 ### 3.0.0 (2026-11-13)
 
 Split into subject modules, each under the self-repair pipeline's 40000-character limit: action-vocab.js, action-search.js, action-movement.js, action-crafting.js, action-world.js, action-shelter.js, action-chests.js, action-claims.js. Code moved unchanged; `actions.js` keeps performAction(), performActionAs() and its dispatcher, the mine-target ranking and LOOT_GROUPS, and re-exports every name it exported before, so every `import ... from "../actions.js"` still resolves. The `export { loadPenLocation, BREEDING_FOOD }` list became `export` on the two declarations. This change history moved here.

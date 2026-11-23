@@ -1,12 +1,23 @@
-// Version: 1.0.0
+// Version: 1.1.0
 //
-// The "mine" action, split out of actions.js's performActionAs() switch
-// (actions.js 2.0.0, 2026-11-10) unchanged, so a fix to it is a fix to this file alone. Called
+// 1.1.0 (2026-11-22, direct report "some of the bots are underground, deep... thus no wood --
+// they should know to climb out to the surface to get wood"): a wood-family search (oak_log and
+// friends) that's still empty after the remembered-spot and wander-and-retry fallbacks now climbs
+// toward the surface (action-search.js 1.1.0's climbTowardSurface()) and tries once more, wander
+// included, before giving up. Ore/stone never climbs -- see WOOD_BLOCK_RE's own comment.
+//
+// 1.0.0 (2026-11-10) -- split out of actions.js's performActionAs() switch
+// (actions.js 2.0.0) unchanged, so a fix to it is a fix to this file alone. Called
 // through ACTION_HANDLERS with performActionAs's own arguments; ok()/fail() build its result.
 
 import { isLivingSpaceWall } from "../shelter.js";
 import path from "node:path";
-import { ACTION_TIMEOUT_MS, CONTENTION_SEARCH_OVERFETCH, MINE_DROPS, MINE_RANKING_FETCH, MINE_SEARCH_RADIUS, collectBlocks, filterAwayFromOtherBots, isProtectedBlockName, itemNamesForMinedBlocks, noteMineUnreachable, rankMineTargets, refreshGear, resolveBlockFamily, tryTakeFromNearbyChest, visitRememberedSpot, wanderAndRetryFind, withTimeout } from "../actions.js";
+import { ACTION_TIMEOUT_MS, CONTENTION_SEARCH_OVERFETCH, MINE_DROPS, MINE_RANKING_FETCH, MINE_SEARCH_RADIUS, climbTowardSurface, collectBlocks, filterAwayFromOtherBots, isProtectedBlockName, itemNamesForMinedBlocks, noteMineUnreachable, rankMineTargets, refreshGear, resolveBlockFamily, tryTakeFromNearbyChest, visitRememberedSpot, wanderAndRetryFind, withTimeout } from "../actions.js";
+
+// Wood-family block names (oak_log, stripped_birch_log, warped_stem, ...) -- the surface-biased
+// resource climbTowardSurface() exists for. Never ore/stone: those are legitimately underground,
+// and climbing toward the surface to look for them would be actively wrong.
+const WOOD_BLOCK_RE = /_(log|stem)$/;
 
 
 export async function mineAction(bot, action, speaker, token) {
@@ -56,7 +67,22 @@ export async function mineAction(bot, action, speaker, token) {
   // before this existed.
   if (!positions.length) positions = await visitRememberedSpot(bot, token, action.block, () => bot.findBlocks(findOptions));
   if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
-  if (!positions.length) return fail(`couldn't find any ${action.block} nearby, even after looking around.`);
+  // Direct report, 2026-11-22 ("some of the bots are underground, deep... thus no wood. They
+  // should know to climb out to the surface to get wood"): wanderAndRetryFind only ever moves
+  // horizontally, so a bot deep in a cave never finds a tree however far she wanders sideways.
+  // Wood only, never ore/stone -- those are legitimately underground, and "couldn't find any
+  // coal_ore nearby" should never send her climbing toward the surface to look for it.
+  let climbed = false;
+  if (!positions.length && WOOD_BLOCK_RE.test(action.block)) {
+    climbed = true;
+    await climbTowardSurface(bot, token);
+    positions = bot.findBlocks(findOptions);
+    if (!positions.length) positions = await wanderAndRetryFind(bot, token, findOptions);
+  }
+  if (!positions.length) {
+    return fail(climbed ? `couldn't find any ${action.block} nearby, even after climbing toward the surface to look.`
+      : `couldn't find any ${action.block} nearby, even after looking around.`);
+  }
   // Direct request, 2026-10-07 ("recognize walls around living spaces... do not knock holes
   // in them"): "mine cobblestone 16" standing in the shared base is a perfectly reasonable
   // step whose nearest 16 matches are the shelter's own walls. Filtered rather than refused

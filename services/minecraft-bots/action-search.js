@@ -1,4 +1,8 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-22, direct report "some of the bots are underground, deep... thus no wood --
+// they should know to climb out to the surface to get wood"): new climbTowardSurface(), see its
+// own header for the full story and why it does not use block.light/skyLight.
 //
 // 1.0.0 (2026-11-13) -- split out of actions.js (2.0.0) unchanged: exploring, search radii, remembered spots, hopping toward a target, wander-and-retry.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. actions.js imports
@@ -213,6 +217,40 @@ export async function wanderAndRetryFind(bot, token, findOptions) {
     if (positions.length) return positions;
   }
   return [];
+}
+
+// Direct report, 2026-11-22 ("some of the bots are underground, deep... thus no wood. They
+// should know to climb out to the surface to get wood"): wanderAndRetryFind only ever moves
+// horizontally -- its own hop offset's y is always 0 -- so a bot deep in a cave spends her whole
+// EXTENDED_SEARCH_DISTANCE (150) budget on depth alone and can never find a tree however far she
+// wanders sideways (confirmed live: Nell, "couldn't find any oak_log nearby, even after looking
+// around," dozens of times over hours). Deliberately does NOT check block.light/skyLight to
+// decide whether she's actually covered first -- tunneling.js's own 1.1.0 note found that field
+// frozen at chunk-load time on this stack (a cell sealed in solid deepslate still read light=10),
+// so it is never trusted here either. Simpler and just as safe: always try climbing toward a
+// generous target Y, bounded attempts. installSteppedGoto (swim-movements.js, wired in by
+// pathfinding.js's setupPathfinding) already makes ANY bot.pathfinder.goto() climb through rock in
+// legs when the goal sits well above her -- a plain GoalY gets that for free, no new climbing
+// logic needed here. If she's already near the surface with nothing to climb, the goal resolves
+// at once and this is a cheap no-op before the same "nothing nearby" failure as before.
+const SURFACE_CLIMB_RISE = 80;
+const SURFACE_CLIMB_ATTEMPTS = 3;
+const SURFACE_CLIMB_TIMEOUT_MS = 60_000;
+
+export async function climbTowardSurface(bot, token) {
+  for (let i = 0; i < SURFACE_CLIMB_ATTEMPTS && !token.cancelled; i++) {
+    const targetY = bot.entity.position.floored().y + SURFACE_CLIMB_RISE;
+    try {
+      await withTimeout(bot.pathfinder.goto(new goals.GoalY(targetY)), SURFACE_CLIMB_TIMEOUT_MS,
+        () => bot.pathfinder.setGoal(null));
+      return; // reached the target Y -- no need for another attempt
+    } catch {
+      // NoPath/Timeout still means whatever height installSteppedGoto's own climbing legs
+      // reached is real progress -- try again from there, up to the attempt cap.
+    } finally {
+      if (!token.cancelled) bot.pathfinder.setGoal(null);
+    }
+  }
 }
 
 // Real bug found live 2026-10-10 (direct report: bots "give up on constructed goals without

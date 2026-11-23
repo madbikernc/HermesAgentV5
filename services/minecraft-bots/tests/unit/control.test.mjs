@@ -1,4 +1,5 @@
-// Version: 1.3.0
+// Version: 1.4.0
+// 1.4.0 (2026-11-22): new check -- classifyIntent's ACTION BUILD becomes ACTION GOAL (chat.js 1.2.0), never a raw one-off build.
 // 1.3.0 (2026-11-13): the "giving up on goal" line names the goal's kind (goal-runners.js 1.1.0), so self-repair can tell abandons apart.
 // 1.2.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
 // 1.2.0 | 2026-11-11 | Partial drop acknowledgements and narration after releasing control.
@@ -319,6 +320,30 @@ await check('MB-23 classifyIntent() exempts a verified bot sender from full scre
   await c.classifyIntent('SomePlayer', 'Amy, gather wood');
   assert.equal(lastOptions.analysis, false,
     'an ordinary player must still take the full-screening path, even typing a Mayor-shaped directive');
+});
+
+
+await check('Direct investigation 2026-11-22 ("why are no shelters built?"): ACTION BUILD becomes a standing goal, not a raw one-off build', async () => {
+  // Live evidence on spark2: every bot that heard Mayor's own compound residence-shortage
+  // directive ("build a new shelter near home: a small sealed room with complete walls, a roof,
+  // a floor and a real door, then a bed and a chest inside") ran ONE raw "build" action and
+  // failed instantly ("need N building blocks ... only have 0"), repeatedly, for hours -- a
+  // one-off action has no next tick to gather material or cache a site on. Routed through a
+  // GOAL instead (chat.js 1.2.0), farmTaskFor tags it "shelter" and runShelterGoal's own gating
+  // (shelter-goals.js) takes over, the same fix shelter-goals.js's own header already applied
+  // once before to the freeform self-propose planner.
+  const c = vm.createContext({ console: { log() {}, error() {} },
+    OTHER_BOTS: [], USERNAME: 'Dale', SCOUT_FEATURE_BLOCKS: {},
+    isAnotherBot: () => false,
+    callRole: async () => 'ACTION BUILD' });
+  vm.runInContext(between(index, 'async function classifyIntent(', 'async function narrateAction('), c);
+
+  const intent = await c.classifyIntent('Mayor', 'build a new shelter near home: walls, a roof, a floor and a door, then a bed and a chest inside');
+  // intent.action is a cross-realm object literal (built inside the vm) -- spread it into the
+  // outer realm before comparing, same fix gathering.test.mjs 1.2.0 already needed.
+  assert.deepEqual({ type: intent.type, action: { ...intent.action } },
+    { type: 'action', action: { type: 'goal', description: 'build a small shelter near home' } },
+    'ACTION BUILD must become ACTION GOAL so it goes through setNewGoal -> farmTaskFor -> runShelterGoal, never a bare performAction({type:"build"})');
 });
 
 

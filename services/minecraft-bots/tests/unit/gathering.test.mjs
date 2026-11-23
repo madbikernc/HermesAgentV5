@@ -1,4 +1,6 @@
-// Version: 1.2.0
+// Version: 1.3.0
+// 1.3.0 (2026-11-22): new checks for mine.js 1.1.0's wood-family climb-to-surface fallback
+// (action-search.js 1.1.0's climbTowardSurface()), and that ore/stone never triggers it.
 // 1.2.0 (2026-11-22): new checks for nextOpportunisticGather() (priorities.js 1.2.0) and its
 // dedicated runner, runOpportunisticGatherGoal() (goal-runners.js 1.3.0).
 // 1.1.1 (2026-11-13): index.js 3.0.0 split into subject modules -- the end marker is the next declaration, not the periodic check that stayed in index.js.
@@ -172,6 +174,59 @@ await check('Opportunistic gather: a tagged goal mines the spotted block once an
   assert.match(index,
     /const gather = nextOpportunisticGather\(\);[\s\S]*?currentGoal\.gatherBlock = gather\.block;[\s\S]*?return;[\s\S]*?const gearNote = describeGear/,
     'proposeOwnGoal tags the goal before falling through to the freeform LLM self-propose call');
+});
+
+
+await check('Mine: a wood search that fails everywhere climbs toward the surface and tries again', async () => {
+  // Direct report, 2026-11-22 ("some of the bots are underground, deep... thus no wood. They
+  // should know to climb out to the surface to get wood"): confirmed live -- Nell repeated
+  // "couldn't find any oak_log nearby, even after looking around" for hours, deep underground,
+  // because wanderAndRetryFind only ever moves horizontally. mine.js 1.1.0's new fallback tries
+  // climbTowardSurface() (action-search.js 1.1.0) once the ordinary search and wander both come
+  // up empty, then searches again.
+  const bot = makeBot();
+  bot.entity = { position: new V3(5, 4, 5) };
+  bot.registry = { blocks: { 1: { name: 'oak_log' } } };
+  bot.blockAt = (p) => ({ name: 'oak_log', position: p, harvestTools: null });
+  let findCalls = 0;
+  bot.findBlocks = () => { findCalls++; return findCalls < 2 ? [] : [new V3(8, 64, 8)]; }; // nothing until after the climb
+  let climbed = 0;
+  const collected = [];
+  bot.collectBlock = { collect: async (blocks) => collected.push(...blocks.map((b) => `${b.position.x},${b.position.y},${b.position.z}`)), cancelTask() {} };
+  const extras = { Vec3: V3, resolveBlockFamily: () => [1], itemNamesForMinedBlocks: () => ['oak_log'],
+    tryTakeFromNearbyChest: async () => null, visitRememberedSpot: async () => [],
+    wanderAndRetryFind: async () => [], climbTowardSurface: async () => { climbed++; },
+    filterAwayFromOtherBots: (b, p) => p, isProtectedBlockName: () => false,
+    MINE_SEARCH_RADIUS: 32, CONTENTION_SEARCH_OVERFETCH: 3, isLivingSpaceWall: () => false };
+  const c = context(bot, extras);
+  vm.runInContext(timeoutFn + actionFn, c);
+
+  const result = await c.performAction(bot, { type: 'mine', block: 'oak_log', count: 1 }, 'test');
+  assert.equal(climbed, 1, 'nothing found nearby or by wandering -- must climb toward the surface before giving up');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(collected, ['8,64,8'], 'the post-climb search found real wood and mined it');
+});
+
+
+await check('Mine: ore/stone never climbs toward the surface -- underground is exactly where it belongs', async () => {
+  const bot = makeBot();
+  bot.entity = { position: new V3(5, 4, 5) };
+  bot.registry = { blocks: { 1: { name: 'coal_ore' } } };
+  bot.blockAt = (p) => ({ name: 'coal_ore', position: p, harvestTools: null });
+  bot.findBlocks = () => [];
+  let climbed = 0;
+  const extras = { Vec3: V3, resolveBlockFamily: () => [1], itemNamesForMinedBlocks: () => ['coal_ore'],
+    tryTakeFromNearbyChest: async () => null, visitRememberedSpot: async () => [],
+    wanderAndRetryFind: async () => [], climbTowardSurface: async () => { climbed++; },
+    filterAwayFromOtherBots: (b, p) => p, isProtectedBlockName: () => false,
+    MINE_SEARCH_RADIUS: 32, CONTENTION_SEARCH_OVERFETCH: 3, isLivingSpaceWall: () => false };
+  const c = context(bot, extras);
+  vm.runInContext(timeoutFn + actionFn, c);
+
+  const result = await c.performAction(bot, { type: 'mine', block: 'coal_ore', count: 1 }, 'test');
+  assert.equal(climbed, 0, 'ore is legitimately underground -- a failed ore search must never climb toward the surface looking for it');
+  assert.equal(result.ok, false);
+  assert.match(result.text, /couldn't find any coal_ore nearby, even after looking around\./);
 });
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) console.log(`${passedCount()} unit checks passed.`);
