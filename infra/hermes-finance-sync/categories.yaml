@@ -13,63 +13,184 @@
 #
 # The only currently-valid match_type is `keyword` (case-insensitive substring match).
 #
-# This is a seed, not an exhaustive list — FINANCE_TRACKER_DESIGN.md §6 frames the taxonomy
-# below as "including but not limited to." Extend it as real transaction data (once S47a/b land)
-# shows gaps. `Transfer` is semantically load-bearing, not a cosmetic bucket: §6/§9 exclude
-# `category = 'Transfer'` from income/expense totals, since a transfer between the operator's own
-# accounts would otherwise double-count real spending already categorized once on the other side.
+# Category taxonomy below is drawn from the operator's real Simplifi transaction history
+# (2026-11-22, "Simplifi - Transactions.csv"), not guessed — these are the actual category
+# strings Simplifi's own export uses, so a transaction this module categorizes lines up with
+# how the operator already categorizes the same merchant by hand. Two things seen in that
+# export are deliberately NOT represented here: Simplifi's own per-account labels (it fills
+# `Category` with an account nickname rather than a real category for transfers between the
+# operator's own accounts — personally identifying either way, and `Transfer` below is already
+# the category of record for that per the paragraph after next), and `Uncategorized` (Simplifi's
+# own "no category assigned" marker — this module's equivalent is already
+# categorize_transaction() returning `None`, so it needs no rule of its own). A handful of real
+# categories with only one supporting transaction, or whose only real-world keyword would be a
+# person's name, a specific medical condition, or other identifying detail, were left out rather
+# than represented with an unsafe or no pattern at all — this file only ever holds the operator's
+# own merchant/category choices, never anyone else's identity or health/religious detail.
+#
+# `Transfer` is semantically load-bearing, not a cosmetic bucket: FINANCE_TRACKER_DESIGN.md §6/§9
+# exclude `category = 'Transfer'` from income/expense totals, since a transfer between the
+# operator's own accounts would otherwise double-count real spending already categorized once
+# on the other side.
 #
 # Order matters: rules are checked top to bottom, first match wins. A more specific pattern that
-# could be shadowed by a broader one listed later (or vice versa) should be reordered deliberately,
-# not left to coincidence.
+# could be shadowed by a broader one listed later (or vice versa) is ordered deliberately, not
+# left to coincidence — e.g. "amazon kindle" before the bare "amazon" below, and the "atm fee"
+# rule ahead of Cash & ATM's own "atm" rule, so a transaction matching both resolves to the more
+# specific category.
+
+Transfer | keyword | online transfer
+Transfer | keyword | internet transfer
+Transfer | keyword | recurring transfer
+
+Personal Income:Paycheck | keyword | payroll
+Personal Income:Paycheck | keyword | direct deposit
+Personal Income:Interest Earned | keyword | interest payment
+Personal Income:Interest Earned | keyword | credit interest
+Personal Income | keyword | mobile deposit
+Personal Income | keyword | edeposit
+
+Credit Card Payment | keyword | credit crd epay
+Credit Card Payment | keyword | mobile payment
+Credit Card Payment | keyword | payment thank you
+
+Fees & Charges:Finance Charge | keyword | interest charge
+Fees & Charges:Late Fee | keyword | late fee
+Fees & Charges | keyword | atm fee
+Fees & Charges | keyword | service charge
+Fees & Charges | keyword | overdraft
+Fees & Charges | keyword | annual fee
+
+Cash & ATM | keyword | atm withdrawal
+Cash & ATM | keyword | atm
 
 Groceries | keyword | whole foods
 Groceries | keyword | trader joe
 Groceries | keyword | safeway
 Groceries | keyword | kroger
 Groceries | keyword | aldi
+Groceries | keyword | harris teeter
+Groceries | keyword | lowes foods
+Groceries | keyword | bj's wholesale
+Groceries | keyword | food lion
 Groceries | keyword | grocery
-Dining | keyword | starbucks
-Dining | keyword | mcdonald
-Dining | keyword | chipotle
-Dining | keyword | doordash
-Dining | keyword | restaurant
-Transportation | keyword | uber
-Transportation | keyword | lyft
-Transportation | keyword | shell oil
-Transportation | keyword | chevron
-Transportation | keyword | exxon
-Transportation | keyword | parking
-Utilities | keyword | electric
-Utilities | keyword | water utility
-Utilities | keyword | internet service
-Utilities | keyword | comcast
-Housing | keyword | rent payment
-Housing | keyword | mortgage
-Subscriptions & Software | keyword | netflix
-Subscriptions & Software | keyword | spotify
-Subscriptions & Software | keyword | adobe
-Subscriptions & Software | keyword | subscription
-Entertainment | keyword | amc theatres
-Entertainment | keyword | ticketmaster
-Entertainment | keyword | steam games
+
+Dining & Drinks:Coffee Shops | keyword | starbucks
+Dining & Drinks:Coffee Shops | keyword | dunkin
+Dining & Drinks:Coffee Shops | keyword | krispy kreme
+Dining & Drinks:Fast Food | keyword | mcdonald
+Dining & Drinks:Fast Food | keyword | wendy's
+Dining & Drinks:Fast Food | keyword | arby
+Dining & Drinks:Fast Food | keyword | hardee
+Dining & Drinks:Fast Food | keyword | jersey mike
+Dining & Drinks:Fast Food | keyword | chick-fil-a
+Dining & Drinks:Fast Food | keyword | subway
+Dining & Drinks:Fast Food | keyword | 7-eleven
+Dining & Drinks:Fast Food | keyword | cook out
+Dining & Drinks:Fast Food | keyword | bojangles
+Dining & Drinks:Fast Food | keyword | firehouse subs
+Dining & Drinks:Fast Food | keyword | papa john
+Dining & Drinks:Restaurants | keyword | red robin
+Dining & Drinks:Restaurants | keyword | chili's
+Dining & Drinks:Restaurants | keyword | applebee
+Dining & Drinks:Restaurants | keyword | olive garden
+Dining & Drinks:Restaurants | keyword | texas roadhouse
+Dining & Drinks:Restaurants | keyword | ihop
+Dining & Drinks | keyword | restaurant
+Dining & Drinks | keyword | pizzeria
+Dining & Drinks | keyword | diner
+
+Auto & Transport:Gas & Fuel | keyword | shell
+Auto & Transport:Gas & Fuel | keyword | sheetz
+Auto & Transport:Gas & Fuel | keyword | wawa
+Auto & Transport:Gas & Fuel | keyword | exxon
+Auto & Transport:Gas & Fuel | keyword | circle k
+Auto & Transport:Gas & Fuel | keyword | pilot travel center
+Auto & Transport:Gas & Fuel | keyword | amoco
+Auto & Transport:Gas & Fuel | keyword | weigels
+Auto & Transport:Car Insurance | keyword | progressive
+Auto & Transport:Car Insurance | keyword | aaa carolinas
+Auto & Transport:Car Payment | keyword | kmfusa
+Auto & Transport:Car Payment | keyword | hyundai
+Auto & Transport:Service & Parts | keyword | advance auto parts
+Auto & Transport:Service & Parts | keyword | discount tire
+Auto & Transport:Service & Parts | keyword | autozone
+Auto & Transport:Parking | keyword | parking
+
+Home:Mortgage | keyword | redpoint wilmington
+Home:Mortgage | keyword | mr cooper
+Home:Mortgage | keyword | championmortgage
+Home:Rent | keyword | brookdale senior
+Home:Home Services | keyword | vivint
+Home:Home Improvement | keyword | lowe's
+Home:Furnishings | keyword | cosyhouse
+
+Utilities:Internet & Cable | keyword | spectrum
+Utilities:Internet & Cable | keyword | cox communications
+Utilities:Internet & Cable | keyword | plex.tv
+Utilities:Internet & Cable | keyword | roku
+Utilities:Gas & Electric | keyword | dominion energy
+Utilities:Gas & Electric | keyword | virginia nat gas
+Utilities:Gas & Electric | keyword | virginianaturalg
+Utilities:Phone | keyword | verizon wireless
+
+Health:Pharmacy | keyword | cvs
+Health:Pharmacy | keyword | walgreens
+Health:Pharmacy | keyword | blink health
+Health:Doctor | keyword | duke health
+Health:Dentist | keyword | dental care
+Health:Eyecare | keyword | eye care
+Health:Eyecare | keyword | brier creek vision
+
+Personal Care:Hair | keyword | great clips
+Personal Care | keyword | sally beauty
+
+Pets:Pet Food & Supplies | keyword | chewy
+Pets:Pet Food & Supplies | keyword | petsmart
+Pets:Pet Food & Supplies | keyword | the farmers dog
+Pets:Pet Food & Supplies | keyword | dog.com
+Pets:Veterinary | keyword | animal hospital
+
+Shopping:Books | keyword | amazon kindle
+Shopping:Books | keyword | audible
+Shopping:Clothing | keyword | old navy
+Shopping:Clothing | keyword | land's end
+Shopping:Clothing | keyword | nautica
+Shopping:Clothing | keyword | woman within
+Shopping:Electronics | keyword | wyze
 Shopping | keyword | amazon
+Shopping | keyword | wal-mart
+Shopping | keyword | walmart
+Shopping | keyword | dollar general
+Shopping | keyword | dollar tree
+Shopping | keyword | etsy
 Shopping | keyword | target
-Shopping | keyword | best buy
-Health & Medical | keyword | cvs pharmacy
-Health & Medical | keyword | walgreens
-Health & Medical | keyword | urgent care
-Insurance | keyword | insurance
-Travel | keyword | delta air
-Travel | keyword | southwest air
-Travel | keyword | marriott
-Travel | keyword | hilton
-Travel | keyword | airbnb
-Income | keyword | payroll
-Income | keyword | direct deposit
-Transfer | keyword | online xfer
-Transfer | keyword | transfer to
-Transfer | keyword | transfer from
-Fees & Interest | keyword | overdraft fee
-Fees & Interest | keyword | atm fee
-Fees & Interest | keyword | interest charge
+
+Entertainment | keyword | netflix
+Entertainment | keyword | hulu
+Entertainment | keyword | prime video
+Entertainment | keyword | fandango
+
+Gifts | keyword | pandora
+
+Charity & Donations | keyword | gofundme
+Charity & Donations | keyword | meal train
+Charity & Donations | keyword | actblue
+
+Travel:Hotel | keyword | staybridge suites
+Travel:Hotel | keyword | home2suite
+
+Financial:Life Insurance | keyword | western-southern
+Financial | keyword | venmo
+
+Education | keyword | master class
+
+Fitness:Gym | keyword | gym time fits
+Fitness | keyword | yoga
+
+Taxes:State Tax | keyword | state tax
+Taxes:Federal Tax | keyword | internal revenue service
+
+Dad:Brookdale | keyword | brookdale
+Dad:Pharmacy | keyword | Southern
+Dad:Personal Income | keyword | Opm
