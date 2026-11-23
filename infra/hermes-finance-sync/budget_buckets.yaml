@@ -1,0 +1,81 @@
+# Maps this module's own granular `category` values (categories.yaml's left column) onto Fidelity's
+# "Budget Worksheet" taxonomy (FINANCE_TRACKER_DESIGN.md §6) — one rule per line:
+# `category | bucket | field`.
+#
+# Same flat-delimited-text convention as categories.yaml/tags.yaml/feeds.yaml/topics.yaml. Despite the
+# .yaml extension, this is NOT real YAML. Blank lines and lines starting with # are ignored.
+# tools/hermes_finance_common.py's load_budget_buckets() reads this file verbatim.
+#
+# A granular category with NO line here is deliberately left unmapped — `classify_budget()` leaves its
+# bucket/field NULL and it shows up in the review queue, rather than being guessed into a bucket the
+# worksheet never actually offers for it. Deliberately absent, per direct operator decision: `Cash & ATM`
+# (could be spent on anything), `Shopping` (general retail has no worksheet bucket), `Financial` (Venmo —
+# no way to know what a P2P transfer was for), `Education` (no worksheet bucket), and
+# `Utilities:Gas & Electric` (conflates electric + gas in one category, but the worksheet splits them into
+# separate fields — review by hand, choosing `Housing`/`Electricity` or `Housing`/`Oil/Gas`).
+#
+# `Transfer` is handled in code, not here: it is excluded from classification entirely (same `category =
+# 'Transfer'` reporting exclusion §6/§9 already give the granular categorizer), never shown as needing
+# review.
+#
+# `Income` is not a bucket the worksheet itself breaks out (it has one top-line "take-home pay" figure,
+# no itemized income section) — added here as a small, necessary extension so paycheck/interest
+# transactions don't sit in the review queue forever.
+
+Personal Income:Paycheck | Income | Paycheck
+Personal Income:Interest Earned | Income | Interest
+Personal Income | Income | Other
+Dad:Personal Income | Income | Other
+
+Credit Card Payment | Debt & Monthly Obligations | Credit Card Debt
+Taxes:State Tax | Debt & Monthly Obligations | Loans, Taxes, Borrowing
+Taxes:Federal Tax | Debt & Monthly Obligations | Loans, Taxes, Borrowing
+Fees & Charges:Finance Charge | Debt & Monthly Obligations | Other
+Fees & Charges:Late Fee | Debt & Monthly Obligations | Other
+Fees & Charges | Debt & Monthly Obligations | Other
+
+Groceries | Groceries | Food
+
+Dining & Drinks:Coffee Shops | Entertainment | Dining Out
+Dining & Drinks:Fast Food | Entertainment | Dining Out
+Dining & Drinks:Restaurants | Entertainment | Dining Out
+Dining & Drinks | Entertainment | Dining Out
+Entertainment | Entertainment | Other
+Shopping:Books | Entertainment | Other
+
+Auto & Transport:Gas & Fuel | Transportation | Gasoline
+Auto & Transport:Car Insurance | Transportation | Auto Insurance
+Auto & Transport:Car Payment | Transportation | Auto Loan or Lease Payment
+Auto & Transport:Service & Parts | Transportation | Routine Maintenance
+Auto & Transport:Parking | Transportation | Other Commuting Expenses
+
+Home:Mortgage | Housing | Mortgage
+Home:Rent | Housing | Rent/Condo Fees
+Home:Home Services | Housing | Other
+Home:Home Improvement | Housing | Other
+Home:Furnishings | Housing | Other
+Utilities:Internet & Cable | Housing | Internet/Telephone
+Utilities:Phone | Housing | Cell Phone
+
+Health:Pharmacy | Healthcare | Prescriptions
+Health:Doctor | Healthcare | Co-payments, Deductibles, Etc.
+Health:Dentist | Healthcare | Co-payments, Deductibles, Etc.
+Health:Eyecare | Healthcare | Co-payments, Deductibles, Etc.
+Financial:Life Insurance | Healthcare | Other
+Dad:Pharmacy | Healthcare | Prescriptions
+
+Pets:Pet Food & Supplies | Child & Dependent Care | Other Obligations
+Pets:Veterinary | Child & Dependent Care | Other Obligations
+Dad:Brookdale | Child & Dependent Care | Support for Parent(s)
+
+Personal Care:Hair | Personal Care | Health and Beauty Aides
+Personal Care | Personal Care | Health and Beauty Aides
+Shopping:Clothing | Personal Care | Clothing
+
+Gifts | Gifts | Gifts
+Charity & Donations | Gifts | Charitable Donations
+
+Travel:Hotel | Recreational | Travel and Vacations
+Fitness:Gym | Recreational | Club Memberships
+Fitness | Recreational | Club Memberships
+Shopping:Electronics | Recreational | Hobbies

@@ -1,6 +1,6 @@
 # Firmament Finance Tracker — Target Design
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-11-19. `IMPLEMENTATION_PLAN.md`'s **S47**
 is the stage that tracks building this and points back here for the full spec — the same split S23/S38/
@@ -356,10 +356,65 @@ logic.
 
 ---
 
+## 6a. Budget-bucket classification `[DECIDED]`, built
+
+**Direct operator request, 2026-11-23: classify every transaction into Fidelity's own "Budget
+Worksheet" taxonomy** (`P:\Private\Budgeting\Budget Worksheet.pdf`) — a second, coarser layer on top
+of §6's granular categorizer, not a replacement for it. The worksheet's own two-tier vocabulary:
+Housing, Groceries, Healthcare, Transportation, Debt & Monthly Obligations, Child & Dependent Care
+(essential); Personal Care, Gifts, Recreational, Entertainment (discretionary) — each with its own
+named fields (e.g. Housing → Mortgage/Rent/Electricity/.../Other). `Income` is this build's own small
+addition: the worksheet itself has no itemized income section (one top-line take-home-pay figure),
+so paycheck/interest transactions would otherwise sit in the review queue forever.
+
+**A second static mapping file, not a rewrite of the first.** `infra/hermes-finance-sync/
+budget_buckets.yaml` maps each granular `category` (§6's own output) to a worksheet `(bucket,
+field)` pair — same flat `category | bucket | field` convention, read by
+`hermes_finance_common.py`'s `load_budget_buckets()`. A granular category absent from this file is
+deliberately left unmapped (`Cash & ATM`, bare `Shopping`, bare `Financial`/Venmo, `Education`,
+`Utilities:Gas & Electric` — the last because it conflates electric + gas in one category while the
+worksheet splits them, and there's no reliable way to pick one from the category alone) — flagged for
+review, never guessed into a bucket the worksheet doesn't honestly offer. `Transfer` is excluded
+outright in code, the same reporting exclusion above already gives it — never shown as needing
+review.
+
+**Reviewed corrections are treated like a RAG result — direct operator request.** Every
+`budget_classifications` row the operator has confirmed (`reviewed=1`) is a ground-truth example for
+a specific real payee; `find_reviewed_match()` checks every new transaction's payee against that set
+first — exact match on the normalized payee, else the longest substring match either direction — and
+a hit wins outright over the static rule chain. Plain substring matching, not embeddings, consistent
+with every other matcher in this codebase; worth revisiting only if plain matching proves too coarse
+in practice. `classify_budget()`'s full priority order: (1) reviewed-match, (2) the static rule chain
+(§6's categorizer → `budget_buckets.yaml`), (3) unclassified. No LLM fallback in this layer — distinct
+from, and unrelated to, §6's own LLM fallback for the granular category.
+
+**Ingestion: CSV only, pulling forward a slice of S47b/§7, ungated from S47a.** Exactly the way this
+section's own rule-based matching turned out not to need S47a's blocked vendor access, neither does
+this: `tools/hermes-budget-import.py` reads a Simplifi-shaped export directly (the real file already
+used to build `categories.yaml`), upserts `accounts`/`transactions` (§7's schema, built now rather
+than waiting on S47b's live API ingest) and runs the classification pipeline per newly-seen
+transaction. Idempotent by construction — re-running the same export never duplicates a row or
+re-classifies (and so never clobbers an operator review) for a transaction already on file. Live API
+ingestion (Intuit/Plaid/Schwab) stays exactly where §2/§2a/§2b already have it — out of scope here.
+
+**`hermes-fleetops-ui.py`'s new `/budget` tab, pulling forward a slice of S47h.** Filter (bucket,
+payee substring, account) and sort (payee/amount, ascending or descending) via GET query params, the
+same server-side pattern the rest of that page already uses. One form per transaction row — bucket
+and field as free-text inputs with a `<datalist>` of the worksheet's own vocabulary (so a bucket/field
+the worksheet never named, like the operator's own `Dad:*` categories, needs no code change) plus a
+reviewed checkbox — posted to the page's fourth write route, `/budget/classify`. Fixing a row's
+bucket/field always stamps it reviewed regardless of the checkbox: a fix is a review decision, not
+optionally one.
+
+---
+
 ## 7. Storage `[PROPOSED]`
 
 A new, dedicated SQLite store — `/mnt/hermes-data/finance/finance.db` — not folded into `hermes-memory`,
 the same bulk-reference-data-vs-conversational-state distinction Market Watch's §5 draws for `market.db`.
+**`accounts`, `transactions`, and the new `budget_classifications` below are built** (§6a,
+`hermes_finance_common.py` 1.1.0's `SCHEMA`/`connect()`) — the rest of this block is still
+`[PROPOSED]`, pending S47a/b.
 
 ```
 accounts(account_id, source, display_name, kind, plaid_item_id, last_synced_date,
@@ -398,6 +453,13 @@ report_items(report_date, report_type, category, rank, label, metric_value, text
              UNIQUE(report_date, report_type, category, rank))
              -- one row per report line, the exact reshape Market Watch's report_items already proved
              -- (§9 below); a future /finance page and Matrix gate both read this, never recompute it twice
+
+budget_classifications(source, txn_id, bucket, field, classified_by, reviewed, classified_at, reviewed_at,
+                        PRIMARY KEY (source, txn_id), FOREIGN KEY (source, txn_id) REFERENCES transactions)
+                        -- §6a, built. bucket/field: NULL = unclassified, flagged for review.
+                        -- classified_by: 'rule' | 'reviewed_match' | 'excluded' | 'manual'
+                        -- reviewed=1 for 'reviewed_match'/'excluded' (confidence already established)
+                        -- and for 'manual'; 'rule' starts at reviewed=0 until the operator confirms it.
 ```
 
 **`[RISK]` — this is the most sensitive data this fleet has handled.** Real account balances, real
@@ -573,6 +635,13 @@ model.
     item 1's Intuit `[UNKNOWN]`, but if Simplifi — not QuickBooks — turns out to be the operator's actual
     daily-use tool, this source needs a watched-folder/manual-export ingestion shape instead of §2's
     OAuth-pull design, before `S47b` can build against it.
+17. **A real bug found in `categories.yaml` while building §6a, not fixed here — the operator's own
+    direct edit, not this design's call to make.** The operator added `Dad:Brookdale | keyword |
+    brookdale` after this file's own `Home:Rent | keyword | brookdale senior` (first-match-wins, file
+    order), so every real "Brookdale Senior..." transaction still resolves to `Home:Rent` —
+    `Dad:Brookdale` can never fire for the one payee it was evidently added for. `Dad:Pharmacy`/
+    `Dad:Personal Income` (added the same edit) both work correctly. Flagged for the operator to resolve
+    (reorder, or remove the older rule) rather than silently reordered on their behalf.
 
 ---
 
@@ -592,16 +661,22 @@ model.
   pull (§2b, once its two-stage developer/product approval lands) — plus one
   `hermes-finance-auth-setup.py` consent script covering all three one-time flows (Intuit's OAuth
   redirect catch, Plaid Link's hosted-widget linking, and Schwab's own OAuth consent — the last one built
-  to be re-run routinely, not once, given §2b's ~7-day refresh-token cliff).
+  to be re-run routinely, not once, given §2b's ~7-day refresh-token cliff). **A CSV-only slice of the
+  schema/ingest half — `accounts`/`transactions`, `tools/hermes-budget-import.py` — is already built
+  (§6a), ungated from S47a; the live API pulls above are still fully gated.**
 - **S47c** — `hermes-finance-sync.py`'s Privacy.com half (`GET /v1/transactions` pull), §5's correlation
-  pass, `categories.yaml` + rule-based categorization (§6).
+  pass, `categories.yaml` + rule-based categorization (§6). **The categorization half, plus the new
+  worksheet budget-bucket layer on top of it (§6a, `budget_buckets.yaml`), is built; the Privacy.com
+  pull and correlation pass are not.**
 - **S47d** — LLM categorization fallback through `dispatch` (§6), `category_proposals` table.
 - **S47e** — `tools/hermes-finance-report.py` — spending/income-vs-expense/subscriptions computation,
   email + Matrix push, STE100-lite per `STYLE_GUIDE.md`.
 - **S47f** — `tools/hermes-finance-gate.py` — the Matrix command grammar (§10).
 - **S47g** — Offline tests + live verification against the operator's real accounts (mirrors S38f).
 - **S47h** — Optional follow-on: `/finance` page on `hermes-fleetops-ui.py` (§11), sequenced after S47a-g
-  have real data to browse.
+  have real data to browse. **A slice of this — the `/budget` tab specifically (§6a) — is already built
+  and ungated, the same reasoning as S47b/c above; the broader `/finance` page (spending/income reports,
+  §9) still waits on S47a-g.**
 
 ---
 
@@ -624,13 +699,13 @@ S47d's real verdicts, once live, turn out to need a different role than `dispatc
 | Stage | Status | Date | Notes |
 |---|---|---|---|
 | S47a | not started | 2026-11-22 | Blocking: confirm real Intuit product, Privacy.com plan tier, Plaid coverage/tier for the six named institutions (§2a), and Schwab Trader API - Individual approval/pricing (§2b), against the operator's actual accounts. New (§2c): Quicken Simplifi — the tool behind the operator's real transaction export — confirmed to have no public API; doesn't resolve whether a separate QuickBooks company file exists, but narrows what "confirm the real Intuit product" needs to check. |
-| S47b | not started | 2026-11-20 | Gated on S47a; now covers Intuit's, Plaid's, and Schwab's ingest halves |
-| S47c | in progress | 2026-11-22 | The categorization half is done and committed (`tools/hermes_finance_common.py`, `categories.yaml`) — not gated on S47a/b after all, since rule-based matching over a merchant string needs no real vendor/account access. `hermes-finance-sync.py`'s own Privacy.com pull and §5's correlation pass are still not started and still gated on S47a/b. |
-| S47d | not started | 2026-11-19 | Gated on S47c |
+| S47b | in progress | 2026-11-23 | Gated on S47a for the live API ingest halves; the CSV-only slice (`accounts`/`transactions` schema, `tools/hermes-budget-import.py`) is built and ungated (§6a) |
+| S47c | in progress | 2026-11-23 | The granular categorization half is done and committed (`tools/hermes_finance_common.py`, `categories.yaml`) — not gated on S47a/b, since rule-based matching over a merchant string needs no real vendor/account access. The new worksheet budget-bucket layer on top of it (§6a: `budget_buckets.yaml`, reviewed-match reuse, `/budget` tab) is also done and committed, same reasoning. `hermes-finance-sync.py`'s own Privacy.com pull and §5's correlation pass are still not started and still gated on S47a/b. |
+| S47d | not started | 2026-11-19 | Gated on S47c's still-pending Privacy.com/correlation half |
 | S47e | not started | 2026-11-19 | Gated on S47c/d |
 | S47f | not started | 2026-11-19 | Gated on S47e |
 | S47g | not started | 2026-11-19 | Gated on S47a-f |
-| S47h | not started | 2026-11-19 | Optional follow-on, gated on S47g |
+| S47h | in progress | 2026-11-23 | Optional follow-on, gated on S47g for the full `/finance` report page; the `/budget` tab slice (§6a) is built and ungated, same reasoning as S47b/c |
 
 ---
 
@@ -643,3 +718,4 @@ S47d's real verdicts, once live, turn out to need a different role than `dispatc
 | 1.2.0 | 2026-11-20 | **Direct operator request: added §2b, direct Schwab investment-account access** — Schwab is the one institution researched so far that actually runs its own retail-individual developer API (Trader API - Individual, successor to the discontinued TD Ameritrade API), so it is read directly rather than through Plaid, even though some Plaid integrations also list Schwab. Two manual approval gates found (developer-account review, then product-access review), no published SLA for either; API pricing not confirmed, expected free like its TD Ameritrade predecessor but unverified. Biggest finding: Schwab's refresh token appears to live only ~7 days with no programmatic renewal (community-reported, not Schwab-confirmed) — far more demanding than Intuit's ~100-day staleness or Plaid's occasional per-Item lapse, and possibly the single most frequent re-consent requirement in this design; whether routine daily use extends it is itself unconfirmed. No sandbox found for this product either, so live verification (`S47g`) may be the only way to test it. §1, §4 (scope), §7 (`schwab_auth` table, `accounts.source`), §9 (investment-account scope note), §12 (`schwab-api` Vaultwarden item), §13 (three new risk items), and §14/Build status (S47a/S47b scope) updated to match. Minor bump — a new vendor section added alongside the existing paths, nothing prior reversed. |
 | 1.3.0 | 2026-11-22 | **S47c's categorization half built and committed** (`tools/hermes_finance_common.py`'s `load_categories()`/`categorize_transaction()`, `infra/hermes-finance-sync/categories.yaml` seed) — found, while picking a small task to trial-run through `hermes-dualcoder.py`, that §6's rule-based matching needs no real vendor/account access and so isn't actually gated on S47a/b the way the Build status table previously implied for all of S47c; only the Privacy.com sync/correlation half of that stage still is. Build status row split accordingly. Minor bump — a build-progress update, nothing in the design itself changed. |
 | 1.4.0 | 2026-11-22 | **Added §2c, Quicken Simplifi vendor research** — discovered while building S47c's `categories.yaml` from the operator's real transaction export that the file is a Quicken Simplifi CSV export, not an Intuit product; Simplifi was sold out of Intuit in 2016 and §2's Mint/QuickBooks research never covered it. Checked with the same live-verification bar §2/§3 hold to: Simplifi has no public developer API (confirmed by Simplifi's own community forum's repeated, still-open requests for one, and no developer portal, MCP server, or transaction-read endpoint found anywhere) — CSV export is the only avenue. Does not resolve §2's own blocking `[UNKNOWN]` (whether the operator separately has a real QuickBooks company file); narrows it instead. §2 (cross-reference), §13 (new item 16), §14/Build status (S47a wording) updated to match. Minor bump — a new vendor section added alongside the existing paths, nothing prior reversed. |
+| 1.5.0 | 2026-11-23 | **Added §6a, built: Fidelity Budget Worksheet classification** — direct operator request, evaluated against the real `Budget Worksheet.pdf` (`P:\Private\Budgeting\`). New files: `infra/hermes-finance-sync/budget_buckets.yaml` (granular category → worksheet bucket/field, operator-reviewed mapping table), `tools/hermes-budget-import.py` (CSV ingest + classify, pulls forward a CSV-only slice of S47b's `accounts`/`transactions` schema and S47h's fleetops-ui page, both ungated from S47a per §6a's own reasoning). `hermes_finance_common.py` 1.1.0 adds `FINANCE_DB`/`SCHEMA`/`connect()`, `WORKSHEET_TAXONOMY`, `load_budget_buckets()`, `classify_budget()`'s reviewed-match-then-rule-then-unclassified priority order (the operator's own reviewed corrections treated as a RAG result, direct operator request), and `set_budget_classification()`. `hermes-fleetops-ui.py` 2.23.0 adds the `/budget` tab and its `/budget/classify` write route (the file's fourth, and first shaped as one form per row). Verified against the real Simplifi export (read live, never committed): 1,871 real transactions imported, 651 rule-classified, 1,220 correctly flagged for review (dominated by Privacy.com-masked merchants and general retail, both already known, separately-scoped gaps) — then re-verified that a single operator correction propagates forward via the reviewed-match lookup, confirming the RAG-reuse requirement actually works end to end, not just unit-tested in isolation. Also found, while cross-checking the real data against this build: a real `categories.yaml` bug (§13 item 17) in the operator's own direct edit (a newer `Dad:Brookdale` rule permanently shadowed by an older, more specific `Home:Rent` rule) — flagged, not fixed, since it's the operator's own data file. §7 (`budget_classifications` table, build-status annotations on `accounts`/`transactions`), §13 (new item 17), §14/Build status (S47b/c/h scope) updated to match. Minor bump — a new section and new tables/files added, nothing prior reversed. |

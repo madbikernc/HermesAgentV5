@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 2.22.0
+# Version: 2.23.0
+#
+# 2.23.0 (2026-11-23) — direct operator request: a new "Budget" tab (/budget), Fidelity's Budget
+# Worksheet taxonomy (FINANCE_TRACKER_DESIGN.md §6/§7) applied to every synced transaction. Reads
+# the new finance.db (hermes_finance_common.py 1.1.0, `tools/hermes-budget-import.py` is the
+# writer) through that module's own connect()/WORKSHEET_TAXONOMY, never raw SQL of its own beyond
+# the one filtered SELECT render_budget() needs. Filter (bucket/payee/account) and sort
+# (payee/amount, asc-desc) are GET query params, the same server-side-filter shape render_
+# backlog()'s own `state` dropdown already uses. New write route, /budget/classify, the file's
+# fourth and the first shaped as one form per row instead of a bulk checkbox-select — bucket and
+# field are free-text inputs with a <datalist> of the worksheet's own vocabulary rather than a
+# fixed <select>, so a bucket/field the worksheet never named (the operator's own "Dad:*"
+# categories, for one) still needs no code change here. Fixing a row's bucket/field always
+# stamps it reviewed, regardless of the checkbox -- a fix IS a review decision, not optionally
+# one. do_POST's shared CSRF/body-cap/tailnet_identity() machinery is reused unchanged.
 #
 # 2.22.0 (2026-11-13) — the self-repair bridge (2.6.0) writes one `seen` line per signature per
 # hour with a `count`, not one per sighting: the funnel and the before/after counts sum `count`
@@ -381,6 +395,7 @@ import hermes_benchmark_common as bc  # noqa: E402
 # below, there is no fail-closed load_gate()-style import for this one.
 import hermes_self_repair_domains as sr_domains  # noqa: E402
 import hermes_self_repair_outcomes as sr_outcomes  # noqa: E402
+import hermes_finance_common as finance_common  # noqa: E402
 
 NAS_HISTORY = Path("/mnt/nas2-hermes-backup/Private/Hermes/Benchmarks/history.jsonl")
 LOCAL_HISTORY = Path.home() / ".hermes" / "state" / "benchmark-history.jsonl"
@@ -629,7 +644,7 @@ NAV = [("/", "Home"), ("/backlog", "Benchmark backlog"), ("/models", "Models &am
        ("/benchmarks", "Benchmark results"), ("/highlights", "Topic highlights"),
        ("/recommendations", "Recommendations"), ("/egress-blocks", "Egress-guard denials"),
        ("/market", "Market Watch"), ("/status", "System status and health"),
-       ("/selfrepair", "Self-repair"), ("/minecraft", "Minecraft bots")]
+       ("/selfrepair", "Self-repair"), ("/minecraft", "Minecraft bots"), ("/budget", "Budget")]
 
 
 def log(msg):
@@ -743,9 +758,9 @@ def shell(title, body, subtitle=""):
             f"<header><h1>hermes-fleetops</h1><nav>{nav}</nav>"
             f"<span style=\"color:var(--dim);margin-left:auto\">{esc(subtitle)}</span></header>"
             f"<main>{body}</main>"
-            f"<footer>Reports are read-only. The backlog's, self-repair's and the market "
-            f"watchlist's decide/add buttons are this page's only write routes; starting and "
-            f"stopping services stays an SSH + systemctl action. "
+            f"<footer>Reports are read-only. The backlog's, self-repair's, the market "
+            f"watchlist's and the budget tab's decide/add/classify buttons are this page's only "
+            f"write routes; starting and stopping services stays an SSH + systemctl action. "
             f"Rendered {esc(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}.</footer>"
             f'<script nonce="__CSP_NONCE__">{PAGE_SCRIPT}</script>'
             f"</body></html>").encode()
@@ -3156,6 +3171,167 @@ def page_minecraft(query):
     return shell("Minecraft bots", body)
 
 
+# ── Budget (Fidelity Budget Worksheet classification, direct operator request) ──────────────────
+
+MAX_BUDGET_ROWS = 500
+
+BUDGET_SORT_OPTIONS = {
+    "date_desc": ("date", "DESC"), "date_asc": ("date", "ASC"),
+    "payee_asc": ("payee_raw", "ASC"), "payee_desc": ("payee_raw", "DESC"),
+    "amount_asc": ("amount_cents", "ASC"), "amount_desc": ("amount_cents", "DESC"),
+}
+
+
+def budget_field_options():
+    """Every field name across every worksheet bucket, deduplicated, for the field column's
+    <datalist> -- a row's bucket and field are independent free-text inputs (see render_budget's
+    per-row form), so this isn't filtered down to one bucket's own fields."""
+    seen = []
+    for fields in finance_common.WORKSHEET_TAXONOMY.values():
+        for f in fields:
+            if f not in seen:
+                seen.append(f)
+    return seen
+
+
+def render_budget(query):
+    """Bucket/payee/account filters and payee/amount sort all arrive as GET query params, the
+    same server-side-filter shape render_backlog's own `state` dropdown already uses -- not a new
+    client-side mechanism. Each row gets its OWN small form (bucket + field as free-text inputs
+    with a <datalist> of the worksheet's own vocabulary, so a future bucket/field the worksheet
+    never named still needs no code change, plus a reviewed checkbox) -- a new interaction shape
+    for this file (every other write route here is a bulk checkbox-select over same-shaped rows,
+    never a per-row inline edit), posting to /budget/classify."""
+    bucket_filter = (query.get("bucket") or [""])[0]
+    payee_filter = (query.get("payee") or [""])[0].strip()
+    account_filter = (query.get("account") or [""])[0]
+    sort = (query.get("sort") or ["date_desc"])[0]
+    if sort not in BUDGET_SORT_OPTIONS:
+        sort = "date_desc"
+    sort_col, sort_dir = BUDGET_SORT_OPTIONS[sort]
+
+    conn = finance_common.connect(readonly=True)
+    try:
+        accounts = [r[0] for r in conn.execute(
+            "SELECT DISTINCT account_id FROM transactions ORDER BY account_id")]
+
+        where = ["1=1"]
+        params = []
+        if bucket_filter == "__unclassified__":
+            where.append("b.bucket IS NULL")
+        elif bucket_filter:
+            where.append("b.bucket = ?")
+            params.append(bucket_filter)
+        if payee_filter:
+            where.append("LOWER(t.payee_raw) LIKE ?")
+            params.append(f"%{payee_filter.lower()}%")
+        if account_filter:
+            where.append("t.account_id = ?")
+            params.append(account_filter)
+
+        sql = f"""
+            SELECT t.source, t.txn_id, t.date, t.account_id, t.payee_raw, t.amount_cents,
+                   t.category, b.bucket, b.field, b.classified_by, b.reviewed
+            FROM transactions t
+            LEFT JOIN budget_classifications b ON b.source = t.source AND b.txn_id = t.txn_id
+            WHERE {' AND '.join(where)}
+            ORDER BY {sort_col} {sort_dir}
+            LIMIT ?
+        """
+        rows = conn.execute(sql, params + [MAX_BUDGET_ROWS + 1]).fetchall()
+    finally:
+        conn.close()
+
+    truncated = len(rows) > MAX_BUDGET_ROWS
+    rows = rows[:MAX_BUDGET_ROWS]
+
+    buckets = sorted(finance_common.WORKSHEET_TAXONOMY)
+    bucket_datalist = "".join(f'<option value="{esc(b)}">' for b in buckets)
+    field_datalist = "".join(f'<option value="{esc(f)}">' for f in budget_field_options())
+
+    bucket_opts = ['<option value="">(any)</option>',
+                   '<option value="__unclassified__"'
+                   + (' selected' if bucket_filter == "__unclassified__" else '')
+                   + '>(needs review — unclassified)</option>']
+    for b in buckets:
+        sel = " selected" if b == bucket_filter else ""
+        bucket_opts.append(f'<option value="{esc(b)}"{sel}>{esc(b)}</option>')
+    account_opts = ['<option value="">(any)</option>']
+    for a in accounts:
+        sel = " selected" if a == account_filter else ""
+        account_opts.append(f'<option value="{esc(a)}"{sel}>{esc(a)}</option>')
+    sort_opts = "".join(
+        f'<option value="{k}"{" selected" if k == sort else ""}>{esc(k.replace("_", " "))}</option>'
+        for k in BUDGET_SORT_OPTIONS)
+
+    filter_form = (
+        f'<form method="get">'
+        f'<select name="bucket">{"".join(bucket_opts)}</select> '
+        f'<input type="text" name="payee" placeholder="payee contains…" '
+        f'value="{esc(payee_filter)}"> '
+        f'<select name="account">{"".join(account_opts)}</select> '
+        f'<select name="sort">{sort_opts}</select> '
+        f'<button type="submit">show</button></form>'
+    )
+
+    note = (f'{len(rows)}{"+" if truncated else ""} of up to {MAX_BUDGET_ROWS} shown. Fixing a '
+            f'category always marks it reviewed; the reviewed checkbox can also be set on its '
+            f'own. A reviewed row is reused to classify future transactions from the same (or a '
+            f'similar) payee automatically — treat it like a standing correction, not a one-off.')
+
+    return_to_value = f"/budget?{urllib.parse.urlencode(query, doseq=True)}"
+    body_rows = []
+    for (source, txn_id, date, account_id, payee, amount_cents, category, bucket, field,
+         _classified_by, reviewed) in rows:
+        amount = f"{amount_cents / 100:,.2f}"
+        if reviewed:
+            status = '<span class="pill s-approved">reviewed</span>'
+        elif bucket is None:
+            status = '<span class="pill s-proposed">needs review</span>'
+        else:
+            status = '<span class="pill">unreviewed</span>'
+        row_form = (
+            f'<form method="post" action="/budget/classify" class="budget-row">'
+            f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
+            f'<input type="hidden" name="source" value="{esc(source)}">'
+            f'<input type="hidden" name="txn_id" value="{esc(txn_id)}">'
+            f'<input type="hidden" name="return_to" value="{esc(return_to_value)}">'
+            f'<input type="text" name="bucket" list="budget-buckets" '
+            f'value="{esc(bucket or "")}" placeholder="(unclassified)" size="20"> '
+            f'<input type="text" name="field" list="budget-fields" '
+            f'value="{esc(field or "")}" size="20"> '
+            f'<label><input type="checkbox" name="reviewed" value="1"'
+            f'{" checked" if reviewed else ""}> reviewed</label> '
+            f'<button type="submit">Save</button></form>'
+        )
+        body_rows.append([esc(date), esc(account_id), esc(payee),
+                           f'<span class="num">{amount}</span>', esc(category or ""), status,
+                           row_form])
+
+    datalists = (f'<datalist id="budget-buckets">{bucket_datalist}</datalist>'
+                 f'<datalist id="budget-fields">{field_datalist}</datalist>')
+
+    return (filter_form + f'<p class="note">{note}</p>' + datalists
+            + table(["date", "account", "payee", "amount", "category", "status", "classify"],
+                    body_rows, numeric={3}))
+
+
+def page_budget(query=None):
+    query = query or {}
+    saved = (query.get("saved") or [""])[0] == "1"
+    banner = '<p class="note">Saved.</p>' if saved else ""
+    body = banner + section(
+        "Budget",
+        "Fidelity's Budget Worksheet taxonomy applied to every synced transaction "
+        "(tools/hermes-budget-import.py), built on top of this page's own granular "
+        "categorizer (categories.yaml). Rule-matched rows show as \"unreviewed\" until "
+        "confirmed; anything the rules can't place shows as \"needs review\" — flagged, not "
+        f"guessed. Data lives in <span class=\"mono\">{esc(str(finance_common.FINANCE_DB))}</span> "
+        "on this host — local-only, never in git.",
+        lambda: render_budget(query))
+    return shell("Budget", body)
+
+
 # ── server ────────────────────────────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -3172,6 +3348,7 @@ ROUTES = {
     "/status": page_system_status,
     "/selfrepair": page_selfrepair,
     "/minecraft": page_minecraft,
+    "/budget": page_budget,
 }
 
 # Where a decide POST redirects back to -- keyed by the decide path itself, so do_POST's tail
@@ -3244,20 +3421,25 @@ class Handler(BaseHTTPRequestHandler):
                                            f'{esc(type(exc).__name__)}: {esc(exc)}</div>'))
 
     def do_POST(self):
-        """This service's only three write routes.
+        """This service's only four write routes.
 
         A GET never changes state — every write arrives here as a form POST, so a link, a
-        prefetch or a crawler cannot decide anything or add a monitored ticker. Body-length cap
-        and CSRF check are shared by all three routes below; only the field names and the action
-        taken differ. /selfrepair/decide (S48, FLEET_SELFREPAIR_DESIGN.md §4.8) is the third,
-        added alongside /backlog/decide rather than merged into it — two independently-reasoned-
-        about gates (model-scout's, self-repair's own) stay two routes, the same way their own
-        TRANSITIONS tables stay two separate dicts."""
+        prefetch or a crawler cannot decide anything, add a monitored ticker, or fix a budget
+        category. Body-length cap and CSRF check are shared by all four routes below; only the
+        field names and the action taken differ. /selfrepair/decide (S48,
+        FLEET_SELFREPAIR_DESIGN.md §4.8) is the third, added alongside /backlog/decide rather
+        than merged into it — two independently-reasoned-about gates (model-scout's, self-
+        repair's own) stay two routes, the same way their own TRANSITIONS tables stay two
+        separate dicts. /budget/classify (direct operator request) is the fourth, and the first
+        shaped as one form per row rather than a bulk checkbox-select over same-shaped rows —
+        each transaction's fix is independent, so it gets its own route branch below rather than
+        being forced into the task_id/apply_fn shape the other three share."""
         parsed = urllib.parse.urlparse(self.path)
         if not self._authed():
             return
         path = parsed.path.rstrip("/")
-        if path not in ("/backlog/decide", "/market/monitor/add", "/selfrepair/decide"):
+        if path not in ("/backlog/decide", "/market/monitor/add", "/selfrepair/decide",
+                        "/budget/classify"):
             self._send(404, shell("Not found", '<p class="empty">No such route.</p>'))
             return
         try:
@@ -3279,6 +3461,7 @@ class Handler(BaseHTTPRequestHandler):
             # that could be arbitrarily (or maliciously) large.
             self.close_connection = True
             self._redirect("/market?monitor=badaction" if path == "/market/monitor/add"
+                           else "/budget" if path == "/budget/classify"
                            else f"{DECIDE_REDIRECT_BASE[path]}?result=badaction")
             return
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
@@ -3286,6 +3469,7 @@ class Handler(BaseHTTPRequestHandler):
             log(f"{path} refused: CSRF check failed from {self.address_string()} "
                 f"(Sec-Fetch-Site={self.headers.get('Sec-Fetch-Site')!r})")
             self._redirect("/market?monitor=csrf" if path == "/market/monitor/add"
+                           else "/budget?csrf=1" if path == "/budget/classify"
                            else f"{DECIDE_REDIRECT_BASE[path]}?csrf=1")
             return
 
@@ -3297,6 +3481,42 @@ class Handler(BaseHTTPRequestHandler):
             log(f"monitor add requested: ticker={ticker!r} force={force} by "
                 f"{who or 'unidentified'} -> {result}")
             self._redirect(f"/market?monitor={result}")
+            return
+
+        if path == "/budget/classify":
+            # One row, one form -- a new interaction shape for this file (every other write route
+            # is a bulk checkbox-select over same-shaped rows), so this branch stays its own thing
+            # rather than being squeezed into the task_id/apply_fn shape below.
+            source = (form.get("source") or [""])[0].strip()
+            txn_id = (form.get("txn_id") or [""])[0].strip()
+            bucket = (form.get("bucket") or [""])[0].strip() or None
+            field = (form.get("field") or [""])[0].strip() or None
+            reviewed_checked = (form.get("reviewed") or [""])[0] == "1"
+            return_to = (form.get("return_to") or [""])[0]
+            if not (return_to == "/budget" or return_to.startswith("/budget?")):
+                return_to = "/budget"
+            who = tailnet_identity(self.headers)
+            if not source or not txn_id:
+                log(f"/budget/classify refused: missing source/txn_id from {who or 'unidentified'}")
+                self._redirect(return_to)
+                return
+            conn = finance_common.connect(readonly=True)
+            try:
+                existing = conn.execute(
+                    "SELECT bucket, field FROM budget_classifications WHERE source=? AND txn_id=?",
+                    (source, txn_id)).fetchone()
+            finally:
+                conn.close()
+            old_bucket, old_field = existing if existing else (None, None)
+            # A fix implies review: changing bucket/field always stamps reviewed, regardless of
+            # the checkbox: the operator just made a decision, not reaffirmed an old one.
+            reviewed = True if (bucket, field) != (old_bucket, old_field) else reviewed_checked
+            finance_common.set_budget_classification(txn_id, source, bucket, field, reviewed,
+                                                      who=who)
+            log(f"/budget/classify: {source}:{txn_id} -> bucket={bucket!r} field={field!r} "
+                f"reviewed={reviewed} by {who or 'unidentified'}")
+            base = return_to[:-1] if return_to.endswith("?") else return_to
+            self._redirect(f"{base}{'&' if '?' in base else '?'}saved=1")
             return
 
         # Several task_id fields, one action -- multi-select posts the same shape as a single row.
@@ -3344,7 +3564,8 @@ def main():
     log(f"listening on {BIND}:{PORT} "
         f"(reports read-only; write routes /backlog/decide "
         f"[{'armed' if GATE and MEMORY_TOKEN else 'DISABLED'}], /selfrepair/decide "
-        f"[{'armed' if SELFREPAIR_GATE and MEMORY_TOKEN else 'DISABLED'}])")
+        f"[{'armed' if SELFREPAIR_GATE and MEMORY_TOKEN else 'DISABLED'}], /budget/classify "
+        f"[armed -- finance.db, no MEMORY_TOKEN needed])")
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
 
 
