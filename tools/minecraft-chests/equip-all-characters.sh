@@ -1,9 +1,47 @@
 #!/usr/bin/env bash
-# Version: 1.0.0
+# Version: 1.1.0
 #
-# Equip every online player with enchanted Netherite gear and useful tools.
+# Equip every online player, or just one named player, with enchanted Netherite gear and useful tools.
 
 set -euo pipefail
+
+usage() {
+  cat <<USAGE >&2
+Usage: $(basename "$0") [-h|--help] [CHARACTER]
+
+Equip online players with enchanted Netherite armor, a sword, tools, shears,
+a bow and arrows, over RCON.
+
+Arguments:
+  CHARACTER     Equip only this player, by in-game username, instead of
+                every online player.
+
+Options:
+  -h, --help    Show this help and exit.
+
+Environment:
+  MCRCON_PASS   RCON password (required).
+  MCRCON_HOST   RCON host (default: 127.0.0.1).
+  MCRCON_PORT   RCON port (default: 25581).
+  MCRCON_BIN    RCON client binary (default: mcrcon).
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
+if (( $# > 1 )); then
+  echo "Too many arguments." >&2
+  usage
+  exit 2
+fi
+
+if [[ -n "${1:-}" ]] && [[ ! "$1" =~ ^[A-Za-z0-9_]{1,16}$ ]]; then
+  echo "CHARACTER must be a valid Minecraft username (letters, digits, underscore, max 16 characters): $1" >&2
+  exit 2
+fi
+target="${1:-@a}"
 
 if [[ -z "${MCRCON_PASS:-}" ]]; then
   echo "MCRCON_PASS must be set in the environment." >&2
@@ -20,21 +58,22 @@ export MCRCON_HOST="${MCRCON_HOST:-127.0.0.1}"
 export MCRCON_PORT="${MCRCON_PORT:-25581}"
 
 commands=(
-  'item replace entity @a armor.head with minecraft:netherite_helmet[enchantments={protection:4,unbreaking:3,mending:1,respiration:3,aqua_affinity:1}]'
-  'item replace entity @a armor.chest with minecraft:netherite_chestplate[enchantments={protection:4,unbreaking:3,mending:1}]'
-  'item replace entity @a armor.legs with minecraft:netherite_leggings[enchantments={protection:4,unbreaking:3,mending:1,swift_sneak:3}]'
-  'item replace entity @a armor.feet with minecraft:netherite_boots[enchantments={protection:4,unbreaking:3,mending:1,feather_falling:4,depth_strider:3}]'
-  'item replace entity @a weapon.mainhand with minecraft:netherite_sword[enchantments={sharpness:5,unbreaking:3,mending:1,looting:3,sweeping_edge:3}]'
-  'give @a minecraft:netherite_axe[enchantments={efficiency:5,sharpness:5,unbreaking:3,mending:1}] 1'
-  'give @a minecraft:netherite_pickaxe[enchantments={efficiency:5,fortune:3,unbreaking:3,mending:1}] 1'
-  'give @a minecraft:netherite_hoe[enchantments={efficiency:5,fortune:3,unbreaking:3,mending:1}] 1'
-  'give @a minecraft:netherite_shovel[enchantments={efficiency:5,fortune:3,unbreaking:3,mending:1}] 1'
-  'give @a minecraft:shears[enchantments={efficiency:5,unbreaking:3,mending:1}] 1'
-  'give @a minecraft:bow[enchantments={power:5,punch:2,flame:1,infinity:1,unbreaking:3}] 1'
-  'give @a minecraft:arrow 1'
+  "item replace entity $target armor.head with minecraft:netherite_helmet[enchantments={protection:4,unbreaking:3,mending:1,respiration:3,aqua_affinity:1}]"
+  "item replace entity $target armor.chest with minecraft:netherite_chestplate[enchantments={protection:4,unbreaking:3,mending:1}]"
+  "item replace entity $target armor.legs with minecraft:netherite_leggings[enchantments={protection:4,unbreaking:3,mending:1,swift_sneak:3}]"
+  "item replace entity $target armor.feet with minecraft:netherite_boots[enchantments={protection:4,unbreaking:3,mending:1,feather_falling:4,depth_strider:3}]"
+  "item replace entity $target weapon.mainhand with minecraft:netherite_sword[enchantments={sharpness:5,unbreaking:3,mending:1,looting:3,sweeping_edge:3}]"
+  "give $target minecraft:netherite_axe[enchantments={efficiency:5,sharpness:5,unbreaking:3,mending:1}] 1"
+  "give $target minecraft:netherite_pickaxe[enchantments={efficiency:5,fortune:3,unbreaking:3,mending:1}] 1"
+  "give $target minecraft:netherite_hoe[enchantments={efficiency:5,fortune:3,unbreaking:3,mending:1}] 1"
+  "give $target minecraft:netherite_shovel[enchantments={efficiency:5,fortune:3,unbreaking:3,mending:1}] 1"
+  "give $target minecraft:shears[enchantments={efficiency:5,unbreaking:3,mending:1}] 1"
+  "give $target minecraft:bow[enchantments={power:5,punch:2,flame:1,infinity:1,unbreaking:3}] 1"
+  "give $target minecraft:arrow 1"
 )
 
 "$rcon_bin" "${commands[@]}"
 
 # Revision History
 # 1.0.0 | 2026-09-19 | Initial all-player enchanted equipment loadout.
+# 1.1.0 | 2026-11-23 | Direct request: added -h/--help, and an optional CHARACTER argument to equip just one player instead of everyone online.
