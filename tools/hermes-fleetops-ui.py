@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 2.24.1
+# Version: 2.25.0
+#
+# 2.25.0 (2026-11-23) — direct operator request: Planning's bucket/field inputs become real
+# dependent dropdowns instead of one flat, all-buckets-merged field <datalist>. New
+# `budget_known_taxonomy()` returns every known bucket (WORKSHEET_TAXONOMY's own static set union
+# whatever `budget_classifications` has actually seen) and, for each one, its OWN field list
+# (same union) -- so a bucket or field the operator types and saves becomes a suggested value from
+# then on, not a one-off; nothing is written back to WORKSHEET_TAXONOMY itself, the database is
+# simply read as the live source of truth every render. One `<datalist id="budget-fields-...">`
+# per known bucket is rendered (new `budget_slug()` keys them); a row's field input starts pointed
+# at its own bucket's datalist, and a new PAGE_SCRIPT `change` listener (`budgetSlug()`, mirroring
+# `budget_slug()` character for character) repoints it live whenever the bucket input changes, so
+# picking or typing a different bucket updates the field suggestions without a page reload. The
+# top filter bar's bucket dropdown now offers the same live set, not just the worksheet's static
+# list.
 #
 # 2.24.1 (2026-11-23) — real bug, found live on the first real deploy: visiting /budget before
 # tools/hermes-budget-import.py had ever run (finance.db doesn't exist yet) crashed both modes
@@ -732,6 +746,23 @@ document.addEventListener('click', function (e) {
 });
 document.addEventListener('change', function (e) {
   if (e.target.name === 'task_id') { refresh(); }
+});
+// Budget Planning: a row's field input only ever suggests ITS bucket's own values (direct
+// operator request) -- budgetSlug() must match hermes-fleetops-ui.py's own budget_slug()
+// character for character, since it's how a bucket's own <datalist id="budget-fields-...">
+// (rendered once per known bucket, server-side) gets found again here.
+function budgetSlug(s) {
+  return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+document.addEventListener('change', function (e) {
+  if (e.target.name !== 'bucket') { return; }
+  var row = e.target.closest('.budget-row');
+  if (!row) { return; }
+  var fieldInput = row.querySelector('input[name="field"]');
+  if (!fieldInput) { return; }
+  var s = budgetSlug(e.target.value);
+  if (s) { fieldInput.setAttribute('list', 'budget-fields-' + s); }
+  else { fieldInput.removeAttribute('list'); }
 });
 document.addEventListener('input', function (e) {
   var box = e.target.closest('[data-filter]');
@@ -3217,16 +3248,30 @@ BUDGET_SORT_OPTIONS = {
 }
 
 
-def budget_field_options():
-    """Every field name across every worksheet bucket, deduplicated, for the field column's
-    <datalist> -- a row's bucket and field are independent free-text inputs (see render_budget's
-    per-row form), so this isn't filtered down to one bucket's own fields."""
-    seen = []
-    for fields in finance_common.WORKSHEET_TAXONOMY.values():
-        for f in fields:
-            if f not in seen:
-                seen.append(f)
-    return seen
+def budget_slug(name):
+    """A stable id fragment for a bucket name, used to key its own per-bucket field <datalist>.
+    PAGE_SCRIPT's own budgetSlug() mirrors this character for character, so a bucket typed into a
+    row's own input always resolves client-side to the exact id this function generated it
+    under."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def budget_known_taxonomy(conn):
+    """The worksheet's own static bucket/field vocabulary (WORKSHEET_TAXONOMY), extended with
+    whatever the operator has actually typed and saved — direct operator request: a value typed
+    into the classify form's bucket or field input becomes a valid, suggested value from then on,
+    not a one-off. Returns (all_buckets, fields_by_bucket): all_buckets is every known bucket name,
+    sorted; fields_by_bucket maps each bucket to its OWN sorted field list (static union observed)
+    — the field column's <datalist> only ever offers its own bucket's fields, never every field
+    from every bucket, per direct operator request."""
+    fields_by_bucket = {b: set(fs) for b, fs in finance_common.WORKSHEET_TAXONOMY.items()}
+    for bucket, field in conn.execute(
+            "SELECT DISTINCT bucket, field FROM budget_classifications WHERE bucket IS NOT NULL"):
+        fields_by_bucket.setdefault(bucket, set())
+        if field:
+            fields_by_bucket[bucket].add(field)
+    all_buckets = sorted(fields_by_bucket)
+    return all_buckets, {b: sorted(fs) for b, fs in fields_by_bucket.items()}
 
 
 # connect(readonly=True) opens the DB file by URI with `mode=ro`, which -- unlike a plain
@@ -3261,6 +3306,7 @@ def render_budget(query):
     try:
         accounts = [r[0] for r in conn.execute(
             "SELECT DISTINCT account_id FROM transactions ORDER BY account_id")]
+        all_buckets, fields_by_bucket = budget_known_taxonomy(conn)
 
         where = ["1=1"]
         params = []
@@ -3292,15 +3338,11 @@ def render_budget(query):
     truncated = len(rows) > MAX_BUDGET_ROWS
     rows = rows[:MAX_BUDGET_ROWS]
 
-    buckets = sorted(finance_common.WORKSHEET_TAXONOMY)
-    bucket_datalist = "".join(f'<option value="{esc(b)}">' for b in buckets)
-    field_datalist = "".join(f'<option value="{esc(f)}">' for f in budget_field_options())
-
     bucket_opts = ['<option value="">(any)</option>',
                    '<option value="__unclassified__"'
                    + (' selected' if bucket_filter == "__unclassified__" else '')
                    + '>(needs review — unclassified)</option>']
-    for b in buckets:
+    for b in all_buckets:
         sel = " selected" if b == bucket_filter else ""
         bucket_opts.append(f'<option value="{esc(b)}"{sel}>{esc(b)}</option>')
     account_opts = ['<option value="">(any)</option>']
@@ -3337,6 +3379,7 @@ def render_budget(query):
             status = '<span class="pill s-proposed">needs review</span>'
         else:
             status = '<span class="pill">unreviewed</span>'
+        field_list_attr = f' list="budget-fields-{budget_slug(bucket)}"' if bucket else ""
         row_form = (
             f'<form method="post" action="/budget/classify" class="budget-row">'
             f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
@@ -3345,7 +3388,7 @@ def render_budget(query):
             f'<input type="hidden" name="return_to" value="{esc(return_to_value)}">'
             f'<input type="text" name="bucket" list="budget-buckets" '
             f'value="{esc(bucket or "")}" placeholder="(unclassified)" size="20"> '
-            f'<input type="text" name="field" list="budget-fields" '
+            f'<input type="text" name="field"{field_list_attr} '
             f'value="{esc(field or "")}" size="20"> '
             f'<label><input type="checkbox" name="reviewed" value="1"'
             f'{" checked" if reviewed else ""}> reviewed</label> '
@@ -3355,8 +3398,19 @@ def render_budget(query):
                            f'<span class="num">{amount}</span>', esc(category or ""), status,
                            row_form])
 
-    datalists = (f'<datalist id="budget-buckets">{bucket_datalist}</datalist>'
-                 f'<datalist id="budget-fields">{field_datalist}</datalist>')
+    # One <datalist> for the bucket column (every known bucket, static ∪ operator-added), plus one
+    # PER BUCKET for the field column -- direct operator request: the field column only ever
+    # suggests ITS bucket's own values, never every field from every bucket. PAGE_SCRIPT's
+    # budgetSlug()-driven 'change' listener repoints a row's field input at the right one of these
+    # whenever its bucket input changes, so a freshly-typed bucket's own fields show up live
+    # without a page reload.
+    datalists = [f'<datalist id="budget-buckets">'
+                 + "".join(f'<option value="{esc(b)}">' for b in all_buckets) + '</datalist>']
+    for bucket_name, field_names in fields_by_bucket.items():
+        datalists.append(
+            f'<datalist id="budget-fields-{budget_slug(bucket_name)}">'
+            + "".join(f'<option value="{esc(f)}">' for f in field_names) + '</datalist>')
+    datalists = "".join(datalists)
 
     return (filter_form + f'<p class="note">{note}</p>' + datalists
             + table(["date", "account", "payee", "amount", "category", "status", "classify"],
