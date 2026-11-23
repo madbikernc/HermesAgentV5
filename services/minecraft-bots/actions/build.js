@@ -1,4 +1,13 @@
-// Version: 1.0.0
+// Version: 1.0.1
+//
+// 1.0.1 (2026-11-23, direct report "I keep finding random structures of blocks, perhaps they are
+// part of aborted shelters"): the wall loop's two silent continues -- couldn't reach the spot,
+// nothing solid to place against yet -- now log their position and reason, and their counts show
+// up in the one-line result (shutIn's own "(N left open...)" pattern) as "(N unreachable, M with
+// nothing solid to build against yet)". Both used to fail with zero trace, so a shell stuck on
+// the same handful of cells forever read identically to one mid-build and just slow. Confirmed
+// live (journalctl across both hosts) that this is a real, repeated production failure mode, not
+// a hypothetical.
 //
 // The "build" action, split out of actions.js's performActionAs() switch
 // (actions.js 2.0.0, 2026-11-10) unchanged, so a fix to it is a fix to this file alone. Called
@@ -83,6 +92,12 @@ export async function buildAction(bot, action, speaker, token) {
 
   let placed = 0;
   let shutIn = 0; // declared out here: the try block below is a real scope, and the result text reads it
+  // Direct report, 2026-11-23 ("random structures of blocks, perhaps aborted shelters"): these two
+  // continues used to fail silently -- a shell stuck on a handful of cells for either reason read
+  // identically to one that was simply mid-build, with no way to tell "will finish eventually" from
+  // "will never finish" from the logs alone. unreachable/noRef below are what actually confirmed the
+  // live root cause (unreachable terrain outside the footprint, not a placement-order deadlock).
+  let unreachable = 0, noRef = 0;
   try {
   for (const pos of buildOrder) {
     if (token.cancelled) break;
@@ -101,8 +116,10 @@ export async function buildAction(bot, action, speaker, token) {
     try {
       await withTimeout(bot.pathfinder.goto(new goals.GoalNear(pos.x, pos.y, pos.z, 4)),
         ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
-    } catch {
+    } catch (err) {
       if (token.cancelled) break;
+      unreachable++;
+      console.log(`build: couldn't get near ${pos} to place there -- ${err.message}`);
       continue; // couldn't get near this spot -- an imperfect shelter beats abandoning it
     } finally {
       if (!token.cancelled) bot.pathfinder.setGoal(null); // never clear a preemptor's path
@@ -119,7 +136,11 @@ export async function buildAction(bot, action, speaker, token) {
         break;
       }
     }
-    if (!refBlock) continue; // nothing solid to place against yet -- the second pass below catches it
+    if (!refBlock) {
+      noRef++;
+      console.log(`build: nothing solid next to ${pos} yet to place against -- leaving it for a later pass.`);
+      continue; // the second pass (a later "build" call, once a neighbor is solid) catches it
+    }
 
     const item = bot.inventory.items().filter((i) => isShelterMaterial(i.name)).sort((a, b) => b.count - a.count)[0];
     if (!item) break; // ran out mid-build
@@ -180,13 +201,21 @@ export async function buildAction(bot, action, speaker, token) {
   // named in the result instead, so a site that keeps coming out partial for this reason is
   // visible rather than a mystery.
   const openedFor = shutIn ? ` (${shutIn} left open so a neighbouring fixture stays reachable)` : "";
-  if (token.cancelled) return ok(`stopped building (${placed} placed, ${missing()} still missing)${openedFor}.`);
+  // Same idea as openedFor just above, for the two reasons that used to fail silently: a shell
+  // stuck at the same count forever (unreachable terrain outside the footprint, most likely --
+  // see shelterApronLevelSpot in action-shelter.js) now says so in the one line self-repair and
+  // journalctl already watch, instead of only in the per-position logs just above.
+  const stuckTags = [];
+  if (unreachable) stuckTags.push(`${unreachable} unreachable`);
+  if (noRef) stuckTags.push(`${noRef} with nothing solid to build against yet`);
+  const stuckFor = stuckTags.length ? ` (${stuckTags.join(", ")})` : "";
+  if (token.cancelled) return ok(`stopped building (${placed} placed, ${missing()} still missing)${openedFor}${stuckFor}.`);
   const left = missing();
-  if (!placed && left && !doorPlaced) return fail(`couldn't place any of the shelter (${left} blocks still missing)${openedFor}.`);
+  if (!placed && left && !doorPlaced) return fail(`couldn't place any of the shelter (${left} blocks still missing)${openedFor}${stuckFor}.`);
   // 2026-10-11: 100%, not the old 80% -- a shelter with a gap in it (or no real door) isn't
   // sealed, and a half-sealed shelter is exactly what this fix exists to stop calling "done."
   const built = left === 0 && doorPlaced;
   return { ...(built ? ok(`built a small shelter (${placed} blocks placed, sealed with a door)${openedFor}.`)
     : fail(`built part of a shelter: ${placed} placed, ${left} still missing` +
-           `${doorPlaced ? "" : ", no door yet"}${openedFor}.`)), built };
+           `${doorPlaced ? "" : ", no door yet"}${openedFor}${stuckFor}.`)), built };
 }

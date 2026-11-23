@@ -1,4 +1,8 @@
-// Version: 1.3.1
+// Version: 1.4.0
+//
+// 1.4.0 (2026-11-23): the materials shelterStep sandbox stubs shelterApronLevelSpot()
+// (shelter-goals.js 1.3.0's new site-levelling step, action-shelter.js 1.2.0) -- a no-op, since
+// its own held oak_log makes shelterMaterialCount nonzero from the very first tick.
 //
 // 1.3.1 (2026-11-22): the materials test's fake craft yield raised 70 -> 80, matching
 // shelterPositions()'s wider floor (action-shelter.js 1.1.0) so it still gathers enough in one
@@ -107,6 +111,9 @@ await check('Shelters: a shelter goal gets materials (planks from her logs), bui
     completeSheltersNearHome: () => (standing ? [new V3(1, 64, 1)] : []), holdsItem: () => false,
     findShelterSite: () => new V3(1, 64, 1), shelterPositions: s.shelterPositions,
     unfinishedShelterNearHome: () => null, shelterShellIsStuck: () => false, isDoorway: () => false, doorwayPosition: s.doorwayPosition,
+    // shelterApronLevelSpot() (action-shelter.js 1.2.0) has its own tests in shelter-1/2.test.mjs;
+    // nothing to level in this flat world, same as every other site this file's own worlds build.
+    shelterApronLevelSpot: () => null,
     shelterMaterialCount: (b) => b.inventory.items().filter((i) => /_(planks|log)$/.test(i.name)).reduce((n, i) => n + i.count, 0),
     // 2026-10-27: runShelterGoal now registers a RAG note on completion (writeMemoryNote,
     // longterm.js) -- stubbed here same as every other cross-module function this context

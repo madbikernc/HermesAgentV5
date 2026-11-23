@@ -1,4 +1,6 @@
-// Version: 3.1.0
+// Version: 3.1.1
+//
+// 3.1.1 (2026-11-23): re-exports action-shelter.js 1.2.0's new shelterApronLevelSpot().
 //
 // The bots' actions: performAction() and the dispatcher over ACTION_HANDLERS (actions/*.js, one
 // file per action). Change history: history/actions.js.md (moved out of this file 2026-11-13,
@@ -54,7 +56,7 @@ export { claimBuilderItem, holdsGuardAnchor, myBuilderClaim, nearbyBeds, release
 export { chestObstructed, craftItem, tryTakeFromNearbyChest, tryTakeFromThisChest } from "./action-crafting.js";
 export { attemptBoatCrossing, clearCellForPlacement, collectBlocks, ensureBoat, isClearableCover, loadActionPlugins, refreshGear, withTimeout } from "./action-movement.js";
 export { CHEST_SEARCH_RADIUS, EXPLORE_SEARCH_RADIUS, MINE_SEARCH_RADIUS, SCOUT_FEATURE_BLOCKS, climbTowardSurface, findRememberedLocation, getResourceBlockNames, hopToward, visitRememberedSpot, wanderAndRetryFind, wanderAndRetryForSheep } from "./action-search.js";
-export { CROP_MAX_AGE, SHELTER_ROOM, collectDrops, communalDoorwayPosition, communalRoomCells, communalShelterMaterialCount, communalShelterPositions, doorItemFor, doorwayPosition, farmStatus, findCommunalShelterSite, findShelterSite, isCommunalShelterMaterial, isShelterDoor, isShelterMaterial, shelterMaterialCount, shelterPositions } from "./action-shelter.js";
+export { CROP_MAX_AGE, SHELTER_ROOM, collectDrops, communalDoorwayPosition, communalRoomCells, communalShelterMaterialCount, communalShelterPositions, doorItemFor, doorwayPosition, farmStatus, findCommunalShelterSite, findShelterSite, isCommunalShelterMaterial, isShelterDoor, isShelterMaterial, shelterApronLevelSpot, shelterMaterialCount, shelterPositions } from "./action-shelter.js";
 export { ACTION_TIMEOUT_MS, DARK_LIGHT_LEVEL, FISH_TIMEOUT_MS, FLEE_ONLY_MOBS, FOOD_NAMES, GEAR_SUFFIXES, GEAR_TIER_RANK, HOSTILE_MOBS, HUNTABLE_ANIMALS, HUNT_RANGE, SKILL_ACTION_VERBS, SLEEP_TIMEOUT_MS, SMELT_RECIPES, SMELT_TIMEOUT_MS, gearCategoryNames, gearTierRank, goals, isEssentialItem, isProtectedBlockName, nearestFriendlyGolem, nearestHostile, pickFuel, resolveBlockFamily } from "./action-vocab.js";
 export { BREEDING_FOOD, CONTENTION_SEARCH_OVERFETCH, GATHER_SEEDS_MAX_DIGS, HERD_SEARCH_RADIUS, LIVESTOCK, MINE_DROPS, SEED_GRASS, SEED_NAMES, bedItemFor, bedNearHazard, bedSpotKey, cellOccupied, chooseFarmPlot, countInPen, filterAwayFromOtherBots, findBedSite, findBedSites, findPenSite, findPlantableSpotNear, getAchievements, isRecentlyRefusedBedSpot, itemNamesForMinedBlocks, loadAchievements, loadPenLocation, nearBuilding, recordAchievement, refusedBedSpots, savePenLocation, tillableAt, woolCounts } from "./action-world.js";
 export const LOOT_GROUPS = { food: FOOD_NAMES, seeds: SEED_NAMES };

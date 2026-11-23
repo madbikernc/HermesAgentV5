@@ -1,4 +1,10 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-23, direct report "random structures of blocks, perhaps aborted shelters" ->
+// "add logic that site choice requires enough contiguous flat space... or as part of the
+// landscape maintenance routing"): shelterStep() now levels a freshly-chosen site's own apron
+// (action-shelter.js 1.2.0's shelterApronLevelSpot) with the same repair_terrain action
+// checkTerrainDamage already runs, before the door/wall steps below ever reach it.
 //
 // 1.2.0 (2026-11-20, direct request: "shelter and bed locations should be stored in world
 // memory"): every confirmed build/bed/chest records its residence's door into the new
@@ -14,7 +20,7 @@
 // before index.js has run (only declarations live here).
 
 import { writeMemoryNote } from "./longterm.js";
-import { SHELTER_ROOM, communalShelterMaterialCount, communalShelterPositions, doorwayPosition, findCommunalShelterSite, findShelterSite, performAction, shelterMaterialCount, shelterPositions } from "./actions.js";
+import { SHELTER_ROOM, communalShelterMaterialCount, communalShelterPositions, doorwayPosition, findCommunalShelterSite, findShelterSite, performAction, shelterApronLevelSpot, shelterMaterialCount, shelterPositions } from "./actions.js";
 import { logStep } from "./goals.js";
 import { isDoorway } from "./swim-movements.js";
 import { SHELTER_SITE_RADIUS, completeSheltersNearHome, residenceChestCell, residencePlan, shelterShellIsStuck, unfinishedShelterNearHome } from "./home-scan.js";
@@ -88,6 +94,21 @@ async function shelterStep(goal, handle) {
     : (unfinishedShelterNearHome() ?? findShelterSite(bot, bot.spawnPoint, SHELTER_SITE_RADIUS));
   if (!site) return { ok: false, text: `couldn't find a flat, clear 3x3 spot within ${SHELTER_SITE_RADIUS} blocks of home.` };
   goal.shelterAt = { x: site.x, y: site.y, z: site.z };
+  // Direct request, 2026-11-23 ("site choice requires enough contiguous flat space... or as part
+  // of the landscape maintenance routing"): findShelterSite() now tolerates a shallow dip around
+  // the footprint instead of requiring it already flat -- this is what actually flattens it, the
+  // same repair_terrain action checkTerrainDamage already runs (upkeep-world.js), just aimed at
+  // THIS site's own apron instead of waiting on that routine's separate home-centered scan to
+  // maybe stumble onto it. One spot per tick, same as every other step here. Skipped while she
+  // holds no building material at all yet -- the gather step below gets her some first, same
+  // order the wall material check already follows.
+  if (shelterMaterialCount(bot) > 0) {
+    const levelSpot = shelterApronLevelSpot(bot, site);
+    if (levelSpot) {
+      return { ...(await performAction(bot, { type: "repair_terrain", position: levelSpot }, USERNAME, handle)),
+        action: { type: "repair_terrain" } };
+    }
+  }
   // 2026-10-28: the door before the walls. "build" crafts its door first but never reports that
   // the craft failed, so with no planks it put up every wall, came back "no door yet" in ~5ms
   // per tick, and burned through the 20-failure limit in 40 seconds. A door is 6 planks, plus 4

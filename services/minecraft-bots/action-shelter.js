@@ -1,4 +1,12 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-23, direct report "random structures of blocks, perhaps aborted shelters" ->
+// "add logic that site choice requires enough contiguous flat space, either naturally occurring
+// or as part of the landscape maintenance routing"): findShelterSiteAtRadius() now checks the
+// whole ring outside the 4x5 footprint (shelterApronPositions), not just the one cell in front of
+// the doorway -- see APRON_LEVEL_DEPTH's own header for the live bug this closes. New
+// shelterApronLevelSpot(), exported for shelterStep() (shelter-goals.js) to level a shallow dip
+// with the same repair_terrain action checkTerrainDamage already uses.
 //
 // 1.1.0 (2026-11-22, direct report: "it looks like pure chaos, with little measurable success",
 // direct follow-up: "or, start leveling land to make it useable"): a shelter site may now
@@ -175,6 +183,75 @@ function floorKind(bot, floorPos) {
   return null; // still water past MAX_FILL_DEPTH -- too deep to fill cheaply
 }
 
+// Direct request, 2026-11-23 ("I keep finding random structures of blocks, perhaps they are part
+// of aborted shelters" -> "add logic that site choice requires enough contiguous flat space,
+// either naturally occurring or as part of the landscape maintenance routing"): confirmed live
+// (journalctl on both hosts) that a shelter can get permanently stuck a handful of blocks short,
+// identical count, call after call, for a reason wouldBlockAccess never catches -- e.g.
+// "[Mayor] built part of a shelter: 52 placed, 8 still missing" sat unchanged across an 8-minute
+// build attempt. The only ground findShelterSiteAtRadius ever checked outside the footprint
+// itself was the single cell in front of the doorway; a site boxed in by a cliff, ravine or water
+// on any OTHER side still passed every other check, and bot.pathfinder.goto's own GoalNear(pos,4)
+// then has nowhere to stand within reach of those wall cells -- forever, since the terrain never
+// changes on its own. build.js's new unreachable/noRef instrumentation is what would have made
+// this visible immediately instead of a multi-host log dive.
+//
+// Now the whole ring one block outside the 4x5 footprint is checked, not just the door-front
+// cell. APRON_LEVEL_DEPTH mirrors upkeep-world.js's own TERRAIN_REPAIR_MAX_DEPTH deliberately: a
+// site needs ground that is EITHER already flat (naturally occurring) OR shallow enough that the
+// landscape maintenance routine (checkTerrainDamage/repair_terrain, upkeep-world.js) can level it
+// -- shelterStep() (shelter-goals.js) runs that same action against this site's own apron, via
+// shelterApronLevelSpot() below, before building reaches it. Anything deeper, or water/lava past
+// that depth, still refuses the site outright, same as floorKind() already does for the footprint.
+const APRON_LEVEL_DEPTH = 4;
+
+// The ring of columns one block outside the 4x5 footprint, all four sides -- the ground she
+// actually has to stand on to reach every wall cell from outside, not just the doorway.
+function shelterApronPositions(base) {
+  const ring = [];
+  for (let dx = -2; dx <= 3; dx++) {
+    for (let dz = -2; dz <= 4; dz++) {
+      if (dx >= -1 && dx <= 2 && dz >= -1 && dz <= 3) continue; // inside the footprint itself
+      ring.push(base.offset(dx, -1, dz)); // at the same height as the footprint's own floor
+    }
+  }
+  return ring;
+}
+
+// Mirrors floorKind() exactly, just with APRON_LEVEL_DEPTH in place of MAX_FILL_DEPTH and no
+// fillable-column cap (the apron isn't placed by the ordinary wall loop the way the floor is --
+// shelterApronLevelSpot()'s own caller levels it separately, one spot at a time, before building
+// reaches it). "flat" (already solid at grade -- nothing to do), "level" (a shallow dip, air or
+// water, with solid ground within APRON_LEVEL_DEPTH below -- fixable), or null (lava, or still
+// open past that depth -- a genuine cliff or ravine, not flat enough at all).
+function apronKind(bot, groundPos) {
+  const top = bot.blockAt(groundPos);
+  if (top?.boundingBox === "block") return "flat";
+  if (top?.name !== "water" && top?.name !== "air") return null;
+  for (let depth = 1; depth <= APRON_LEVEL_DEPTH; depth++) {
+    const below = bot.blockAt(groundPos.offset(0, -depth, 0));
+    if (below?.boundingBox === "block") return "level";
+    if (below?.name !== "water" && below?.name !== "air") return null;
+  }
+  return null;
+}
+
+// The first apron cell (if any) still short of grade, shaped exactly like upkeep-world.js's own
+// findTerrainDamage() spot ({x, y, z, targetY}) so shelterStep() can hand it straight to the same
+// "repair_terrain" action checkTerrainDamage already uses, rather than a second fill mechanism.
+export function shelterApronLevelSpot(bot, base) {
+  for (const groundPos of shelterApronPositions(base)) {
+    if (apronKind(bot, groundPos) !== "level") continue;
+    for (let depth = 1; depth <= APRON_LEVEL_DEPTH; depth++) {
+      const surface = groundPos.offset(0, -depth, 0);
+      if (bot.blockAt(surface)?.boundingBox === "block") {
+        return { x: surface.x, y: surface.y + 1, z: surface.z, targetY: groundPos.y };
+      }
+    }
+  }
+  return null;
+}
+
 function findShelterSiteAtRadius(bot, home, radius) {
   const hx = Math.floor(home.x), hy = Math.floor(home.y), hz = Math.floor(home.z);
   const clear = (p) => {
@@ -196,8 +273,16 @@ function findShelterSiteAtRadius(bot, home, radius) {
           if (kind === "fill" && ++fillable > MAX_FILLABLE_COLUMNS) { ok = false; break; }
           for (let oy = 0; oy <= 3 && ok; oy++) ok = clear(base.offset(ox, oy, oz));
         }
-        const outside = base.offset(0, 0, 4); // in front of the doorway -- kept dry, not fillable
-        ok = ok && bot.blockAt(outside.offset(0, -1, 0))?.boundingBox === "block" && clear(outside) && clear(outside.offset(0, 1, 0));
+        // The whole apron, not just the door-front cell -- see shelterApronPositions()'s own
+        // header above for the live bug this replaces. groundPos.offset(0,1,0)/(0,2,0) are the
+        // same two cells the old door-front-only check verified (headroom to stand in), now
+        // checked all the way around instead of at one point.
+        for (const groundPos of ok ? shelterApronPositions(base) : []) {
+          if (apronKind(bot, groundPos) === null || !clear(groundPos.offset(0, 1, 0)) || !clear(groundPos.offset(0, 2, 0))) {
+            ok = false;
+            break;
+          }
+        }
         if (ok) { best = base; bestDist = dist; }
       }
     }

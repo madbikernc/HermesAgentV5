@@ -1,4 +1,8 @@
-// Version: 1.3.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-11-23): new check for build.js 1.0.1's unreachable-cell instrumentation -- a wall
+// cell the pathfinder can never reach now logs its position and counts toward the result text,
+// instead of a silent, permanent skip.
 //
 // 1.3.0 (2026-11-20): new case -- a bedless, freshly built shell is protected from its door alone
 // (shelter.js 1.4.0's doorAnchors()).
@@ -13,7 +17,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { actionCases, actions, index, swim, V3, between, actionFn, timeoutFn, makeBot, context, shelter, check, blockWorld, shelterLivingSpace, smallRoom, room, tunnel, slice, passedCount } from './_harness.mjs';
+import { actionCases, actions, index, swim, V3, between, actionFn, timeoutFn, makeBot, context, shelter, shelterFns, check, blockWorld, shelterLivingSpace, smallRoom, room, tunnel, slice, passedCount } from './_harness.mjs';
 
 
 await check('Shelter upgrade: dirt and wood cells are dug out and refilled with stone, one at a time', async () => {
@@ -298,6 +302,66 @@ await check('Access: the other four placement sites ask first, each in the way t
 
   const bed = slice('case "place_bed": {', 'case "shear": {');
   assert.match(bed, /!wouldBlockAccess\(bot, c\.foot\) && !wouldBlockAccess\(bot, c\.head\)/, 'both halves of the bed');
+});
+
+
+await check('Build: a wall cell the pathfinder can never reach is logged and counted, not a silent, permanent skip', async () => {
+  // Direct report, 2026-11-23 ("random structures of blocks, perhaps aborted shelters"):
+  // confirmed live (journalctl, both hosts) that a shelter can get stuck on a handful of cells
+  // forever -- e.g. "[Mayor] built part of a shelter: 52 placed, 8 still missing" sat unchanged
+  // across an 8-minute build attempt, with no wouldBlockAccess reason. build.js 1.0.1's new
+  // unreachable counter and per-position log are what actually confirmed that live root cause
+  // (unreachable terrain outside the footprint -- see action-shelter.js 1.2.0's apron fix)
+  // instead of a multi-host log dive every time it happens again.
+  const s = shelterFns();
+  const base = new V3(0, 64, 0);
+  const allPositions = s.shelterPositions(base);
+  const doorPos = s.doorwayPosition(base);
+  const key = (p) => `${p.x},${p.y},${p.z}`;
+  // A roof cell, specifically -- nowhere near the ground-level access paths wouldBlockAccess
+  // cares about, so there is no ambiguity about which reason this one fails for.
+  const unreachablePos = allPositions.find((p) => p.y === base.y + 3);
+  const solid = new Set(allPositions.filter((p) => p !== unreachablePos).map(key));
+
+  const bot = makeBot();
+  bot.entity = { position: base };
+  bot.inventory = { items: () => [{ name: 'dirt', count: 64 }] };
+  bot.blockAt = (p) => {
+    if (key(p) === key(doorPos)) return { name: 'oak_door', boundingBox: 'empty' };
+    return solid.has(key(p)) ? { name: 'dirt', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' };
+  };
+  bot.equip = async () => {};
+  bot.placeBlock = async () => {};
+  class GoalNear { constructor(x, y, z, range) { Object.assign(this, { x, y, z, range }); } }
+  bot.pathfinder = {
+    movements: { canDig: true },
+    setGoal() {}, setMovements(m) { this.movements = m; },
+    goto: async (goal) => {
+      if (goal.x === unreachablePos.x && goal.y === unreachablePos.y && goal.z === unreachablePos.z) {
+        throw new Error('Took to long to decide path to goal!');
+      }
+    },
+  };
+
+  const logs = [];
+  const c = context(bot, {
+    Vec3: V3, doorwayPosition: s.doorwayPosition, isShelterDoor: (b) => b?.name === 'oak_door',
+    isShelterMaterial: s.isShelterMaterial, shelterMaterialCount: s.shelterMaterialCount,
+    shelterPositions: s.shelterPositions, findShelterSite: () => null, doorItemFor: () => 'oak_door',
+    isDoorway: () => false, craftItem: async () => ({ ok: true, text: 'crafted.' }),
+    collectDrops: async () => {}, goals: { GoalNear, GoalFollow: class {} },
+    clearCellForPlacement: async () => {},
+    console: { log: (l) => logs.push(String(l)), error() {} },
+  });
+  vm.runInContext(timeoutFn + actionFn, c);
+
+  const result = await c.performAction(bot, { type: 'build', at: { x: base.x, y: base.y, z: base.z } }, 'Test');
+  assert.equal(result.ok, false, result.text);
+  assert.equal(result.built, false);
+  assert.match(result.text, /0 placed, 1 still missing/, result.text);
+  assert.match(result.text, /1 unreachable/, result.text);
+  assert(logs.some((l) => l.includes("couldn't get near") && l.includes(`${unreachablePos}`) && l.includes('Took to long')),
+    'the unreachable cell logs both its own position and the real pathfinder error, not a bare skip');
 });
 
 

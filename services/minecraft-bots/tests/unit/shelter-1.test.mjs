@@ -1,4 +1,7 @@
-// Version: 1.3.1
+// Version: 1.4.0
+// 1.4.0 (2026-11-23): new checks for action-shelter.js 1.2.0's apron fix -- shelterApronLevelSpot()
+// and findShelterSite()'s own ring check now require the ground outside the footprint, not just
+// inside it, to be flat or levelable.
 // 1.3.1 (2026-11-22): "Shelter memory" test follows shelter-memory.js 1.1.0's move to
 // rag-backend.js's memRead/memWrite (KNOWN_SHELTERS_FILE -> KNOWN_SHELTERS_PATH) -- stubs
 // memRead/memWrite instead of readFile/writeFile/mkdir, slice starts at the renamed constant.
@@ -277,6 +280,42 @@ await check('Shelters: a shallow pond in the footprint is filled instead of refu
   for (let x = -5; x <= 6; x++) for (let z = -5; z <= 7; z++) lakeWater.push(new V3(x, 63, z));
   const lake = c.findShelterSite(shelterWorld({ water: lakeWater }), home);
   assert.equal(lake, null, 'a fully submerged area is still refused, not an endless fill');
+});
+
+
+await check('Shelters: a shallow dip in the apron outside the footprint is levelable, a real cliff is not', async () => {
+  // Direct report, 2026-11-23 ("random structures of blocks, perhaps aborted shelters" ->
+  // "add logic that site choice requires enough contiguous flat space, either naturally
+  // occurring or as part of the landscape maintenance routing"): confirmed live that a shelter
+  // can get stuck a handful of blocks short forever ("[Mayor] built part of a shelter: 52
+  // placed, 8 still missing", unchanged across an 8-minute attempt) for a reason wouldBlockAccess
+  // never caught -- before this, the ONLY ground ever checked outside the footprint was the one
+  // cell in front of the doorway, so a site boxed in by a cliff on any OTHER side still passed.
+  const c = shelterFns();
+  const home = new V3(0, 64, 0);
+
+  // shelterApronLevelSpot() directly: the one ground-truth function shelterStep() (shelter-
+  // goals.js) now calls to level a chosen site's own apron with the real repair_terrain action.
+  const base = home;
+  assert.equal(c.shelterApronLevelSpot(shelterWorld(), base), null, 'an already-flat apron needs no levelling');
+  const dipWorld = shelterWorld({ groundY: (x, z) => (x === 3 && z === 0 ? 61 : 63) });
+  const spot = c.shelterApronLevelSpot(dipWorld, base);
+  assert(spot, 'a shallow (2-block) dip just outside the footprint is a fixable spot, not a bare refusal');
+  assert.deepEqual([spot.x, spot.z], [3, 0]);
+  assert.equal(spot.targetY, 63, 'fills up to the apron grade -- the same height as the footprint floor');
+  assert.equal(spot.y, 62, 'starts from the first empty cell above the real (lower) surface');
+  const ravineWorld = shelterWorld({ groundY: (x, z) => (x === 3 && z === 0 ? 50 : 63) });
+  assert.equal(c.shelterApronLevelSpot(ravineWorld, base), null,
+    'past APRON_LEVEL_DEPTH -- a genuine ravine, not something repair_terrain would ever reach either');
+
+  // findShelterSite() itself: the shallow dip must not disqualify the obvious, home-centered
+  // site (shelterStep levels it before building reaches it); the real cliff must.
+  const dip = c.findShelterSite(dipWorld, home);
+  assert.deepEqual([dip.x, dip.y, dip.z], [0, 64, 0], 'a levelable dip in the apron does not move the site');
+  const cliff = c.findShelterSite(ravineWorld, home);
+  assert(cliff, 'still finds a site -- just not one boxed in by the cliff');
+  assert.notDeepEqual([cliff.x, cliff.y, cliff.z], [0, 64, 0],
+    'moved off the unreachable apron -- the live bug this closes (a bot can never stand in a ravine to build against it)');
 });
 
 

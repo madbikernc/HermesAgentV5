@@ -1,4 +1,8 @@
-// Version: 1.4.0
+// Version: 1.5.0
+//
+// 1.5.0 (2026-11-23): the shelterStep sandbox stubs shelterApronLevelSpot() (shelter-goals.js
+// 1.3.0's new site-levelling step, action-shelter.js 1.2.0) -- a no-op here, since this file's own
+// materials/door/build flow is what's under test, not the levelling step itself.
 //
 // 1.4.0 (2026-11-20): the shelterStep sandbox stubs recordKnownShelter() (shelter-goals.js 1.2.0's
 // new known_shelters.json write on a successful build).
@@ -299,6 +303,11 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
     shelterShellIsStuck: (b) => !!c.stuck && b.equals(c.stuck),
     residencePlan: () => ({ kind: 'build', beds: 0, active: 1 }), completeSheltersNearHome: () => [],
     findShelterSite: () => { c.siteCalls++; return new V3(5, 65, 5); },
+    // shelterApronLevelSpot() (action-shelter.js 1.2.0, levelling the site's own apron before the
+    // door/wall steps below) has its own dedicated tests in shelter-1.test.mjs/shelter-2.test.mjs;
+    // nothing to level here, same no-op default every other cross-module dependency this context
+    // injects already uses.
+    shelterApronLevelSpot: () => null,
     shelterPositions: () => Array.from({ length: 60 }, (_, i) => new V3(i, 100, 0)), shelterMaterialCount: () => c.materials,
     // recordKnownShelter() (shelter-memory.js, new) is exercised directly in shelter-1.test.mjs.
     recordKnownShelter: async () => {},
