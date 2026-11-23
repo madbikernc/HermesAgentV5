@@ -1,6 +1,6 @@
 # Firmament Minecraft Bots
 
-**Version:** 2.51.0
+**Version:** 2.52.0
 **Status:** Built, deployed, live. Nine bots running since 2026-09-13. This file describes what
 exists, not a plan.
 
@@ -745,13 +745,6 @@ the original incident number, still cited throughout the code. Narrative is in g
 | The skills directory sits *inside* the memory directory, so the memory corpus's recursive scan must skip it — otherwise every skill description is embedded as a world fact, which is exactly what the separate corpus exists to prevent | — |
 
 ## 12. Open
-
-- **`checkLighting` and `light_area` still gate on `block.light`**, which §11 now records as frozen
-  at chunk-load time. Near the base, where chunks loaded while it was dark, both read "dark"
-  forever — so bots keep sweeping spots they have already lit, and `light_area` can report
-  "already lit" for somewhere genuinely black. Deliberately not fixed alongside the torch trail
-  (2026-10-07): the trail could avoid the field entirely, these two are built around it. The fix
-  is the same substitution — `emitLight` by block id instead of a light level.
 
 - **`planNextStep` model choice.** `dispatch` is fast and occasionally wrong, `coder` is more
   accurate at ~8s, `coder2` is most rule-compliant but unusable per-tick. Evidence gathered, no

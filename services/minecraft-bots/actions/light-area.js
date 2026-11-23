@@ -1,4 +1,9 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-22, direct report: "they waste resources by putting torches too close
+// together"): the dark-spot search and the just-before-placing recheck both used block.light,
+// which MINECRAFT_BOTS_DESIGN.md §12 already flagged as frozen at chunk-load time here and never
+// fixed. Both now read real nearby light sources (tunneling.js's lightSourceBlockIds) instead.
 //
 // The "light_area" action, split out of actions.js's performActionAs() switch
 // (actions.js 2.0.0, 2026-11-10) unchanged, so a fix to it is a fix to this file alone. Called
@@ -6,7 +11,8 @@
 
 import path from "node:path";
 import { Vec3 } from "vec3";
-import { ACTION_TIMEOUT_MS, DARK_LIGHT_LEVEL, goals, isProtectedBlockName, withTimeout } from "../actions.js";
+import { ACTION_TIMEOUT_MS, goals, isProtectedBlockName, withTimeout } from "../actions.js";
+import { TORCH_SPACING, lightSourceBlockIds } from "../tunneling.js";
 
 
 export async function lightAreaAction(bot, action, speaker, token) {
@@ -30,6 +36,18 @@ export async function lightAreaAction(bot, action, speaker, token) {
 
   const LIGHT_AREA_RADIUS = 10;
   const LIGHT_AREA_BATCH_LIMIT = 6;
+  // Direct report, 2026-11-22 ("they waste resources by putting torches too close together"):
+  // this used to read block.light, which MINECRAFT_BOTS_DESIGN.md §12 already flagged as frozen
+  // at chunk-load time on this stack and never fixed here -- near home, where chunks loaded while
+  // it was dark, every position read "dark" forever, including ones this very sweep, or another
+  // bot, had already lit. Same substitution tunneling.js's torch trail already uses: real nearby
+  // light SOURCES (registry emitLight), not a stale per-position reading -- fetched once up
+  // front, not per candidate, since findBlocks' own matcher below runs over every block in the
+  // scanned volume and a litNearby-style findBlocks call inside it would multiply that cost.
+  let lit = bot.findBlocks({ point: action.near, matching: lightSourceBlockIds(bot),
+    maxDistance: LIGHT_AREA_RADIUS + TORCH_SPACING, count: 64 });
+  const isLit = (pos) => lit.some((l) => l.distanceTo(pos) <= TORCH_SPACING);
+
   const positions = bot.findBlocks({
     point: action.near,
     // 2026-11-04: a position-less palette block (findBlocks' section pre-check) gets the cheap
@@ -37,7 +55,7 @@ export async function lightAreaAction(bot, action, speaker, token) {
     matching: (block) => {
       if (!block || block.boundingBox === "block") return false;
       if (!block.position) return true;
-      if (block.light === undefined || block.light >= DARK_LIGHT_LEVEL) return false;
+      if (isLit(block.position)) return false;
       const below = bot.blockAt(block.position.offset(0, -1, 0));
       return !!below && below.boundingBox === "block" && !isProtectedBlockName(below.name);
     },
@@ -66,12 +84,12 @@ export async function lightAreaAction(bot, action, speaker, token) {
     // Re-check: another bot (or this one, via an earlier iteration) may have already lit
     // this exact spot since the batch was found.
     const ground = bot.blockAt(pos.offset(0, -1, 0));
-    const spaceNow = bot.blockAt(pos);
-    if (!ground || ground.boundingBox !== "block" || spaceNow?.light >= DARK_LIGHT_LEVEL) continue;
+    if (!ground || ground.boundingBox !== "block" || isLit(pos)) continue;
 
     try {
       await bot.equip(current, "hand");
       await bot.placeBlock(ground, new Vec3(0, 1, 0));
+      lit = [...lit, pos]; // counts toward isLit immediately, so this sweep doesn't stack a second torch nearby
       placed++;
     } catch (err) {
       console.error(`light_area: failed to place a torch at ${pos}:`, err.message);

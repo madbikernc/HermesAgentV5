@@ -1,4 +1,8 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-22, direct report: "they don't take torches into tunnels as they dig but they
+// should"): checkTorchSupply() now mines some coal_ore as a last resort, before backing off,
+// when she has neither coal/charcoal to craft with nor a chest torch to loot.
 //
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: living space, access obstructions, torch supply, terrain repair, shelter integrity and stuck detection.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
@@ -92,9 +96,25 @@ export async function checkTorchSupply() {
   try {
     const action = fuel && wood ? { type: "craft", item: "torch", count: torchBatch() }
       : { type: "loot", item: "torch", count: TORCH_CARRY_MIN };
-    const result = await performAction(bot, action, USERNAME, handle);
+    let result = await performAction(bot, action, USERNAME, handle);
     console.log(`[${USERNAME}] torch supply: ${action.type} -- ${result.text} ` +
       `(ok=${result.ok}, carrying ${torchCount(bot)}/${TORCH_CARRY_MIN})`);
+
+    // Direct report, 2026-11-22 ("they don't take torches into tunnels as they dig but they
+    // should"): confirmed live -- every bot on spark sat at 0/8 torches for hours, backing off
+    // ten minutes at a time, "no fuel+wood on hand to craft one" / "no torch in any chest" --
+    // nothing here ever went and got the one raw material actually missing. Same last resort
+    // this codebase already reaches for when a craft is short its one ingredient (gatherPlanks'
+    // own "mine oak_log, no tree nearby" fallback; gear-goals.js's own cobblestone/iron_ore
+    // fallback for a tool upgrade). Wood is not fixed the same way here -- a bot this low on
+    // supplies is rarely also out of every stick/plank/log/stem, unlike coal, which only turns up
+    // as a side effect of already being underground.
+    if (!result.ok && !result.cancelled && !fuel) {
+      const mined = await performAction(bot, { type: "mine", block: "coal_ore", count: 4 }, USERNAME, handle);
+      console.log(`[${USERNAME}] torch supply: mine coal_ore -- ${mined.text} (ok=${mined.ok})`);
+      if (mined.ok) result = mined;
+    }
+
     if (!result.ok && !result.cancelled) {
       torchSupplyBlockedUntil = Date.now() + TORCH_SUPPLY_BACKOFF_MS;
       console.log(`[${USERNAME}] torch supply: nothing worked -- waiting ${TORCH_SUPPLY_BACKOFF_MS}ms before trying again.`);

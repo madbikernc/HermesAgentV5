@@ -1,4 +1,9 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-22, direct report: "they waste resources by putting torches too close
+// together"): checkLighting() no longer gates on the frozen block.light field -- see its own
+// updated comment -- and now reads litNearby (tunneling.js) instead, closing MINECRAFT_BOTS_
+// DESIGN.md §12's long-open item for this function.
 //
 // 1.1.0 (2026-11-20, direct report: "chests and free slots should be in world memory, and
 // checked by other bots... before... planning to build new ones"): checkInventoryFull() now
@@ -10,11 +15,12 @@
 // it; this file reads index.js's state through live imports, so nothing here may touch it
 // before index.js has run (only declarations live here).
 
-import { DARK_LIGHT_LEVEL, loadKnownChests, performAction } from "./actions.js";
+import { loadKnownChests, performAction } from "./actions.js";
 import * as arbiter from "./arbiter.js";
 import { BUILDER_PRIORITY_RADIUS, countUsableNearHome } from "./home-scan.js";
 import { TOOL_RANK } from "./priorities.js";
 import { routineBlocked } from "./goal-proposal.js";
+import { litNearby } from "./tunneling.js";
 import { AUTONOMY_ENABLED, HOME_LIGHTING_MAINTAINER, USERNAME, bot, goals } from "./index.js";
 import { INVENTORY_FULL_SLOTS, INVENTORY_MAIN_HOTBAR_SLOTS, makeHomeChest, setStorageBlockedUntil, storageBlockedUntil, storeSurplusValuables } from "./upkeep-inventory.js";
 import { torchBatch } from "./upkeep-world.js";
@@ -267,25 +273,28 @@ export async function checkSaplings() {
 // internally; swapping to a torch mid-collect would fight that). Reuses the EXISTING "place"
 // action (already generic over any held block, see actions.js's own comment on it) rather than a
 // new performAction case -- placing a torch is mechanically identical to placing a furnace.
-// block.light (confirmed against prismarine-block source) is the real per-position light value,
-// 0-15; under 8 is the common threshold below which hostile mobs can spawn, the same heuristic
-// most mineflayer bots use since there's no simpler "is this dark" signal exposed directly.
 export const LIGHTING_CHECK_MS = parseInt(process.env.MC_LIGHTING_CHECK_MS || "20000", 10);
-// DARK_LIGHT_LEVEL now lives in actions.js (2026-09-10), shared with the new "light_area" action
-// below rather than kept as a second, driftable copy here.
 
+// Direct report, 2026-11-22 ("they waste resources by putting torches too close together"): used
+// to read block.light here, which tunneling.js's own 1.1.0 note (and MINECRAFT_BOTS_DESIGN.md
+// §12's "Open" item, which flagged this exact function and never got around to it) already found
+// frozen at chunk-load time on this stack -- confirmed live, Wade placed 17 torches in under six
+// minutes standing in roughly the same spot, because wherever her tile's light reading was dark
+// when the chunk loaded reads dark forever, even with a torch burning right there. litNearby
+// (tunneling.js) is the same substitution the torch trail already uses: a real nearby light
+// source (registry emitLight) instead of a stale per-position reading.
 export async function checkLighting() {
   if (!AUTONOMY_ENABLED || routineBlocked("checkLighting") || bot.isSleeping || !bot.entity) return;
   if (!bot.inventory.items().some((i) => i.name === "torch")) return;
-  const block = bot.blockAt(bot.entity.position);
-  if (!block || block.light >= DARK_LIGHT_LEVEL) return;
+  const pos = bot.entity.position.floored();
+  if (!bot.blockAt(pos) || litNearby(bot, pos)) return;
 
   // busy deliberately not held here -- see goalTick's own 2026-09-07 fix note.
   const handle = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
   if (!handle) return;
   try {
     const result = await performAction(bot, { type: "place", item: "torch" }, USERNAME, handle);
-    if (result.ok) console.log(`[${USERNAME}] lighting: ${result.text} (light was ${block.light})`);
+    if (result.ok) console.log(`[${USERNAME}] lighting: ${result.text}`);
   } catch (err) {
     console.error(`[${USERNAME}] lighting check failed:`, err.message);
   } finally {

@@ -1,4 +1,9 @@
-// Version: 1.4.2
+// Version: 1.5.0
+// 1.5.0 (2026-11-22): new torch-themed checks for the direct report "they waste resources by
+// putting torches too close together" / "they don't take torches into tunnels as they dig but
+// they should" -- checkTorchSupply's new coal_ore mining fallback (upkeep-world.js 1.1.0), and
+// checkLighting/light_area reading real nearby light sources instead of the frozen block.light
+// (upkeep-home.js 1.2.0, actions/light-area.js 1.1.0).
 // 1.4.2 (2026-11-20): both Residences tests' sandboxes capture recordKnownShelter() calls
 // (shelter-goals.js 1.2.0 / home-scan.js 1.3.0's known_shelters.json writes) instead of leaving
 // it undefined, and the found-room test confirms the record itself.
@@ -78,6 +83,95 @@ await check('Torches: she tops up from coal she carries, falls back to a chest, 
 
   inv = [{ name: 'torch', count: 16 }];
   assert.equal(t.needsTorches(bot), false, 'a full pouch is left alone');
+});
+
+
+await check('Torches: no coal and no chest torch -- mines some coal instead of just waiting out the backoff', async () => {
+  // Direct report, 2026-11-22 ("they don't take torches into tunnels as they dig but they
+  // should"): confirmed live -- every bot on spark sat at 0/8 torches for hours, "no fuel+wood on
+  // hand" / "no torch in any chest," backing off ten minutes at a time forever. checkTorchSupply
+  // used to stop there; it now mines some coal_ore as a last resort (upkeep-world.js 1.1.0).
+  const calls = [];
+  let lootReply = { ok: false, text: "couldn't find a chest" };
+  let mineReply = { ok: true, text: 'collected some coal.' };
+  const inv = [{ name: 'torch', count: 2 }]; // no coal, no wood
+  const bot = { isSleeping: false, entity: { position: new V3(0, 64, 0) }, inventory: { items: () => inv } };
+  const t = tunnel();
+  const c = vm.createContext({ bot, Date, process: { env: {} }, console: { log() {}, error() {} },
+    USERNAME: 'Babs', AUTONOMY_ENABLED: true, routineBlocked: () => false,
+    arbiter: { OWNERS: { ROUTINE: 1 }, requestControl: async () => ({ release() {} }) },
+    needsTorches: t.needsTorches, torchCount: t.torchCount, TORCH_CARRY_MIN: vm.runInContext('TORCH_CARRY_MIN', t),
+    heldCount: (test) => inv.filter((i) => test(i.name)).reduce((n, i) => n + i.count, 0),
+    performAction: async (b, a) => { calls.push(a); return a.type === 'mine' ? mineReply : lootReply; } });
+  vm.runInContext(between(index, 'const TORCH_SUPPLY_CHECK_MS', 'const TERRAIN_REPAIR_RADIUS'), c);
+
+  await c.checkTorchSupply();
+  assert.deepEqual(calls.map((a) => `${a.type}:${a.block ?? a.item}`), ['loot:torch', 'mine:coal_ore'],
+    'no coal to craft with, no torch in any chest -- mines some coal instead of giving up');
+
+  calls.length = 0;
+  await c.checkTorchSupply();
+  assert(calls.length > 0, 'the mine succeeded: real progress, so this is tried again right away, not backed off');
+
+  calls.length = 0;
+  mineReply = { ok: false, text: 'no coal_ore nearby.' };
+  await c.checkTorchSupply();
+  calls.length = 0;
+  await c.checkTorchSupply();
+  assert.deepEqual(calls, [], 'mining failed too: now she backs off same as before');
+});
+
+
+await check('Lighting: checkLighting reads real nearby light sources, not the frozen block.light', async () => {
+  // Direct report, 2026-11-22 ("they waste resources by putting torches too close together"):
+  // confirmed live -- Wade placed 17 torches in under six minutes standing in roughly the same
+  // spot, because block.light at her position was frozen dark from chunk load and never updated,
+  // even right beside her own just-placed torch (upkeep-home.js 1.2.0, MINECRAFT_BOTS_DESIGN.md
+  // §12's long-open item for this function).
+  const t = tunnel();
+  const w = blockWorld({ groundY: 63, light: 0 }); // frozen "dark" everywhere
+  w.bot.entity = { position: new V3(0, 64, 0) };
+  w.bot.inventory.items = () => [{ name: 'torch', count: 4 }];
+  const calls = [];
+  const c = vm.createContext({ bot: w.bot, console: { log() {}, error() {} },
+    USERNAME: 'Wade', AUTONOMY_ENABLED: true, routineBlocked: () => false,
+    arbiter: { OWNERS: { ROUTINE: 1 }, requestControl: async () => ({ release() {} }) },
+    litNearby: t.litNearby,
+    performAction: async (b, a) => { calls.push(a); return { ok: true, text: 'placed a torch.' }; } });
+  vm.runInContext(between(index, 'export async function checkLighting(', 'export const HOME_LIGHTING_CHECK_MS'), c);
+
+  await c.checkLighting();
+  assert.deepEqual(calls.map((a) => a.type), ['place'], 'nothing lit nearby yet: places a torch');
+
+  w.place([2, 64, 0], 'torch'); // a real torch two blocks away, block.light staying frozen at 0 notwithstanding
+  calls.length = 0;
+  await c.checkLighting();
+  assert.deepEqual(calls, [], 'a real torch nearby: must not place a second one right on top of it');
+});
+
+
+await check('Light area: the dark-spot search and its placement recheck use real nearby light, not the frozen block.light', async () => {
+  // Same report and root cause as the checkLighting test above, for light_area.js 1.1.0's own
+  // home-area sweep (MINECRAFT_BOTS_DESIGN.md §12 named both functions).
+  const t = tunnel();
+  const w = blockWorld({ groundY: 63, light: 0 }); // frozen "dark" everywhere
+  w.bot.entity = { position: new V3(5, 64, 0) };
+  w.bot.inventory.items = () => [{ name: 'torch', count: 4 }];
+  w.open([1, 64, 0]);  // close to the real torch below -- already lit, frozen block.light notwithstanding
+  w.open([10, 64, 0]); // far from it -- genuinely dark
+  w.place([0, 64, 0], 'torch');
+  w.bot.pathfinder.goto = async () => {};
+  w.bot.equip = async () => {};
+  const placed = [];
+  w.bot.placeBlock = async (ref) => placed.push(`${ref.position.x},${ref.position.y},${ref.position.z}`);
+
+  const c = context(w.bot, { Vec3: V3, isProtectedBlockName: () => false,
+    TORCH_SPACING: vm.runInContext('TORCH_SPACING', t), lightSourceBlockIds: t.lightSourceBlockIds });
+  vm.runInContext(timeoutFn + actionFn, c);
+
+  const result = await c.performAction(w.bot, { type: 'light_area', near: new V3(5, 64, 0) }, 'test');
+  assert.equal(result.ok, true, result.text);
+  assert.deepEqual(placed, ['10,63,0'], 'the spot one block from a real torch is skipped; the genuinely dark one still gets lit');
 });
 
 
