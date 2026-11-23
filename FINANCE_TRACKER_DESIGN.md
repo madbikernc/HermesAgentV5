@@ -1,6 +1,6 @@
 # Firmament Finance Tracker — Target Design
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 
 **Status:** Planned, not executed. Direct operator request, 2026-11-19. `IMPLEMENTATION_PLAN.md`'s **S47**
 is the stage that tracks building this and points back here for the full spec — the same split S23/S38/
@@ -86,6 +86,10 @@ one call returns a flattened list across every connected account (date, transact
 payee/name, memo, amount) rather than iterating five separate entity endpoints. Fall back to the per-entity
 endpoints (`Purchase`/`Deposit`/`Transfer`/`CreditCardPayment`/`JournalEntry`) only if a live test shows the
 report's columns are too coarse for correlation or categorization once real data is in hand.
+
+**Not to be confused with a separate, since-confirmed finding: Quicken Simplifi (§2c) is not an Intuit
+product at all.** If the operator's real CSV-export habit turns out to be Simplifi rather than a QuickBooks
+company file, it doesn't answer this section's blocking question either way — see §2c.
 
 ---
 
@@ -221,6 +225,36 @@ testing requires a live brokerage account, not a safe fixture environment — if
 verification step for Schwab is not merely a nice-to-have confirmation pass, it may be the *only* way to
 test this integration at all, the same caution this design gives QuickBooks' own real-company-file
 dependency in §2.
+
+---
+
+## 2c. Vendor/access research — Quicken Simplifi `[RISK]`, confirmed no API
+
+**Discovered mid-build, not from the original ask: the operator's real transaction export is from Quicken
+Simplifi, not Intuit.** S47c's `infra/hermes-finance-sync/categories.yaml` taxonomy was built directly from
+a real file the operator pointed at, `"Simplifi - Transactions.csv"` — Simplifi by Quicken's own CSV
+export. This matters because **Simplifi is not an Intuit product and has nothing to do with §2's Mint/
+QuickBooks research**: Intuit sold the Quicken brand and software to H.I.G. Capital in 2016, and Quicken
+Inc. has operated independently since; "Simplifi by Quicken" is a Quicken-brand app built years after that
+split. §2's own "which Intuit product, if any" framing never considered it, because it isn't one.
+
+**Checked against the same live-verification bar §2/§3 hold to: Simplifi has no public developer API.**
+Simplifi's own community forum has repeated, still-open user requests for one — one recent post asks for
+exactly this capability so users can stop manually exporting CSV files, another suggests starting with
+read-only access — both confirming the gap is real and currently unaddressed, not merely undocumented. A
+third-party provider directory (APIs.io) lists a "Simplifi by Quicken API," but its own description is the
+consumer-facing bank-linking flow (Simplifi authorizing *into* a bank via OAuth), not a developer-facing
+endpoint for reading a user's own Simplifi data back out — the opposite direction from what this stage
+needs. No Quicken developer portal, MCP server, or transaction-read endpoint was found anywhere.
+
+**Practical consequence: Simplifi has no automatable path today — CSV export is the only one.** That is a
+materially different shape than every other source in this design (§2/§2a/§2b are all OAuth-pull sources
+built around `hermes-finance-sync.py`'s daily timer, §12); a Simplifi source would instead mean watching
+for a manually-dropped export file, not a pull. **This does not resolve §2's own blocking `[UNKNOWN]`** —
+whether the operator separately has a real QuickBooks company file is still unconfirmed and still gates
+S47a exactly as written. What's new here is narrower but still useful: if Simplifi turns out to be the tool
+the operator actually uses day to day, the daily-ingestion problem for *that* tool specifically has a
+confirmed, final answer — no API exists to build against — rather than an open question like Intuit's.
 
 ---
 
@@ -534,13 +568,20 @@ model.
     design and deserves its own monitored "about to expire" alert rather than discovery via a failed sync.
 15. **`[RISK]` (§2b) — no sandbox found for Trader API - Individual.** `S47g`'s live verification may be
     the only way to test the Schwab integration at all.
+16. **`[RISK]` (§2c) — Quicken Simplifi, confirmed to have no public API; CSV export only.** Discovered
+    from the operator's real transaction export used to build S47c's `categories.yaml`. Doesn't resolve
+    item 1's Intuit `[UNKNOWN]`, but if Simplifi — not QuickBooks — turns out to be the operator's actual
+    daily-use tool, this source needs a watched-folder/manual-export ingestion shape instead of §2's
+    OAuth-pull design, before `S47b` can build against it.
 
 ---
 
 ## 14. Build sequence
 
-- **S47a** — Vendor/access decision: confirm the real Intuit product (§2), the Privacy.com plan tier
-  (§3), Plaid's actual coverage + tier for the six named institutions (§2a), and Schwab Trader API -
+- **S47a** — Vendor/access decision: confirm the real Intuit product, if any (§2) — now including whether
+  the operator has a QuickBooks company file at all, given §2c's confirmed finding that Quicken Simplifi,
+  the tool behind the operator's real transaction export, has no API of its own — the Privacy.com plan
+  tier (§3), Plaid's actual coverage + tier for the six named institutions (§2a), and Schwab Trader API -
   Individual approval + pricing (§2b) — against the operator's real accounts and real developer
   registrations. Gates every other sub-stage, the same role S38a played for Market Watch.
 - **S47b** — `tools/hermes_finance_common.py` (shared schema/connect/compute) + the `finance.db` schema
@@ -582,7 +623,7 @@ S47d's real verdicts, once live, turn out to need a different role than `dispatc
 
 | Stage | Status | Date | Notes |
 |---|---|---|---|
-| S47a | not started | 2026-11-20 | Blocking: confirm real Intuit product, Privacy.com plan tier, Plaid coverage/tier for the six named institutions (§2a), and Schwab Trader API - Individual approval/pricing (§2b), against the operator's actual accounts |
+| S47a | not started | 2026-11-22 | Blocking: confirm real Intuit product, Privacy.com plan tier, Plaid coverage/tier for the six named institutions (§2a), and Schwab Trader API - Individual approval/pricing (§2b), against the operator's actual accounts. New (§2c): Quicken Simplifi — the tool behind the operator's real transaction export — confirmed to have no public API; doesn't resolve whether a separate QuickBooks company file exists, but narrows what "confirm the real Intuit product" needs to check. |
 | S47b | not started | 2026-11-20 | Gated on S47a; now covers Intuit's, Plaid's, and Schwab's ingest halves |
 | S47c | in progress | 2026-11-22 | The categorization half is done and committed (`tools/hermes_finance_common.py`, `categories.yaml`) — not gated on S47a/b after all, since rule-based matching over a merchant string needs no real vendor/account access. `hermes-finance-sync.py`'s own Privacy.com pull and §5's correlation pass are still not started and still gated on S47a/b. |
 | S47d | not started | 2026-11-19 | Gated on S47c |
@@ -601,3 +642,4 @@ S47d's real verdicts, once live, turn out to need a different role than `dispatc
 | 1.1.0 | 2026-11-19 | **Direct operator request: added §2a, direct bank/brokerage access** for Wells Fargo, Fidelity, Merrill Lynch, Truliant Federal Credit Union, Citibank (credit card), and Chase (credit card) — since none of the six publishes a retail developer API, and the CFPB's Section 1033 open-banking rule that would have forced one is enjoined and under rewrite as of this writing. Plaid is the chosen aggregator: confirmed live/current for Chase (JPMorganChase's own renewed September 2025 data-access agreement, referenced in Plaid's October 2026 changelog) and listed for Wells Fargo on Plaid's own institutions page; Citibank, Truliant FCU, Fidelity, and Merrill Lynch coverage not independently confirmed in this research pass — flagged to verify in the Plaid Dashboard before `S47a` is called done. Plaid's new Trial plan (free, real production data, up to 10 Items, new developer teams from 2026-04-15) fits this scope if the fleet's own Plaid team qualifies; flagged as unconfirmed too, same as whether Investments is included in that tier for Fidelity/Merrill Lynch. §1, §4 (scope), §5 (correlation generalized from Intuit-side to ledger-side), §6 (uniform-across-sources note), §7 (`plaid_items` table, `accounts.plaid_item_id`), §9 (investment-account scope note), §10 (`finance accounts` command), §12 (`plaid-api` + per-institution Vaultwarden items), §13 (four new risk items), and §14/Build status (S47a/S47b scope) all updated to match. Minor bump — a new access path added alongside the existing Intuit path, nothing prior reversed. |
 | 1.2.0 | 2026-11-20 | **Direct operator request: added §2b, direct Schwab investment-account access** — Schwab is the one institution researched so far that actually runs its own retail-individual developer API (Trader API - Individual, successor to the discontinued TD Ameritrade API), so it is read directly rather than through Plaid, even though some Plaid integrations also list Schwab. Two manual approval gates found (developer-account review, then product-access review), no published SLA for either; API pricing not confirmed, expected free like its TD Ameritrade predecessor but unverified. Biggest finding: Schwab's refresh token appears to live only ~7 days with no programmatic renewal (community-reported, not Schwab-confirmed) — far more demanding than Intuit's ~100-day staleness or Plaid's occasional per-Item lapse, and possibly the single most frequent re-consent requirement in this design; whether routine daily use extends it is itself unconfirmed. No sandbox found for this product either, so live verification (`S47g`) may be the only way to test it. §1, §4 (scope), §7 (`schwab_auth` table, `accounts.source`), §9 (investment-account scope note), §12 (`schwab-api` Vaultwarden item), §13 (three new risk items), and §14/Build status (S47a/S47b scope) updated to match. Minor bump — a new vendor section added alongside the existing paths, nothing prior reversed. |
 | 1.3.0 | 2026-11-22 | **S47c's categorization half built and committed** (`tools/hermes_finance_common.py`'s `load_categories()`/`categorize_transaction()`, `infra/hermes-finance-sync/categories.yaml` seed) — found, while picking a small task to trial-run through `hermes-dualcoder.py`, that §6's rule-based matching needs no real vendor/account access and so isn't actually gated on S47a/b the way the Build status table previously implied for all of S47c; only the Privacy.com sync/correlation half of that stage still is. Build status row split accordingly. Minor bump — a build-progress update, nothing in the design itself changed. |
+| 1.4.0 | 2026-11-22 | **Added §2c, Quicken Simplifi vendor research** — discovered while building S47c's `categories.yaml` from the operator's real transaction export that the file is a Quicken Simplifi CSV export, not an Intuit product; Simplifi was sold out of Intuit in 2016 and §2's Mint/QuickBooks research never covered it. Checked with the same live-verification bar §2/§3 hold to: Simplifi has no public developer API (confirmed by Simplifi's own community forum's repeated, still-open requests for one, and no developer portal, MCP server, or transaction-read endpoint found anywhere) — CSV export is the only avenue. Does not resolve §2's own blocking `[UNKNOWN]` (whether the operator separately has a real QuickBooks company file); narrows it instead. §2 (cross-reference), §13 (new item 16), §14/Build status (S47a wording) updated to match. Minor bump — a new vendor section added alongside the existing paths, nothing prior reversed. |
