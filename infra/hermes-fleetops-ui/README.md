@@ -1,21 +1,25 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.18.0
+**Version:** 2.19.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog (now leading with a "Recommended for benchmarking" section), which checkpoint backs each
 role, benchmark results, the news digest's stored highlights, curated benchmark-driven model-swap
-recommendations, Market Watch, and security/integrity recommendations written by the fleet's
-scanners. Runs on **Watch (spark)** only, over **HTTPS**, Basic Auth required.
+recommendations, Market Watch, security/integrity recommendations written by the fleet's scanners,
+and (direct operator request) a Budget tab classifying transactions against Fidelity's own Budget
+Worksheet taxonomy, with Planning (fix a category) and Report (the worksheet's own layout, one
+month at a time) modes. Runs on **Watch (spark)** only, over **HTTPS**, Basic Auth required.
 
 **<https://spark.tail1a534.ts.net:8103/>**
 
 ## Scope — read this before adding to it
 
 Read-only reports, plus a small number of deliberately narrow write routes: the benchmark
-backlog's decide buttons, the market watchlist's add form, and (S48) the self-repair tab's decide
-buttons. Each is its own route in the one `do_POST` handler, each gated by its own imported
-transition table where one exists.
+backlog's decide buttons, the market watchlist's add form, (S48) the self-repair tab's decide
+buttons, and the Budget tab's per-row category fix. Each is its own route in the one `do_POST`
+handler; the first three are gated by their own imported transition table, the last writes
+directly to `finance.db` through `hermes_finance_common.py`'s own `set_budget_classification()`
+(no transition table — a classification is a plain value, not a state machine).
 
 Services are still not started, stopped or restarted from here. That stays an SSH + `systemctl`
 operator action, like every other privileged action in this fleet
@@ -173,7 +177,8 @@ curl -s -u fleetops:"$PW" http://100.96.59.79:8103/ | head -5
 ```
 
 The unit runs `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=true` and
-`NoNewPrivileges=true`, with **one** writable path: `ReadWritePaths=/home/pmoney/.hermes/state`.
+`NoNewPrivileges=true`, with **two** writable paths: `ReadWritePaths=/home/pmoney/.hermes/state`
+and `ReadWritePaths=/mnt/hermes-data/finance`.
 
 That exception is not optional, and it was found by starting the service rather than by reasoning:
 `usage.db` is in **WAL** mode, and a read-only SQLite connection to a WAL database still has to
@@ -196,6 +201,18 @@ sandboxed at all.
 **Follow-up, not done here:** give `usage.db` its own directory via `HERMES_USAGE_DB`, which
 `hermes_usage_log.py` already honours, and bind only that. It means editing the writers' units and
 relocating a live 50MB database, which is not a change to make in passing.
+
+**The second grant, found the same way — by starting the service, not by reasoning about it first.**
+The Budget tab's `/budget/classify` route (direct operator request) is the first feature on this
+page whose own job is to let the operator correct a stored record, not just report on one, and
+`finance.db` is where that correction has to land. The first real Save attempt failed with
+`sqlite3.OperationalError: attempt to write a readonly database` even though the file's own Unix
+permissions already allowed `pmoney` to write it — `ProtectSystem=strict` overrides that regardless
+of file mode, for every path not named in `ReadWritePaths`. Fixed by granting
+`/mnt/hermes-data/finance` specifically, not all of `/mnt/hermes-data`: `memory.db`, `market.db`
+and `vectors.db`/the RAG store all stay exactly as unwritable as before — every other read on this
+page, including the rest of the Budget tab's own reads, still goes through the same `mode=ro` URI
+`connect()` pattern as always.
 
 ## 4. What each page reads, and how it fails
 
@@ -408,3 +425,4 @@ rather than silent. A restart re-fetches the credentials.
 | 2.15.0 | 2026-10-27 | New `/status` page (S45), direct operator request: Sintra/Amy/HomeD13 compute health (CPU, memory, GPU, disk), plus broker, injection-guard, and inter-node-comms status. This service's sandbox rules out reaching that data live — no subprocess or SSH anywhere in this file — so it reads `hermes-fleet-health.py` 1.7.0's new daily JSON snapshot (`FLEET_HEALTH_PATH`, a subpath of the `ReadWritePaths` grant already held for `usage.db`'s sidecar) instead of probing anything itself. Same per-identity/broker/guard/comms data that script's own daily email already carries; the page states its snapshot's own age and flags it once it's more than ~36h stale. No sandbox or unit changes on either service. 16 new offline checks (377 total). |
 | 2.16.0 | 2026-10-27 | S46: `/backlog` gets an "auto-deferred" badge, next to the existing "★ recommended" one, on a `deferred` row whose turn carries `auto_deferred: true` — `hermes-model-scout.py` 1.5.0's new `find_similar_known()` check defaulting a confident near-duplicate candidate straight to `deferred` instead of `proposed`. Titled with the reason and the matched model, so a human can never mistake a scout-made call for a prior human decision — both rendered as an identical plain pill before this change. No read-path change; `read_backlog()`'s existing turn-payload read already carries whatever fields scout.py stamps. 3 new offline checks (380 total). |
 | 2.18.0 | 2026-11-11 | New `/minecraft` tab, direct operator request: which Minecraft bots are running, each one's current goal and latest log lines, and its last 20 actions with success or failure. Same reasoning as `/status` — the bots run on spark and spark-2 and this sandbox can reach neither — so it reads a snapshot the new `hermes-minecraft-bots-status.py` writes every minute, under the existing `ReadWritePaths` grant. No write route, no sandbox or unit change. 25 new offline checks (444 total). |
+| 2.19.0 | 2026-11-23 | **New `/budget` tab (hermes-fleetops-ui.py 2.23.0–2.25.0, direct operator request), covering several code versions this README fell behind on.** Fidelity Budget Worksheet classification on top of `FINANCE_TRACKER_DESIGN.md` §6a's `finance.db`: **Planning** mode filters/sorts transactions and fixes a category inline, with dependent bucket/field dropdowns (the field column only ever suggests its own bucket's values, re-scoping live via a small `change`-driven script when the bucket input changes) sourced live from `budget_classifications` itself, so a brand-new bucket or field typed and saved becomes a suggested value from then on with no code change. **Report** mode emulates the real worksheet's own layout for one month at a time. The real architecture change: this file's **fourth** write route, `/budget/classify` — the first shaped as one form per row rather than a bulk checkbox-select, and the first whose write lands directly in `finance.db` rather than through hermes-memory's HTTP API or a flat YAML file. Found live, the same way the Market Watch `ReadWritePaths` exception was: the first real Save failed with `sqlite3.OperationalError: attempt to write a readonly database`, since `ProtectSystem=strict` keeps `/mnt/hermes-data` read-only regardless of the file's own Unix permissions — fixed by a second, narrowly-scoped grant, `ReadWritePaths=/mnt/hermes-data/finance`, leaving `memory.db`/`market.db`/`vectors.db` exactly as unwritable as before. `check_write_surface()`/`check_unit_sandbox()` extended to assert both the four-route whitelist and the two-grant shape structurally, not left to accident — 4 new checks there (458 total; the jump from 444 at 2.18.0 to 454 before this entry is undocumented test-suite growth this README fell behind on, not part of this change). |

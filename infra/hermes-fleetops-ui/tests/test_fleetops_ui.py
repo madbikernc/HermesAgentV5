@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-# Version: 2.20.0
+# Version: 2.21.0
+#
+# 2.21.0 (2026-11-23) — check_write_surface()/check_unit_sandbox() updated for the budget
+# classifier's /budget and /budget/classify (hermes-fleetops-ui.py 2.25.0, built in several
+# unversioned passes this session that never ran this suite -- found only when fixing the real
+# bug below). The write-surface whitelist check now reads the four-route tuple structurally
+# (index/slice, not an exact multi-line literal, since it no longer fits one line) instead of
+# assuming three; new checks confirm every finance_common.connect() this file makes is explicitly
+# readonly=True and the one real write is the single named set_budget_classification() call, not
+# SQL embedded here. check_unit_sandbox() now expects TWO ReadWritePaths grants, not one: the
+# first real Save attempt crashed the live service with "sqlite3.OperationalError: attempt to
+# write a readonly database" -- ProtectSystem=strict keeps /mnt/hermes-data read-only regardless
+# of the file's own Unix permissions, and this page's one write route had never needed to touch
+# it directly before. Fixed by granting /mnt/hermes-data/finance specifically (hermes-fleetops-
+# ui.service), scoped to that one subdirectory -- asserted here the same way the existing
+# usage.db/state-dir grant already was, not left to accident.
 #
 # 2.20.0 (2026-11-13) — check_selfrepair_funnel(): an hourly `seen` line's `count` is summed, and
 # `recurring` is counted (hermes-fleetops-ui.py 2.22.0, bridge 2.6.0).
@@ -699,12 +714,18 @@ def check_degradation(ui):
 
 
 def check_write_surface(ui):
-    print(NL + "[the write surface is exactly one guarded route]")
+    print(NL + "[the write surface is exactly one guarded dispatcher, four named routes]")
     src = (TOOLS / "hermes-fleetops-ui.py").read_text(encoding="utf-8")
     check("there is exactly one write handler", src.count("def do_POST") == 1)
-    check("and it serves only three named routes -- /backlog/decide, /market/monitor/add, "
-          "/selfrepair/decide",
-          'path not in ("/backlog/decide", "/market/monitor/add", "/selfrepair/decide")' in src)
+    start = src.index("path not in (") + len("path not in (")
+    end = src.index("):", start)
+    routes_text = src[start:end]
+    expected_routes = ["/backlog/decide", "/market/monitor/add", "/selfrepair/decide",
+                        "/budget/classify"]
+    check("and it serves only four named routes -- /backlog/decide, /market/monitor/add, "
+          "/selfrepair/decide, /budget/classify",
+          all(f'"{r}"' in routes_text for r in expected_routes)
+          and routes_text.count('"') == 2 * len(expected_routes), routes_text)
     check("the decide body cap is a named constant, not a bare magic number",
           "0 <= length <= MAX_DECIDE_BODY" in src and "0 <= length <= 8192" not in src)
     check("an oversized/invalid body closes the connection rather than leaving it unread",
@@ -712,8 +733,15 @@ def check_write_surface(ui):
     check("a decide answers 303 to a GET, so a refresh cannot replay it",
           "self.send_response(303)" in src)
     check("nor do_PUT or do_DELETE", "def do_PUT" not in src and "def do_DELETE" not in src)
-    check("every sqlite connection goes through the read-only helper",
+    check("every literal sqlite3.connect() call in this file goes through the read-only helper",
           src.count("sqlite3.connect(") == 1 and "mode=ro" in src)
+    check("this file never opens finance.db read-write itself -- every finance_common.connect() "
+          "call it makes is explicitly readonly=True",
+          src.count("finance_common.connect(")
+          == src.count("finance_common.connect(readonly=True)") > 0)
+    check("the budget classifier's one real write is a single named function in the shared "
+          "module, not SQL embedded here",
+          src.count("finance_common.set_budget_classification(") == 1)
     check("auth is compared with hmac.compare_digest, not ==",
           "hmac.compare_digest" in src)
     check("the service refuses to start unauthenticated",
@@ -725,23 +753,33 @@ def check_write_surface(ui):
 
 
 def check_unit_sandbox():
-    print(NL + "[the unit's sandbox is pinned, so the one exception cannot widen]")
-    # The first real start forced exactly one writable path: usage.db is WAL, and a read-only
-    # SQLite connection still takes a read mark in its -shm sidecar. That is a real requirement,
-    # but it is also the kind of grant that grows by accident, so the shape is asserted here.
+    print(NL + "[the unit's sandbox is pinned, so its exceptions cannot widen unnoticed]")
+    # The first real start forced one writable path: usage.db is WAL, and a read-only SQLite
+    # connection still takes a read mark in its -shm sidecar. The budget classifier's first real
+    # Save forced a second: ProtectSystem=strict blocks a write to /mnt/hermes-data regardless of
+    # the file's own Unix permissions. Both are real requirements, and both are the kind of grant
+    # that grows by accident, so the exact shape is asserted here rather than assumed.
     unit = (Path(__file__).resolve().parents[1] / "hermes-fleetops-ui.service").read_text(
         encoding="utf-8")
     rw = [l.split("=", 1)[1].strip() for l in unit.splitlines()
           if l.startswith("ReadWritePaths=")]
-    check("there is exactly one ReadWritePaths line", len(rw) == 1, str(rw))
-    check("and it grants only the state directory",
-          rw == ["/home/pmoney/.hermes/state"], str(rw))
-    # The grant must never reach the stores themselves, which is where the approval state lives:
-    # memory.db's task states say whether a candidate is approved, and they are under /mnt.
-    granted = rw[0].split()
-    check("the grant is a single path, not a list that has grown", len(granted) == 1, str(granted))
-    check("it does not reach /mnt, where memory.db and vectors.db live",
-          not any(g.startswith("/mnt") for g in granted), str(granted))
+    check("there are exactly two ReadWritePaths lines", len(rw) == 2, str(rw))
+    check("and together they grant only the state directory and the budget classifier's own "
+          "finance subdirectory",
+          sorted(rw) == sorted(["/home/pmoney/.hermes/state", "/mnt/hermes-data/finance"]),
+          str(rw))
+    check("each grant is a single path, not a list that has grown",
+          all(len(line.split()) == 1 for line in rw), str(rw))
+    # The grants must never reach the stores where the approval/price/vector state lives --
+    # memory.db's task states say whether a candidate is approved, and market.db/vectors.db hold
+    # their own live data -- only the budget classifier's own finance subdirectory is writable.
+    granted = [p for line in rw for p in line.split()]
+    check("the finance grant is scoped to its own subdirectory, not all of /mnt/hermes-data",
+          "/mnt/hermes-data/finance" in granted and "/mnt/hermes-data" not in granted,
+          str(granted))
+    check("it does not reach memory.db, market.db or vectors.db's own directories",
+          not any(g.startswith(("/mnt/hermes-data/memory", "/mnt/hermes-data/market",
+                                 "/mnt/hermes-data/rag")) for g in granted), str(granted))
     check("nor /etc, nor the repo itself",
           not any(g.startswith("/etc") or "HermesAgentV5" in g for g in granted), str(granted))
     check("nor the whole home directory",
@@ -749,10 +787,12 @@ def check_unit_sandbox():
     for prop in ("ProtectSystem=strict", "ProtectHome=read-only", "NoNewPrivileges=true",
                  "PrivateTmp=true"):
         check(f"{prop} is still set", prop in unit)
-    check("the unit explains why the exception exists, not just that it does",
+    check("the unit explains why the state-dir exception exists, not just that it does",
           "WAL" in unit and "-shm" in unit)
     check("and records that it confers no approval authority",
           "memory.db" in unit and "read-only" in unit)
+    check("the unit explains why the finance exception exists too, not just that it does",
+          "/budget/classify" in unit and "attempt to write a readonly database" in unit)
 
 class FakeGate:
     """Stands in for hermes-model-scout-gate.py. The transition table is a COPY of the real one and

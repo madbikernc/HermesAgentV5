@@ -22,8 +22,11 @@ Environment=FLEETOPS_UI_PORT=8104
 ExecStart=/home/pmoney/HermesAgentV5/tools/hermes-fleetops-ui-wrapper.sh
 Restart=on-failure
 RestartSec=10s
-# It opens every store read-only and serves no write routes, so it has no business writing
-# anywhere on this host. Enforced here as well as in the code, rather than only asserted.
+# The write routes this service does serve (model-scout/self-repair decisions, the market
+# watchlist's add, and the budget classifier) stay deliberately narrow: hermes-memory's own HTTP
+# API for the first two, and two specific, explicitly-granted local paths below for the rest --
+# never a blanket writable filesystem. Enforced here as well as in the code, rather than only
+# asserted.
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
@@ -51,6 +54,18 @@ NoNewPrivileges=true
 # hermes_usage_log.py already honours, and bind only that. It means changing the writers' units
 # and relocating a live 50MB database, so it is recorded as a follow-up rather than done here.
 ReadWritePaths=/home/pmoney/.hermes/state
+# A second, narrower exception: /mnt/hermes-data/finance specifically, for the budget
+# classifier's one write route (/budget/classify, direct operator request). Every other read on
+# this page stays read-only via the same mode=ro URI pattern market.db/memory.db already use;
+# this is the first feature on this page whose own job IS to let the operator correct a stored
+# record, not just report on one, and finance.db is where that correction has to land. Found live,
+# not reasoned about in advance: the first real Save attempt failed with
+# "sqlite3.OperationalError: attempt to write a readonly database" even though the file's own Unix
+# permissions already allowed pmoney to write it -- ProtectSystem=strict overrides that regardless
+# of file mode, for every path not named here. The rest of /mnt/hermes-data (memory.db, market.db,
+# vectors.db, the RAG store) stays read-only; this grant is scoped to the one subdirectory that
+# needs it, the same "as narrow as systemd allows" rule the state-dir grant above follows.
+ReadWritePaths=/mnt/hermes-data/finance
 StandardOutput=journal
 StandardError=journal
 
