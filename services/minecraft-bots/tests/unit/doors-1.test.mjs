@@ -1,4 +1,8 @@
-// Version: 1.5.0
+// Version: 1.6.0
+//
+// 1.6.0 (2026-11-23): new check for shelter-goals.js 1.3.1's fix to its own same-day
+// repair_terrain regression -- the apron-levelling call now passes a material she actually
+// holds, not whatever repair_terrain would have sampled off the pit's rim.
 //
 // 1.5.0 (2026-11-23): the shelterStep sandbox stubs shelterApronLevelSpot() (shelter-goals.js
 // 1.3.0's new site-levelling step, action-shelter.js 1.2.0) -- a no-op here, since this file's own
@@ -370,6 +374,35 @@ await check('Shelter goal: a door is secured before the walls, and an unfinished
   await c.shelterStep(goal, null);
   assert.equal(calls.at(-1).type, 'craft');
   assert.equal(calls.at(-1).count, 8, 'as many planks as two logs make, not all 58 missing');
+});
+
+
+await check('Shelter goal: levelling the site\'s apron fills with material she actually holds, not whatever repair_terrain would sample off the rim', async () => {
+  // Real bug found live 2026-11-23, hours after shelter-goals.js 1.3.0 first shipped: the call
+  // it added passed no material override, so repair_terrain sampled the pit's rim instead --
+  // almost never a match for what she was carrying. "need stone to fill this in -- don't have
+  // any", every tick, 90-220 times per bot over 12 hours, three bots never once reaching "build".
+  const { isShelterMaterial } = shelterFns();
+  const calls = [];
+  const site = new V3(5, 65, 5);
+  const levelSpot = { x: 6, y: 64, z: 5, targetY: 64 };
+  const c = vm.createContext({ Vec3: V3, USERNAME: 'Babs', SHELTER_SITE_RADIUS: 48, console,
+    bot: { spawnPoint: new V3(0, 64, 0), inventory: { items: () => [{ name: 'cobblestone', count: 20 }] },
+      blockAt: () => null, registry: { blocksByName: { crafting_table: { id: 1 } } }, findBlocks: () => [] },
+    isDoorway: () => true, doorwayPosition: (b) => b.offset(0, 0, 3), heldCount: () => 0,
+    isShelterMaterial, findShelterNearHome: () => null, unfinishedShelterNearHome: () => null, stuck: null,
+    shelterShellIsStuck: () => false, residencePlan: () => ({ kind: 'build', beds: 0, active: 1 }),
+    completeSheltersNearHome: () => [], findShelterSite: () => site, shelterApronLevelSpot: () => levelSpot,
+    shelterPositions: () => [], shelterMaterialCount: () => 20, recordKnownShelter: async () => {},
+    gatherPlanks: async () => null,
+    performAction: async (_bot, action) => { calls.push(action); return { ok: true, text: action.type }; } });
+  vm.runInContext(between(index, 'async function shelterStep(', 'async function runShelterGoal('), c);
+
+  await c.shelterStep({}, null);
+  assert.equal(calls.at(-1).type, 'repair_terrain', 'the apron gets levelled before the door/wall steps below it');
+  assert.equal(calls.at(-1).material, 'cobblestone',
+    'the fill material is one she actually holds -- repair_terrain would otherwise fail against whatever the rim happens to be');
+  assert.equal(JSON.stringify(calls.at(-1).position), JSON.stringify(levelSpot));
 });
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) console.log(`${passedCount()} unit checks passed.`);

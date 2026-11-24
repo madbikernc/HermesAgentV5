@@ -1,4 +1,9 @@
-// Version: 1.3.0
+// Version: 1.3.1
+//
+// 1.3.1 (2026-11-23, same-day fix: "check for recent behavior problems" surfaced 1.3.0's own
+// repair_terrain call thrashing fleet-wide -- it now passes one of her held shelter materials
+// as the fill override instead of leaving repair_terrain to sample the rim for a material she
+// may not be carrying. See the comment at the call site for the live numbers that caught it.
 //
 // 1.3.0 (2026-11-23, direct report "random structures of blocks, perhaps aborted shelters" ->
 // "add logic that site choice requires enough contiguous flat space... or as part of the
@@ -20,7 +25,7 @@
 // before index.js has run (only declarations live here).
 
 import { writeMemoryNote } from "./longterm.js";
-import { SHELTER_ROOM, communalShelterMaterialCount, communalShelterPositions, doorwayPosition, findCommunalShelterSite, findShelterSite, performAction, shelterApronLevelSpot, shelterMaterialCount, shelterPositions } from "./actions.js";
+import { SHELTER_ROOM, communalShelterMaterialCount, communalShelterPositions, doorwayPosition, findCommunalShelterSite, findShelterSite, isShelterMaterial, performAction, shelterApronLevelSpot, shelterMaterialCount, shelterPositions } from "./actions.js";
 import { logStep } from "./goals.js";
 import { isDoorway } from "./swim-movements.js";
 import { SHELTER_SITE_RADIUS, completeSheltersNearHome, residenceChestCell, residencePlan, shelterShellIsStuck, unfinishedShelterNearHome } from "./home-scan.js";
@@ -102,10 +107,17 @@ async function shelterStep(goal, handle) {
   // maybe stumble onto it. One spot per tick, same as every other step here. Skipped while she
   // holds no building material at all yet -- the gather step below gets her some first, same
   // order the wall material check already follows.
+  // Real bug found live 2026-11-23 (hours after the fix above first shipped): repair_terrain
+  // left to its own default samples a fill material from the pit's rim, which is almost never
+  // what she happens to be carrying -- "need stone to fill this in -- don't have any", every
+  // tick, 90-220 times per bot over 12 hours and three bots never once reaching an actual
+  // "build" the whole time. Passing one of her own shelter materials as the override skips that
+  // sampling and guarantees the fill she's about to attempt is one she can actually place.
   if (shelterMaterialCount(bot) > 0) {
     const levelSpot = shelterApronLevelSpot(bot, site);
-    if (levelSpot) {
-      return { ...(await performAction(bot, { type: "repair_terrain", position: levelSpot }, USERNAME, handle)),
+    const fillMaterial = levelSpot && bot.inventory.items().find((i) => isShelterMaterial(i.name))?.name;
+    if (fillMaterial) {
+      return { ...(await performAction(bot, { type: "repair_terrain", position: levelSpot, material: fillMaterial }, USERNAME, handle)),
         action: { type: "repair_terrain" } };
     }
   }
