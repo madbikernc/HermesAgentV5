@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# Version: 2.23.0
+# Version: 2.24.0
+#
+# 2.24.0 (2026-11-24) — check_minecraft_history() extended for hermes-fleetops-ui.py 2.28.0's
+# show/hide toggle: a completed fetch now renders inside an open `<details class="hist-toggle">`
+# with both swapped-by-CSS labels present and no fetch form inside it, while a failed fetch still
+# offers the plain retry form and carries no toggle. 3 new checks (494 total).
 #
 # 2.23.0 (2026-11-24) — check_write_surface() now expects SIX named routes, adding
 # /minecraft/history (hermes-fleetops-ui.py 2.27.0's "Show last 500" button on the Minecraft
@@ -2067,12 +2072,21 @@ def check_minecraft_history(ui, tmp):
         done_section = ui.mc_history_section("amy", ui.read_history_requests())
         check("a completed fetch renders the fetched actions, not just the default 20",
               "last 2 action(s)" in done_section and "no food" in done_section, done_section)
+        check("the fetched table sits inside an open show/hide toggle, not the plain fetch form",
+              '<details class="hist-toggle" open>' in done_section
+              and 'action="/minecraft/history"' not in done_section, done_section)
+        check("the toggle carries both labels, swapped client-side by CSS, not a server round trip",
+              '<span class="show-label">Show last 500</span>' in done_section
+              and '<span class="hide-label">Hide history</span>' in done_section, done_section)
 
         requests["amy"].update(result="error", actions=None, detail="ssh timed out")
         history_path.write_text(json.dumps(requests))
         fail_section = ui.mc_history_section("amy", ui.read_history_requests())
         check("a completed, failed fetch names the failure",
               "failed: ssh timed out" in fail_section, fail_section)
+        check("and still offers the plain fetch form to retry, not the toggle",
+              'action="/minecraft/history"' in fail_section
+              and "hist-toggle" not in fail_section, fail_section)
 
         print(NL + "[a new click replaces the old record for that bot, never piles up beside it]")
         check("exactly one record exists for amy after three separate requests",

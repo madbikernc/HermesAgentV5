@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 2.27.0
+# Version: 2.28.0
+#
+# 2.28.0 (2026-11-24) — direct operator request, found live right after 2.27.0 shipped: once a
+# fetch actually lands, mc_history_section() now renders the fetched table inside a nested
+# <details class="hist-toggle" open>, whose own <summary> reads "Hide history" while open and
+# "Show last 500" while closed (two spans, swapped by CSS alone via a `[open]` selector -- no new
+# JS). Clicking "Hide history" collapses straight back down to the default MC_ACTIONS_SHOWN rows
+# already rendered just above it, with no server round trip -- the CSRF-checked POST only ever
+# happens once, to actually fetch; hiding an already-fetched list needs none of that. Before this,
+# a successful fetch rendered the 500-row table unconditionally with no way back to the condensed
+# view short of a full page reload, which the operator read as "the button does nothing" (it
+# wasn't -- the fetch and the async /minecraft/control-style request/response split were both
+# already working correctly, confirmed live via history-requests.json and the service's own
+# journal; the only real gap was this missing toggle).
 #
 # 2.27.0 (2026-11-24) — direct operator request: the Minecraft tab's per-bot action history gains
 # a "Show last 500" button next to the existing MC_ACTIONS_SHOWN(=20) table, which keeps showing
@@ -740,6 +753,12 @@ p.worksheet-total { font-size:14px; margin:10px 0; }
 .r-warn { color:var(--warn); border-color:var(--warn); }
 details { margin:6px 0; }
 details summary { cursor:pointer; padding:4px 0; }
+details.hist-toggle > summary { display:inline-block; background:#1b1f27; color:var(--accent);
+       border:1px solid var(--line); border-radius:3px; padding:4px 10px; }
+details.hist-toggle > summary:hover { border-color:var(--accent); }
+details.hist-toggle > summary .hide-label { display:none; }
+details.hist-toggle[open] > summary .show-label { display:none; }
+details.hist-toggle[open] > summary .hide-label { display:inline; }
 input[type=search],input[type=text],select { background:#1b1f27; color:var(--fg);
        border:1px solid var(--line); border-radius:3px; padding:5px 8px; font:inherit; }
 input[type=checkbox] { accent-color:var(--accent); width:14px; height:14px; vertical-align:middle;
@@ -3360,24 +3379,37 @@ def write_history_request(bot, who=""):
 def mc_history_section(bot_name, requests):
     """The fetch button, plus whatever MC_HISTORY_RESULT the last click for this bot produced --
     appended inside the same <details> block as the default MC_ACTIONS_SHOWN table, so the full
-    history reads as "more of the same list", not a second, separate feature."""
+    history reads as "more of the same list", not a second, separate feature.
+
+    Once a fetch has actually landed (status done, result ok), the submit-button form is replaced
+    by a nested <details class="hist-toggle">, open by default, whose own <summary> reads "Hide
+    history" while open and "Show last 500" while closed (two spans, swapped by a `[open]` CSS
+    selector -- no JS). Revealing or hiding an already-fetched list is then a pure client-side
+    toggle: the CSRF-checked, validated POST only ever happens once, to actually fetch; "Hide
+    history" needs no server round trip, since all it has to do is stop showing rows beyond the
+    default MC_ACTIONS_SHOWN ones already rendered just above this."""
+    rec = requests.get(bot_name)
+    if rec and rec.get("status") == "done" and rec.get("result") == "ok":
+        who = f" by {esc(rec['requested_by'])}" if rec.get("requested_by") else ""
+        when = esc(mc_ago(rec.get("requested_at")))
+        actions = rec.get("actions") or []
+        return (f'<details class="hist-toggle" open><summary>'
+                f'<span class="show-label">Show last {MC_HISTORY_LIMIT}</span>'
+                f'<span class="hide-label">Hide history</span></summary>'
+                f'<p class="note">last {len(actions)} action(s) fetched {when}{who}</p>'
+                f'{mc_actions_table(actions)}</details>')
     form = (f'<form method="post" action="/minecraft/history">'
             f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
             f'<input type="hidden" name="bot" value="{esc(bot_name)}">'
             f'<button type="submit">Show last {MC_HISTORY_LIMIT}</button></form>')
-    rec = requests.get(bot_name)
     if not rec:
         return form
     who = f" by {esc(rec['requested_by'])}" if rec.get("requested_by") else ""
     when = esc(mc_ago(rec.get("requested_at")))
     if rec.get("status") == "pending":
         return f'{form}<p class="note">requested {when}{who} — pending, check back shortly</p>'
-    if rec.get("result") != "ok":
-        return (f'{form}<p class="note" style="color:var(--bad)">requested {when}{who} — '
-                f'failed: {esc(rec.get("detail") or "no detail")}</p>')
-    actions = rec.get("actions") or []
-    return (f'{form}<p class="note">last {len(actions)} action(s) fetched {when}{who}</p>'
-            f'{mc_actions_table(actions)}')
+    return (f'{form}<p class="note" style="color:var(--bad)">requested {when}{who} — '
+            f'failed: {esc(rec.get("detail") or "no detail")}</p>')
 
 
 def mc_time(ts):
