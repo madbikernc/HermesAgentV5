@@ -1,0 +1,15 @@
+[Unit]
+Description=hermes-minecraft-bots-history - fetch "last 500 actions" requests from fleetops-ui's /minecraft tab
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-minecraft-bots-history/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+# Reads ~/.hermes/state/minecraft-bots/history-requests.json for pending "last 500 actions"
+# requests hermes-fleetops-ui.py wrote, runs `journalctl` itself locally or over pmoney's
+# `spark2` SSH alias, and writes the parsed actions back to the same file. No ReadWritePaths
+# grant needed -- this unit is not sandboxed the way the UI service is; it needs a real shell
+# and SSH to do its job.
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-minecraft-bots-history.py
+TimeoutStartSec=60

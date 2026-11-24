@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-# Version: 2.26.0
+# Version: 2.27.0
+#
+# 2.27.0 (2026-11-24) — direct operator request: the Minecraft tab's per-bot action history gains
+# a "Show last 500" button next to the existing MC_ACTIONS_SHOWN(=20) table, which keeps showing
+# exactly what it always has -- the status snapshot's own, unchanged, 20-per-bot cap. 500 actions
+# is more than hermes-minecraft-bots-status.py's one-minute snapshot keeps (it only writes 20, to
+# stay cheap on every single run), so this is this file's SIXTH write route, /minecraft/history,
+# the same shape as 2.26.0's /minecraft/control: this process still runs no subprocess and no SSH
+# (check_write_surface() extended, not relaxed) -- it only validates the bot name and appends a
+# pending request to the new MC_HISTORY_PATH (same ~/.hermes/state/minecraft-bots directory as
+# MC_CONTROL_PATH, no unit change). The new sibling `hermes-minecraft-bots-history.py` (1.0.0, its
+# own 15-second timer, same re-validate-against-its-own-roster discipline as -control.py) is the
+# actual privileged reader: it runs `journalctl` itself, locally or over SSH, for up to 500
+# OUTCOME lines, and writes the parsed actions back onto the same record. Unlike
+# control-requests.json's append-and-trim list (a real audit trail of clicks is worth keeping),
+# history-requests.json is a dict keyed by bot name: a stale fetched list has no value once a
+# newer click exists, so a new request simply replaces the old record for that bot rather than
+# piling up beside it. mc_actions_table() now takes the actions list directly rather than a bot
+# dict, so the same renderer serves both the default 20-row table and the fetched-on-demand one.
 #
 # 2.26.0 (2026-11-24) — direct operator request, and a deliberate reversal of this file's own
 # stated house rule (see "── SCOPE ──" below, and the argument already on record there about
@@ -349,10 +367,10 @@
 #
 # Read-only reports, plus a small number of deliberately narrow write routes: the model-scout
 # backlog's decide buttons, the market watchlist's add form, (S48) the self-repair tab's decide
-# buttons, the Budget tab's per-row fix, and (2.26.0) the Minecraft tab's per-bot Stop/Start/
-# Restart. Each is its own route under the one do_POST handler, gated by its own imported
-# transition table where one exists — never a shared write surface two features could disagree
-# through.
+# buttons, the Budget tab's per-row fix, (2.26.0) the Minecraft tab's per-bot Stop/Start/Restart,
+# and (2.27.0) that same tab's on-demand "last 500 actions" fetch. Each is its own route under the
+# one do_POST handler, gated by its own imported transition table where one exists — never a
+# shared write surface two features could disagree through.
 #
 # Services used to not be started, stopped or restarted from here at all — "that stays an SSH +
 # `systemctl` operator action, like every other privileged action in this fleet
@@ -468,6 +486,12 @@ MC_BOTS_STATUS_PATH = os.environ.get(
 MC_CONTROL_PATH = os.environ.get(
     "MC_CONTROL_PATH",
     str(Path.home() / ".hermes" / "state" / "minecraft-bots" / "control-requests.json"))
+# Same directory, same grant again -- this file only ever appends a pending request here too;
+# hermes-minecraft-bots-history.py is the separate, privileged process that actually runs
+# journalctl and writes the fetched actions back (2.27.0).
+MC_HISTORY_PATH = os.environ.get(
+    "MC_HISTORY_PATH",
+    str(Path.home() / ".hermes" / "state" / "minecraft-bots" / "history-requests.json"))
 
 TOOLS = Path(__file__).resolve().parent
 REPO = TOOLS.parent
@@ -3282,6 +3306,80 @@ def mc_control_cell(bot_name, requests):
     return f"{form}<br>{status}"
 
 
+# ── On-demand "last 500 actions" (2.27.0, direct operator request) ──────────────────────────────
+#
+# Same split as Stop/Start/Restart above: this process still never runs journalctl itself.
+# write_history_request() only validates and records a pending fetch in MC_HISTORY_PATH;
+# hermes-minecraft-bots-history.py (a separate, privileged process, its own 15-second timer) is
+# what actually reads it, re-validates against its own freshly-discovered roster, runs the real
+# journalctl query, and writes the parsed actions back here. Shaped as a dict keyed by bot name,
+# NOT control-requests.json's append-and-trim list: a stale fetched action list has no value once
+# a newer click exists for the same bot, so a new request simply replaces the old record rather
+# than piling up beside it the way a real audit trail (control's own clicks) is worth keeping.
+MC_HISTORY_LIMIT = 500
+MC_HISTORY_RESULT_MESSAGES = {
+    "requested": "Requested — the next history pass (about every 15s) will fetch it.",
+    "nosuch": "Not a bot this snapshot knows about — nothing requested.",
+    "toolarge": "Request too large — nothing requested. Try again.",
+    "csrf": "Could not confirm the request — nothing requested. Try again.",
+}
+
+
+def read_history_requests():
+    try:
+        data = json.loads(Path(MC_HISTORY_PATH).read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_history_request(bot, who=""):
+    """Validates, then replaces any existing record for this bot with a fresh pending one.
+    Returns a MC_HISTORY_RESULT_MESSAGES key. Same courtesy-check-only stance as
+    write_control_request() above: hermes-minecraft-bots-history.py re-validates against its own
+    freshly-discovered roster before ever touching journalctl, never trusting this less-privileged
+    process's own write."""
+    bot = (bot or "").strip().lower()
+    try:
+        known = known_bot_names()
+    except (OSError, ValueError):
+        known = set()
+    if bot not in known:
+        return "nosuch"
+    requests = read_history_requests()
+    requests[bot] = {"status": "pending", "requested_at": time.time(), "requested_by": who,
+                      "actions": None, "detail": None, "completed_at": None}
+    path = Path(MC_HISTORY_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(requests))
+    os.replace(tmp, path)  # never read half-written, same as write_snapshot()'s own convention
+    return "requested"
+
+
+def mc_history_section(bot_name, requests):
+    """The fetch button, plus whatever MC_HISTORY_RESULT the last click for this bot produced --
+    appended inside the same <details> block as the default MC_ACTIONS_SHOWN table, so the full
+    history reads as "more of the same list", not a second, separate feature."""
+    form = (f'<form method="post" action="/minecraft/history">'
+            f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
+            f'<input type="hidden" name="bot" value="{esc(bot_name)}">'
+            f'<button type="submit">Show last {MC_HISTORY_LIMIT}</button></form>')
+    rec = requests.get(bot_name)
+    if not rec:
+        return form
+    who = f" by {esc(rec['requested_by'])}" if rec.get("requested_by") else ""
+    when = esc(mc_ago(rec.get("requested_at")))
+    if rec.get("status") == "pending":
+        return f'{form}<p class="note">requested {when}{who} — pending, check back shortly</p>'
+    if rec.get("result") != "ok":
+        return (f'{form}<p class="note" style="color:var(--bad)">requested {when}{who} — '
+                f'failed: {esc(rec.get("detail") or "no detail")}</p>')
+    actions = rec.get("actions") or []
+    return (f'{form}<p class="note">last {len(actions)} action(s) fetched {when}{who}</p>'
+            f'{mc_actions_table(actions)}')
+
+
 def mc_time(ts):
     """Seconds matter for an action log; the date only when it isn't today."""
     if not ts:
@@ -3326,9 +3424,9 @@ def mc_latest_cell(bot):
     return "<br>".join(lines) or '<span class="empty">—</span>'
 
 
-def mc_actions_table(bot):
+def mc_actions_table(actions):
     rows = []
-    for a in bot.get("actions", []):
+    for a in actions:
         result = a.get("result", "?")
         rows.append([f'<span class="mono">{esc(mc_time(a.get("at")))}</span>', esc(a.get("type", "?")),
                      f'<span class="pill {MC_RESULT_CLASS.get(result, "")}">{esc(result)}</span>',
@@ -3378,19 +3476,23 @@ def render_minecraft():
     out.append(table(["bot", "host", "state", "current goal", "latest", "control"], rows))
 
     out.append(f"<h3>Last {MC_ACTIONS_SHOWN} actions per bot</h3>")
+    history_requests = read_history_requests()
     for b in bots:
+        name = b.get("name", "?")
         counts = Counter(a.get("result") for a in b.get("actions", []))
         summary = ", ".join(f"{n} {r}" for r, n in sorted(counts.items(), key=lambda kv: -kv[1]))
         opened = " open" if b.get("active_state") == "active" else ""
-        out.append(f'<details{opened}><summary><b>{esc(b.get("name", "?").title())}</b> '
+        out.append(f'<details{opened}><summary><b>{esc(name.title())}</b> '
                    f'<span class="note">{esc(summary) or "no actions logged in the last 7 days"}'
-                   f'</span></summary>{mc_actions_table(b)}</details>')
+                   f'</span></summary>{mc_actions_table(b.get("actions", []))}'
+                   f'{mc_history_section(name, history_requests)}</details>')
     return "".join(out)
 
 
 def page_minecraft(query):
     control_msg = MC_CONTROL_RESULT_MESSAGES.get((query.get("control") or [""])[0], "")
-    body = f'<p class="note">{esc(control_msg)}</p>' if control_msg else ""
+    history_msg = MC_HISTORY_RESULT_MESSAGES.get((query.get("history") or [""])[0], "")
+    body = "".join(f'<p class="note">{esc(m)}</p>' for m in (control_msg, history_msg) if m)
     body += section(
         "Minecraft bots",
         "Which bots are running, each one's current goal and latest log lines, and its last "
@@ -3399,7 +3501,10 @@ def page_minecraft(query):
         "both hosts). Failed actions carry the bot's own reason. Stop/Start/Restart (2.26.0) "
         "post a request that <span class=\"mono\">hermes-minecraft-bots-control.py</span> "
         "carries out on its own ~15-second pass — the result shows up here once that's happened, "
-        "not immediately.",
+        f"not immediately. Each bot's history section also has a \"Show last {MC_HISTORY_LIMIT}\" "
+        "button (2.27.0), fetched the same asynchronous way by "
+        "<span class=\"mono\">hermes-minecraft-bots-history.py</span> — more than the snapshot "
+        "itself keeps, so it is never instant either.",
         render_minecraft)
     return shell("Minecraft bots", body)
 
@@ -3834,11 +3939,11 @@ class Handler(BaseHTTPRequestHandler):
                                            f'{esc(type(exc).__name__)}: {esc(exc)}</div>'))
 
     def do_POST(self):
-        """This service's only five write routes.
+        """This service's only six write routes.
 
         A GET never changes state — every write arrives here as a form POST, so a link, a
         prefetch or a crawler cannot decide anything, add a monitored ticker, or fix a budget
-        category. Body-length cap and CSRF check are shared by all five routes below; only the
+        category. Body-length cap and CSRF check are shared by all six routes below; only the
         field names and the action taken differ. /selfrepair/decide (S48,
         FLEET_SELFREPAIR_DESIGN.md §4.8) is the third, added alongside /backlog/decide rather
         than merged into it — two independently-reasoned-about gates (model-scout's, self-
@@ -3850,13 +3955,16 @@ class Handler(BaseHTTPRequestHandler):
         (2.26.0, direct operator request, overriding this file's own prior "no service control
         from here" rule) is the fifth: unlike every other route here, this one never performs the
         real action itself -- it only validates and appends a pending request that a separate,
-        privileged process (hermes-minecraft-bots-control.py) picks up and actually runs."""
+        privileged process (hermes-minecraft-bots-control.py) picks up and actually runs.
+        /minecraft/history (2.27.0) is the sixth, same shape as the fifth but for a read instead
+        of a mutation -- validates a bot name and appends a pending fetch that
+        hermes-minecraft-bots-history.py picks up and runs the real journalctl query for."""
         parsed = urllib.parse.urlparse(self.path)
         if not self._authed():
             return
         path = parsed.path.rstrip("/")
         if path not in ("/backlog/decide", "/market/monitor/add", "/selfrepair/decide",
-                        "/budget/classify", "/minecraft/control"):
+                        "/budget/classify", "/minecraft/control", "/minecraft/history"):
             self._send(404, shell("Not found", '<p class="empty">No such route.</p>'))
             return
         try:
@@ -3880,6 +3988,7 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/market?monitor=badaction" if path == "/market/monitor/add"
                            else "/budget" if path == "/budget/classify"
                            else "/minecraft?control=badaction" if path == "/minecraft/control"
+                           else "/minecraft?history=toolarge" if path == "/minecraft/history"
                            else f"{DECIDE_REDIRECT_BASE[path]}?result=badaction")
             return
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
@@ -3889,7 +3998,16 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/market?monitor=csrf" if path == "/market/monitor/add"
                            else "/budget?csrf=1" if path == "/budget/classify"
                            else "/minecraft?control=csrf" if path == "/minecraft/control"
+                           else "/minecraft?history=csrf" if path == "/minecraft/history"
                            else f"{DECIDE_REDIRECT_BASE[path]}?csrf=1")
+            return
+
+        if path == "/minecraft/history":
+            bot = (form.get("bot") or [""])[0]
+            who = tailnet_identity(self.headers)
+            result = write_history_request(bot, who)
+            log(f"minecraft history requested: bot={bot!r} by {who or 'unidentified'} -> {result}")
+            self._redirect(f"/minecraft?history={result}")
             return
 
         if path == "/minecraft/control":
@@ -3995,7 +4113,9 @@ def main():
         f"[{'armed' if GATE and MEMORY_TOKEN else 'DISABLED'}], /selfrepair/decide "
         f"[{'armed' if SELFREPAIR_GATE and MEMORY_TOKEN else 'DISABLED'}], /budget/classify "
         f"[armed -- finance.db, no MEMORY_TOKEN needed], /minecraft/control "
-        f"[armed -- {MC_CONTROL_PATH}, picked up by hermes-minecraft-bots-control.py separately])")
+        f"[armed -- {MC_CONTROL_PATH}, picked up by hermes-minecraft-bots-control.py separately], "
+        f"/minecraft/history [armed -- {MC_HISTORY_PATH}, picked up by "
+        f"hermes-minecraft-bots-history.py separately])")
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
 
 

@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.20.0
+**Version:** 2.21.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog (now leading with a "Recommended for benchmarking" section), which checkpoint backs each
@@ -16,12 +16,13 @@ month at a time) modes. Runs on **Watch (spark)** only, over **HTTPS**, Basic Au
 
 Read-only reports, plus a small number of deliberately narrow write routes: the benchmark
 backlog's decide buttons, the market watchlist's add form, (S48) the self-repair tab's decide
-buttons, the Budget tab's per-row category fix, and (2.26.0) the Minecraft tab's per-bot
-Stop/Start/Restart. Each is its own route in the one `do_POST` handler; the first three are gated
-by their own imported transition table, the fourth writes directly to `finance.db` through
-`hermes_finance_common.py`'s own `set_budget_classification()` (no transition table — a
-classification is a plain value, not a state machine), and the fifth writes a pending request to a
-flat file for a separate process to actually carry out (see below).
+buttons, the Budget tab's per-row category fix, (2.26.0) the Minecraft tab's per-bot
+Stop/Start/Restart, and (2.27.0) that same tab's on-demand "last 500 actions" fetch. Each is its
+own route in the one `do_POST` handler; the first three are gated by their own imported transition
+table, the fourth writes directly to `finance.db` through `hermes_finance_common.py`'s own
+`set_budget_classification()` (no transition table — a classification is a plain value, not a
+state machine), and the fifth and sixth each write a pending request to a flat file for a separate
+process to actually carry out (see below).
 
 **Services used to not be started, stopped or restarted from here at all, through 2.25.1** — "that
 stays an SSH + `systemctl` operator action, like every other privileged action in this fleet
@@ -43,6 +44,18 @@ wrote — and only then runs `sudo systemctl <action> minecraft-bot-<name>.servi
 SSH, writing the result back to the same file. So a click here is asynchronous by design: the
 banner says "requested", and the bots table shows done/failed once that separate process has
 actually caught up, never a false confirmation from this one.
+
+**2.27.0 extends the same split to a read, not a mutation.** The action-history section's default
+table still only ever shows `MC_ACTIONS_SHOWN` (20) rows, exactly what it always has — the status
+snapshot's own, unchanged, per-bot cap. A new "Show last 500" button per bot posts to
+`/minecraft/history`, which validates the bot name and appends a pending record to the new
+`MC_HISTORY_PATH` (same directory, same grant, no unit change); the new, separate, unsandboxed
+`hermes-minecraft-bots-history.py` (its own README, `infra/hermes-minecraft-bots-history/`), on
+its own 15-second timer, is what actually runs `journalctl` — locally or over SSH — for up to 500
+`OUTCOME` lines and writes the parsed actions back. Unlike `control-requests.json`'s
+append-and-trim list of clicks, `history-requests.json` is a dict keyed by bot name: a stale
+fetched list has no value once a newer click exists for the same bot, so a new request simply
+replaces the old record.
 
 ### The decide buttons, and the argument that was had about them
 
@@ -253,6 +266,7 @@ missing-table crash on first run — is the concrete precedent.
 | `/status` | `FLEET_HEALTH_PATH` (default `~/.hermes/state/fleet-health/last-report.json`), a plain JSON file | `hermes-fleet-health.py` 1.7.0 writes it every run (daily, 06:00); never fresher than that — see below |
 | `/minecraft` | `MC_STATUS_PATH` (default `~/.hermes/state/minecraft-bots/status.json`), a plain JSON file | `hermes-minecraft-bots-status.py` writes it every minute for both hosts' bots; flagged stale past 5 minutes — see `infra/hermes-minecraft-bots-status/README.md` |
 | `/minecraft` Stop/Start/Restart | `MC_CONTROL_PATH` (default `~/.hermes/state/minecraft-bots/control-requests.json`) — this page only writes a pending request | `hermes-minecraft-bots-control.py` (separate, unsandboxed, 15s timer) is what actually runs it — see `infra/hermes-minecraft-bots-control/README.md` and the Scope section above |
+| `/minecraft` "Show last 500" | `MC_HISTORY_PATH` (default `~/.hermes/state/minecraft-bots/history-requests.json`) — this page only writes a pending request | `hermes-minecraft-bots-history.py` (separate, unsandboxed, 15s timer) is what actually runs `journalctl` — see `infra/hermes-minecraft-bots-history/README.md` and the Scope section above |
 
 **The plan was wrong about the backlog source and the code follows the store, not the plan.** S21b
 said to read the scout's tasks with "the same `GET /tasks` shape `hermes-self-repair-status.py`
@@ -347,7 +361,7 @@ route, since even with a stolen CSRF token a form on someone else's page cannot 
 
 ## 6. Tests
 
-`tests/test_fleetops_ui.py` — 477 offline checks, no network, no live store, no socket bound. The
+`tests/test_fleetops_ui.py` — 491 offline checks, no network, no live store, no socket bound. The
 fixtures are the real schemas read off the live stores on 2026-10-09, because the first draft got
 two of them wrong from the plan's own prose. Also asserts the things that are easy to break
 silently: that the NAS and local history paths still equal `hermes_benchmark_common`'s own
@@ -423,6 +437,7 @@ rather than silent. A restart re-fetches the credentials.
 
 | Version | Date | Change |
 |---|---|---|
+| 2.21.0 | 2026-11-24 | **New: a "Show last 500" button per bot on the Minecraft tab's action-history section (hermes-fleetops-ui.py 2.27.0), direct operator request** — the default table keeps showing exactly the `MC_ACTIONS_SHOWN` (20) rows it always has; the button fetches more than the one-minute snapshot keeps. Same split as 2.20.0's Stop/Start/Restart, for a read instead of a mutation: this file's sixth write route, `/minecraft/history`, only ever validates the bot name and appends a pending record to the new `MC_HISTORY_PATH` (same directory, same existing `ReadWritePaths` grant); the real `journalctl` call is a new, separate, unsandboxed process, `hermes-minecraft-bots-history.py` (`infra/hermes-minecraft-bots-history/`), on its own 15-second timer, re-validating against its own freshly-discovered roster. `history-requests.json` is a dict keyed by bot name rather than `control-requests.json`'s append-and-trim list — a stale fetched list has no value once a newer click exists, so a new request replaces the old record instead of piling up beside it. `mc_actions_table()` now takes a plain actions list rather than a bot dict, so the same renderer serves both the default table and the fetched one. 14 new offline checks (491 total): `check_write_surface()` now expects six routes, and new `check_minecraft_history()` covers validation, the replace-not-append shape, the rendered form/section, a completed or failed fetch, and the page's own result banner alongside the control one. |
 | 2.20.0 | 2026-11-24 | **New: per-bot Stop/Start/Restart on the Minecraft tab (hermes-fleetops-ui.py 2.26.0), overriding this file's own prior "no service control from here" rule, on direct operator request given explicitly as a choice between three options** (build the real thing / read-only command display / route through `hermes-confirm-gate.sh`) — the operator chose to build it. This file's own sandbox did not widen: the fifth write route, `/minecraft/control`, still only ever validates and appends a pending request (`MC_CONTROL_PATH`, already inside the existing state-directory `ReadWritePaths` grant); the real `systemctl` call is a brand-new, separate, unsandboxed process, `hermes-minecraft-bots-control.py` (`infra/hermes-minecraft-bots-control/`), on its own 15-second timer, which re-validates against its own freshly-discovered roster rather than trusting this process's write. Each button carries its own confirmation dialog via a new `data-confirm-one` PAGE_SCRIPT branch (the existing `data-confirm` handler is wired to the bulk-decide checkbox count and would silently no-op a single-button form). 19 new offline checks (477 total): `check_write_surface()` now expects five routes and asserts this file still imports no subprocess, and new `check_minecraft_control()` covers validation, attribution, the rendered form/status cell, the request file's bound, and the page's own result banner. |
 | 2.17.0 | 2026-11-08 | New `/selfrepair` tab (S48, `FLEET_SELFREPAIR_DESIGN.md` §4.8, part of that design's Phase 2). Read-only (state, domain, path, problem, dualcoder round count, a collapsible diff preview, any opened PR, any daily-review recommendation) plus a third write route, `/selfrepair/decide`, following this file's own house rule (§"Why this imports the gate instead of reimplementing it" above): the transition table and task/turn writers come from `hermes-self-repair-promote-gate.py` (bumped to 1.1.0 for a new `TRANSITIONS`/`write_turn()` pair built for this), imported through a fail-closed `load_selfrepair_gate()`, mirroring `load_gate()` exactly. No ownership check on this route — unlike model-scout's tasks, self-repair tasks carry no single stable owner agent, so `read_selfrepair_tasks()` selects by `agent LIKE 'selfrepair%'` instead. Also fixes a real latent gap found while wiring this up: `hermes-self-repair-promote-gate.py`'s own `set_task_state()` never returned anything, so no caller could tell a successful write from a failed one except by reading the log line — now returns `True`/`False` like the scout gate's own `set_task_state()` already does. Also corrects this file's own stale "Scope" line, which still said "plus **one** write route" after the market watchlist's add form had already made it two (2.12.0) — now states all three. 43 new offline checks (423 total). |
 | 1.0.0 | 2026-10-09 | Initial version — S21a-e built and verified live on spark: port 8103 chosen against a live `ss -ltnp` after 8101 turned out to be `hermes-buzz`, the backlog source corrected from the plan's `GET /tasks` to a read-only sqlite read, benchmark `suites`/`value` schema corrected from the plan's assumed `scores` blob, and all five pages fetched returning HTTP 200 with zero section errors. 64 offline checks. |

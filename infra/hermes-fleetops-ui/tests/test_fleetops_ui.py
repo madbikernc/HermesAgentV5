@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-# Version: 2.22.0
+# Version: 2.23.0
+#
+# 2.23.0 (2026-11-24) — check_write_surface() now expects SIX named routes, adding
+# /minecraft/history (hermes-fleetops-ui.py 2.27.0's "Show last 500" button on the Minecraft
+# tab's action-history section) and updating its subprocess-absence check to also name
+# hermes-minecraft-bots-history.py. New check_minecraft_history(): an unknown bot is refused
+# before anything is written, a legal request is recorded pending (keyed by bot name, not
+# appended) and attributed, the rendered section carries the form and a real CSRF token, a
+# completed fetch renders the fetched actions through the now-generic mc_actions_table() (which
+# takes a plain list, not a bot dict, since 2.27.0 reuses it for both the default 20-row table and
+# this one), a failed fetch names its failure, a second click replaces rather than duplicates the
+# bot's record, and the page shows its own banner for a request/rejection outcome, alongside the
+# control banner without colliding. check_unit_sandbox() needed no change -- the new write target
+# sits under the state directory's existing grant, same as /minecraft/control's did.
 #
 # 2.22.0 (2026-11-24) — check_write_surface() now expects FIVE named routes, adding
 # /minecraft/control (hermes-fleetops-ui.py 2.26.0's Stop/Start/Restart buttons, a deliberate,
@@ -728,20 +741,21 @@ def check_degradation(ui):
 
 
 def check_write_surface(ui):
-    print(NL + "[the write surface is exactly one guarded dispatcher, five named routes]")
+    print(NL + "[the write surface is exactly one guarded dispatcher, six named routes]")
     src = (TOOLS / "hermes-fleetops-ui.py").read_text(encoding="utf-8")
     check("there is exactly one write handler", src.count("def do_POST") == 1)
     start = src.index("path not in (") + len("path not in (")
     end = src.index("):", start)
     routes_text = src[start:end]
     expected_routes = ["/backlog/decide", "/market/monitor/add", "/selfrepair/decide",
-                        "/budget/classify", "/minecraft/control"]
-    check("and it serves only five named routes -- /backlog/decide, /market/monitor/add, "
-          "/selfrepair/decide, /budget/classify, /minecraft/control",
+                        "/budget/classify", "/minecraft/control", "/minecraft/history"]
+    check("and it serves only six named routes -- /backlog/decide, /market/monitor/add, "
+          "/selfrepair/decide, /budget/classify, /minecraft/control, /minecraft/history",
           all(f'"{r}"' in routes_text for r in expected_routes)
           and routes_text.count('"') == 2 * len(expected_routes), routes_text)
-    check("this file still runs no subprocess at all -- the real systemctl/ssh call stays "
-          "hermes-minecraft-bots-control.py's job, a separate privileged process",
+    check("this file still runs no subprocess at all -- the real systemctl/ssh/journalctl call "
+          "stays hermes-minecraft-bots-control.py's/-history.py's job, separate privileged "
+          "processes",
           "import subprocess" not in src and "os.system(" not in src)
     check("the decide body cap is a named constant, not a bare magic number",
           "0 <= length <= MAX_DECIDE_BODY" in src and "0 <= length <= 8192" not in src)
@@ -2009,6 +2023,86 @@ def check_minecraft_control(ui, tmp):
         ui.MC_BOTS_STATUS_PATH, ui.MC_CONTROL_PATH = orig_status, orig_control
 
 
+def check_minecraft_history(ui, tmp):
+    print(NL + "[minecraft bots: 'Show last 500' posts a request, never runs journalctl here]")
+    import time as tm
+    snap = {"generated_at": "2026-11-24T00:00:00+00:00",
+            "hosts": [{"host": "spark", "collected_at": "x", "error": None, "bots": [
+                {"name": "amy", "role": "Builder", "active_state": "active", "since": tm.time(),
+                 "restarts": 0, "goal": None, "latest": [], "last_goal_event": None,
+                 "actions": [{"at": tm.time(), "type": "mine", "result": "ok", "ms": 500,
+                              "why": ""}]}]}]}
+    status_path = tmp / "mc-status-for-history.json"
+    status_path.write_text(json.dumps(snap))
+    history_path = tmp / "mc-history-requests.json"
+    orig_status, orig_history = ui.MC_BOTS_STATUS_PATH, ui.MC_HISTORY_PATH
+    ui.MC_BOTS_STATUS_PATH, ui.MC_HISTORY_PATH = str(status_path), str(history_path)
+    try:
+        check("an unknown bot is refused before anything is written",
+              ui.write_history_request("nobody", "x") == "nosuch" and not history_path.exists())
+        check("a legal request is accepted and recorded pending",
+              ui.write_history_request("amy", "Paul <p@x>") == "requested")
+        requests = ui.read_history_requests()
+        check("keyed by bot name, one record, pending, attributed, with no actions yet",
+              list(requests) == ["amy"] and requests["amy"]["status"] == "pending"
+              and requests["amy"]["actions"] is None
+              and requests["amy"]["requested_by"] == "Paul <p@x>", requests)
+
+        section = ui.mc_history_section("amy", requests)
+        check("the form posts to /minecraft/history with a real CSRF token and the bot name",
+              'action="/minecraft/history"' in section and f'value="{ui.CSRF_TOKEN}"' in section
+              and 'name="bot" value="amy"' in section, section)
+        check("a bot with no request on file still gets the button",
+              '<button type="submit">' in ui.mc_history_section("babs", {}))
+        check("the pending request shows as pending, not silently", "pending" in section, section)
+
+        # Simulate the privileged executor (hermes-minecraft-bots-history.py) finishing the job --
+        # this UI never does this itself, it only ever reads the file back afterwards.
+        fetched = [{"at": tm.time(), "type": "mine", "result": "ok", "ms": 500, "why": ""},
+                   {"at": tm.time() - 5, "type": "loot", "result": "failed", "ms": 900,
+                    "why": "no food"}]
+        requests["amy"].update(status="done", result="ok", actions=fetched,
+                                completed_at=tm.time())
+        history_path.write_text(json.dumps(requests))
+        done_section = ui.mc_history_section("amy", ui.read_history_requests())
+        check("a completed fetch renders the fetched actions, not just the default 20",
+              "last 2 action(s)" in done_section and "no food" in done_section, done_section)
+
+        requests["amy"].update(result="error", actions=None, detail="ssh timed out")
+        history_path.write_text(json.dumps(requests))
+        fail_section = ui.mc_history_section("amy", ui.read_history_requests())
+        check("a completed, failed fetch names the failure",
+              "failed: ssh timed out" in fail_section, fail_section)
+
+        print(NL + "[a new click replaces the old record for that bot, never piles up beside it]")
+        check("exactly one record exists for amy after three separate requests",
+              ui.write_history_request("amy", "x") == "requested"
+              and list(ui.read_history_requests()) == ["amy"]
+              and ui.read_history_requests()["amy"]["status"] == "pending")
+
+        print(NL + "[mc_actions_table() takes a plain actions list, not a bot dict]")
+        rendered = ui.mc_actions_table(fetched)
+        check("the shared renderer works on a raw list, same pills as the 20-row table",
+              'class="pill r-ok">ok<' in rendered and 'class="pill r-bad">failed<' in rendered,
+              rendered)
+
+        print(NL + "[the page itself wires the form up, with a result banner on return]")
+        page = ui.page_minecraft({}).decode()
+        check("the history form posts to /minecraft/history", 'action="/minecraft/history"' in page)
+        page = ui.page_minecraft({"history": ["requested"]}).decode()
+        check("a successful post shows its own banner",
+              ui.MC_HISTORY_RESULT_MESSAGES["requested"] in page, page[:400])
+        page = ui.page_minecraft({"history": ["nosuch"]}).decode()
+        check("an unknown bot's rejection shows its own banner",
+              ui.MC_HISTORY_RESULT_MESSAGES["nosuch"] in page, page[:400])
+        page = ui.page_minecraft({"control": ["requested"], "history": ["nosuch"]}).decode()
+        check("both banners can show together without colliding",
+              ui.MC_CONTROL_RESULT_MESSAGES["requested"] in page
+              and ui.MC_HISTORY_RESULT_MESSAGES["nosuch"] in page, page[:600])
+    finally:
+        ui.MC_BOTS_STATUS_PATH, ui.MC_HISTORY_PATH = orig_status, orig_history
+
+
 def check_decide_unavailable(ui):
     print(NL + "[a page must not offer an action it knows it cannot perform]")
     # 2026-10-16: the service came up during post-reboot vault contention, its wrapper fetches
@@ -2388,6 +2482,7 @@ def main():
         check_system_status(ui, tmp)
         check_minecraft(ui, tmp)
         check_minecraft_control(ui, tmp)
+        check_minecraft_history(ui, tmp)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:
