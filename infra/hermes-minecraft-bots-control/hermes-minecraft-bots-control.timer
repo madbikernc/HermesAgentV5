@@ -1,0 +1,10 @@
+[Unit]
+Description=Process pending Minecraft bot control requests every 15 seconds
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+AccuracySec=2s
+
+[Install]
+WantedBy=timers.target

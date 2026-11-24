@@ -1,0 +1,15 @@
+[Unit]
+Description=hermes-minecraft-bots-control - execute Stop/Start/Restart requests from fleetops-ui's /minecraft tab
+Documentation=file:///home/pmoney/HermesAgentV5/infra/hermes-minecraft-bots-control/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pmoney
+# Reads ~/.hermes/state/minecraft-bots/control-requests.json for pending Stop/Start/Restart
+# requests hermes-fleetops-ui.py wrote, runs `sudo systemctl <action>
+# minecraft-bot-<name>.service` locally or over pmoney's `spark2` SSH alias, and writes the
+# result back to the same file. No ReadWritePaths grant needed -- this unit is not sandboxed the
+# way the UI service is; it needs a real shell, sudo and SSH to do its job.
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-minecraft-bots-control.py
+TimeoutStartSec=60

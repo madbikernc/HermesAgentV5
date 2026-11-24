@@ -1,6 +1,6 @@
 # hermes-fleetops-ui — recreate checklist
 
-**Version:** 2.19.0
+**Version:** 2.20.0
 
 S21. One browser page for the human-facing surfaces this fleet already has: the model-benchmark
 backlog (now leading with a "Recommended for benchmarking" section), which checkpoint backs each
@@ -16,14 +16,33 @@ month at a time) modes. Runs on **Watch (spark)** only, over **HTTPS**, Basic Au
 
 Read-only reports, plus a small number of deliberately narrow write routes: the benchmark
 backlog's decide buttons, the market watchlist's add form, (S48) the self-repair tab's decide
-buttons, and the Budget tab's per-row category fix. Each is its own route in the one `do_POST`
-handler; the first three are gated by their own imported transition table, the last writes
-directly to `finance.db` through `hermes_finance_common.py`'s own `set_budget_classification()`
-(no transition table — a classification is a plain value, not a state machine).
+buttons, the Budget tab's per-row category fix, and (2.26.0) the Minecraft tab's per-bot
+Stop/Start/Restart. Each is its own route in the one `do_POST` handler; the first three are gated
+by their own imported transition table, the fourth writes directly to `finance.db` through
+`hermes_finance_common.py`'s own `set_budget_classification()` (no transition table — a
+classification is a plain value, not a state machine), and the fifth writes a pending request to a
+flat file for a separate process to actually carry out (see below).
 
-Services are still not started, stopped or restarted from here. That stays an SSH + `systemctl`
-operator action, like every other privileged action in this fleet
-(`tools/hermes-confirm-gate.sh` exists for that reason).
+**Services used to not be started, stopped or restarted from here at all, through 2.25.1** — "that
+stays an SSH + `systemctl` operator action, like every other privileged action in this fleet
+(`tools/hermes-confirm-gate.sh` exists for that reason)." Direct operator request (2026-11-24)
+overrode that, for exactly the Minecraft bots page: Stop/Start/Restart buttons per bot. The
+override was surfaced and asked about explicitly before anything was built — build the real thing,
+keep the page read-only and show the `ssh`+`systemctl` command to run by hand, or route it through
+`hermes-confirm-gate.sh`'s Matrix-confirmation pattern instead — and the operator chose to build
+the real thing. **This service's own sandbox did not widen to do it.** It still runs no
+subprocess and no SSH (`check_write_surface()` now also asserts this directly, not just by
+omission). `/minecraft/control` only ever validates the bot name (against this process's own live
+snapshot) and the action (stop/start/restart), then appends a pending record to
+`MC_CONTROL_PATH` (default `~/.hermes/state/minecraft-bots/control-requests.json`, already inside
+the existing `ReadWritePaths` grant below — no unit change). The actual privileged work is a new,
+separate, unsandboxed process, `hermes-minecraft-bots-control.py` (its own README,
+`infra/hermes-minecraft-bots-control/`), on its own 15-second timer: it re-validates the request
+against its OWN freshly-discovered roster — never trusting what this less-privileged process
+wrote — and only then runs `sudo systemctl <action> minecraft-bot-<name>.service`, locally or over
+SSH, writing the result back to the same file. So a click here is asynchronous by design: the
+banner says "requested", and the bots table shows done/failed once that separate process has
+actually caught up, never a false confirmation from this one.
 
 ### The decide buttons, and the argument that was had about them
 
@@ -233,6 +252,7 @@ missing-table crash on first run — is the concrete precedent.
 | `/recommendations` (top section) | `MODEL_SWAP_RECOMMENDATIONS`, a curated constant in the module itself | **not** read from a live store — see below |
 | `/status` | `FLEET_HEALTH_PATH` (default `~/.hermes/state/fleet-health/last-report.json`), a plain JSON file | `hermes-fleet-health.py` 1.7.0 writes it every run (daily, 06:00); never fresher than that — see below |
 | `/minecraft` | `MC_STATUS_PATH` (default `~/.hermes/state/minecraft-bots/status.json`), a plain JSON file | `hermes-minecraft-bots-status.py` writes it every minute for both hosts' bots; flagged stale past 5 minutes — see `infra/hermes-minecraft-bots-status/README.md` |
+| `/minecraft` Stop/Start/Restart | `MC_CONTROL_PATH` (default `~/.hermes/state/minecraft-bots/control-requests.json`) — this page only writes a pending request | `hermes-minecraft-bots-control.py` (separate, unsandboxed, 15s timer) is what actually runs it — see `infra/hermes-minecraft-bots-control/README.md` and the Scope section above |
 
 **The plan was wrong about the backlog source and the code follows the store, not the plan.** S21b
 said to read the scout's tasks with "the same `GET /tasks` shape `hermes-self-repair-status.py`
@@ -327,7 +347,7 @@ route, since even with a stolen CSRF token a form on someone else's page cannot 
 
 ## 6. Tests
 
-`tests/test_fleetops_ui.py` — 444 offline checks, no network, no live store, no socket bound. The
+`tests/test_fleetops_ui.py` — 477 offline checks, no network, no live store, no socket bound. The
 fixtures are the real schemas read off the live stores on 2026-10-09, because the first draft got
 two of them wrong from the plan's own prose. Also asserts the things that are easy to break
 silently: that the NAS and local history paths still equal `hermes_benchmark_common`'s own
@@ -403,6 +423,7 @@ rather than silent. A restart re-fetches the credentials.
 
 | Version | Date | Change |
 |---|---|---|
+| 2.20.0 | 2026-11-24 | **New: per-bot Stop/Start/Restart on the Minecraft tab (hermes-fleetops-ui.py 2.26.0), overriding this file's own prior "no service control from here" rule, on direct operator request given explicitly as a choice between three options** (build the real thing / read-only command display / route through `hermes-confirm-gate.sh`) — the operator chose to build it. This file's own sandbox did not widen: the fifth write route, `/minecraft/control`, still only ever validates and appends a pending request (`MC_CONTROL_PATH`, already inside the existing state-directory `ReadWritePaths` grant); the real `systemctl` call is a brand-new, separate, unsandboxed process, `hermes-minecraft-bots-control.py` (`infra/hermes-minecraft-bots-control/`), on its own 15-second timer, which re-validates against its own freshly-discovered roster rather than trusting this process's write. Each button carries its own confirmation dialog via a new `data-confirm-one` PAGE_SCRIPT branch (the existing `data-confirm` handler is wired to the bulk-decide checkbox count and would silently no-op a single-button form). 19 new offline checks (477 total): `check_write_surface()` now expects five routes and asserts this file still imports no subprocess, and new `check_minecraft_control()` covers validation, attribution, the rendered form/status cell, the request file's bound, and the page's own result banner. |
 | 2.17.0 | 2026-11-08 | New `/selfrepair` tab (S48, `FLEET_SELFREPAIR_DESIGN.md` §4.8, part of that design's Phase 2). Read-only (state, domain, path, problem, dualcoder round count, a collapsible diff preview, any opened PR, any daily-review recommendation) plus a third write route, `/selfrepair/decide`, following this file's own house rule (§"Why this imports the gate instead of reimplementing it" above): the transition table and task/turn writers come from `hermes-self-repair-promote-gate.py` (bumped to 1.1.0 for a new `TRANSITIONS`/`write_turn()` pair built for this), imported through a fail-closed `load_selfrepair_gate()`, mirroring `load_gate()` exactly. No ownership check on this route — unlike model-scout's tasks, self-repair tasks carry no single stable owner agent, so `read_selfrepair_tasks()` selects by `agent LIKE 'selfrepair%'` instead. Also fixes a real latent gap found while wiring this up: `hermes-self-repair-promote-gate.py`'s own `set_task_state()` never returned anything, so no caller could tell a successful write from a failed one except by reading the log line — now returns `True`/`False` like the scout gate's own `set_task_state()` already does. Also corrects this file's own stale "Scope" line, which still said "plus **one** write route" after the market watchlist's add form had already made it two (2.12.0) — now states all three. 43 new offline checks (423 total). |
 | 1.0.0 | 2026-10-09 | Initial version — S21a-e built and verified live on spark: port 8103 chosen against a live `ss -ltnp` after 8101 turned out to be `hermes-buzz`, the backlog source corrected from the plan's `GET /tasks` to a read-only sqlite read, benchmark `suites`/`value` schema corrected from the plan's assumed `scores` blob, and all five pages fetched returning HTTP 200 with zero section errors. 64 offline checks. |
 | 1.1.0 | 2026-10-09 | Service enabled on spark with its `fleetops-ui` vault item; all five pages verified against the real credential on the tailnet address. Records the one sandbox exception the first real start forced — `usage.db` is WAL, so a read-only connection still needs write access for its `-shm` read mark — and why the two narrower grants are not available (systemd rejects a single file in `ReadWritePaths`; SQLite unlinks `-shm` when the last writer closes, so the sidecars cannot be bind-mounted). States what the grant does not confer: the approvals live in `memory.db` under `/mnt`, which stays read-only. |

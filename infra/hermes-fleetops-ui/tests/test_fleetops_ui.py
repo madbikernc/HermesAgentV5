@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# Version: 2.21.0
+# Version: 2.22.0
+#
+# 2.22.0 (2026-11-24) — check_write_surface() now expects FIVE named routes, adding
+# /minecraft/control (hermes-fleetops-ui.py 2.26.0's Stop/Start/Restart buttons, a deliberate,
+# operator-approved override of this file's prior "no service control from here" stance), plus a
+# check that this file still never imports subprocess or calls os.system() itself -- the real
+# systemctl/ssh call is a separate privileged process's job
+# (hermes-minecraft-bots-control.py, its own test suite). New check_minecraft_control(): an
+# unknown bot or bad action is refused before anything is written, a legal request is recorded
+# pending and attributed, latest_control_for() finds it, the rendered per-bot cell carries all
+# three actions with a real CSRF token and its own single-button confirm attribute (not the
+# bulk-select one), a completed request reads as done or names its failure, the request file is
+# bounded (MC_CONTROL_MAX_KEPT), and the page shows its own banner for a request/rejection outcome.
+# check_unit_sandbox() needed no change -- the new write target sits under the state directory's
+# existing grant.
 #
 # 2.21.0 (2026-11-23) — check_write_surface()/check_unit_sandbox() updated for the budget
 # classifier's /budget and /budget/classify (hermes-fleetops-ui.py 2.25.0, built in several
@@ -714,18 +728,21 @@ def check_degradation(ui):
 
 
 def check_write_surface(ui):
-    print(NL + "[the write surface is exactly one guarded dispatcher, four named routes]")
+    print(NL + "[the write surface is exactly one guarded dispatcher, five named routes]")
     src = (TOOLS / "hermes-fleetops-ui.py").read_text(encoding="utf-8")
     check("there is exactly one write handler", src.count("def do_POST") == 1)
     start = src.index("path not in (") + len("path not in (")
     end = src.index("):", start)
     routes_text = src[start:end]
     expected_routes = ["/backlog/decide", "/market/monitor/add", "/selfrepair/decide",
-                        "/budget/classify"]
-    check("and it serves only four named routes -- /backlog/decide, /market/monitor/add, "
-          "/selfrepair/decide, /budget/classify",
+                        "/budget/classify", "/minecraft/control"]
+    check("and it serves only five named routes -- /backlog/decide, /market/monitor/add, "
+          "/selfrepair/decide, /budget/classify, /minecraft/control",
           all(f'"{r}"' in routes_text for r in expected_routes)
           and routes_text.count('"') == 2 * len(expected_routes), routes_text)
+    check("this file still runs no subprocess at all -- the real systemctl/ssh call stays "
+          "hermes-minecraft-bots-control.py's job, a separate privileged process",
+          "import subprocess" not in src and "os.system(" not in src)
     check("the decide body cap is a named constant, not a bare magic number",
           "0 <= length <= MAX_DECIDE_BODY" in src and "0 <= length <= 8192" not in src)
     check("an oversized/invalid body closes the connection rather than leaving it unread",
@@ -1915,6 +1932,83 @@ def check_minecraft(ui, tmp):
         ui.MC_BOTS_STATUS_PATH = orig
 
 
+def check_minecraft_control(ui, tmp):
+    print(NL + "[minecraft bots: Stop/Start/Restart post a request, never run anything here]")
+    import time as tm
+    snap = {"generated_at": "2026-11-24T00:00:00+00:00",
+            "hosts": [{"host": "spark", "collected_at": "x", "error": None, "bots": [
+                {"name": "amy", "role": "Builder", "active_state": "active", "since": tm.time(),
+                 "restarts": 0, "goal": None, "latest": [], "last_goal_event": None, "actions": []}]}]}
+    status_path = tmp / "mc-status-for-control.json"
+    status_path.write_text(json.dumps(snap))
+    control_path = tmp / "mc-control-requests.json"
+    orig_status, orig_control = ui.MC_BOTS_STATUS_PATH, ui.MC_CONTROL_PATH
+    ui.MC_BOTS_STATUS_PATH, ui.MC_CONTROL_PATH = str(status_path), str(control_path)
+    try:
+        check("the live snapshot's roster is read, not a fixed list",
+              ui.known_bot_names() == {"amy"})
+        check("an unknown bot is refused before anything is written",
+              ui.write_control_request("nobody", "restart", "x") == "nosuch"
+              and not control_path.exists())
+        check("a bad action is refused the same way",
+              ui.write_control_request("amy", "yeet", "x") == "badaction"
+              and not control_path.exists())
+        check("a legal request is accepted and recorded pending",
+              ui.write_control_request("amy", "restart", "Paul <p@x>") == "requested")
+        requests = ui.read_control_requests()
+        check("exactly one record, pending, attributed, with no result yet", len(requests) == 1
+              and requests[0]["bot"] == "amy" and requests[0]["action"] == "restart"
+              and requests[0]["status"] == "pending" and requests[0]["result"] is None
+              and requests[0]["requested_by"] == "Paul <p@x>", requests)
+        check("latest_control_for finds it", ui.latest_control_for("amy", requests) is requests[0])
+        check("and finds nothing for a bot with no history",
+              ui.latest_control_for("babs", requests) is None)
+
+        cell = ui.mc_control_cell("amy", requests)
+        check("all three actions get their own button", 'value="stop"' in cell
+              and 'value="start"' in cell and 'value="restart"' in cell, cell)
+        check("the form carries a real CSRF token and the bot name",
+              f'value="{ui.CSRF_TOKEN}"' in cell and 'name="bot" value="amy"' in cell, cell)
+        check("buttons confirm individually, not via the bulk-select attribute",
+              "data-confirm-one=" in cell and 'data-confirm="' not in cell, cell)
+        check("the pending request shows as pending, not silently", "pending" in cell, cell)
+
+        # Simulate the privileged executor (hermes-minecraft-bots-control.py) finishing the job --
+        # this UI never does this itself, it only ever reads the file back afterwards.
+        requests[0].update(status="done", result="ok", completed_at=tm.time())
+        control_path.write_text(json.dumps(requests))
+        done_cell = ui.mc_control_cell("amy", ui.read_control_requests())
+        check("a completed, successful action reads as done", "— done" in done_cell, done_cell)
+
+        requests[0].update(result="error", detail="Unit not found.")
+        control_path.write_text(json.dumps(requests))
+        fail_cell = ui.mc_control_cell("amy", ui.read_control_requests())
+        check("a completed, failed action names the failure",
+              "failed: Unit not found." in fail_cell, fail_cell)
+
+        check("MC_CONTROL_MAX_KEPT actually bounds the file",
+              ui.MC_CONTROL_MAX_KEPT > 0 and ui.MC_CONTROL_MAX_KEPT < 10000)
+        control_path.write_text(json.dumps([
+            {"id": str(i), "bot": "amy", "action": "stop", "requested_at": 0, "requested_by": "",
+             "status": "done", "result": "ok", "detail": None, "completed_at": 0}
+            for i in range(ui.MC_CONTROL_MAX_KEPT + 20)]))
+        ui.write_control_request("amy", "start", "")
+        check("old records roll off rather than growing forever",
+              len(ui.read_control_requests()) == ui.MC_CONTROL_MAX_KEPT)
+
+        print(NL + "[the page itself wires the form up, with a result banner on return]")
+        page = ui.page_minecraft({}).decode()
+        check("the control form posts to /minecraft/control", 'action="/minecraft/control"' in page)
+        page = ui.page_minecraft({"control": ["requested"]}).decode()
+        check("a successful post shows its own banner",
+              ui.MC_CONTROL_RESULT_MESSAGES["requested"] in page, page[:400])
+        page = ui.page_minecraft({"control": ["nosuch"]}).decode()
+        check("an unknown bot's rejection shows its own banner",
+              ui.MC_CONTROL_RESULT_MESSAGES["nosuch"] in page, page[:400])
+    finally:
+        ui.MC_BOTS_STATUS_PATH, ui.MC_CONTROL_PATH = orig_status, orig_control
+
+
 def check_decide_unavailable(ui):
     print(NL + "[a page must not offer an action it knows it cannot perform]")
     # 2026-10-16: the service came up during post-reboot vault contention, its wrapper fetches
@@ -2293,6 +2387,7 @@ def main():
         check_market(ui, tmp)
         check_system_status(ui, tmp)
         check_minecraft(ui, tmp)
+        check_minecraft_control(ui, tmp)
 
     print(f"\n{CHECKS[0] - len(FAILURES)}/{CHECKS[0]} checks passed")
     if FAILURES:

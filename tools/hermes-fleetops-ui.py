@@ -1,5 +1,30 @@
 #!/usr/bin/env python3
-# Version: 2.25.1
+# Version: 2.26.0
+#
+# 2.26.0 (2026-11-24) — direct operator request, and a deliberate reversal of this file's own
+# stated house rule (see "── SCOPE ──" below, and the argument already on record there about
+# the backlog decide buttons): the Minecraft tab gets Stop/Start/Restart per bot, this file's
+# FIFTH write route, /minecraft/control. The override was raised explicitly before building
+# anything -- asked whether to (a) build the real thing, (b) keep the UI read-only and just show
+# the operator the ssh+systemctl command to run themselves, or (c) route it through
+# tools/hermes-confirm-gate.sh's Matrix-confirmation pattern instead -- and the operator chose
+# (a). This file's own sandbox is unchanged and still cannot run a command itself (no subprocess,
+# no SSH, enforced by check_write_surface()/check_unit_sandbox() exactly as before): the route
+# only ever validates and appends a pending request to MC_CONTROL_PATH (new, default
+# ~/.hermes/state/minecraft-bots/control-requests.json, already under the existing
+# ReadWritePaths=/home/pmoney/.hermes/state grant -- no unit change). The new sibling
+# `hermes-minecraft-bots-control.py` (1.0.0, its own 15-second timer, same REMOTES/SSH shape as
+# hermes-minecraft-bots-status.py) is the actual privileged executor: it polls that file, re-
+# validates the bot/action against its OWN freshly-discovered roster (never trusts what this less-
+# privileged process wrote), runs the real `sudo systemctl <action> minecraft-bot-<name>.service`
+# locally or over SSH, and writes the result back. So the action is asynchronous by design --
+# clicking Restart posts "requested", and the page's next load (or the next ~15s refresh) shows
+# done/failed once the executor has actually run it, never a false "done" from this process. Bot
+# name and action are validated here too (against the live snapshot's own roster, and a fixed
+# stop/start/restart set) before anything is ever written, exactly the same "fail the write before
+# it reaches disk" discipline every other route here already has. Confirmation dialog on every
+# button (`data-confirm-one`, a new PAGE_SCRIPT branch -- the existing `data-confirm` handler is
+# wired to the bulk-select checkbox count and would silently no-op a single-button form).
 #
 # 2.25.1 (2026-11-23) — real bug, reported live: the Budget Planning row's "reviewed" checkbox
 # looked inactive. The HTML itself was clean (checked out byte for byte against the live page,
@@ -323,14 +348,22 @@
 # ── SCOPE ──
 #
 # Read-only reports, plus a small number of deliberately narrow write routes: the model-scout
-# backlog's decide buttons, the market watchlist's add form, and (S48) the self-repair tab's
-# decide buttons. Each is its own route under the one do_POST handler, gated by its own imported
+# backlog's decide buttons, the market watchlist's add form, (S48) the self-repair tab's decide
+# buttons, the Budget tab's per-row fix, and (2.26.0) the Minecraft tab's per-bot Stop/Start/
+# Restart. Each is its own route under the one do_POST handler, gated by its own imported
 # transition table where one exists — never a shared write surface two features could disagree
 # through.
 #
-# Services are still not started, stopped or restarted from here. That stays an SSH + `systemctl`
-# operator action, like every other privileged action in this fleet (`tools/hermes-confirm-gate.sh`
-# exists for that reason).
+# Services used to not be started, stopped or restarted from here at all — "that stays an SSH +
+# `systemctl` operator action, like every other privileged action in this fleet
+# (`tools/hermes-confirm-gate.sh` exists for that reason)" was this file's own stated rule through
+# 2.25.1. **2.26.0 overrides it, on direct operator request, for exactly the Minecraft bots page.**
+# The override was surfaced and asked about explicitly, the same way the decide-buttons reversal
+# below was argued rather than silently done — see 2.26.0's own changelog entry above for the
+# options put to the operator and which one was chosen. This file's sandbox itself did not widen:
+# it still runs no subprocess and no SSH; the actual privileged systemctl call lives in a new,
+# separate process (`hermes-minecraft-bots-control.py`) that this file only ever hands a request
+# to via a flat JSON file, never calls directly.
 #
 # ── The decide buttons, and the argument that was had about them ──
 #
@@ -429,6 +462,12 @@ FLEET_HEALTH_PATH = os.environ.get(
     "FLEET_HEALTH_PATH", str(Path.home() / ".hermes" / "state" / "fleet-health" / "last-report.json"))
 MC_BOTS_STATUS_PATH = os.environ.get(
     "MC_STATUS_PATH", str(Path.home() / ".hermes" / "state" / "minecraft-bots" / "status.json"))
+# Same directory, same existing ReadWritePaths grant as MC_BOTS_STATUS_PATH above -- this file
+# only ever appends a pending request here; hermes-minecraft-bots-control.py is what actually
+# reads it, runs the real systemctl call, and writes the result back (2.26.0).
+MC_CONTROL_PATH = os.environ.get(
+    "MC_CONTROL_PATH",
+    str(Path.home() / ".hermes" / "state" / "minecraft-bots" / "control-requests.json"))
 
 TOOLS = Path(__file__).resolve().parent
 REPO = TOOLS.parent
@@ -759,6 +798,11 @@ document.addEventListener('click', function (e) {
     if (!n) { e.preventDefault(); return; }
     if (!window.confirm(act.dataset.confirm.replace('{n}', n))) { e.preventDefault(); }
   }
+  // Minecraft Stop/Start/Restart (2.26.0): one button, no checkbox selection to count -- a
+  // separate attribute from data-confirm above on purpose, since that one's selected() gate
+  // would silently swallow a click here (n would always be 0).
+  var one = e.target.closest('button[data-confirm-one]');
+  if (one && !window.confirm(one.dataset.confirmOne)) { e.preventDefault(); }
 });
 document.addEventListener('change', function (e) {
   if (e.target.name === 'task_id') { refresh(); }
@@ -3138,6 +3182,106 @@ def read_minecraft_status():
     return json.loads(Path(MC_BOTS_STATUS_PATH).read_text())
 
 
+# ── Stop/Start/Restart (2.26.0, direct operator request, overriding this file's own prior "no
+# service control from here" rule -- see the SCOPE comment at the top of this file) ─────────────
+#
+# This process still never runs a command itself. request_bot_control() only validates and
+# appends a pending record to MC_CONTROL_PATH; hermes-minecraft-bots-control.py (a separate,
+# privileged process, its own 15-second timer) is what actually reads a pending record, re-
+# validates it against its own freshly-discovered roster, runs the real systemctl call, and writes
+# the result back here. So a request's true outcome is never known at POST time -- the banner
+# only ever says "requested", and the bots table shows done/failed once the executor catches up.
+MC_CONTROL_ACTIONS = ("stop", "start", "restart")
+MC_CONTROL_MAX_KEPT = 50  # bounds the request file; one record per click, nothing elaborate
+MC_CONTROL_RESULT_MESSAGES = {
+    "requested": "Requested — the next control pass (about every 15s) will pick it up.",
+    "nosuch": "Not a bot this snapshot knows about — nothing requested.",
+    "badaction": "Not stop/start/restart — nothing requested.",
+    "csrf": "Could not confirm the request — nothing requested. Try again.",
+}
+
+
+def known_bot_names(snapshot=None):
+    snapshot = snapshot if snapshot is not None else read_minecraft_status()
+    return {b.get("name") for h in snapshot.get("hosts", []) for b in h.get("bots", []) if b.get("name")}
+
+
+def read_control_requests():
+    try:
+        return json.loads(Path(MC_CONTROL_PATH).read_text())
+    except (OSError, ValueError):
+        return []
+
+
+def latest_control_for(name, requests):
+    """Requests are appended oldest-first (write_control_request() below), so the last match is
+    the newest one."""
+    matches = [r for r in requests if r.get("bot") == name]
+    return matches[-1] if matches else None
+
+
+def write_control_request(bot, action, who=""):
+    """Validates, then appends one pending record. Returns a MC_CONTROL_RESULT_MESSAGES key.
+
+    The bot must be one this process's OWN live snapshot currently knows about -- not a fixed
+    list, so a bot added or removed needs no change here, the same "discovered every run" stance
+    hermes-minecraft-bots-status.py itself takes. This is a courtesy check, not the real guard:
+    hermes-minecraft-bots-control.py re-validates against its own freshly-discovered roster before
+    ever touching systemctl, exactly because this process's own file is less privileged and is
+    never trusted blindly by the one that actually runs the command."""
+    bot = (bot or "").strip().lower()
+    action = (action or "").strip().lower()
+    if action not in MC_CONTROL_ACTIONS:
+        return "badaction"
+    try:
+        known = known_bot_names()
+    except (OSError, ValueError):
+        known = set()
+    if bot not in known:
+        return "nosuch"
+    requests = read_control_requests()
+    requests.append({"id": secrets.token_urlsafe(8), "bot": bot, "action": action,
+                      "requested_at": time.time(), "requested_by": who, "status": "pending",
+                      "result": None, "detail": None, "completed_at": None})
+    requests = requests[-MC_CONTROL_MAX_KEPT:]
+    path = Path(MC_CONTROL_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(requests))
+    os.replace(tmp, path)  # never read half-written, same as write_snapshot()'s own convention
+    return "requested"
+
+
+def mc_control_cell(bot_name, requests):
+    """Three submit buttons sharing one form (HTML forms cannot nest, and a bulk-decide form
+    elsewhere in this file already established the one-form-per-row shape for this reason) --
+    each button's own `name="action" value="..."` is what the server sees, so one <form> covers
+    all three verbs. data-confirm-one is a NEW PAGE_SCRIPT branch, deliberately not the existing
+    data-confirm attribute: that one is wired to the bulk-decide checkbox count
+    (selected() in PAGE_SCRIPT) and would silently no-op a single-button form like this one."""
+    title = esc(bot_name.title())
+    buttons = "".join(
+        f'<button type="submit" name="action" value="{act}" '
+        f'data-confirm-one="{act.title()} {title}\'s bot now?">{act.title()}</button> '
+        for act in MC_CONTROL_ACTIONS)
+    form = (f'<form method="post" action="/minecraft/control">'
+            f'<input type="hidden" name="csrf" value="{esc(CSRF_TOKEN)}">'
+            f'<input type="hidden" name="bot" value="{esc(bot_name)}">{buttons}</form>')
+    last = latest_control_for(bot_name, requests)
+    if not last:
+        return form
+    who = f" by {esc(last['requested_by'])}" if last.get("requested_by") else ""
+    when = esc(mc_ago(last.get("requested_at")))
+    if last.get("status") == "pending":
+        status = f'<span class="note">{last["action"]} requested {when}{who} — pending</span>'
+    elif last.get("result") == "ok":
+        status = f'<span class="note">{last["action"]} {when}{who} — done</span>'
+    else:
+        status = (f'<span class="note" style="color:var(--bad)">{esc(last.get("action", "?"))} '
+                   f'{when}{who} — failed: {esc(last.get("detail") or "no detail")}</span>')
+    return f"{form}<br>{status}"
+
+
 def mc_time(ts):
     """Seconds matter for an action log; the date only when it isn't today."""
     if not ts:
@@ -3216,6 +3360,7 @@ def render_minecraft():
     bots.sort(key=lambda b: (b.get("active_state") != "active", b.get("name", "")))
     running = [b for b in bots if b.get("active_state") == "active"]
     out.append(f"<h3>{len(running)} of {len(bots)} bots running</h3>")
+    control_requests = read_control_requests()
     rows = []
     for b in bots:
         state = b.get("active_state", "?")
@@ -3228,8 +3373,9 @@ def render_minecraft():
                      esc(b["host"]),
                      f'<span class="pill {cls}">{esc(label)}</span><br><span class="note">'
                      f'{verb} {esc(mc_ago(b.get("since")))}{restarts}</span>',
-                     mc_goal_cell(b), mc_latest_cell(b)])
-    out.append(table(["bot", "host", "state", "current goal", "latest"], rows))
+                     mc_goal_cell(b), mc_latest_cell(b),
+                     mc_control_cell(b.get("name", ""), control_requests)])
+    out.append(table(["bot", "host", "state", "current goal", "latest", "control"], rows))
 
     out.append(f"<h3>Last {MC_ACTIONS_SHOWN} actions per bot</h3>")
     for b in bots:
@@ -3243,12 +3389,17 @@ def render_minecraft():
 
 
 def page_minecraft(query):
-    body = section(
+    control_msg = MC_CONTROL_RESULT_MESSAGES.get((query.get("control") or [""])[0], "")
+    body = f'<p class="note">{esc(control_msg)}</p>' if control_msg else ""
+    body += section(
         "Minecraft bots",
         "Which bots are running, each one's current goal and latest log lines, and its last "
         f"{MC_ACTIONS_SHOWN} actions with their outcome — from "
         "<span class=\"mono\">hermes-minecraft-bots-status.py</span>'s snapshot (every minute, "
-        "both hosts). Failed actions carry the bot's own reason. Read-only.",
+        "both hosts). Failed actions carry the bot's own reason. Stop/Start/Restart (2.26.0) "
+        "post a request that <span class=\"mono\">hermes-minecraft-bots-control.py</span> "
+        "carries out on its own ~15-second pass — the result shows up here once that's happened, "
+        "not immediately.",
         render_minecraft)
     return shell("Minecraft bots", body)
 
@@ -3683,11 +3834,11 @@ class Handler(BaseHTTPRequestHandler):
                                            f'{esc(type(exc).__name__)}: {esc(exc)}</div>'))
 
     def do_POST(self):
-        """This service's only four write routes.
+        """This service's only five write routes.
 
         A GET never changes state — every write arrives here as a form POST, so a link, a
         prefetch or a crawler cannot decide anything, add a monitored ticker, or fix a budget
-        category. Body-length cap and CSRF check are shared by all four routes below; only the
+        category. Body-length cap and CSRF check are shared by all five routes below; only the
         field names and the action taken differ. /selfrepair/decide (S48,
         FLEET_SELFREPAIR_DESIGN.md §4.8) is the third, added alongside /backlog/decide rather
         than merged into it — two independently-reasoned-about gates (model-scout's, self-
@@ -3695,13 +3846,17 @@ class Handler(BaseHTTPRequestHandler):
         separate dicts. /budget/classify (direct operator request) is the fourth, and the first
         shaped as one form per row rather than a bulk checkbox-select over same-shaped rows —
         each transaction's fix is independent, so it gets its own route branch below rather than
-        being forced into the task_id/apply_fn shape the other three share."""
+        being forced into the task_id/apply_fn shape the other three share. /minecraft/control
+        (2.26.0, direct operator request, overriding this file's own prior "no service control
+        from here" rule) is the fifth: unlike every other route here, this one never performs the
+        real action itself -- it only validates and appends a pending request that a separate,
+        privileged process (hermes-minecraft-bots-control.py) picks up and actually runs."""
         parsed = urllib.parse.urlparse(self.path)
         if not self._authed():
             return
         path = parsed.path.rstrip("/")
         if path not in ("/backlog/decide", "/market/monitor/add", "/selfrepair/decide",
-                        "/budget/classify"):
+                        "/budget/classify", "/minecraft/control"):
             self._send(404, shell("Not found", '<p class="empty">No such route.</p>'))
             return
         try:
@@ -3724,6 +3879,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._redirect("/market?monitor=badaction" if path == "/market/monitor/add"
                            else "/budget" if path == "/budget/classify"
+                           else "/minecraft?control=badaction" if path == "/minecraft/control"
                            else f"{DECIDE_REDIRECT_BASE[path]}?result=badaction")
             return
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
@@ -3732,7 +3888,18 @@ class Handler(BaseHTTPRequestHandler):
                 f"(Sec-Fetch-Site={self.headers.get('Sec-Fetch-Site')!r})")
             self._redirect("/market?monitor=csrf" if path == "/market/monitor/add"
                            else "/budget?csrf=1" if path == "/budget/classify"
+                           else "/minecraft?control=csrf" if path == "/minecraft/control"
                            else f"{DECIDE_REDIRECT_BASE[path]}?csrf=1")
+            return
+
+        if path == "/minecraft/control":
+            bot = (form.get("bot") or [""])[0]
+            action = (form.get("action") or [""])[0]
+            who = tailnet_identity(self.headers)
+            result = write_control_request(bot, action, who)
+            log(f"minecraft control requested: bot={bot!r} action={action!r} by "
+                f"{who or 'unidentified'} -> {result}")
+            self._redirect(f"/minecraft?control={result}")
             return
 
         if path == "/market/monitor/add":
@@ -3827,7 +3994,8 @@ def main():
         f"(reports read-only; write routes /backlog/decide "
         f"[{'armed' if GATE and MEMORY_TOKEN else 'DISABLED'}], /selfrepair/decide "
         f"[{'armed' if SELFREPAIR_GATE and MEMORY_TOKEN else 'DISABLED'}], /budget/classify "
-        f"[armed -- finance.db, no MEMORY_TOKEN needed])")
+        f"[armed -- finance.db, no MEMORY_TOKEN needed], /minecraft/control "
+        f"[armed -- {MC_CONTROL_PATH}, picked up by hermes-minecraft-bots-control.py separately])")
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
 
 
