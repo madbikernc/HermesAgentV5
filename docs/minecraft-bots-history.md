@@ -1,6 +1,6 @@
 # Minecraft Bots — Change History
 
-**Version:** 1.50.0
+**Version:** 1.51.0
 
 Every changelog for the Minecraft bot fleet, extracted here so the documents themselves stay
 lean. Rows are verbatim and append-only, in the order they were written. Nothing here is
@@ -268,3 +268,4 @@ For the narrative behind any row: `git log -p -- <the file>`.
 | 1.48.0 | 2026-11-14 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.49.0 row (a shelter shell nothing can finish is no longer handed back). |
 | 1.49.0 | 2026-11-14 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.50.0 row (bot server upgraded to 26.1.2). |
 | 1.50.0 | 2026-11-15 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.51.0 row (2x2 craft leftovers in the grid and on the cursor; clear_access NoPath retry; probe sleep check off and arena mob sweep in the live-bot suite). |
+| 1.51.0 | 2026-11-25 | Added the `MINECRAFT_BOTS_DESIGN.md` 2.53.0 row (world reinit to a fresh random seed via `hermes-minecraft-admin.py bots reinit-world`; spark2's four bots restarted by hand since the tool only restarts its own host's units). |
