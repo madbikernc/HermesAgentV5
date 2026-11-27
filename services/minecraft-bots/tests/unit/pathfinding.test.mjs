@@ -1,4 +1,12 @@
-// Version: 1.7.0
+// Version: 1.8.0
+// 1.8.0 (2026-11-27): swim-movements.js 1.9.0 -- a climb is a diagonal staircase toward the
+// goal now, never a vertical shaft (direct request: "if they are trapped underground, they
+// need to dig up in a diagonal, creating stairs to the surface"). Every existing climb
+// assertion keyed off GoalY's own distinct 'y' call-kind updated for the new scheme (climbs and
+// ordinary "walk to this point" calls are both GoalBlock now, told apart by searchRadius --
+// see _harness.mjs 1.6.6); two new checks for the diagonal direction itself and its
+// no-horizontal-goal fallback.
+//
 // 1.7.0 (2026-11-27): pathfinding.js 1.4.0 tore out the land teleport-nudge entirely (direct
 // instruction: "too disruptive") -- removed its now-dead test; the smooth jump-impulse assist's
 // own check (added in 1.6.0) is the only land-stuck coverage left.
@@ -185,13 +193,33 @@ await check('Pathfinding: far below the goal under rock, she climbs in legs with
     'ok',
   ], { start: new V3(0, 3, 0), rock: true });
   await bot.pathfinder.goto(home);
-  assert.deepEqual(calls.slice(0, 4), ['goal', 'y', 'goal', 'y'], 'a sideways partial and no partial both get a climb instead');
+  assert.deepEqual(calls.slice(0, 4), ['goal', 'block', 'goal', 'block'], 'a sideways partial and no partial both get a climb instead');
   assert.deepEqual(bot.pathfinder.climbDigCosts, [1, 1], 'digging is cheap only while climbing');
   assert.equal(bot.pathfinder.movements.digCost, 15, 'and put back after');
   assert.deepEqual(bot.pathfinder.climbRadii, [500, 500], 'a climb search gets the budget for 8 blocks of rock');
   assert.equal(bot.pathfinder.searchRadius, 48, 'the budget is put back after');
   assert.equal(calls.at(-1), 'goal', 'then the whole way is searched again');
   assert.equal(bot.entity.position.y, 50, 'two climbs, then a partial path that rises is walked');
+});
+
+// 2026-11-27 (swim-movements.js 1.9.0): direct request ("if they are trapped underground, they
+// need to dig up in a diagonal, creating stairs to the surface") -- a climb is a 45-degree
+// staircase toward the goal's own horizontal position now, never a vertical shaft straight up.
+await check('Pathfinding: a climb is a diagonal staircase toward the goal, not a vertical shaft', async () => {
+  const farCorner = { x: 100, y: 94, z: -100, heuristic: (n) => Math.abs(100 - n.x) + Math.abs(-100 - n.z) + Math.abs(94 - n.y) };
+  const { bot } = steppedGotoWorld([{ status: 'noPath', path: [] }, 'ok'], { start: new V3(0, 3, 0), rock: true });
+  await bot.pathfinder.goto(farCorner);
+  assert.deepEqual([bot.entity.position.x, bot.entity.position.y, bot.entity.position.z], [8, 11, -8],
+    'climbed 8 up AND 8 toward the goal, diagonally -- not straight up with x/z left unchanged');
+});
+
+await check('Pathfinding: a climb with no horizontal goal falls back to her own facing, never NaN', async () => {
+  const { bot } = steppedGotoWorld([{ status: 'noPath', path: [] }, 'ok'], { start: new V3(0, 3, 0), rock: true });
+  bot.entity.yaw = Math.PI / 2;
+  await bot.pathfinder.goto({ y: 94, heuristic: (n) => Math.abs(94 - n.y) });
+  assert.equal(bot.entity.position.y, 11, 'still climbs -- a goal with no x/z is not a reason to refuse');
+  assert(Number.isFinite(bot.entity.position.x) && Number.isFinite(bot.entity.position.z),
+    'her own facing stands in for a direction, never leaves x/z undefined or NaN');
 });
 
 await check('Pathfinding: a climb search that runs short is walked as far as it rose', async () => {
@@ -202,7 +230,7 @@ await check('Pathfinding: a climb search that runs short is walked as far as it 
     'ok',
   ], { start: new V3(0, 3, 0), rock: true });
   await bot.pathfinder.goto(home);
-  assert.deepEqual(calls, ['goal', 'y', 'block', 'goal'], 'climb, walk its partial up, then search again');
+  assert.deepEqual(calls, ['goal', 'block', 'block', 'goal'], 'climb, walk its partial up, then search again');
   assert.equal(bot.entity.position.y, 7);
   assert.deepEqual(bot.pathfinder.legRadii, [528], 'the walk gets the budget its partial path cost');
   assert.equal(bot.pathfinder.searchRadius, 48);
@@ -215,26 +243,26 @@ await check('Pathfinding: climbs do not use up legs, and a partial that barely r
   let w = steppedGotoWorld([...Array.from({ length: 12 }, () => ({ status: 'noPath', path: [] })), 'ok'],
     { start: new V3(0, 3, 0), rock: true });
   await w.bot.pathfinder.goto(deep);
-  assert.equal(w.calls.filter((k) => k === 'y').length, 12, 'twelve climbs, past the eight-leg limit');
+  assert.equal(w.bot.pathfinder.climbDigCosts.length, 12, 'twelve climbs, past the eight-leg limit');
   assert.equal(w.bot.entity.position.y, 99);
   w = steppedGotoWorld([{ status: 'noPath', path: [new V3(0, 5, 0)] }, 'ok'], { start: new V3(0, 3, 0), rock: true });
   await w.bot.pathfinder.goto(deep);
-  assert.deepEqual(w.calls, ['goal', 'y', 'goal'], 'a partial rising 2 is not walked: she climbs 8');
+  assert.deepEqual(w.calls, ['goal', 'block', 'goal'], 'a partial rising 2 is not walked: she climbs 8');
 });
 
 await check('Pathfinding: no climb under open sky, close to the goal height, or while digging is off', async () => {
   const above = { y: 94, heuristic: (n) => Math.abs(100 - n.x) };
   let w = steppedGotoWorld([{ status: 'noPath', path: [new V3(20, 64, 0)] }, 'ok'], { rock: false });
   await w.bot.pathfinder.goto(above);
-  assert(!w.calls.includes('y'), 'open sky: she walks round, never tunnels up a hillside');
+  assert.equal(w.bot.pathfinder.climbDigCosts.length, 0, 'open sky: she walks round, never tunnels up a hillside');
   w = steppedGotoWorld([{ status: 'noPath', path: [new V3(20, 64, 0)] }, 'ok'], { rock: true });
   await w.bot.pathfinder.goto({ y: 70, heuristic: above.heuristic });
-  assert(!w.calls.includes('y'), 'six blocks up is not a climb');
+  assert.equal(w.bot.pathfinder.climbDigCosts.length, 0, 'six blocks up is not a climb');
   w = steppedGotoWorld([{ status: 'noPath', path: [] }], { start: new V3(0, 3, 0), rock: true, canDig: false });
   await assert.rejects(w.bot.pathfinder.goto(above), { name: 'NoPath' }, 'digging suppressed: nothing to climb with');
   w = steppedGotoWorld([{ status: 'noPath', path: [new V3(20, 64, 0)] }, 'ok'], { rock: true });
   await w.bot.pathfinder.goto({ heuristic: above.heuristic });
-  assert(!w.calls.includes('y'), 'a goal with no height (following someone) is never climbed to');
+  assert.equal(w.bot.pathfinder.climbDigCosts.length, 0, 'a goal with no height (following someone) is never climbed to');
 });
 
 // 2026-11-27 (swim-movements.js 1.8.0): direct report, root-caused live -- Amy genuinely stuck 5+
@@ -247,7 +275,7 @@ await check('Pathfinding: open sky, but walking round fails too -- she climbs an
   const above = { y: 94, heuristic: (n) => Math.abs(100 - n.x) };
   const w = steppedGotoWorld([{ status: 'noPath', path: [new V3(20, 64, 0)] }, 'ok'], { rock: false, failBlock: true });
   await w.bot.pathfinder.goto(above);
-  assert.deepEqual(w.calls, ['goal', 'block', 'y', 'goal'],
+  assert.deepEqual(w.calls, ['goal', 'block', 'block', 'goal'],
     'walk round tried and failed, only then a forced climb, then the whole way searched again');
   assert.equal(w.bot.entity.position.y, 72, 'climbed CLIMB_LEG_RISE (8) up from the start height 64');
 });
@@ -258,7 +286,7 @@ await check('Pathfinding: an empty, failed search the library resolved gets a cl
   const sealed = { y: 94, heuristic: (n) => Math.abs(94 - n.y), isEnd: (n) => n.y === 94 };
   let w = steppedGotoWorld([{ status: 'partial', path: [], resolves: true }, 'ok'], { start: new V3(0, 3, 0), rock: true });
   await w.bot.pathfinder.goto(sealed);
-  assert.deepEqual(w.calls.slice(0, 2), ['goal', 'y'], 'sealed in: she climbs instead of "arriving"');
+  assert.deepEqual(w.calls.slice(0, 2), ['goal', 'block'], 'sealed in: she climbs instead of "arriving"');
   // "mine" relies on the library's "as close as it gets" (live: felling a whole trunk broke when
   // this was a NoPath everywhere).
   w = steppedGotoWorld([{ status: 'noPath', path: [], resolves: true }], { rock: false });

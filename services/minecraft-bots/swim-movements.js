@@ -1,4 +1,15 @@
-// Version: 1.8.0
+// Version: 1.9.0
+//
+// 1.9.0 (2026-11-27, direct request: "if they are trapped underground, they need to dig up in a
+// diagonal, creating stairs to the surface"): climbLeg() no longer climbs a pure vertical shaft
+// (GoalY) -- it targets a diagonal GoalBlock instead, snapped to the nearest compass direction
+// toward the goal's own horizontal position (or her current facing if the goal has none), at a
+// clean 1-block-up-per-1-block-forward slope. A straight-up shaft needed a real jump every
+// single block with nothing underfoot but air between them; a staircase is solid rock already
+// there underfoot at every step, the real player technique for this, and relies on the same
+// landing-triggered jump the smooth assist in pathfinding.js now makes reliable. Applies to
+// every climbLeg() caller (sealed-in-rock and the 1.8.0 open-sky force fallback alike), not just
+// the "trapped underground" case named in the request -- the shape is better in all of them.
 //
 // 1.8.0 (2026-11-27, direct report: "unresponsive" bots root-caused further -- Amy genuinely stuck
 // 5+ minutes below a sheer 11-block open-air cliff): climbLeg()'s own rockOverhead gate was a
@@ -205,6 +216,17 @@ function goalHeight(goal) {
   return Number.isFinite(y) ? y : null;
 }
 
+// Direct request, 2026-11-27 ("if they are trapped underground, they need to dig up in a
+// diagonal, creating stairs to the surface"): the goal's own horizontal position when it has
+// one (GoalBlock/GoalNear and the like) -- she climbs TOWARD where she actually needs to be,
+// not an arbitrary direction. GoalFollow/GoalInvert and other dynamic goals carry no fixed x/z
+// of their own; climbLeg's caller falls back to her current facing for those.
+function goalHorizontal(goal) {
+  const x = goal?.x ?? goal?.pos?.x;
+  const z = goal?.z ?? goal?.pos?.z;
+  return Number.isFinite(x) && Number.isFinite(z) ? { x, z } : null;
+}
+
 function rockOverhead(bot, here, rise) {
   for (let dy = 2; dy <= rise; dy++) {
     if (bot.blockAt(here.offset(0, dy, 0))?.boundingBox === "block") return true;
@@ -218,17 +240,32 @@ async function climbLeg(bot, goto, goal, leg, lastResult, force = false) {
   const movements = bot.pathfinder.movements;
   if (target === null || target - here.y < CLIMB_MIN_RISE || !movements?.canDig) return false;
   const toY = Math.min(target, here.y + CLIMB_LEG_RISE);
-  const underRock = rockOverhead(bot, here, toY - here.y + 1);
+  const rise = toY - here.y;
+  const underRock = rockOverhead(bot, here, rise + 1);
   if (!underRock && !force) return false;
+  // A pure vertical shaft (this function's own behavior before 2026-11-27) needs a real jump
+  // every single block, under rock with nothing underfoot but air the moment she mistimes one --
+  // a genuine staircase is the real player technique for exactly this situation instead: each
+  // step is an ordinary forward-and-up move onto solid rock that was already there, never a
+  // block that has to be placed, just the one cell ahead and the one above it dug for headroom
+  // (mineflayer-pathfinder's own default diagonal-step-up move, already affordable at
+  // CLIMB_DIG_COST below). Direction: toward the goal's own horizontal position when it has one,
+  // else her current facing -- snapped to the nearest of the 8 compass directions, so the slope
+  // is a clean 1-block-up-per-1-block-forward (or the diagonal equivalent), never a long, flat
+  // ramp that would blow the search budget on horizontal distance instead of the climb itself.
+  const horiz = goalHorizontal(goal);
+  const yaw = horiz ? Math.atan2(-(horiz.x - here.x), -(horiz.z - here.z)) : bot.entity.yaw;
+  const toX = here.x + Math.round(-Math.sin(yaw)) * rise;
+  const toZ = here.z + Math.round(-Math.cos(yaw)) * rise;
   console.log(`[${bot.username}] pathfinder: the goal is ${target - here.y} blocks up` +
     (underRock ? ", under rock" : " -- walking round found no route") +
-    ` -- leg ${leg}: climbing to y=${toY}, then searching again`);
+    ` -- leg ${leg}: climbing a staircase to (${toX}, ${toY}, ${toZ}), then searching again`);
   const { digCost } = movements;
   const { searchRadius } = bot.pathfinder;
   movements.digCost = Math.min(digCost, CLIMB_DIG_COST);
   if (searchRadius >= 0) bot.pathfinder.searchRadius = Math.max(searchRadius, CLIMB_SEARCH_BUDGET);
   try {
-    await goto(new pathfinderPkg.goals.GoalY(toY));
+    await goto(new pathfinderPkg.goals.GoalBlock(toX, toY, toZ));
   } catch (err) {
     if (err.name !== "NoPath" && err.name !== "Timeout") throw err;
     const result = lastResult();

@@ -1,4 +1,10 @@
-// Version: 1.6.5
+// Version: 1.6.6
+// 1.6.6 (2026-11-27): climbLeg's climb (swim-movements.js 1.9.0) is a diagonal GoalBlock now,
+// not a vertical GoalY -- steppedGotoWorld's mock goto() tells a climb's own primary attempt
+// apart from an ordinary "walk to this point" GoalBlock call by searchRadius (climbs always
+// freshly bump it to exactly 500 first), instead of by goal kind. bot.entity gets a default
+// yaw (0) for climbLeg's own direction fallback when the goal carries no horizontal position.
+//
 // 1.6.5 (2026-11-27): steppedGotoWorld() takes a `failBlock` option -- a GoalBlock leg (walking to
 // the closest reachable point of a partial path) throws NoPath instead of auto-succeeding, for
 // swim-movements.js 1.8.0's forced-climb-as-last-resort regression check.
@@ -723,7 +729,7 @@ export function steppedGotoWorld(script, { start = new V3(0, 64, 0), rock = fals
   const calls = [];
   const named = (name) => Object.assign(new Error(name), { name });
   bot.username = 'Amy';
-  bot.entity = { position: start };
+  bot.entity = { position: start, yaw: 0 };
   // rock: every cell above her start is solid, as in a cave; otherwise open sky.
   bot.blockAt = (p) => ({ boundingBox: rock && p.y > start.y + 1 ? 'block' : 'empty' });
   bot.pathfinder = {
@@ -731,21 +737,31 @@ export function steppedGotoWorld(script, { start = new V3(0, 64, 0), rock = fals
     movements: { digCost: 15, canDig },
     async goto(goal) {
       calls.push(goal.kind ?? 'goal');
-      if (goal.kind === 'y') {
-        bot.pathfinder.climbDigCosts.push(bot.pathfinder.movements.digCost);
-        bot.pathfinder.climbRadii.push(bot.pathfinder.searchRadius);
-        // { climbPartial } next in the script: this climb's search runs short with that partial path.
-        if (script[0]?.climbPartial) {
-          const st = script.shift();
-          bot.emit('path_update', { status: 'noPath', path: st.climbPartial, cost: st.cost ?? 10 });
-          throw named('NoPath');
+      if (goal.kind === 'block') {
+        // A climb's own primary attempt (swim-movements.js's climbLeg, 1.9.0 -- a diagonal
+        // staircase now, not a vertical GoalY shaft) always freshly bumps searchRadius to
+        // CLIMB_SEARCH_BUDGET (500) right before this call; nothing else in this mock world
+        // produces that exact value, so it's the one clean signal left to tell a climb apart
+        // from an ordinary "walk to this known point" GoalBlock call now that both use the
+        // same goal type.
+        const isClimb = bot.pathfinder.searchRadius === 500;
+        if (isClimb) {
+          bot.pathfinder.climbDigCosts.push(bot.pathfinder.movements.digCost);
+          bot.pathfinder.climbRadii.push(bot.pathfinder.searchRadius);
+          // { climbPartial } next in the script: this climb's search runs short with that partial path.
+          if (script[0]?.climbPartial) {
+            const st = script.shift();
+            bot.emit('path_update', { status: 'noPath', path: st.climbPartial, cost: st.cost ?? 10 });
+            throw named('NoPath');
+          }
+          bot.entity.position = new V3(goal.x, goal.y, goal.z);
+          return;
         }
-        bot.entity.position = new V3(bot.entity.position.x, goal.y, bot.entity.position.z);
+        bot.pathfinder.legRadii.push(bot.pathfinder.searchRadius);
+        if (failBlock) throw named('NoPath');
+        bot.entity.position = new V3(goal.x, goal.y, goal.z);
         return;
       }
-      if (goal.kind === 'block') bot.pathfinder.legRadii.push(bot.pathfinder.searchRadius);
-      if (goal.kind === 'block' && failBlock) throw named('NoPath');
-      if (goal.kind === 'block') { bot.entity.position = new V3(goal.x, goal.y, goal.z); return; }
       const step = script.shift();
       if (step === 'ok') return;
       if (step.error) throw named(step.error);
