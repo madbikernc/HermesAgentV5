@@ -1,5 +1,5 @@
 [Unit]
-Description=Firmament Minecraft Bot (Babs)
+Description=Firmament Minecraft Bot (Babs_Miner)
 After=network-online.target hermes-router.service hermes-memory.service hermes-buzz.service continuwuity.service
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -8,7 +8,11 @@ StartLimitIntervalSec=0
 Type=simple
 User=pmoney
 WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
-Environment=MC_BOT_USERNAME=Babs
+Environment=MC_BOT_USERNAME=Babs_Miner
+# 2026-11-26 rename ("rename the bots to be name-<role>"): pins this bot's own stable identity
+# (persona, Matrix account, memory paths -- see index.js 3.1.0) while MC_BOT_USERNAME above
+# becomes the new in-game display name other players and bots actually see.
+Environment=MC_BOT_PERSONA=babs
 # 2026-09-19 ("expand their search capabilities... especially the miner and explorer roles"):
 # Babs is the fleet's one Miner -- searches ore/log up to 40 blocks instead of the shared
 # 32-block default (kept under actions.js's own documented 48-block pathfinder OOM ceiling).

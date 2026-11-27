@@ -1,4 +1,11 @@
-// Version: 1.7.0
+// Version: 1.8.0
+//
+// 1.8.0 (2026-11-26) -- direct request ("rename the bots to be name-<role>"): no code change --
+// these keys were always the persona, not the in-game username, and stay exactly as they were.
+// Clarifying only, since the comment below this one could otherwise read as newly stale: bots
+// now log in under a Name_Role display username (Mayor -> Mayor_Leader) that no longer equals
+// USERNAME.toLowerCase(); every unit pins MC_BOT_PERSONA explicitly so PERSONA_NAME (and so this
+// table's own keys) stay unaffected. See index.js 3.1.0 for the full rationale.
 //
 // 1.7.0 (2026-10-11, PRIORITIES_PROPOSAL.md §2a) -- Soldier's domain/priorities now describe the
 // guard-anchor split: with two or more live Soldiers, exactly one holds index.js's new
@@ -110,7 +117,8 @@ export const ROLES = Object.freeze({
   HERDER:   Object.freeze({ name: "Herder",   domain: "breeds and tends livestock (including bees -- honey via harvest_hive) for a sustainable food/material source" }),
 });
 
-// persona (USERNAME.toLowerCase(), matching PERSONA_NAME's own default in index.js) -> { primary, secondary }
+// persona (each bot's stable PERSONA_NAME -- MC_BOT_PERSONA explicitly in every systemd unit since
+// the 2026-11-26 rename, no longer always USERNAME.toLowerCase()) -> { primary, secondary }
 //
 // Direct request, 2026-09-13 ("rebalance the bots so they each have exactly one role... create
 // [more] so that every role has at least one bot"): every `secondary` is now null -- the field

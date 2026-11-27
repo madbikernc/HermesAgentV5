@@ -1,4 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-26) -- direct request ("rename the bots to be name-<role>"): every BOT_ROLES/
+// otherBotGoals/Buzz lookup here that derived a bot's persona key via `name.toLowerCase()` now
+// goes through index.js's new personaOf() instead -- that shortcut broke the moment a bot's
+// display username (Mayor -> Mayor_Leader) stopped being persona.toUpperCase() (see index.js
+// 3.1.0 for the full rationale).
 //
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: the Mayor's tech-tree curriculum, directives for the other bots, and the fallback coordinator.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
@@ -12,7 +18,7 @@ import { BOT_ROLES, ROLES } from "./roles.js";
 import { narrateAction } from "./chat.js";
 import { otherBotGoals } from "./fleet-coordination.js";
 import { routineBlocked } from "./goal-proposal.js";
-import { AUTONOMY_ENABLED, BOT_USERNAMES, MAYOR_USERNAME, USERNAME, bot, busy, mayorUnreachable, persona, setBusy } from "./index.js";
+import { AUTONOMY_ENABLED, BOT_USERNAMES, MAYOR_USERNAME, USERNAME, bot, busy, mayorUnreachable, persona, personaOf, setBusy } from "./index.js";
 
 
 // Mayor-only autonomous behavior, 2026-09-08 ("add another bot, Mayor, whose personality is to
@@ -159,7 +165,7 @@ function mayorHasStageItem(stage) {
 
 // Stage participants: everyone the stage's completion waits on (Soldiers are exempt).
 function isCurriculumParticipant(name) {
-  return BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER;
+  return BOT_ROLES[personaOf(name)]?.primary !== ROLES.SOLDIER;
 }
 
 // Records one bot's verified "done" item; returns true if it newly clears the current stage.
@@ -186,7 +192,7 @@ function recordCurriculumEvidence(agentName, item) {
 export function creditCurriculumEvidence(fromAgent, items) {
   if (curriculumStageIndex >= TECH_TREE_STAGES.length) return;
   const stage = TECH_TREE_STAGES[curriculumStageIndex];
-  const agentName = [...BOT_USERNAMES].find((name) => `mc-${name.toLowerCase()}` === fromAgent);
+  const agentName = [...BOT_USERNAMES].find((name) => `mc-${personaOf(name)}` === fromAgent);
   if (!agentName) return;
   // MB-20: one item is evidence toward a stage, not the whole stage.
   const evidence = [...new Set(items.filter(Boolean))];
@@ -233,8 +239,8 @@ const lastRoleAssignedAt = new Map();
 function pickIdleTarget(idleBots) {
   if (idleBots.length <= 1) return idleBots[0];
   return idleBots.slice().sort((a, b) => {
-    const roleA = BOT_ROLES[a.toLowerCase()]?.primary?.name;
-    const roleB = BOT_ROLES[b.toLowerCase()]?.primary?.name;
+    const roleA = BOT_ROLES[personaOf(a)]?.primary?.name;
+    const roleB = BOT_ROLES[personaOf(b)]?.primary?.name;
     const atA = roleA ? (lastRoleAssignedAt.get(roleA) ?? 0) : 0;
     const atB = roleB ? (lastRoleAssignedAt.get(roleB) ?? 0) : 0;
     return atA - atB; // whichever role was least recently assigned something, first
@@ -242,7 +248,7 @@ function pickIdleTarget(idleBots) {
 }
 
 function markRoleAssigned(target) {
-  const roleName = BOT_ROLES[target.toLowerCase()]?.primary?.name;
+  const roleName = BOT_ROLES[personaOf(target)]?.primary?.name;
   if (roleName) lastRoleAssignedAt.set(roleName, Date.now());
 }
 
@@ -263,7 +269,7 @@ export async function proposeDirectiveForOthers() {
   if (USERNAME !== MAYOR_USERNAME || !AUTONOMY_ENABLED || routineBlocked("proposeDirectiveForOthers")) return;
   await checkCurriculumAdvance();
   const idleBots = [...BOT_USERNAMES].filter((name) =>
-    name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${name.toLowerCase()}`));
+    name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${personaOf(name)}`));
   if (!idleBots.length) return; // everyone already has something going -- nothing to assign
   // Prefer an idle bot who still needs the current stage over one who's already cleared it --
   // matching "increasingly useful larger goals as they successfully meet earlier goals" means
@@ -274,7 +280,7 @@ export async function proposeDirectiveForOthers() {
   const stageCandidates = curriculumStageIndex < TECH_TREE_STAGES.length
     ? idleBots.filter((name) => isCurriculumParticipant(name) && !stageProgress.has(name)) : [];
   const target = stageCandidates.length ? pickIdleTarget(stageCandidates) : pickIdleTarget(idleBots);
-  const targetRole = BOT_ROLES[target.toLowerCase()];
+  const targetRole = BOT_ROLES[personaOf(target)];
   // A Soldier target never gets a curriculum-stage directive, regardless of where the rest of
   // the fleet's own progression stands -- see SOLDIER_DIRECTIVE_NOTE's own comment.
   const targetIsSoldier = targetRole?.primary === ROLES.SOLDIER;
@@ -362,10 +368,10 @@ export async function proposeFallbackDirective() {
   if (!mayorUnreachable()) return;
 
   const idleBots = [...BOT_USERNAMES].filter((name) =>
-    name !== USERNAME && name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${name.toLowerCase()}`));
+    name !== USERNAME && name !== MAYOR_USERNAME && !otherBotGoals.has(`mc-${personaOf(name)}`));
   if (!idleBots.length) return;
   const target = pickIdleTarget(idleBots);
-  const targetRole = BOT_ROLES[target.toLowerCase()];
+  const targetRole = BOT_ROLES[personaOf(target)];
   // Same restriction as Mayor's own proposeDirectiveForOthers -- see SOLDIER_DIRECTIVE_NOTE's
   // comment. A Soldier gets the identical restricted task space regardless of which of the two
   // functions is doing the assigning.

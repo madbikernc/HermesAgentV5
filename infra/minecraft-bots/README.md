@@ -1,13 +1,16 @@
 # minecraft-bots — recreate checklist
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 Ordered steps to install the Minecraft bot orchestrator (`services/minecraft-bots/`) as
 process-supervised systemd services, so a crash or a reboot doesn't leave a bot silently offline
-the way plain `nohup` did during initial development. Nine units: five on `spark` (Babs, Amy,
-Mark, Luke, Mayor) and four on `spark2` (Bob, Nell, Wade, Dale) — the split is memory headroom,
-not design. See `MINECRAFT_BOTS_DESIGN.md` for the full design and `infra/minecraft-bots-backup/`
-for the sibling recipe this was built alongside.
+the way plain `nohup` did during initial development. Nine units: five on `spark` (Babs_Miner,
+Amy_Builder, Mark_Soldier, Luke_Soldier, Mayor_Leader) and four on `spark2` (Bob_Farmer,
+Nell_Artist, Wade_Explorer, Dale_Herder) — the split is memory headroom, not design. Unit
+filenames and `MC_BOT_PERSONA` stay the plain lowercase name (`babs`, `mark`, ...) even though
+each bot's in-game `MC_BOT_USERNAME` became Name_Role 2026-11-26 — see `MINECRAFT_BOTS_DESIGN.md`
+for the full design and `infra/minecraft-bots-backup/` for the sibling recipe this was built
+alongside.
 
 ## 1. Prerequisites already in place
 
@@ -54,3 +57,4 @@ plausible activity. Only RCON `list` settles it.
 | 1.0.0 | 2026-09-06 | Initial version -- replaces the bare `nohup` processes used during initial development. |
 | 1.1.0 | 2026-09-24 | Updated from the original two-bot (Babs/Amy, spark-only) install to the real nine-unit, two-host layout; added the op-grant/Buzz/Matrix onboarding pointer and the warning that `active` does not mean connected. |
 | 1.2.0 | 2026-11-04 | Matrix dropped as a bot prerequisite and onboarding step: the per-bot Matrix room watcher is legacy from before Buzz; bots coordinate over Buzz only and run fully without a Matrix token. |
+| 1.3.0 | 2026-11-26 | Direct request ("rename the bots to be name-<role>"): each bot's in-game `MC_BOT_USERNAME` became Name_Role; unit filenames and `MC_BOT_PERSONA` stay the original lowercase name. Updated this file's roster prose to the new display names. |

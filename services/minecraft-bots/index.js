@@ -1,4 +1,4 @@
-// Version: 3.0.0
+// Version: 3.1.0
 //
 // The Firmament's Minecraft bot: one process per bot (run-bot.sh), configured by its unit's
 // environment. Change history: history/index.js.md (moved out of this file 2026-11-13, verbatim).
@@ -41,7 +41,7 @@ export const { pathfinder, goals } = pathfinderPkg;
 
 const HOST = process.env.MC_HOST || "192.168.1.221";
 const PORT = parseInt(process.env.MC_PORT || "25580", 10);
-export const USERNAME = process.env.MC_BOT_USERNAME || "Babs";
+export const USERNAME = process.env.MC_BOT_USERNAME || "Babs_Miner";
 installFatalHandlers(USERNAME); // faults.js: log an uncaught error with where it came from, then exit
 export const PERSONA_NAME = process.env.MC_BOT_PERSONA || USERNAME.toLowerCase();
 export const MAX_CHAT_LEN = 200;
@@ -74,12 +74,28 @@ export function isBoss(speaker) {
 // actually running yet, keeps this list in sync with roles.js's own BOT_ROLES rather than
 // silently drifting" reasoning as Bob's own addition to this list.
 export const BOT_USERNAMES = new Set(
-  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor,Bob,Nell,Wade,Dale").split(",").map((s) => s.trim()).filter(Boolean),
+  (process.env.MC_BOT_USERNAMES || "Babs_Miner,Amy_Builder,Mark_Soldier,Luke_Soldier,Mayor_Leader,Bob_Farmer,Nell_Artist,Wade_Explorer,Dale_Herder")
+    .split(",").map((s) => s.trim()).filter(Boolean),
 );
 
 export function isAnotherBot(speaker) {
   return BOT_USERNAMES.has(speaker) || speaker.startsWith("@mc-"); // Matrix bot identities
 }
+
+// 2026-11-26 rename (direct request, "rename the bots to be name-<role>"): every bot's in-game
+// display username became Name_Role (Mayor -> Mayor_Leader) while its persona key -- and so its
+// AGENT_ID, Matrix identity, and /mnt/hermes-data/minecraft-memory/ paths -- stayed exactly what
+// it was (MC_BOT_PERSONA is now pinned explicitly in each systemd unit, see
+// infra/minecraft-bots/*.service). Before this, every caller elsewhere in this codebase that
+// needed a BOT_USERNAMES member's persona key just did `name.toLowerCase()`, since persona WAS
+// username.toLowerCase() for every bot that ever existed. That shortcut is wrong now -- this is
+// the one place the real mapping lives, so isMayor/isActingCoordinator (below) and mayor.js/
+// priorities.js/self-defense.js's own role/goal/Buzz lookups all go through it instead.
+const USERNAME_TO_PERSONA = Object.freeze({
+  Mayor_Leader: "mayor", Mark_Soldier: "mark", Luke_Soldier: "luke", Babs_Miner: "babs",
+  Amy_Builder: "amy", Bob_Farmer: "bob", Nell_Artist: "nell", Wade_Explorer: "wade", Dale_Herder: "dale",
+});
+export function personaOf(name) { return USERNAME_TO_PERSONA[name] || name.toLowerCase(); }
 
 // Direct request, 2026-09-08 ("add another bot, Mayor, whose personality is to be a leader and
 // set goals for the others. The others can defer to him when his instructions are not in
@@ -89,9 +105,9 @@ export function isAnotherBot(speaker) {
 // (classifyIntent -> ACTION GOAL), the same path a player's own instruction already takes.
 // Matches on both the plain in-game name and his Matrix identity (@mc-mayor:spark), the two
 // forms isAnotherBot() itself already recognizes.
-export const MAYOR_USERNAME = process.env.MC_MAYOR_USERNAME || "Mayor";
+export const MAYOR_USERNAME = process.env.MC_MAYOR_USERNAME || "Mayor_Leader";
 export function isMayor(speaker) {
-  return speaker === MAYOR_USERNAME || speaker === `@mc-${MAYOR_USERNAME.toLowerCase()}:spark`;
+  return speaker === MAYOR_USERNAME || speaker === `@mc-${personaOf(MAYOR_USERNAME)}:spark`;
 }
 
 // Autonomy (standing goals): a whole-bot kill switch, an idle-before-self-proposing-a-goal
@@ -266,7 +282,7 @@ export function setLastMayorSeenAt(value) { lastMayorSeenAt = value; return valu
 // fleet that booted without him. Liveness is now measured from process start when Mayor has
 // never been heard, and every bot accepts the named fallback coordinator while Mayor is quiet.
 const PROCESS_STARTED_AT = Date.now();
-const FALLBACK_COORDINATOR_USERNAME = process.env.MC_FALLBACK_COORDINATOR_NAME || "Mark";
+const FALLBACK_COORDINATOR_USERNAME = process.env.MC_FALLBACK_COORDINATOR_NAME || "Mark_Soldier";
 export function mayorUnreachable() {
   return Date.now() - (lastMayorSeenAt || PROCESS_STARTED_AT) >= MAYOR_LIVENESS_TIMEOUT_MS;
 }
@@ -274,7 +290,7 @@ export function isActingCoordinator(speaker) {
   if (isMayor(speaker)) return true;
   return speaker !== USERNAME && mayorUnreachable() &&
     (speaker === FALLBACK_COORDINATOR_USERNAME ||
-     speaker === `@mc-${FALLBACK_COORDINATOR_USERNAME.toLowerCase()}:spark`);
+     speaker === `@mc-${personaOf(FALLBACK_COORDINATOR_USERNAME)}:spark`);
 }
 guardedInterval(goalHeartbeatTick, GOAL_HEARTBEAT_MS);
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Firmament Minecraft Bot (Bob)
+Description=Firmament Minecraft Bot (Bob_Farmer)
 After=network-online.target hermes-router.service hermes-memory.service hermes-buzz.service continuwuity.service
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -8,7 +8,11 @@ StartLimitIntervalSec=0
 Type=simple
 User=pmoney
 WorkingDirectory=/home/pmoney/HermesAgentV5/services/minecraft-bots
-Environment=MC_BOT_USERNAME=Bob
+Environment=MC_BOT_USERNAME=Bob_Farmer
+# 2026-11-26 rename ("rename the bots to be name-<role>"): pins this bot's own stable identity
+# (persona, Matrix account, memory paths -- see index.js 3.1.0) while MC_BOT_USERNAME above
+# becomes the new in-game display name other players and bots actually see.
+Environment=MC_BOT_PERSONA=bob
 # spark2 has no RAG index or embedder: search/notes/skills go to spark's hermes-minecraft-rag (8105)
 Environment=MC_RAG_URL=http://10.129.1.15:8105
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh

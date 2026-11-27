@@ -1,4 +1,9 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-26) -- direct request ("rename the bots to be name-<role>"): isLiveSoldier()/
+// liveSoldierNames() now resolve a BOT_USERNAMES member's persona via index.js's personaOf()
+// instead of `name.toLowerCase()`, which broke once a bot's display username (Mayor_Leader, ...)
+// stopped being persona.toUpperCase() (see index.js 3.1.0).
 //
 // 1.2.0 (2026-11-22, direct report: "bots need to be opportunistic... if they find themselves
 // near a minable resource other than wood or grass, they should gather it... particularly true
@@ -24,7 +29,7 @@ import { heldCount } from "./goal-runners.js";
 import { BOT_ROLES, ROLES } from "./roles.js";
 import { SELF_DEFENSE_RANGE } from "./self-defense.js";
 import { isDoorway } from "./swim-movements.js";
-import { BOT_USERNAMES, GOAL_LEASE_MS, HUNGER_THRESHOLD, TOOL_TIERS, USERNAME, bot, foodFetchBlockedUntil, hasFood, hasPickaxe, hasRod, otherBotGoalSeenAt, proposeOwnGoal, toolStep } from "./index.js";
+import { BOT_USERNAMES, GOAL_LEASE_MS, HUNGER_THRESHOLD, TOOL_TIERS, USERNAME, bot, foodFetchBlockedUntil, hasFood, hasPickaxe, hasRod, otherBotGoalSeenAt, personaOf, proposeOwnGoal, toolStep } from "./index.js";
 
 // Home scanning: counting blocks near home, shelter and residence detection: in home-scan.js (split out 2026-11-10).
 // Direct request, 2026-10-11 (PRIORITIES_PROPOSAL.md Tier 2 item 1a -- "once the fleet's
@@ -423,13 +428,13 @@ const SOLDIER_PATROL_RANGE = 32; // wider than SELF_DEFENSE_RANGE -- a Soldier h
 // running Soldier is never idle long enough for her own lease to go stale.
 function isLiveSoldier(name) {
   if (name === USERNAME) return true; // herself -- trivially live if this code is even running
-  if (BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER) return false; // demoted/reassigned
-  const seenAt = otherBotGoalSeenAt.get(`mc-${name.toLowerCase()}`);
+  if (BOT_ROLES[personaOf(name)]?.primary !== ROLES.SOLDIER) return false; // demoted/reassigned
+  const seenAt = otherBotGoalSeenAt.get(`mc-${personaOf(name)}`);
   return seenAt !== undefined && Date.now() - seenAt <= GOAL_LEASE_MS;
 }
 
 function liveSoldierNames() {
-  return [...BOT_USERNAMES].filter((name) => BOT_ROLES[name.toLowerCase()]?.primary === ROLES.SOLDIER && isLiveSoldier(name));
+  return [...BOT_USERNAMES].filter((name) => BOT_ROLES[personaOf(name)]?.primary === ROLES.SOLDIER && isLiveSoldier(name));
 }
 
 // One live Soldier: trivially the anchor, no claim contention at all -- today's unchanged

@@ -1,4 +1,8 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-26) -- direct request ("rename the bots to be name-<role>"): OTHER_BOT_USERNAMES'
+// default fallback list updated to the new Name_Role display usernames, kept in sync with
+// index.js's own BOT_USERNAMES default per this file's existing convention (see comment below).
 //
 // 1.0.0 (2026-11-13) -- split out of actions.js (2.0.0) unchanged: other bots' positions, mine drops, buildings, planting, pens and herds, seeds, achievements, farm plots, wool and bed sites.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. actions.js imports
@@ -30,7 +34,8 @@ import { isProtectedBlockName } from "./action-vocab.js";
 // sync with index.js's own BOT_USERNAMES default since this really is an independent duplicate
 // of that same roster, not a second source of truth.
 const OTHER_BOT_USERNAMES = new Set(
-  (process.env.MC_BOT_USERNAMES || "Babs,Amy,Mark,Luke,Mayor,Bob,Nell,Wade,Dale").split(",").map((s) => s.trim()).filter(Boolean),
+  (process.env.MC_BOT_USERNAMES || "Babs_Miner,Amy_Builder,Mark_Soldier,Luke_Soldier,Mayor_Leader,Bob_Farmer,Nell_Artist,Wade_Explorer,Dale_Herder")
+    .split(",").map((s) => s.trim()).filter(Boolean),
 );
 const BOT_PROXIMITY_AVOID_DISTANCE = 6;
 // How many extra candidates to fetch beyond what's actually needed, so filtering out ones too

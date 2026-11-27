@@ -1,5 +1,11 @@
 #!/bin/bash
-# Version: 1.7.0
+# Version: 1.8.0
+#
+# 1.8.0 (2026-11-26) -- direct request ("rename the bots to be name-<role>"): the Matrix
+# token-var lookup and HEAPDUMP_DIR now key off MC_BOT_PERSONA (falling back to the lowercased
+# username, same as before, if it's unset) instead of MC_BOT_USERNAME directly -- otherwise a
+# bot's display-name rename (Mayor -> Mayor_Leader) would silently look for a
+# MC_MATRIX_MAYOR_LEADER_TOKEN that doesn't exist and lose Matrix connectivity with no error.
 #
 # 1.7.0 (2026-09-07) -- direct request: "check the Firmament coder logs for flagged Minecraft
 # behavior that are not yet resolved" (again) -> the 1.4.0 768MB ceiling turned out too tight
@@ -84,20 +90,26 @@ BUZZ_TOKEN="$("$VAULT_GET" buzz-token password)"
 export BUZZ_TOKEN
 export BUZZ_URL="${BUZZ_URL:-http://10.129.1.15:8101}"
 
-MC_BOT_USERNAME="${MC_BOT_USERNAME:-Babs}"
+MC_BOT_USERNAME="${MC_BOT_USERNAME:-Babs_Miner}"
+# 2026-11-26 rename ("rename the bots to be name-<role>"): persona (and so the Matrix token this
+# bot logs in with, and its heapdump dir) must stay pinned to each bot's own stable identity even
+# though its in-game MC_BOT_USERNAME changed -- same reasoning as index.js's own PERSONA_NAME
+# default. MC_BOT_PERSONA is now set explicitly in every systemd unit; the lowercased-username
+# fallback below only matters for a bot that doesn't set it.
+MC_BOT_PERSONA="${MC_BOT_PERSONA:-$(echo "$MC_BOT_USERNAME" | tr '[:upper:]' '[:lower:]')}"
 MATRIX_CREDS="$HOME/.hermes/minecraft-matrix.env"
 if [ -f "$MATRIX_CREDS" ]; then
-  VAR_NAME="MC_MATRIX_$(echo "$MC_BOT_USERNAME" | tr '[:lower:]' '[:upper:]')_TOKEN"
+  VAR_NAME="MC_MATRIX_$(echo "$MC_BOT_PERSONA" | tr '[:lower:]' '[:upper:]')_TOKEN"
   MATRIX_ACCESS_TOKEN="$(grep "^${VAR_NAME}=" "$MATRIX_CREDS" | cut -d= -f2- || true)"
   if [ -n "$MATRIX_ACCESS_TOKEN" ]; then
     export MATRIX_ACCESS_TOKEN
     export MATRIX_HOMESERVER="${MATRIX_HOMESERVER:-http://10.129.1.15:6167}"
-    export MATRIX_USER_ID="${MATRIX_USER_ID:-@mc-$(echo "$MC_BOT_USERNAME" | tr '[:upper:]' '[:lower:]'):spark}"
+    export MATRIX_USER_ID="${MATRIX_USER_ID:-@mc-$MC_BOT_PERSONA:spark}"
     export MATRIX_ROOM_ID="${MATRIX_ROOM_ID:-!2rXcMwykUS2yVNTLGw:spark}"
   fi
 fi
 
-HEAPDUMP_DIR="/mnt/hermes-data/minecraft-memory/heapdumps/$(echo "$MC_BOT_USERNAME" | tr '[:upper:]' '[:lower:]')"
+HEAPDUMP_DIR="/mnt/hermes-data/minecraft-memory/heapdumps/$MC_BOT_PERSONA"
 mkdir -p "$HEAPDUMP_DIR"
 
 exec node --max-old-space-size=1536 --heapsnapshot-near-heap-limit=1 --diagnostic-dir="$HEAPDUMP_DIR" index.js

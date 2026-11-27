@@ -1,6 +1,6 @@
 # index.js change history
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 The change history of `services/minecraft-bots/index.js`, newest first. Until 2026-11-13 it was the
 comment block at the top of `index.js` itself (149k characters, more than the self-repair pipeline's
@@ -9,6 +9,26 @@ into subject modules (`index.js` 3.0.0, direct operator request). `index.js` kee
 line; each new version's entry goes at the top of the list below.
 
 ## Versions
+
+### 3.1.0 (2026-11-26)
+
+Direct request ("rename the bots to be name-<role>"): `USERNAME`/`BOT_USERNAMES`/`MAYOR_USERNAME`/
+`FALLBACK_COORDINATOR_USERNAME` defaults became each bot's new Name_Role display username
+(Mayor -> Mayor_Leader, etc.) -- the in-game account each bot actually logs into, chats as, and is
+seen under. Persona keys (and so AGENT_ID, Matrix identity, and every `/mnt/hermes-data/
+minecraft-memory/` path) stayed exactly what they were: every bot's systemd unit now pins
+`MC_BOT_PERSONA` explicitly (see `infra/minecraft-bots/*.service`), rather than falling through to
+this file's own `USERNAME.toLowerCase()` default, which would otherwise have derived the wrong
+persona the moment a username stopped being a bare capitalized name. Added `personaOf()`/
+`USERNAME_TO_PERSONA` as the one place that username -> persona mapping lives, since every caller
+elsewhere that needed a `BOT_USERNAMES` member's persona key previously just did
+`name.toLowerCase()` under the now-false assumption that persona was always username.toLowerCase()
+-- `isMayor()`/`isActingCoordinator()` (both here) and `mayor.js`/`priorities.js`/
+`self-defense.js`'s own role/goal/Buzz lookups all route through it now. World playerdata (UUID
+is derived from username, so renaming changes it) and `/mnt/hermes-data/minecraft-memory/
+achievements/<name>.json` (keyed by real username, not persona) were migrated by hand to the new
+UUIDs/filenames so in-progress inventory/position/XP/achievements carried over; ops.json was
+updated with the new usernames' UUIDs the same way.
 
 ### 3.0.0 (2026-11-13)
 
@@ -1803,3 +1823,4 @@ efficiency principle (§5): don't spend a model call faster than the previous on
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-11-13 | Created: index.js's header changelog moved here verbatim, plus its 3.0.0 entry. |
+| 1.1.0 | 2026-11-26 | Added index.js's 3.1.0 entry (bot rename to Name_Role display usernames, personaOf() mapping). |
