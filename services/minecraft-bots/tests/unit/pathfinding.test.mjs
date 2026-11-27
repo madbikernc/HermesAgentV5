@@ -1,4 +1,8 @@
-// Version: 1.6.0
+// Version: 1.7.0
+// 1.7.0 (2026-11-27): pathfinding.js 1.4.0 tore out the land teleport-nudge entirely (direct
+// instruction: "too disruptive") -- removed its now-dead test; the smooth jump-impulse assist's
+// own check (added in 1.6.0) is the only land-stuck coverage left.
+//
 // 1.6.0 (2026-11-27): pathfinding.js 1.3.0 replaced the land teleport-nudge's own low burst
 // threshold (it fired on nearly every terrain step live) with a smooth per-tick jump-impulse
 // assist, demoting the teleport to an 8-in-60s last resort -- updated that test's threshold and
@@ -290,45 +294,11 @@ await check('Pathfinding: setupPathfinding installs the costs, unbreakable block
   assert.equal(movements.canDig, false, 'four dig_errors in a burst force walk-only pathing');
 });
 
-// 2026-11-27 (pathfinding.js 1.2.0): direct report ("they're still standing there seemingly
+// 2026-11-27 (pathfinding.js 1.4.0): direct report ("they're still standing there seemingly
 // stuck"), the LAND half -- live DEBUG_PHYSICS data caught both bots frozen on dry ground with
 // jump held, never launching, because prismarine-physics's own jump impulse only fires while
-// freshly landing, not while already resting against the step. The smooth per-tick assist
-// (tested below) handles the vast majority of this live; a SUSTAINED burst of "stuck" resets
-// (not in water) despite that is the rarer last resort, nudging her up one block via an op'd
-// chat /tp, the same mechanism upkeep-world.js's own teleportToSpawn() already uses. Direct live
-// follow-up ("why were they teleporting all the time now") found the original 3-in-12s burst
-// fired on nearly every ordinary terrain step (51 teleports in 10 minutes, one bot popping up a
-// mountain instead of walking it) -- raised well past what the smooth assist alone should ever
-// need, so this only fires for a genuine case that assist can't clear.
-await check('Pathfinding: a SUSTAINED burst of land "stuck" resets nudges her up one block (not in water)', async () => {
-  const src = await readFile(root + 'pathfinding.js', 'utf8');
-  class Movements { constructor() { this.blocksCantBreak = new Set(); this.exclusionAreasPlace = []; this.canDig = true; } }
-  const chatCalls = [];
-  const bot = new EventEmitter();
-  Object.assign(bot, {
-    registry: { blocksArray: [] },
-    pathfinder: { setMovements(m) { this.movements = m; } }, pvp: {}, collectBlock: {},
-    entity: { position: new V3(5, 69, -17) }, entities: {}, blockAt: () => null,
-    chat: (msg) => chatCalls.push(msg),
-  });
-  const c = vm.createContext({ console: { log() {}, error() {} }, Vec3: V3, SwimMovements: Movements, setTimeout, Date,
-    installDoorSupport: () => {}, installSteppedGoto: () => {}, isProtectedBlockName: () => false, wouldBlockAccess: () => false });
-  vm.runInContext(between(src, 'function setupPathfinding'), c);
-  c.setupPathfinding(bot, { username: 'Amy' });
-  for (let i = 0; i < 7; i++) bot.emit('path_reset', 'stuck');
-  assert.deepEqual(chatCalls, [], 'seven resets in the burst window are not enough yet');
-  bot.emit('path_reset', 'stuck');
-  assert.equal(chatCalls.length, 1, 'an eighth reset in the window nudges her');
-  assert.equal(chatCalls[0], '/tp Amy 5.00 70.05 -17.00', 'up exactly one block, at her own x/z');
-  bot.entity.isInWater = true;
-  for (let i = 0; i < 8; i++) bot.emit('path_reset', 'stuck');
-  assert.equal(chatCalls.length, 1, 'stuck while swimming is the separate, already-long-standing water case -- no nudge');
-});
-
-// 2026-11-27 (pathfinding.js 1.2.0): the smooth replacement for the teleport-nudge above --
-// direct live follow-up ("why were they teleporting all the time now") found the real fix
-// belongs at the exact mechanic prismarine-physics itself uses: give her the same vel.y=0.42
+// freshly landing, not while already resting against the step. The real fix belongs at the
+// exact mechanic prismarine-physics itself uses: give her the same vel.y=0.42
 // impulse a landing-triggered jump would, the moment she's holding jump, genuinely not airborne
 // (vel.y already <= 0) and not onGround. Self-limiting because the injected impulse makes vel.y
 // positive for the next several ticks, so it can't re-fire mid-arc -- looks like ordinary

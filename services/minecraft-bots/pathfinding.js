@@ -1,4 +1,9 @@
-// Version: 1.3.0
+// Version: 1.4.0
+//
+// 1.4.0 (2026-11-27, direct instruction: "tear out the teleport fix. it's too disruptive"): the
+// 1.3.0 teleport-nudge (kept as a demoted last resort alongside the new smooth jump assist) is
+// gone entirely. The smooth per-tick impulse assist is now the whole land fix; a case it can't
+// clear is a different, not-yet-diagnosed problem, not a reason to teleport her.
 //
 // 1.3.0 (2026-11-27, direct live follow-up: "why were they teleporting all the time now"): the
 // land fix just below (1.2.0) was teleporting constantly -- the onGround gap turns out to fire
@@ -6,9 +11,7 @@
 // measured live, one bot popping up a mountain instead of walking it). Replaced with a smooth
 // per-tick assist that gives the exact vel.y=0.42 impulse prismarine-physics's own
 // landing-triggered jump would, the moment she's blocked holding jump -- self-limiting since the
-// injected impulse keeps vel.y positive through the rest of the arc. The teleport-nudge is kept
-// but demoted to a genuine last resort (8-in-60s instead of 3-in-12s) for whatever the smooth
-// assist alone still can't clear.
+// injected impulse keeps vel.y positive through the rest of the arc.
 //
 // 1.2.0 (2026-11-27, direct report: "they're still standing there seemingly stuck"): two
 // separate root causes found live and fixed. (1) Land: a burst of "stuck" resets on dry ground
@@ -420,38 +423,13 @@ export function setupPathfinding(bot, { username: USERNAME }) {
   // makes vel.y positive for the next several ticks (a normal jump arc), so it can't re-fire
   // until she's falling again. Looks like ordinary jumping, not a teleport, because it IS the
   // same mechanic a landing-triggered jump already uses -- just applied where this resting case
-  // needs it. The teleport-nudge below is kept, but demoted to a genuine last resort (a much
-  // longer burst window) for whatever this smooth assist alone still can't clear.
+  // needs it. A demoted, last-resort teleport nudge was tried alongside this and torn back out
+  // on direct instruction ("too disruptive") -- this smooth assist is the whole fix now; a case
+  // it genuinely can't clear is a different, not-yet-diagnosed problem, not a reason to teleport.
   bot.on("physicsTick", () => {
     if (bot.entity?.isInWater || !bot.pathfinder?.isMoving?.() || !bot.getControlState("jump")) return;
     if (bot.entity?.onGround || !bot.entity?.velocity || bot.entity.velocity.y > 0) return;
     bot.entity.velocity.y = 0.42;
-  });
-  // Same op'd-chat nudge upkeep-world.js's own teleportToSpawn() already uses (this bot's own
-  // client issuing a server command, not an external tool): a SUSTAINED burst of "stuck" resets
-  // on dry land -- despite the smooth jump assist just above -- nudges her up exactly one block
-  // at her own x/z, for the rarer case that assist alone doesn't clear (horizontal collision
-  // blocking forward progress regardless of jump height, say). Deliberately excludes water
-  // (isInWater) -- that's the separate, already-long-standing swim case just below, which this
-  // nudge would not help (she's not resting against a step there, she's mid-swim).
-  const LAND_STUCK_BURST_THRESHOLD = 8;
-  const LAND_STUCK_BURST_WINDOW_MS = 60000;
-  const LAND_STUCK_NUDGE_COOLDOWN_MS = 30000;
-  let landStuckTimestamps = [];
-  let landNudgeSuppressedUntil = 0;
-  bot.on("path_reset", (reason) => {
-    if (reason !== "stuck" || bot.entity?.isInWater) return;
-    const now = Date.now();
-    landStuckTimestamps.push(now);
-    landStuckTimestamps = landStuckTimestamps.filter((t) => now - t < LAND_STUCK_BURST_WINDOW_MS);
-    if (landStuckTimestamps.length < LAND_STUCK_BURST_THRESHOLD || now < landNudgeSuppressedUntil) return;
-    landStuckTimestamps = [];
-    landNudgeSuppressedUntil = now + LAND_STUCK_NUDGE_COOLDOWN_MS;
-    const pos = bot.entity?.position;
-    if (!pos) return;
-    console.log(`[${USERNAME}] land-stuck burst -- nudging up one block at ` +
-                `(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`);
-    bot.chat(`/tp ${USERNAME} ${pos.x.toFixed(2)} ${(pos.y + 1.05).toFixed(2)} ${pos.z.toFixed(2)}`);
   });
   // Direct report, 2026-11-27 ("they're still standing there seemingly stuck"), a long-standing
   // issue per this file's own liquidCost/entityCost history above, only root-caused live now:
