@@ -1,137 +1,37 @@
 # Minecraft Bots Orchestrator
 
-**Version:** 4.5.0
+**Version:** 1.0.0
+**Status:** Mid-restart. `index.js`/`actions.js` currently reference modules that moved to the
+archive (see `ARCHIVE_INDEX.md`) and will not run until `MINECRAFT_BOTS_RESTART_PLAN.md`'s Phase 4/5
+land. All nine bot units are stopped on purpose — do not start them before then.
 
-Mineflayer bot runtime for the Firmament's nine Minecraft bots. **What the bots do and why lives
-in `../../MINECRAFT_BOTS_DESIGN.md`** — this file covers only how to run and configure the
-process. Change history: `../../docs/minecraft-bots-history.md`.
+See `MINECRAFT_BOTS_RESTART_PLAN.md` (repo root) for the full restart plan and current phase status.
+`ARCHIVE_INDEX.md` in this folder is a terse map of what moved out and why.
 
-The fleet's only Node.js service. Everything else in HermesAgentV5 is Python stdlib; mineflayer
-has no comparable Python equivalent, which makes this a deliberate runtime deviation rather than
-an oversight.
-
-## Running
-
-One process per bot, `run-bot.sh` rather than `node index.js` — the wrapper fetches
-`MEMORY_TOKEN`/`BUZZ_TOKEN` from Vaultwarden and sets the heap cap. (It also reads a legacy
-Matrix token from `~/.hermes/minecraft-matrix.env` if one is there -- optional, from before Buzz;
-no bot needs one.) Running `index.js` directly works but loses short-term memory, long-term
-recall, and Buzz, each degrading independently rather than failing the bot.
-
-```bash
-cd services/minecraft-bots
-npm install                                  # once; package-lock.json pins tested versions
-MC_BOT_USERNAME=Babs ./run-bot.sh
-```
-
-In production each bot is a systemd unit instead — see `infra/minecraft-bots/`.
-
-**Requirements:** Node.js 22 LTS (on `spark` and `spark2`).
-
-**Heap:** `--max-old-space-size=1536`, with a heap snapshot written to
-`/mnt/hermes-data/minecraft-memory/heapdumps/<bot>/` if the limit is hit. This is defense in
-depth, not a fix — `astar.js`'s synchronous `compute()` starves pending continuations on every
-search, leaking promises slowly. `Restart=always` covers the rest.
-
-## Environment
-
-Everything has a working default; a unit file only sets what it overrides.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `MC_HOST` / `MC_PORT` | `192.168.1.221` / `25580` | Game server |
-| `MC_BOT_USERNAME` | `Babs` | This bot's in-world name |
-| `MC_BOT_PERSONA` | lowercased username | Which `agents/minecraft-<x>/` to load |
-| `MC_BOT_USERNAMES` | all nine | Identities excluded from the human-reply path, or bots relaying each other's chat loop forever |
-| `MC_BOSS_USERNAMES` | `CanisLupisM,@phone1:spark` | Real accounts the "Boss" persona modifiers apply to |
-| `MC_MAYOR_USERNAME` | `Mayor` | Who issues directives |
-| `MC_SQUAD_RESPONDER` | derived from Soldier role | Override to put a non-Soldier on squad duty |
-| `MC_FALLBACK_COORDINATOR` | unset | Coordinates when Mayor goes quiet (set on Mark) |
-| `MC_AUTONOMY_ENABLED` / `MC_SELF_PROPOSE_GOALS` | `true` | Kill switches for the goal loop |
-| `MC_SELF_DEFENSE_RANGE` | `12` | Threat detection radius (20 on Mark/Luke) |
-| `MC_MINE_SEARCH_RADIUS` / `MC_EXPLORE_SEARCH_RADIUS` | `32` | Local block scan (40 on Babs/Wade). Keep under 48 — `pathfinder.searchRadius`'s OOM ceiling |
-| `MC_EXTENDED_SEARCH_DISTANCE` | `150` | Wander beacon scan (260 on Wade); hop-capped, so safe to raise |
-| `MC_GOAL_TICK_MS` / `MC_IDLE_SELF_GOAL_MS` | `45000` / `600000` | Goal step cadence; idle before self-proposing |
-| `MC_MAYOR_DIRECTIVE_MS` | `300000` | Mayor's assignment cadence |
-| `MC_*_CHECK_MS` | see `index.js` | Per-check intervals: sleep, dusk, hunger, inventory, give, sapling, lighting, home lighting, terrain repair, access, torch supply, stuck, self-defense, sleeping-threat |
-| `MC_LIVING_SPACE_REFRESH_MS` | `30000` | How often the shelter-wall scan reruns. The result is what `safeToBreak` reads, so a longer interval means a staler shell |
-| `MC_TORCH_SPACING` / `MC_TORCH_CARRY_MIN` | `6` / `8` | Blocks between trail torches while digging; how many she tops up to |
-| `MC_MAX_STUCK_NUDGES` / `MC_RESTART_STUCK_*` | `2` / `3`, `2` | Stuck detection before teleport self-rescue |
-| `MEMORY_URL` / `BUZZ_URL` | spark | Service endpoints; tokens come from `run-bot.sh` |
-| `MATRIX_*` | — | Legacy, optional: with `MATRIX_ACCESS_TOKEN` set, the bot also watches and replies in the old shared Matrix room |
-| `HERMES_ROUTER_URL` | `127.0.0.1:8080` | Localhost only — the router proxies to whichever node serves a role |
-
-## Files
+## What's still here (kept, not archived)
 
 | File | Job |
 |---|---|
-| `index.js` | The bot: creates it, holds the state the modules share (`busy`, `currentGoal`, ...), and registers every listener and periodic check in order. Most code lives in the modules below (split 2026-11-13, each under the self-repair pipeline's 40000-char file limit) |
-| `fleet-coordination.js` | Role notes, recent goal outcomes, goal/give/threat/death broadcasts, resource notes |
-| `goal-proposal.js`, `goal-tick.js` | Self-proposed goals; the goal loop (`goalTick`) and its follow-up scheduling |
-| `goal-runners.js`, `gear-goals.js`, `shelter-goals.js` | The dedicated goal runners: builder placement, farm, ranch, bed, weapon, tools, food, shelter |
-| `mayor.js` | The Mayor's tech-tree curriculum, directives to other bots, the fallback coordinator |
-| `night-survival.js` | Sleep and dusk, emergency health, drowning, threats while asleep |
-| `upkeep-inventory.js`, `upkeep-home.js`, `upkeep-world.js` | The periodic checks: hunger, crops, give requests, storage, trash, lighting, terrain, shelter integrity, stuck detection |
-| `incoming.js` | Incoming chat and commands, stop, the incoming queue, the Buzz topic watchers |
-| `chat.js`, `planning.js`, `self-defense.js`, `home-scan.js`, `priorities.js` | Chat replies and intent, the step planner, self-defense, home scans, the role priority lists (split 2026-11-10) |
-| `actions.js` | `performAction` and its dispatcher over `actions/*.js` (one file per verb); re-exports every helper below |
-| `action-vocab.js`, `action-search.js`, `action-movement.js`, `action-crafting.js`, `action-world.js`, `action-shelter.js`, `action-chests.js`, `action-claims.js` | The helpers the actions share: item and block vocabulary, searching, boats and collection, crafting, pens/farms/beds, shelter geometry, the chest record, builder claims (split 2026-11-13) |
-| `history/` | `index.js`'s and `actions.js`'s change history (moved out of the files 2026-11-13) |
-| `arbiter.js` | Urgency tiers — who may hold the body |
-| `roles.js` | Role taxonomy and per-bot assignment |
-| `goals.js` | Persistent goal state, `actionsTaken`, failure counters |
-| `skills.js` | Skill library: author, validate, retrieve, replay |
-| `longterm.js` | Per-bot RAG memory and shared world-memory notes |
-| `equipment.js` | `hasWeapon()`, best armor/weapon selection, gear tiers |
-| `swim-movements.js` | `Movements` subclass: water handling, `MAX_DIG_LABOR_COST` cap, doors, the shelter-wall dig refusal |
-| `shelter.js` | Access cells for chests/beds/doors, and the flood fill that recognises a living space's walls |
-| `tunneling.js` | Torch supply and the trail placed while digging |
-| `persona.js` | Prepends `agents/minecraft-common.md` to the bot's own `PROMPT.md` |
-| `memory.js`, `buzz.js`, `router.js` | Thin service clients |
-| `matrix.js` | Legacy, optional Matrix room watcher (pre-Buzz); only runs with a `MATRIX_ACCESS_TOKEN` |
+| `index.js` | The bot entrypoint — being rewritten in Phase 5 to call the new skill/task/instruction layer instead of the archived goal engine |
+| `pathfinding.js`, `swim-movements.js` | Movement/physics: the climb, jump-impulse and swim-sprint fixes from the 2026-11 pathfinding debugging session |
+| `arbiter.js` | Tiered control arbitration — who may hold the bot's body right now (routine work, player command, emergency) |
+| `router.js` | Thin client to `hermes-router.py`'s role dispatch (`callRole`) |
+| `equipment.js` | Armor/weapon/tool selection from real game state |
+| `buzz.js` | Bot-to-bot coordination client (`hermes-buzz.py`) |
+| `matrix.js` | Shared operator+bots chat room client (Continuwuity Matrix CS API) |
+| `roles.js` | The `<Name>_<Role>` persona/role roster and naming convention |
+| `run-bot.sh` | Process wrapper: fetches tokens from Vaultwarden, sets the heap cap |
 
-## Things that will bite you
+**Requirements:** Node.js 22 LTS (on `dgx-spark` and `dgx-spark2`).
 
-- **`index.js` and `actions.js` keep their change history in `history/`**, not at the top of the file
-  (each was larger than the self-repair pipeline's whole file limit). Bump the `// Version:` line in
-  the file and add the entry at the top of `history/<file>.md`. Every other file keeps its own header.
-- **A module-level variable is assigned only in the file that declares it.** Another file imports it
-  (a live, read-only binding) and writes it through that file's setter -- `setBusy()`,
-  `setCurrentGoal()`. `busy = true` in a split-out module is a TypeError at runtime, not at load.
-  Code that runs at load (`bot.on`, `guardedInterval`) stays in `index.js`: the modules evaluate
-  before `index.js` has created `bot`.
+## Running
 
-- **Adding an action verb means three places**: the `actions.js` switch, `classifyIntent`'s
-  vocabulary, and `planNextStep`/`parseGoalStep`'s vocabulary — plus `SKILL_ACTION_VERBS` unless
-  its arguments can't be replayed.
-- **Every block placement asks `wouldBlockAccess` first** (`shelter.js`). A new placement site that
-  doesn't is a new way to wall in a chest, a bed, a door, or a shelter's only doorway.
-- **The shelter shell is a cached `Set`, refreshed on a timer.** `safeToBreak` is called thousands
-  of times per path search, so it can only ever be a lookup — never recompute the fill there.
-- **`block.light` is frozen at chunk-load time.** It never updates after a block change — not for
-  an RCON `fill`, not across a chunk reload, not even for a torch the bot itself places. Anything
-  that needs "is this dark" must use block identity instead (the registry's `emitLight`), the way
-  `tunneling.js` does. `checkLighting` and `light_area` still depend on it; see the design doc's
-  §12 Open.
-- **`craftItem` chains through `recipe.delta`, not `recipe.ingredients`.** `ingredients` is only
-  populated for shapeless recipes; torches, sticks and crafting tables are shaped.
-- **Any mineflayer plugin holding its own `Movements`** (`collectBlock`, `pvp`) must be pointed at
-  the shared instance at spawn, or every cost tuning is silently undone for that plugin's calls.
-- **Persona text reaches eight prompt sites**, not just chat — changing `PROMPT.md` or
-  `minecraft-common.md` affects self-proposal and directive generation too.
-- **A bot is just another player to mineflayer.** Bot identities are filtered out of the
-  human-reply path; Mayor's directives are the one deliberate exception.
-- **`isUtilityUsable`'s failure-streak cache is in-memory only, per process.** A restarted bot
-  forgets every chest/furnace/table it had already proven broken and has to re-discover
-  unusability through a few more real attempts before `countUsableNearHome` excludes it again —
-  bounded by `UTILITY_UNUSABLE_AFTER_FAILURES`, same tradeoff `builderStallItem`/
-  `fleetHasIronTool` already make for comparably short-lived fleet state.
-- **`mine`'s no-path skip list is in-memory too.** A stone (or any target) that just failed "No
-  path" sits out `MINE_UNREACHABLE_MS` (10 min) in actions.js's `mineUnreachableUntil`; a restart
-  clears it, and the first attempt after one may retry a buried block once more.
-- **Dropped surplus can be picked straight back up.** A thrown item is anyone's to pick up 2s
-  later. `makeHomeChest` throws `junkToDrop` items from 6 blocks out from home and walks back at
-  once; anything else that drops items should move her away the same way.
-- **A spectator can't drop, craft or place.** The server keeps a player's game mode between
-  logins, and probe scripts log in as `MBProbe` in spectator; `live-bot.test.mjs` sets survival at
-  every boot. A test that sees an action "succeed" with nothing changing in the world: check this.
+Not functional right now — see Status above. Once Phase 5 lands:
+
+```bash
+cd services/minecraft-bots
+npm install
+MC_BOT_USERNAME=Babs ./run-bot.sh
+```
+
+In production each bot is a systemd unit — see `infra/minecraft-bots/`.
