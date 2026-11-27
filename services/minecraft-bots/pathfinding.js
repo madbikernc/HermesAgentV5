@@ -1,4 +1,14 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-27, direct report: "they're still standing there seemingly stuck"): two
+// separate root causes found live and fixed. (1) Land: a burst of "stuck" resets on dry ground
+// (not in water) nudges her up one block via an op'd chat /tp -- prismarine-physics's jump
+// impulse only fires on freshly landing (onGround = isCollidedVertically && oldVelY < 0), never
+// while already resting against the step she needs to climb, so holding jump alone can deadlock
+// forever on an ordinary 1-block terrain rise. (2) Water (confirmed a separate, already
+// long-standing issue, not the land cause): setupPathfinding() now forces sprint on while
+// swimming toward a goal -- mineflayer-pathfinder's own sprint gate never considers water, so a
+// slow non-sprint swim kept tripping its fixed stuck timeout even while genuinely progressing.
 //
 // 1.1.0 (2026-11-22, direct report: "it looks like pure chaos, with little measurable
 // success" a day into the fresh world): setupPathfinding() now debounces mineflayer-
@@ -373,6 +383,62 @@ export function setupPathfinding(bot, { username: USERNAME }) {
     setTimeout(() => {
       if (Date.now() >= digSuppressedUntil) movements.canDig = true;
     }, DIG_DISABLE_COOLDOWN_MS);
+  });
+  // Direct report, 2026-11-27 ("they're still standing there seemingly stuck" -- the LAND half,
+  // confirmed by direct instruction to be a SEPARATE cause from the swim fix just below): live
+  // DEBUG_PHYSICS data (MC_DEBUG_PHYSICS=true, index.js) caught both bots frozen on plain dry
+  // ground (fern/short_grass over ordinary dirt -- confirmed by block name, no water, no cliff,
+  // no other entity nearby) with forward+jump held every tick and a real goal needing a full
+  // 1-block rise -- exactly the "hillside... each elevation change was one block" terrain from
+  // the very first report. Confirmed against prismarine-physics's own source
+  // (node_modules/prismarine-physics/index.js): the jump impulse that actually launches her
+  // (vel.y = 0.42) only ever fires `else if (entity.onGround && entity.jumpTicks === 0)`, and
+  // onGround itself is computed as `entity.isCollidedVertically && oldVelY < 0` -- true only on
+  // the tick she's freshly LANDING from a fall, not while already at rest pressed against the
+  // step she needs to climb. Holding jump (what mineflayer-pathfinder's own monitorMovement
+  // does) never re-triggers that transition once she's settled into this resting state, so
+  // vel.y just holds at a small, steady gravity bias (-0.078 measured live) forever -- a true,
+  // reproducible deadlock, not merely slow progress. Same op'd-chat nudge upkeep-world.js's own
+  // teleportToSpawn() already uses (this bot's own client issuing a server command, not an
+  // external tool): a burst of "stuck" resets on dry land nudges her up exactly one block at her
+  // own x/z, enough to clear the step and let the onGround -> jump-impulse transition fire
+  // cleanly once she actually lands again. Deliberately excludes water (isInWater) -- that's the
+  // separate, already-long-standing swim case just below, which this nudge would not help (she's
+  // not resting against a step there, she's mid-swim).
+  const LAND_STUCK_BURST_THRESHOLD = 3;
+  const LAND_STUCK_BURST_WINDOW_MS = 12000;
+  const LAND_STUCK_NUDGE_COOLDOWN_MS = 5000;
+  let landStuckTimestamps = [];
+  let landNudgeSuppressedUntil = 0;
+  bot.on("path_reset", (reason) => {
+    if (reason !== "stuck" || bot.entity?.isInWater) return;
+    const now = Date.now();
+    landStuckTimestamps.push(now);
+    landStuckTimestamps = landStuckTimestamps.filter((t) => now - t < LAND_STUCK_BURST_WINDOW_MS);
+    if (landStuckTimestamps.length < LAND_STUCK_BURST_THRESHOLD || now < landNudgeSuppressedUntil) return;
+    landStuckTimestamps = [];
+    landNudgeSuppressedUntil = now + LAND_STUCK_NUDGE_COOLDOWN_MS;
+    const pos = bot.entity?.position;
+    if (!pos) return;
+    console.log(`[${USERNAME}] land-stuck burst -- nudging up one block at ` +
+                `(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})`);
+    bot.chat(`/tp ${USERNAME} ${pos.x.toFixed(2)} ${(pos.y + 1.05).toFixed(2)} ${pos.z.toFixed(2)}`);
+  });
+  // Direct report, 2026-11-27 ("they're still standing there seemingly stuck"), a long-standing
+  // issue per this file's own liquidCost/entityCost history above, only root-caused live now:
+  // live DEBUG_PHYSICS data (MC_DEBUG_PHYSICS=true, index.js) showed a swimming bot holding
+  // forward+jump correctly every tick (vertical swim progress genuinely works), but mineflayer-
+  // pathfinder's own monitorMovement never engages sprint while in water -- its sprint gate
+  // (canStraightLine/canSprintJump) is a walking-path heuristic that never checks water at all.
+  // Vanilla's own non-sprint swim speed is slow enough that a genuinely-progressing horizontal
+  // swim can still trip the library's fixed 3500ms stuck timeout long before she's actually
+  // stuck, repeating the same failed leg forever. Forcing sprint while swimming toward a goal is
+  // the same vanilla mechanic a real player already has (sprint-swimming), not a new capability
+  // -- just one this library's own sprint heuristic never considered. Registered after
+  // mineflayer-pathfinder's own physicsTick listener (setupPathfinding runs once pathfinder is
+  // already injected), so this always has the last word for the next tick's simulation.
+  bot.on("physicsTick", () => {
+    if (bot.entity?.isInWater && bot.pathfinder?.isMoving?.()) bot.setControlState("sprint", true);
   });
   return movements;
 }

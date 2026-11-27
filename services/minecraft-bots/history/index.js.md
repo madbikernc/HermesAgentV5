@@ -1,6 +1,6 @@
 # index.js change history
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 The change history of `services/minecraft-bots/index.js`, newest first. Until 2026-11-13 it was the
 comment block at the top of `index.js` itself (149k characters, more than the self-repair pipeline's
@@ -9,6 +9,28 @@ into subject modules (`index.js` 3.0.0, direct operator request). `index.js` kee
 line; each new version's entry goes at the top of the list below.
 
 ## Versions
+
+### 3.2.0 (2026-11-27)
+
+Direct report ("they're still standing there seemingly stuck"), live-debugged alongside
+combat.test.mjs/pathfinding.test.mjs's fixes (actions/flee.js 1.1.0, swim-movements.js 1.8.0) but a
+genuinely separate problem: both bots sat on completely open, ordinary terrain (grass/lakeshore,
+verified by block name, not just air-or-not -- an earlier RCON probe that only tested "is this
+block literally air" misread fern/grass_block/water as walls), server TPS a clean 20.0, no plugins
+loaded, `/tp` proves the server can move her entity -- yet `path_update status=success` paths never
+actually get walked, immediately followed by mineflayer-pathfinder's own `path_reset: stuck`
+(`performance.now() - lastNodeTime > 3500`, `index.js`'s `monitorMovement`, itself gated on the
+library's `physicsTick` event). Confirmed in mineflayer's own `physics.js`: `tickPhysics()` skips
+BOTH the local physics simulation and sending her position to the server whenever
+`bot.blockAt(bot.entity.position) == null` ("check if chunk is unloaded") -- a real candidate for a
+tick loop that's intermittently or persistently not running at all, invisible to every server-side
+RCON check already run (position, velocity, on-ground, effects, attributes all read normal; a
+teleport test is the only thing that visibly moved her). New `MC_DEBUG_PHYSICS=true` (default off)
+diagnostic, added at the spawn handler right after `setupPathfinding()`: logs physicsTick
+throughput, `blockAt(her own position)` nullness, on-ground, pathfinder's own `isMoving()`/goal
+presence, and the raw `forward`/`jump`/`sprint` control states once every 2s, to tell a genuinely
+stalled tick loop from one running at the normal ~20Hz rate but not producing movement. Not itself
+a fix -- the live data it gathers determines what the real fix is.
 
 ### 3.1.0 (2026-11-26)
 

@@ -1,4 +1,7 @@
-// Version: 3.1.0
+// Version: 3.2.0
+//
+// 3.2.0 (2026-11-27): new MC_DEBUG_PHYSICS=true live diagnostic (default off) -- see its own
+// comment at the spawn handler. See history/index.js.md for the full entry.
 //
 // The Firmament's Minecraft bot: one process per bot (run-bot.sh), configured by its unit's
 // environment. Change history: history/index.js.md (moved out of this file 2026-11-13, verbatim).
@@ -185,6 +188,54 @@ bot.once("spawn", async () => {
   // Pathfinder setup -- movement costs, unbreakable blocks, search limits, path diagnostics --
   // is in pathfinding.js (split out 2026-11-10).
   setupPathfinding(bot, { username: USERNAME });
+  // Direct report, 2026-11-27 ("they're still standing there seemingly stuck" -- confirmed live:
+  // not terrain, not lag, not a plugin, not the arbiter -- the path search succeeds but she never
+  // actually walks it). Temporary, env-gated live diagnostic: MC_DEBUG_PHYSICS=true logs
+  // physicsTick throughput, velocity, the path's own next waypoint, and whether
+  // bot.blockAt(her own position) is null, once every DEBUG_PHYSICS_LOG_MS. First live run (both
+  // bots, in water): ticks a normal ~40/2s, forward+jump held every tick, pathfinder reports
+  // isMoving -- yet position was frozen for 30+ real seconds. velocity/nextNode narrow down
+  // whether physics is genuinely producing zero displacement despite the held controls, or she's
+  // stuck re-targeting a waypoint she's already standing on.
+  if (process.env.MC_DEBUG_PHYSICS === "true") {
+    const DEBUG_PHYSICS_LOG_MS = 2000;
+    let physicsTicks = 0;
+    let lastDebugLogAt = Date.now();
+    let lastPathUpdate = null;
+    bot.on("path_update", (r) => { lastPathUpdate = r; });
+    bot.on("physicsTick", () => {
+      physicsTicks++;
+      const now = Date.now();
+      if (now - lastDebugLogAt < DEBUG_PHYSICS_LOG_MS) return;
+      const elapsedMs = now - lastDebugLogAt;
+      const ticks = physicsTicks;
+      lastDebugLogAt = now;
+      physicsTicks = 0;
+      const pos = bot.entity?.position;
+      const vel = bot.entity?.velocity;
+      const blockHere = pos ? bot.blockAt(pos) : null;
+      const next = lastPathUpdate?.path?.[0];
+      // 2026-11-27 follow-up (direct report: water is a separate, already-long-standing issue --
+      // this is specifically to catch a LAND stuck episode): MINECRAFT_BOTS_DESIGN.md's own
+      // 2026-09-21 entry already root-caused one shape of this exact "success, then stuck every
+      // few seconds, forever" signature to another entity standing on/near the target square --
+      // the search's entityCost (8) discourages it but Minecraft's own real collision can still
+      // make it genuinely unreachable at execution time even though the plan said "success."
+      // Lists every entity within 2 blocks so a land freeze can be checked against that live,
+      // not re-guessed.
+      const nearby = pos ? Object.values(bot.entities)
+        .filter((e) => e !== bot.entity && e.position && e.position.distanceTo(pos) <= 2)
+        .map((e) => `${e.username || e.name}@${e.position.distanceTo(pos).toFixed(1)}`) : [];
+      console.log(`[${USERNAME}] DEBUG_PHYSICS ticks=${ticks}/${elapsedMs}ms ` +
+        `pos=${pos ? `${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)}` : "none"} ` +
+        `vel=${vel ? `${vel.x.toFixed(3)},${vel.y.toFixed(3)},${vel.z.toFixed(3)}` : "none"} ` +
+        `blockAtPos=${blockHere ? blockHere.name : "NULL"} isInWater=${bot.entity?.isInWater} onGround=${bot.entity?.onGround} ` +
+        `isMoving=${bot.pathfinder?.isMoving?.()} hasGoal=${!!bot.pathfinder?.goal} ` +
+        `nextNode=${next ? `${next.x},${next.y},${next.z}` : "none"} pathLen=${lastPathUpdate?.path?.length ?? "?"} ` +
+        `fwd=${bot.getControlState("forward")} jump=${bot.getControlState("jump")} sprint=${bot.getControlState("sprint")} ` +
+        `nearby=[${nearby.join(", ")}]`);
+    });
+  }
   installTorchTrail(bot); // tunneling.js: a torch every TORCH_SPACING blocks while digging
   // The shell SwimMovements.safeToBreak() reads has to exist before the first path search, not
   // only after the first timer tick (LIVING_SPACE_REFRESH_MS below) -- a bot spawns inside the

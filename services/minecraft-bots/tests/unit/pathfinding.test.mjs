@@ -1,4 +1,8 @@
-// Version: 1.4.0
+// Version: 1.5.0
+// 1.5.0 (2026-11-27): new checks for pathfinding.js 1.2.0's two live fixes -- a burst of "stuck"
+// resets on dry land (not in water) nudges her up one block via an op'd chat /tp, and sprint is
+// forced on while swimming toward a goal.
+//
 // 1.4.0 (2026-11-27): new check for swim-movements.js 1.8.0's forced-climb-as-last-resort fix --
 // an open-sky cliff where walking round's own closest-reachable-point leg also fails now climbs
 // anyway, instead of failing the whole leg with no fallback left.
@@ -279,6 +283,63 @@ await check('Pathfinding: setupPathfinding installs the costs, unbreakable block
   assert.deepEqual(installed, ['doors', 'stepped']);
   for (let i = 0; i < 4; i++) bot.emit('path_reset', 'dig_error');
   assert.equal(movements.canDig, false, 'four dig_errors in a burst force walk-only pathing');
+});
+
+// 2026-11-27 (pathfinding.js 1.2.0): direct report ("they're still standing there seemingly
+// stuck"), the LAND half -- live DEBUG_PHYSICS data caught both bots frozen on dry ground with
+// jump held, never launching, because prismarine-physics's own jump impulse only fires while
+// freshly landing, not while already resting against the step. A burst of "stuck" resets (not
+// in water) now nudges her up one block via an op'd chat /tp, the same mechanism
+// upkeep-world.js's own teleportToSpawn() already uses.
+await check('Pathfinding: a burst of land "stuck" resets nudges her up one block (not in water)', async () => {
+  const src = await readFile(root + 'pathfinding.js', 'utf8');
+  class Movements { constructor() { this.blocksCantBreak = new Set(); this.exclusionAreasPlace = []; this.canDig = true; } }
+  const chatCalls = [];
+  const bot = new EventEmitter();
+  Object.assign(bot, {
+    registry: { blocksArray: [] },
+    pathfinder: { setMovements(m) { this.movements = m; } }, pvp: {}, collectBlock: {},
+    entity: { position: new V3(5, 69, -17) }, entities: {}, blockAt: () => null,
+    chat: (msg) => chatCalls.push(msg),
+  });
+  const c = vm.createContext({ console: { log() {}, error() {} }, Vec3: V3, SwimMovements: Movements, setTimeout, Date,
+    installDoorSupport: () => {}, installSteppedGoto: () => {}, isProtectedBlockName: () => false, wouldBlockAccess: () => false });
+  vm.runInContext(between(src, 'function setupPathfinding'), c);
+  c.setupPathfinding(bot, { username: 'Amy' });
+  bot.emit('path_reset', 'stuck');
+  bot.emit('path_reset', 'stuck');
+  assert.deepEqual(chatCalls, [], 'two resets in a burst window are not enough yet');
+  bot.emit('path_reset', 'stuck');
+  assert.equal(chatCalls.length, 1, 'a third reset in the window nudges her');
+  assert.equal(chatCalls[0], '/tp Amy 5.00 70.05 -17.00', 'up exactly one block, at her own x/z');
+  bot.entity.isInWater = true;
+  for (let i = 0; i < 3; i++) bot.emit('path_reset', 'stuck');
+  assert.equal(chatCalls.length, 1, 'stuck while swimming is the separate, already-long-standing water case -- no nudge');
+});
+
+// 2026-11-27 (pathfinding.js 1.2.0): direct report, the already-long-standing water half --
+// mineflayer-pathfinder's own sprint gate never considers water, so a genuinely-progressing
+// but slow non-sprint swim kept tripping its fixed stuck timeout.
+await check('Pathfinding: sprint is forced on while swimming toward a goal', async () => {
+  const src = await readFile(root + 'pathfinding.js', 'utf8');
+  class Movements { constructor() { this.blocksCantBreak = new Set(); this.exclusionAreasPlace = []; this.canDig = true; } }
+  const controlStates = {};
+  const bot = new EventEmitter();
+  Object.assign(bot, {
+    registry: { blocksArray: [] },
+    pathfinder: { setMovements(m) { this.movements = m; }, isMoving: () => true },
+    pvp: {}, collectBlock: {}, entity: { position: new V3(0, 64, 0), isInWater: false }, entities: {},
+    blockAt: () => null, setControlState: (c, v) => { controlStates[c] = v; },
+  });
+  const c = vm.createContext({ console: { log() {}, error() {} }, Vec3: V3, SwimMovements: Movements, setTimeout, Date,
+    installDoorSupport: () => {}, installSteppedGoto: () => {}, isProtectedBlockName: () => false, wouldBlockAccess: () => false });
+  vm.runInContext(between(src, 'function setupPathfinding'), c);
+  c.setupPathfinding(bot, { username: 'Amy' });
+  bot.emit('physicsTick');
+  assert.equal(controlStates.sprint, undefined, 'not swimming -- left alone');
+  bot.entity.isInWater = true;
+  bot.emit('physicsTick');
+  assert.equal(controlStates.sprint, true, 'swimming toward a goal -- forced on');
 });
 
 
