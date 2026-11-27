@@ -1,4 +1,14 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-27, direct live follow-up: "why were they teleporting all the time now"): the
+// land fix just below (1.2.0) was teleporting constantly -- the onGround gap turns out to fire
+// on nearly every ordinary terrain step, not as a rare deadlock (51 teleports in 10 minutes
+// measured live, one bot popping up a mountain instead of walking it). Replaced with a smooth
+// per-tick assist that gives the exact vel.y=0.42 impulse prismarine-physics's own
+// landing-triggered jump would, the moment she's blocked holding jump -- self-limiting since the
+// injected impulse keeps vel.y positive through the rest of the arc. The teleport-nudge is kept
+// but demoted to a genuine last resort (8-in-60s instead of 3-in-12s) for whatever the smooth
+// assist alone still can't clear.
 //
 // 1.2.0 (2026-11-27, direct report: "they're still standing there seemingly stuck"): two
 // separate root causes found live and fixed. (1) Land: a burst of "stuck" resets on dry ground
@@ -396,18 +406,37 @@ export function setupPathfinding(bot, { username: USERNAME }) {
   // onGround itself is computed as `entity.isCollidedVertically && oldVelY < 0` -- true only on
   // the tick she's freshly LANDING from a fall, not while already at rest pressed against the
   // step she needs to climb. Holding jump (what mineflayer-pathfinder's own monitorMovement
-  // does) never re-triggers that transition once she's settled into this resting state, so
-  // vel.y just holds at a small, steady gravity bias (-0.078 measured live) forever -- a true,
-  // reproducible deadlock, not merely slow progress. Same op'd-chat nudge upkeep-world.js's own
-  // teleportToSpawn() already uses (this bot's own client issuing a server command, not an
-  // external tool): a burst of "stuck" resets on dry land nudges her up exactly one block at her
-  // own x/z, enough to clear the step and let the onGround -> jump-impulse transition fire
-  // cleanly once she actually lands again. Deliberately excludes water (isInWater) -- that's the
-  // separate, already-long-standing swim case just below, which this nudge would not help (she's
-  // not resting against a step there, she's mid-swim).
-  const LAND_STUCK_BURST_THRESHOLD = 3;
-  const LAND_STUCK_BURST_WINDOW_MS = 12000;
-  const LAND_STUCK_NUDGE_COOLDOWN_MS = 5000;
+  // does) never re-triggers that transition once she's settled into this resting state.
+  //
+  // First fix shipped here teleported her up a block the moment a burst of "stuck" resets
+  // happened. Direct live follow-up ("why were they teleporting all the time now") found that
+  // was the wrong shape: this onGround gap turns out to fire on very nearly EVERY ordinary
+  // 1-block terrain step, not as a rare deadlock -- climbing one real hill triggered dozens of
+  // teleports in a row (measured live: one bot, 51 in 10 minutes, visibly popping up a mountain
+  // instead of walking it). The actual fix belongs at the same place the library's own impulse
+  // would have fired: give her that exact vel.y=0.42 directly, the moment she's holding jump,
+  // genuinely not airborne (vel.y already <= 0, not mid-arc from a real launch) and not
+  // onGround -- every tick this is naturally self-limiting, since the injected impulse itself
+  // makes vel.y positive for the next several ticks (a normal jump arc), so it can't re-fire
+  // until she's falling again. Looks like ordinary jumping, not a teleport, because it IS the
+  // same mechanic a landing-triggered jump already uses -- just applied where this resting case
+  // needs it. The teleport-nudge below is kept, but demoted to a genuine last resort (a much
+  // longer burst window) for whatever this smooth assist alone still can't clear.
+  bot.on("physicsTick", () => {
+    if (bot.entity?.isInWater || !bot.pathfinder?.isMoving?.() || !bot.getControlState("jump")) return;
+    if (bot.entity?.onGround || !bot.entity?.velocity || bot.entity.velocity.y > 0) return;
+    bot.entity.velocity.y = 0.42;
+  });
+  // Same op'd-chat nudge upkeep-world.js's own teleportToSpawn() already uses (this bot's own
+  // client issuing a server command, not an external tool): a SUSTAINED burst of "stuck" resets
+  // on dry land -- despite the smooth jump assist just above -- nudges her up exactly one block
+  // at her own x/z, for the rarer case that assist alone doesn't clear (horizontal collision
+  // blocking forward progress regardless of jump height, say). Deliberately excludes water
+  // (isInWater) -- that's the separate, already-long-standing swim case just below, which this
+  // nudge would not help (she's not resting against a step there, she's mid-swim).
+  const LAND_STUCK_BURST_THRESHOLD = 8;
+  const LAND_STUCK_BURST_WINDOW_MS = 60000;
+  const LAND_STUCK_NUDGE_COOLDOWN_MS = 30000;
   let landStuckTimestamps = [];
   let landNudgeSuppressedUntil = 0;
   bot.on("path_reset", (reason) => {

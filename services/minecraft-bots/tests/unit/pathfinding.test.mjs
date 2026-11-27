@@ -1,4 +1,9 @@
-// Version: 1.5.0
+// Version: 1.6.0
+// 1.6.0 (2026-11-27): pathfinding.js 1.3.0 replaced the land teleport-nudge's own low burst
+// threshold (it fired on nearly every terrain step live) with a smooth per-tick jump-impulse
+// assist, demoting the teleport to an 8-in-60s last resort -- updated that test's threshold and
+// added a new one for the impulse assist itself.
+//
 // 1.5.0 (2026-11-27): new checks for pathfinding.js 1.2.0's two live fixes -- a burst of "stuck"
 // resets on dry land (not in water) nudges her up one block via an op'd chat /tp, and sprint is
 // forced on while swimming toward a goal.
@@ -288,10 +293,15 @@ await check('Pathfinding: setupPathfinding installs the costs, unbreakable block
 // 2026-11-27 (pathfinding.js 1.2.0): direct report ("they're still standing there seemingly
 // stuck"), the LAND half -- live DEBUG_PHYSICS data caught both bots frozen on dry ground with
 // jump held, never launching, because prismarine-physics's own jump impulse only fires while
-// freshly landing, not while already resting against the step. A burst of "stuck" resets (not
-// in water) now nudges her up one block via an op'd chat /tp, the same mechanism
-// upkeep-world.js's own teleportToSpawn() already uses.
-await check('Pathfinding: a burst of land "stuck" resets nudges her up one block (not in water)', async () => {
+// freshly landing, not while already resting against the step. The smooth per-tick assist
+// (tested below) handles the vast majority of this live; a SUSTAINED burst of "stuck" resets
+// (not in water) despite that is the rarer last resort, nudging her up one block via an op'd
+// chat /tp, the same mechanism upkeep-world.js's own teleportToSpawn() already uses. Direct live
+// follow-up ("why were they teleporting all the time now") found the original 3-in-12s burst
+// fired on nearly every ordinary terrain step (51 teleports in 10 minutes, one bot popping up a
+// mountain instead of walking it) -- raised well past what the smooth assist alone should ever
+// need, so this only fires for a genuine case that assist can't clear.
+await check('Pathfinding: a SUSTAINED burst of land "stuck" resets nudges her up one block (not in water)', async () => {
   const src = await readFile(root + 'pathfinding.js', 'utf8');
   class Movements { constructor() { this.blocksCantBreak = new Set(); this.exclusionAreasPlace = []; this.canDig = true; } }
   const chatCalls = [];
@@ -306,15 +316,45 @@ await check('Pathfinding: a burst of land "stuck" resets nudges her up one block
     installDoorSupport: () => {}, installSteppedGoto: () => {}, isProtectedBlockName: () => false, wouldBlockAccess: () => false });
   vm.runInContext(between(src, 'function setupPathfinding'), c);
   c.setupPathfinding(bot, { username: 'Amy' });
+  for (let i = 0; i < 7; i++) bot.emit('path_reset', 'stuck');
+  assert.deepEqual(chatCalls, [], 'seven resets in the burst window are not enough yet');
   bot.emit('path_reset', 'stuck');
-  bot.emit('path_reset', 'stuck');
-  assert.deepEqual(chatCalls, [], 'two resets in a burst window are not enough yet');
-  bot.emit('path_reset', 'stuck');
-  assert.equal(chatCalls.length, 1, 'a third reset in the window nudges her');
+  assert.equal(chatCalls.length, 1, 'an eighth reset in the window nudges her');
   assert.equal(chatCalls[0], '/tp Amy 5.00 70.05 -17.00', 'up exactly one block, at her own x/z');
   bot.entity.isInWater = true;
-  for (let i = 0; i < 3; i++) bot.emit('path_reset', 'stuck');
+  for (let i = 0; i < 8; i++) bot.emit('path_reset', 'stuck');
   assert.equal(chatCalls.length, 1, 'stuck while swimming is the separate, already-long-standing water case -- no nudge');
+});
+
+// 2026-11-27 (pathfinding.js 1.2.0): the smooth replacement for the teleport-nudge above --
+// direct live follow-up ("why were they teleporting all the time now") found the real fix
+// belongs at the exact mechanic prismarine-physics itself uses: give her the same vel.y=0.42
+// impulse a landing-triggered jump would, the moment she's holding jump, genuinely not airborne
+// (vel.y already <= 0) and not onGround. Self-limiting because the injected impulse makes vel.y
+// positive for the next several ticks, so it can't re-fire mid-arc -- looks like ordinary
+// jumping, not a teleport.
+await check('Pathfinding: a blocked jump gets the same impulse a real landing-triggered one would', async () => {
+  const src = await readFile(root + 'pathfinding.js', 'utf8');
+  class Movements { constructor() { this.blocksCantBreak = new Set(); this.exclusionAreasPlace = []; this.canDig = true; } }
+  const bot = new EventEmitter();
+  Object.assign(bot, {
+    registry: { blocksArray: [] },
+    pathfinder: { setMovements(m) { this.movements = m; }, isMoving: () => true },
+    pvp: {}, collectBlock: {}, entity: { position: new V3(0, 64, 0), isInWater: false, onGround: false, velocity: new V3(0, -0.078, 0) },
+    entities: {}, blockAt: () => null, getControlState: (c) => c === 'jump',
+  });
+  const c = vm.createContext({ console: { log() {}, error() {} }, Vec3: V3, SwimMovements: Movements, setTimeout, Date,
+    installDoorSupport: () => {}, installSteppedGoto: () => {}, isProtectedBlockName: () => false, wouldBlockAccess: () => false });
+  vm.runInContext(between(src, 'function setupPathfinding'), c);
+  c.setupPathfinding(bot, { username: 'Amy' });
+  bot.emit('physicsTick');
+  assert.equal(bot.entity.velocity.y, 0.42, 'resting against a step, jump held -- gets the real impulse');
+  bot.emit('physicsTick');
+  assert.equal(bot.entity.velocity.y, 0.42, 'already rising (vel.y > 0) -- left alone, not re-applied mid-arc');
+  bot.entity.onGround = true;
+  bot.entity.velocity.y = -0.078;
+  bot.emit('physicsTick');
+  assert.equal(bot.entity.velocity.y, -0.078, 'actually on ground -- the library\'s own impulse handles it, left alone');
 });
 
 // 2026-11-27 (pathfinding.js 1.2.0): direct report, the already-long-standing water half --
@@ -328,8 +368,8 @@ await check('Pathfinding: sprint is forced on while swimming toward a goal', asy
   Object.assign(bot, {
     registry: { blocksArray: [] },
     pathfinder: { setMovements(m) { this.movements = m; }, isMoving: () => true },
-    pvp: {}, collectBlock: {}, entity: { position: new V3(0, 64, 0), isInWater: false }, entities: {},
-    blockAt: () => null, setControlState: (c, v) => { controlStates[c] = v; },
+    pvp: {}, collectBlock: {}, entity: { position: new V3(0, 64, 0), isInWater: false, onGround: true }, entities: {},
+    blockAt: () => null, setControlState: (c, v) => { controlStates[c] = v; }, getControlState: () => false,
   });
   const c = vm.createContext({ console: { log() {}, error() {} }, Vec3: V3, SwimMovements: Movements, setTimeout, Date,
     installDoorSupport: () => {}, installSteppedGoto: () => {}, isProtectedBlockName: () => false, wouldBlockAccess: () => false });
