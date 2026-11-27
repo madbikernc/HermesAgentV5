@@ -1,10 +1,17 @@
-// Version: 1.7.0
+// Version: 1.8.0
 //
-// 1.7.0 (2026-11-11, direct request: "pathfinding needs to understand when it has to go up") --
-// installSteppedGoto() climbs when the goal is well above her and she is under a ceiling: a leg to
-// a height up to CLIMB_LEG_RISE higher, with digCost cut to CLIMB_DIG_COST for that leg only. A
-// goto() the library resolved on an empty, unsuccessful search short of the goal also gets a climb
-// when one applies (sealed in rock); otherwise it resolves as before.
+// 1.8.0 (2026-11-27, direct report: "unresponsive" bots root-caused further -- Amy genuinely stuck
+// 5+ minutes below a sheer 11-block open-air cliff): climbLeg()'s own rockOverhead gate was a
+// deliberate choice ("under open sky nothing changes -- a valley's way up is walking round, not
+// tunnelling through the hillside," 1.7.0 above) -- correct when walking round actually works, but
+// confirmed live (terrain scan via RCON) that this specific climb has no walk-round route within
+// the search budget: the normal full search times out, and the stepped-goto fallback's own "walk
+// to the closest reachable point" leg ALSO fails outright (that point sits inside the cliff face,
+// not yet dug to), so the whole leg threw with no further fallback -- repeating identically every
+// retry, forever. climbLeg() now takes an optional `force` flag that skips the rockOverhead check;
+// installSteppedGoto's catch block passes it only as a LAST resort, after the walk-to-end attempt
+// has already thrown NoPath/Timeout -- walking round is still tried first and still preferred, this
+// only kicks in once that's demonstrably not working for this leg.
 //
 // 1.6.0 (2026-11-07) -- installSteppedGoto(): a NoPath/Timeout that still carries a partial path is
 // walked to its end and searched again from there, instead of failing.
@@ -205,15 +212,17 @@ function rockOverhead(bot, here, rise) {
   return false;
 }
 
-async function climbLeg(bot, goto, goal, leg, lastResult) {
+async function climbLeg(bot, goto, goal, leg, lastResult, force = false) {
   const target = goalHeight(goal);
   const here = bot.entity.position.floored();
   const movements = bot.pathfinder.movements;
   if (target === null || target - here.y < CLIMB_MIN_RISE || !movements?.canDig) return false;
   const toY = Math.min(target, here.y + CLIMB_LEG_RISE);
-  if (!rockOverhead(bot, here, toY - here.y + 1)) return false;
-  console.log(`[${bot.username}] pathfinder: the goal is ${target - here.y} blocks up, under rock -- ` +
-    `leg ${leg}: climbing to y=${toY}, then searching again`);
+  const underRock = rockOverhead(bot, here, toY - here.y + 1);
+  if (!underRock && !force) return false;
+  console.log(`[${bot.username}] pathfinder: the goal is ${target - here.y} blocks up` +
+    (underRock ? ", under rock" : " -- walking round found no route") +
+    ` -- leg ${leg}: climbing to y=${toY}, then searching again`);
   const { digCost } = movements;
   const { searchRadius } = bot.pathfinder;
   movements.digCost = Math.min(digCost, CLIMB_DIG_COST);
@@ -280,6 +289,14 @@ export function installSteppedGoto(bot) {
         if (searchRadius >= 0) bot.pathfinder.searchRadius = Math.max(searchRadius, Math.ceil(partialCost) + 8);
         try {
           await goto(new pathfinderPkg.goals.GoalBlock(end.x, end.y, end.z));
+        } catch (walkErr) {
+          if (walkErr.name !== "NoPath" && walkErr.name !== "Timeout") throw walkErr;
+          // Walking to even the closest reachable point also failed -- open sky's own "walk round"
+          // assumption (1.7.0's header) doesn't hold for this leg. Last resort, not the default:
+          // climb anyway, the same assist a sealed cave already gets (force skips the rockOverhead
+          // gate), rather than fail this leg outright with no fallback left at all.
+          if (!await climbLeg(bot, goto, goal, leg, () => lastResult, true)) throw walkErr;
+          leg--;
         } finally {
           bot.pathfinder.searchRadius = searchRadius;
         }

@@ -1,6 +1,18 @@
-// Version: 1.0.0
+// Version: 1.1.0
 //
-// The "flee" action, split out of actions.js's performActionAs() switch
+// 1.1.0 (2026-11-26) -- direct report ("unresponsive, won't even run away or fight back from a
+// mob"): root-caused live -- this action ignored action.maxDurationMs entirely, always running
+// the full ACTION_TIMEOUT_MS (90s) no matter who called it. night-survival.js's onEmergencyHealth
+// already passes a short EMERGENCY_ATTACK_TIMEOUT_MS (8s) leash for its "attack" branch (see that
+// file's own 2026-09-21 header: "she doesn't have 90 seconds of margin to lose"), but a critically
+// wounded, unarmed bot (decideFightType forces "flee" with no weapon, regardless of health) hits
+// this file's own hardcoded ACTION_TIMEOUT_MS instead, holding HEALTH_CRITICAL-tier arbiter
+// control -- and locking out every lower tier, including fresh self-defense re-evaluation -- for
+// up to the full 90s on a single flee attempt that may be making no real progress at all. Now
+// honours action.maxDurationMs exactly like attack.js already does, falling back to the standard
+// ACTION_TIMEOUT_MS for every caller that doesn't set it (checkSelfDefense, respondToSquadCall).
+//
+// 1.0.0 (2026-11-10) -- split out of actions.js's performActionAs() switch
 // (actions.js 2.0.0, 2026-11-10) unchanged, so a fix to it is a fix to this file alone. Called
 // through ACTION_HANDLERS with performActionAs's own arguments; ok()/fail() build its result.
 
@@ -55,7 +67,7 @@ export async function fleeAction(bot, action, speaker, token) {
     const goal = rally
       ? new goals.GoalNear(rally.x, rally.y, rally.z, 3)
       : new goals.GoalInvert(new goals.GoalFollow(target, 16));
-    await withTimeout(bot.pathfinder.goto(goal), ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
+    await withTimeout(bot.pathfinder.goto(goal), action.maxDurationMs ?? ACTION_TIMEOUT_MS, () => bot.pathfinder.setGoal(null));
   } catch (err) {
     if (token.cancelled) return ok("stopped fleeing.");
     return fail(`couldn't get away: ${err.message}`);

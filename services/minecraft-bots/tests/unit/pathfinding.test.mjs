@@ -1,4 +1,8 @@
-// Version: 1.3.0
+// Version: 1.4.0
+// 1.4.0 (2026-11-27): new check for swim-movements.js 1.8.0's forced-climb-as-last-resort fix --
+// an open-sky cliff where walking round's own closest-reachable-point leg also fails now climbs
+// anyway, instead of failing the whole leg with no fallback left.
+//
 // 1.3.0 (2026-11-22): new checks for setupPathfinding's chunkColumnLoad reset debounce
 // (pathfinding.js 1.1.0) and its own safety gate when the listener count isn't exactly one.
 // 1.2.1 (2026-11-13): index.js 3.0.0 -- the breath listener is the named onLowBreath(), registered by index.js; the check registers it.
@@ -218,6 +222,21 @@ await check('Pathfinding: no climb under open sky, close to the goal height, or 
   w = steppedGotoWorld([{ status: 'noPath', path: [new V3(20, 64, 0)] }, 'ok'], { rock: true });
   await w.bot.pathfinder.goto({ heuristic: above.heuristic });
   assert(!w.calls.includes('y'), 'a goal with no height (following someone) is never climbed to');
+});
+
+// 2026-11-27 (swim-movements.js 1.8.0): direct report, root-caused live -- Amy genuinely stuck 5+
+// minutes below a sheer 11-block open-air cliff (RCON terrain scan: solid to y=87, air from y=88,
+// she stood at y=76). Walking round found a partial path, but walking even to ITS own closest
+// reachable point also failed outright -- open sky's own "she walks round" assumption (the test
+// just above) doesn't hold when walking round demonstrably isn't working. A forced climb (same
+// assist a sealed cave already gets) is now the last resort for exactly that case.
+await check('Pathfinding: open sky, but walking round fails too -- she climbs anyway as a last resort', async () => {
+  const above = { y: 94, heuristic: (n) => Math.abs(100 - n.x) };
+  const w = steppedGotoWorld([{ status: 'noPath', path: [new V3(20, 64, 0)] }, 'ok'], { rock: false, failBlock: true });
+  await w.bot.pathfinder.goto(above);
+  assert.deepEqual(w.calls, ['goal', 'block', 'y', 'goal'],
+    'walk round tried and failed, only then a forced climb, then the whole way searched again');
+  assert.equal(w.bot.entity.position.y, 72, 'climbed CLIMB_LEG_RISE (8) up from the start height 64');
 });
 
 await check('Pathfinding: an empty, failed search the library resolved gets a climb when sealed in rock, else stands', async () => {

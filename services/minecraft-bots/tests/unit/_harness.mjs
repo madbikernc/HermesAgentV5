@@ -1,4 +1,8 @@
-// Version: 1.6.4
+// Version: 1.6.5
+// 1.6.5 (2026-11-27): steppedGotoWorld() takes a `failBlock` option -- a GoalBlock leg (walking to
+// the closest reachable point of a partial path) throws NoPath instead of auto-succeeding, for
+// swim-movements.js 1.8.0's forced-climb-as-last-resort regression check.
+//
 // 1.6.4 (2026-11-22): chestMemoryStubs()/chestMemorySrc follow action-chests.js 1.2.0's move to
 // rag-backend.js's memRead/memWrite (KNOWN_CHESTS_FILE -> KNOWN_CHESTS_PATH, path "world/
 // known_chests.json") -- stubs memRead/memWrite instead of readFile/writeFile/mkdir/path, and
@@ -710,9 +714,11 @@ export function chestActionContext(bot, known) {
 
 // 2026-11-07 (swim-movements.js 1.6.0): a search that runs out of budget walks its partial path
 // toward the goal and searches again, instead of failing.
-export function steppedGotoWorld(script, { start = new V3(0, 64, 0), rock = false, canDig = true } = {}) {
+export function steppedGotoWorld(script, { start = new V3(0, 64, 0), rock = false, canDig = true, failBlock = false } = {}) {
   // script: one entry per real goto() call -- { path, status } rejects with that status's error after
-  // emitting path_update; 'ok' resolves. A GoalBlock leg moves her to its block.
+  // emitting path_update; 'ok' resolves. A GoalBlock leg moves her to its block, unless failBlock
+  // (2026-11-27, swim-movements.js 1.8.0's forced-climb-as-last-resort fix): walking to even the
+  // closest reachable point also fails, as it did live below a sheer open-air cliff.
   const bot = new EventEmitter();
   const calls = [];
   const named = (name) => Object.assign(new Error(name), { name });
@@ -738,6 +744,7 @@ export function steppedGotoWorld(script, { start = new V3(0, 64, 0), rock = fals
         return;
       }
       if (goal.kind === 'block') bot.pathfinder.legRadii.push(bot.pathfinder.searchRadius);
+      if (goal.kind === 'block' && failBlock) throw named('NoPath');
       if (goal.kind === 'block') { bot.entity.position = new V3(goal.x, goal.y, goal.z); return; }
       const step = script.shift();
       if (step === 'ok') return;

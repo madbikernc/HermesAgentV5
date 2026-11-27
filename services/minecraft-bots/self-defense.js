@@ -1,4 +1,19 @@
-// Version: 1.0.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-26) -- direct report ("unresponsive, won't even run away or fight back from a
+// mob"): root-caused live alongside actions/flee.js 1.1.0 -- attackAsLastResort/fleeAsLastResort
+// never passed a maxDurationMs through to performAction(), so night-survival.js's own
+// EMERGENCY_ATTACK_TIMEOUT_MS (8s) -- the whole point of which is "she doesn't have 90 seconds of
+// margin to lose" at critical health -- silently stopped applying the moment the FIRST attempt
+// failed and either of these last-resort fallbacks took over, falling back to the full 90s
+// ACTION_TIMEOUT_MS for the second attempt. Both now take an optional trailing maxDurationMs,
+// threaded straight through to performAction(); checkSelfDefense's own calls (not life-or-death,
+// SELF_DEFENSE tier) omit it and keep the standard 90s leash, unchanged.
+//
+// 1.1.0 (2026-11-26) -- direct request ("rename the bots to be name-<role>"): nearestRallyPoint()
+// now resolves a BOT_USERNAMES member's persona via index.js's personaOf() instead of
+// `name.toLowerCase()`, which broke once a bot's display username stopped being
+// persona.toUpperCase() (see index.js 3.1.0).
 //
 // 1.0.0 (2026-11-10) -- split out of index.js (2.140.0) unchanged: self-defense (fight or flee,
 // last-resort attack/flee, the outnumbered and creeper rules), threat memory, squad response
@@ -12,7 +27,7 @@ import { hasWeapon } from "./equipment.js";
 import * as arbiter from "./arbiter.js";
 import { guardedInterval } from "./faults.js";
 import { BOT_ROLES, ROLES } from "./roles.js";
-import { AUTONOMY_ENABLED, BOT_USERNAMES, EMERGENCY_HEALTH_THRESHOLD, USERNAME, bot, broadcastThreatAlert, goals, myRole } from "./index.js";
+import { AUTONOMY_ENABLED, BOT_USERNAMES, EMERGENCY_HEALTH_THRESHOLD, USERNAME, bot, broadcastThreatAlert, goals, myRole, personaOf } from "./index.js";
 
 // Fourth of five scoped enhancements, direct follow-up to "what other logic enhancements are
 // available" -> self-defense. checkSelfDefense() itself is now a true mid-action interrupt
@@ -126,9 +141,9 @@ export function decideFightType(threat) {
 // that's already failed. Deliberately still excludes FLEE_ONLY_MOBS -- a flyer or teleport-evader
 // is still unreachable no matter how desperate this gets, the exact doomed-melee shape
 // FLEE_ONLY_MOBS exists to prevent (actions.js); that's "can't reach it," not "won't try."
-export async function attackAsLastResort(threat, label, handle) {
+export async function attackAsLastResort(threat, label, handle, maxDurationMs) {
   if (FLEE_ONLY_MOBS.has(threat.name)) return;
-  const result = await performAction(bot, { type: "attack", target: threat }, USERNAME, handle);
+  const result = await performAction(bot, { type: "attack", target: threat, maxDurationMs }, USERNAME, handle);
   console.log(`[${USERNAME}] ${label}: couldn't get away, fighting instead -- ${result.text} ` +
               `(ok=${result.ok})`);
 }
@@ -144,10 +159,10 @@ export async function attackAsLastResort(threat, label, handle) {
 // swinging is a second closer to death with no upside. Symmetric with attackAsLastResort: fighting
 // is still the first choice at critical health (unchanged, direct request), this only fires when
 // that first choice has already had a fair, bounded shot and hasn't paid off.
-export async function fleeAsLastResort(threat, label, handle) {
+export async function fleeAsLastResort(threat, label, handle, maxDurationMs) {
   if (bot.health <= 0) return;
   const rallyPoint = await nearestRallyPoint(bot);
-  const result = await performAction(bot, { type: "flee", target: threat, rallyPoint }, USERNAME, handle);
+  const result = await performAction(bot, { type: "flee", target: threat, rallyPoint, maxDurationMs }, USERNAME, handle);
   console.log(`[${USERNAME}] ${label}: fight wasn't working, fleeing instead -- ${result.text} ` +
               `(ok=${result.ok})`);
 }
@@ -220,7 +235,7 @@ export async function nearestRallyPoint(bot) {
   let nearestSoldierDist = RALLY_SEARCH_RANGE;
   for (const name of BOT_USERNAMES) {
     if (name === USERNAME) continue;
-    if (BOT_ROLES[name.toLowerCase()]?.primary !== ROLES.SOLDIER) continue;
+    if (BOT_ROLES[personaOf(name)]?.primary !== ROLES.SOLDIER) continue;
     const entity = bot.players[name]?.entity;
     if (!entity) continue;
     const dist = entity.position.distanceTo(bot.entity.position);

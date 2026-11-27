@@ -1,4 +1,13 @@
-// Version: 1.4.0
+// Version: 1.4.1
+// 1.4.1 (2026-11-26): fixed two real gaps found while testing an unrelated fix, both from the
+// 2026-11-26 bot rename never reaching this test: isActingCoordinator() (index.js 3.1.0) now
+// calls personaOf(), which this test's mock context never provided (ReferenceError the moment
+// Mayor liveness fell through to the fallback-coordinator check) -- added the same
+// `personaOf: (name) => name.toLowerCase()` stub this suite already uses elsewhere; and the
+// simulated speaker name 'Mark' no longer matches FALLBACK_COORDINATOR_USERNAME's own real
+// default, now 'Mark_Soldier' -- updated the fixture's speaker names to match (Luke's too, for
+// consistency), not the production code.
+//
 // 1.4.0 (2026-11-23): new check for mine.js 1.2.0's whole-tree expansion -- a wood target now
 // mines the rest of the trunk and its attached leaves, not just whichever single log
 // findBlocks/rankMineTargets happened to hand back.
@@ -26,12 +35,16 @@ await check('MB-11 fallback coordinator accepted once Mayor is unreachable; serv
   const c = vm.createContext({ bot: { username: 'Amy' }, MATRIX_USER_ID: '@mc-amy:spark', USERNAME: 'Amy',
     MAYOR_USERNAME: 'Mayor', MAYOR_LIVENESS_TIMEOUT_MS: 0, lastMayorSeenAt: 0, busy: false,
     lastActivityAt: 0, setInterval() {}, guardedInterval() {}, Date, process: { env: {} },
-    isAnotherBot: (s) => ['Mark', 'Mayor', 'Luke'].includes(s), isMayor: (s) => s === 'Mayor',
+    isAnotherBot: (s) => ['Mark_Soldier', 'Mayor', 'Luke_Soldier'].includes(s), isMayor: (s) => s === 'Mayor',
+    personaOf: (name) => name.toLowerCase(),
     classifyIntent: async () => { classified++; return { type: 'none' }; }, console: { log() {}, error() {} } });
   vm.runInContext('var lastMayorSeenAt = 0;' + between(index, 'const PROCESS_STARTED_AT', 'guardedInterval(goalHeartbeatTick') +
     between(index, 'const NON_PLAYER_SPEAKERS', 'function watchFleetTopics('), c);
-  c.handleIncoming('Mark', 'Amy, gather wood', { alreadyAddressed: false, send() {} });
-  c.handleIncoming('Luke', 'Amy, gather wood', { alreadyAddressed: false, send() {} });
+  // 'Mark_Soldier': FALLBACK_COORDINATOR_USERNAME's own real default (index.js 3.1.0, since the
+  // 2026-11-26 rename) -- a literal 'Mark' (its pre-rename name) would no longer match, same gap
+  // this check's own personaOf stub just above exists to close.
+  c.handleIncoming('Mark_Soldier', 'Amy, gather wood', { alreadyAddressed: false, send() {} });
+  c.handleIncoming('Luke_Soldier', 'Amy, gather wood', { alreadyAddressed: false, send() {} });
   c.handleIncoming('Rcon', 'Teleported MBTester to 2000, 201, 2000', { alreadyAddressed: false, send() {} });
   c.handleIncoming('MBTester', 'Amy, stop', { alreadyAddressed: false, send() {} });
   await sleep(0);

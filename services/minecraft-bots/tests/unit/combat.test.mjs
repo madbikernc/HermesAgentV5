@@ -1,4 +1,8 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-26): regression checks for the "unresponsive, won't run or fight back" fix --
+// flee.js 1.1.0's new maxDurationMs support, and night-survival.js 1.1.0 passing it on every
+// EMERGENCY branch (flee, and both last-resort fallbacks), not just the initial attack.
 //
 // 1.2.0 (2026-11-10): slices read the split modules (actions/*.js via actionCases/actionHandlerSrc, the modules out of index.js via index/indexOnly), and sandboxes stub guardedInterval.
 //
@@ -139,7 +143,7 @@ await check('Soldier priorities: one live Soldier is trivially the anchor; two o
   const c = vm.createContext({ bot: { username: 'Mark' }, nearestHostile: () => threat, FLEE_ONLY_MOBS: new Set(), SOLDIER_PATROL_RANGE: 32,
     USERNAME: 'Mark', BOT_USERNAMES: new Set(['Mark', 'Luke']), // matches BOT_USERNAMES' own capitalized convention
     BOT_ROLES: { mark: { primary: SOLDIER_ROLE }, luke: { primary: SOLDIER_ROLE } }, ROLES: { SOLDIER: SOLDIER_ROLE },
-    otherBotGoalSeenAt, GOAL_LEASE_MS: 60_000, Date,
+    otherBotGoalSeenAt, GOAL_LEASE_MS: 60_000, Date, personaOf: (name) => name.toLowerCase(),
     holdsGuardAnchor: async (bot) => holds[bot.username] ?? false });
   vm.runInContext(between(prioritiesSrc, 'function isLiveSoldier('), c);
 
@@ -383,6 +387,40 @@ await check('Food goal: hunts, else takes a ripe crop -- never runs as a farm go
   assert.equal(failures.length, 1, 'the next tick, 2s later, waits');
   now += 30_000; await run();
   assert.equal(failures.length, 2, '30s on, she tries again');
+});
+
+await check('Flee honors a short maxDurationMs instead of the full 90s leash (regression: "unresponsive, won\'t run or fight back")', async () => {
+  // Direct live report, 2026-11-26 (spark, Amy_Builder/Babs_Miner): onEmergencyHealth's own
+  // EMERGENCY_ATTACK_TIMEOUT_MS only ever shortened its "attack" branch -- an unarmed bot, forced
+  // into "flee" by decideFightType regardless of health, hit flee.js's own hardcoded
+  // ACTION_TIMEOUT_MS instead, holding HEALTH_CRITICAL (the highest real-combat arbiter tier,
+  // locking out self-defense and everything beneath it) for up to the full 90s on a single
+  // attempt that may be making no progress at all -- confirmed live as long "yielded to
+  // (HEALTH_CRITICAL)" stretches with no visible fleeing or fighting. goto() here never resolves
+  // at all (a genuinely stuck flee, the live symptom); the fix (actions/flee.js 1.1.0) must bail
+  // on its own short maxDurationMs, not wait out this test's 400ms ACTION_TIMEOUT_MS.
+  const bot = makeBot();
+  bot.pathfinder.setMovements = (m) => { bot.pathfinder.movements = m; };
+  bot.pathfinder.goto = () => new Promise(() => {});
+  const handle = await arbiter.requestControl(bot, arbiter.OWNERS.HEALTH_CRITICAL);
+  const c = context(bot, { goals: { GoalNear: class {}, GoalFollow: class {}, GoalInvert: class {} } });
+  vm.runInContext(timeoutFn + actionFn, c);
+  const started = Date.now();
+  const result = await c.performAction(bot, { type: 'flee', target: { id: 1 }, maxDurationMs: 30 }, 'test', handle);
+  assert(Date.now() - started < 200, 'must bail on its own short leash, not the 400ms test ACTION_TIMEOUT_MS');
+  assert.equal(result.ok, false);
+  handle.release();
+});
+
+
+await check('EMERGENCY: flee and both last-resort fallbacks share attack\'s short leash (regression)', () => {
+  // Source-level, matching this file's own "routed before farmTaskFor" check above: the fix
+  // spans night-survival.js (onEmergencyHealth) and self-defense.js (attackAsLastResort/
+  // fleeAsLastResort's new trailing maxDurationMs param) together, so proves both files agree.
+  assert.match(index, /maxDurationMs: EMERGENCY_ATTACK_TIMEOUT_MS \},\s*\n\s*USERNAME, handle\);/,
+    'the initial attempt (attack OR flee) shares one leash now, not an attack-only one');
+  assert.match(index, /attackAsLastResort\(threat, "emergency", handle, EMERGENCY_ATTACK_TIMEOUT_MS\)/);
+  assert.match(index, /fleeAsLastResort\(threat, "emergency", handle, EMERGENCY_ATTACK_TIMEOUT_MS\)/);
 });
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) console.log(`${passedCount()} unit checks passed.`);

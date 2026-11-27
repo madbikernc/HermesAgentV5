@@ -1,4 +1,17 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-26) -- direct report ("unresponsive, won't even run away or fight back from a
+// mob"): root-caused live -- onEmergencyHealth() only ever shortened its OWN "attack" branch to
+// EMERGENCY_ATTACK_TIMEOUT_MS (8s); its "flee" branch, and both attackAsLastResort/
+// fleeAsLastResort fallbacks, silently fell back to the full 90s ACTION_TIMEOUT_MS the whole
+// time this handler held the arbiter's HEALTH_CRITICAL tier -- the highest real-combat
+// priority, locking out self-defense re-evaluation and everything else underneath it. Confirmed
+// live on spark: Amy and Babs (both unarmed -- decideFightType forces "flee" with no weapon
+// regardless of health) spent long stretches cycling "yielded to (HEALTH_CRITICAL)" while
+// visibly neither fleeing nor fighting back, each stretch roughly matching the un-bounded 90s
+// ceiling. Every branch of this handler (initial attempt and whichever last-resort fallback
+// follows a failed first one) now passes the same EMERGENCY_ATTACK_TIMEOUT_MS leash -- see
+// actions/flee.js 1.1.0 and self-defense.js 1.2.0 for the other two files this fix spans.
 //
 // 1.0.0 (2026-11-13) -- split out of index.js (2.145.0) unchanged: sleep, dusk, emergency health, drowning and sleeping-threat helpers.
 // Its own file, under the self-repair pipeline's 40000-char whole-file limit. index.js imports
@@ -213,14 +226,17 @@ export function onEmergencyHealth() {
     try {
       const rallyPoint = type === "flee" ? await nearestRallyPoint(bot) : null;
       // EMERGENCY_ATTACK_TIMEOUT_MS (not the standard ACTION_TIMEOUT_MS -- see its own comment
-      // just below): a fight this bot is already losing badly enough to be at critical health
-      // gets one short, bounded shot, not a 90-second commitment with no way to reconsider.
-      const maxDurationMs = type === "attack" ? EMERGENCY_ATTACK_TIMEOUT_MS : undefined;
-      const result = await performAction(bot, { type, target: threat, rallyPoint, maxDurationMs },
+      // just below): a fight (or a flee -- see actions/flee.js 1.1.0's own header for the real,
+      // live "unresponsive" bug this asymmetry caused) this bot is already losing badly enough to
+      // be at critical health gets one short, bounded shot, not a 90-second commitment with no
+      // way to reconsider. Applies to both branches now, and to whichever last-resort fallback
+      // runs next if the first attempt doesn't pay off -- a second 90s commitment right after the
+      // first would defeat the entire point just as completely as the first one did alone.
+      const result = await performAction(bot, { type, target: threat, rallyPoint, maxDurationMs: EMERGENCY_ATTACK_TIMEOUT_MS },
         USERNAME, handle);
       console.log(`[${USERNAME}] emergency ${type}: ${result.text} (ok=${result.ok})`);
-      if (type === "flee" && !result.ok && !result.cancelled) await attackAsLastResort(threat, "emergency", handle);
-      if (type === "attack" && !result.ok && !result.cancelled) await fleeAsLastResort(threat, "emergency", handle);
+      if (type === "flee" && !result.ok && !result.cancelled) await attackAsLastResort(threat, "emergency", handle, EMERGENCY_ATTACK_TIMEOUT_MS);
+      if (type === "attack" && !result.ok && !result.cancelled) await fleeAsLastResort(threat, "emergency", handle, EMERGENCY_ATTACK_TIMEOUT_MS);
     } catch (err) {
       console.error(`[${USERNAME}] emergency ${type} failed:`, err.message);
     } finally {
