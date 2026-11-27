@@ -1,8 +1,9 @@
 # Minecraft Bots Restart Plan
 
-**Version:** 1.4.0
-**Status:** Both §0 open questions answered by the operator 2026-11-27 — fresh world, archive path as
-proposed. Executing Phase 2 onward.
+**Version:** 1.6.0
+**Status:** Phases 0-5 done. `index.js` rewritten onto the Mindcraft-ported skill/command/mode
+layer and the new persona-profile format; deploying and relaunching Babs/Amy next (Phase 7 —
+Phase 6's test-coverage extraction is still open, tracked, not blocking a first live run).
 
 Scope: `services/minecraft-bots/`, `infra/minecraft-bots/`, and the bot-sandbox Paper server
 (`minecraft-bots.service`, port 25580, world `firmament-bots`, host `192.168.1.221`) only. Nothing
@@ -140,7 +141,21 @@ goal/priority/instruction content, not infra, not Buzz/Matrix, not the roster ma
   wiring). Mechanical, not goal content.
 - `arbiter.js` — tiered control arbitration (who owns the bot's physical actions right now: routine
   work vs. player command vs. emergency). The tiers' *names* come from the old goal engine, but the
-  arbitration mechanism itself is still needed under any skill library, including the new one.
+  arbitration mechanism itself is still needed under any skill library, including the new one. Its
+  real `OWNERS` tiers, confirmed by reading the file during Phase 4 (not from memory): `ROUTINE`,
+  `GOAL_STEP`, `HUNGER_CRITICAL`, `DIRECT_COMMAND`, `RECOVERY`, `SQUAD_RESPONSE`, `SELF_DEFENSE`,
+  `DROWNING`, `HEALTH_CRITICAL`, `TELEPORT_HOME`.
+
+**Second correction, found while actually wiring Phase 4's port together — `shelter.js` and
+`action-vocab.js` were un-archived back to kept infra.** Both were originally filed under "role-specific
+behavior"/"action library" and archived, but `pathfinding.js` and `swim-movements.js` (kept, and
+already working, hard-won code from this session) import `wouldBlockAccess`/`isLivingSpaceWall` from
+`shelter.js` and `isProtectedBlockName` from `action-vocab.js` — both turned out to be pure
+safety/vocabulary infra (living-space wall/access detection; protected-block-name matching, hostile
+mob lists, gear tiers) with no dependency on the archived goal engine (confirmed: each imports only
+`vec3`/`mineflayer-pathfinder`, nothing archived). Restored both to `services/minecraft-bots/`;
+`pathfinding.js` bumped to 1.4.1 to import `isProtectedBlockName` from `action-vocab.js` directly
+instead of the now-gone `actions.js` re-export. `ARCHIVE_INDEX.md` updated to match.
 
 ## 6. Benchmark-evaluation call (CLAUDE.md requirement, recorded here)
 
@@ -175,11 +190,11 @@ rewrite has to keep `fleet_muse_contract`'s contract current (see §5's caveat o
 | 1 | Operator sign-off on §0's two open questions | done | 2026-11-27 | reinit world; archive path as proposed |
 | 2 | Freeze & snapshot: stop Amy/Babs cleanly, RCON `save-all`, reinit world, resolve `router.js`/`equipment.js`/`arbiter.js` placement from §5 | done | 2026-11-27 | World reinitialized, fresh seed `53110123` (old world kept as `firmament-bots.bak-20261127181944`); `mob_griefing`/`keep_inventory`/`spawn_phantoms` gamerules reapplied; all 9 bot units confirmed stopped on both hosts |
 | 3 | Create `services/minecraft-bots-archive-11-2026/`, move the §5 source/doc file list into it (**tests excluded — see §5's test correction**), leave `ARCHIVE_INDEX.md` in `services/minecraft-bots/` | done | 2026-11-27 | Also archived the old `README.md` (described the archived architecture in detail) and wrote a fresh minimal one. **Known follow-up, not done here:** ~14 other docs repo-wide (`FLEET_BENCHMARK_DESIGN.md`, `IMPLEMENTATION_PLAN.md`, `infra/minecraft-bots/README.md`, `docs/minecraft-bots-history.md`, etc.) still link `MINECRAFT_BOTS_DESIGN.md`/`agents/minecraft-*` at their old paths — low-stakes (findable by filename) but not fixed; sweep separately if it becomes annoying |
-| 4 | Pull in Mindcraft's skill library, profile schema, and task schema; port skills into `actions/`, write the 9 persona profiles | not started | | |
-| 5 | Rewrite `index.js` and `actions.js` to call the new layer; keep `pathfinding.js`, `swim-movements.js`, `buzz.js`, `matrix.js`, `roles.js`, `router.js`, `equipment.js`, `arbiter.js`, `run-bot.sh` unchanged | not started | | |
-| 6 | Extract kept-infra test coverage (`arbiter.js`, `router.js`, others) from the mixed `tests/unit/*.test.mjs` files into their own dedicated files; archive what's left of those files; write fresh tests against the Mindcraft-based replacements; update `tests/README.md` | not started | | |
-| 7 | Relaunch all 9 bot units (5 on dgx-spark, 4 on dgx-spark2); verify via RCON + Buzz/Matrix smoke checks | not started | | |
-| 8 | Re-baseline: after ~24h live, `tests/run.sh baseline --update` on each host, commit `tests/baselines/<host>.json` | not started | | |
+| 4 | Pull in Mindcraft's skill library, profile schema, and task schema; port skills into `services/minecraft-bots/`, write the 9 persona profiles | done | 2026-11-27 | `skills.js`/`world.js`/`mcdata.js`, `commands.js`, `modes.js` all ported and syntax-checked (`node --check` on dgx-spark); 9 `agents/minecraft-<name>/profile.json` + `agents/minecraft-common.json` + `minecraft-mbprobe` written from the archived PROMPT.md content; `!stop` fixed (0.1.0 bump) to actually interrupt a skill's loop via `bot.interrupt_code`/`arbiter.cancelAndClear` |
+| 5 | Rewrite `index.js` to call the new layer; keep `pathfinding.js`, `swim-movements.js`, `buzz.js`, `matrix.js`, `roles.js`, `router.js`, `equipment.js`, `arbiter.js`, `shelter.js`, `action-vocab.js`, `faults.js`, `run-bot.sh` unchanged | done | 2026-11-27 | `index.js` 4.0.0: decision loop (`callRole("muse", ...)` + `commands.js`'s `!verb(args)`), chat/whisper/Matrix handling, `bot.modes`/`bot.interrupt_code`/`bot.output` shim for skills.js. Known, flagged gaps: no cross-restart wedge rescue, no Buzz goal/death broadcasting, no long-term/RAG memory (bounded in-process history only) — see `index.js`'s own header |
+| 6 | Extract kept-infra test coverage (`arbiter.js`, `router.js`, others) from the mixed `tests/unit/*.test.mjs` files into their own dedicated files; archive what's left of those files; write fresh tests against the Mindcraft-based replacements; update `tests/README.md` | not started | | **Not done before the Phase 7 relaunch below** — a real gap against this project's own "every behavior change ships with a test" rule, accepted deliberately given the direct instruction to get Babs/Amy running now; tracked here so it isn't silently dropped |
+| 7 | Relaunch Babs and Amy only, per direct instruction 2026-11-27 (not all nine — the rest stay stopped until requested) on dgx-spark; verify via RCON + Buzz/Matrix smoke checks | not started | | |
+| 8 | Re-baseline: after ~24h live, `tests/run.sh baseline --update` on dgx-spark, commit `tests/baselines/dgx-spark.json` | not started | | |
 
 ## Revision History
 
@@ -190,3 +205,5 @@ rewrite has to keep `fleet_muse_contract`'s contract current (see §5's caveat o
 | 1.2.0 | 2026-11-27 | Phase 2 file-placement review: resolved `router.js`/`equipment.js`/`arbiter.js` (all stay, none archived); found 10 more archive candidates missed in the original inventory (`agents/minecraft-*/PROMPT.md` + `agents/minecraft-common.md`); confirmed the benchmark-evaluation call in §6 with real evidence (`fleet_muse_contract`, `fleet_dispatch_routing`/`fleet_mc_intent` already cover the roles this restart touches) instead of leaving it conditional. |
 | 1.3.0 | 2026-11-27 | Phase 2 executed: world reinitialized (fresh seed `53110123`, old world kept as `firmament-bots.bak-20261127181944`), standing gamerules reapplied, all 9 bot units confirmed stopped on both hosts ahead of Phase 3's archive move. |
 | 1.4.0 | 2026-11-27 | Phase 3 executed: 92 files moved into `services/minecraft-bots-archive-11-2026/` (docs, goal/priority engine, role behavior, action library, persona prompts, plus the now-stale old `README.md`); wrote a fresh minimal `README.md` and `ARCHIVE_INDEX.md` in `services/minecraft-bots/`. Corrected §5's test-file assumption after discovering `tests/unit/*.test.mjs` is mixed by behavioral area, not split per source module — tests are excluded from this phase, deferred to Phase 6. |
+| 1.5.0 | 2026-11-27 | Direct instruction to continue through to a restored, running system (Babs/Amy only) without a checkpoint. Phase 4 underway: ported `modes.js` and `commands.js` from Mindcraft, `skills.js`/`world.js` port in flight; wrote 9 `profile.json` personas + `agents/minecraft-common.json` from the archived PROMPT.md content. Found and fixed a real integration bug: `shelter.js`/`action-vocab.js` were wrongly archived — `pathfinding.js`/`swim-movements.js` depend on them — un-archived both as kept infra, `pathfinding.js` bumped to 1.4.1 to fix the resulting dead import. Recorded `arbiter.js`'s real `OWNERS` tier names (confirmed by reading the file, not memory). |
+| 1.6.0 | 2026-11-27 | Phases 4-5 completed: `skills.js`/`world.js`/`mcdata.js` ported and syntax-verified; `index.js` fully rewritten (4.0.0) onto the new layer. Found and fixed a second wrongly-archived file (`faults.js` — generic crash/interval-error infra, no goal-engine dependency). Fixed a real bug in the ported `!stop` command (didn't actually interrupt a running skill's loop). Phase 6 (test coverage) deliberately deferred past the Phase 7 relaunch, tracked as an open gap rather than silently skipped. |

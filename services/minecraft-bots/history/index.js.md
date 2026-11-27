@@ -1,6 +1,6 @@
 # index.js change history
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 The change history of `services/minecraft-bots/index.js`, newest first. Until 2026-11-13 it was the
 comment block at the top of `index.js` itself (149k characters, more than the self-repair pipeline's
@@ -9,6 +9,30 @@ into subject modules (`index.js` 3.0.0, direct operator request). `index.js` kee
 line; each new version's entry goes at the top of the list below.
 
 ## Versions
+
+### 4.0.0 (2026-11-27)
+
+`MINECRAFT_BOTS_RESTART_PLAN.md` Phase 5: full rewrite. Every `callRole` call into the archived
+goal/priority/chat engine (goal-tick.js, goal-proposal.js, chat.js, mayor.js, night-survival.js,
+upkeep-*.js, self-defense.js, incoming.js, fleet-coordination.js) is gone, replaced with a single
+decision loop (`decisionTick`, `MC_GOAL_TICK_MS`) and a chat/whisper/Matrix handler
+(`handleChatMessage`), both built on the Mindcraft-ported `skills.js`/`world.js`/`commands.js`/
+`modes.js` and the new `agents/minecraft-common.json` + `agents/minecraft-<name>/profile.json`
+persona format (replacing `persona.js`'s `PROMPT.md` prepend). Kept verbatim or near-verbatim:
+bot creation, `setupPathfinding`, the `MC_DEBUG_PHYSICS` diagnostic, the memory/chunk-count
+diagnostic, Matrix wiring, the identity/role bookkeeping (`isBoss`/`isAnotherBot`/`personaOf`/
+`isMayor`), and the death/kick/disconnect/signal handlers (trimmed -- see below). New:
+`bot.modes`/`bot.interrupt_code`/`bot.output`, the shim `skills.js`'s ported functions expect from
+Mindcraft's own (not-ported) `Agent` class; loading `mineflayer-collectblock`/`mineflayer-pvp`
+plugins directly (previously the archived `action-movement.js`'s `loadActionPlugins`).
+
+Deliberately not restored, flagged rather than silently dropped: cross-restart wedge detection and
+its teleport-home rescue (depended on the archived `goals.js`'s position persistence); Buzz
+goal-state/death-alert broadcasts and achievement/curriculum tracking (archived
+`fleet-coordination.js`/`mayor.js`/`goals.js` again -- `buzz.js` itself is untouched, just not
+wired into this loop yet); long-term/RAG memory (archived `memory.js`/`longterm.js`/
+`rag-backend.js`), replaced with a bounded in-process rolling history only, reset on every
+restart.
 
 ### 3.2.0 (2026-11-27)
 
@@ -1846,3 +1870,5 @@ efficiency principle (§5): don't spend a model call faster than the previous on
 |---|---|---|
 | 1.0.0 | 2026-11-13 | Created: index.js's header changelog moved here verbatim, plus its 3.0.0 entry. |
 | 1.1.0 | 2026-11-26 | Added index.js's 3.1.0 entry (bot rename to Name_Role display usernames, personaOf() mapping). |
+| 1.2.0 | 2026-11-27 | Added index.js's 3.2.0 entry (MC_DEBUG_PHYSICS diagnostic). |
+| 1.3.0 | 2026-11-27 | Added index.js's 4.0.0 entry: full rewrite onto the Mindcraft-ported skill/command/mode layer, MINECRAFT_BOTS_RESTART_PLAN.md Phase 5. |

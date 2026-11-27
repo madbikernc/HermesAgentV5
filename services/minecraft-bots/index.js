@@ -1,46 +1,49 @@
-// Version: 3.2.0
+// Version: 4.0.0
 //
-// 3.2.0 (2026-11-27): new MC_DEBUG_PHYSICS=true live diagnostic (default off) -- see its own
-// comment at the spawn handler. See history/index.js.md for the full entry.
+// 4.0.0 (2026-11-27, MINECRAFT_BOTS_RESTART_PLAN.md Phase 5): the bot entrypoint, rewritten to
+// call the Mindcraft-ported skill/command/mode layer (skills.js, world.js, mcdata.js, commands.js,
+// modes.js) and the new agents/minecraft-common.json + agents/minecraft-<name>/profile.json
+// persona format, instead of the archived hand-built goal/priority engine
+// (services/minecraft-bots-archive-11-2026/). Process shape, systemd unit, and the kept infra this
+// file wires up are otherwise the same as 3.2.0: pathfinding/movements (pathfinding.js,
+// swim-movements.js), control arbitration (arbiter.js), gear (equipment.js), living-space safety
+// (shelter.js), Buzz/Matrix clients (buzz.js, matrix.js, not actively wired into this minimal
+// decision loop yet -- see the note near the bottom), and the role/persona roster (roles.js).
 //
-// The Firmament's Minecraft bot: one process per bot (run-bot.sh), configured by its unit's
-// environment. Change history: history/index.js.md (moved out of this file 2026-11-13, verbatim).
-// Most of the code lives in the modules imported below; this file creates the bot, holds the
-// state they share, and wires every listener and periodic check in its original order.
+// Deliberately NOT restored in this pass (known gaps, not oversights -- flagged here rather than
+// silently dropped):
+// - Cross-restart "wedged" detection and its teleport-home rescue (old index.js's position
+//   persistence via the archived goals.js's loadStuckState/saveStuckState). pathfinding.js's own
+//   per-tick stuck handling is unaffected; this was the separate, rarer across-restart case.
+// - Goal-state/death-alert Buzz broadcasts and achievement/curriculum tracking (archived
+//   fleet-coordination.js/mayor.js/goals.js) -- buzz.js itself is untouched and ready for a later
+//   phase to wire back in; nothing publishes to it yet.
+// - Long-term/RAG memory (archived memory.js/longterm.js/rag-backend.js) -- replaced for now with
+//   a bounded in-process rolling chat history only, reset on every restart.
+//
+// Change history: history/index.js.md (this file is over the self-repair pipeline's 40000-char
+// per-file limit when its changelog is included inline, so the changelog lives there instead).
 
 import mineflayer from "mineflayer";
 import pathfinderPkg from "mineflayer-pathfinder";
-import { loadPersona } from "./persona.js";
-import { publish as buzzPublish } from "./buzz.js";
+import collectBlockPkg from "mineflayer-collectblock";
+import pvpPkg from "mineflayer-pvp";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { sendMessage as matrixSend, watchRoom } from "./matrix.js";
-import { loadAchievements, loadActionPlugins } from "./actions.js";
-import { equipBestArmor, equipBestWeapon, installEnchantsFix } from "./equipment.js";
-import { clearGoal, loadGoal, loadStuckState, saveStuckState } from "./goals.js";
+import { equipBestArmor, equipBestWeapon, installEnchantsFix, loadEquipmentPlugins } from "./equipment.js";
 import { setupPathfinding } from "./pathfinding.js";
 import { guardedInterval, installFatalHandlers } from "./faults.js";
-import { installSelfDefense, lastKnownThreat } from "./self-defense.js";
 import { refreshLivingSpace } from "./shelter.js";
-import { installTorchTrail } from "./tunneling.js";
 import { BOT_ROLES, ROLES } from "./roles.js";
-import { installChat, narrateAction } from "./chat.js";
+import { callRole } from "./router.js";
+import { containsCommand, executeCommand, getCommandDocs } from "./commands.js";
+import { MODES, runModes } from "./modes.js";
+import { OWNERS, isBusy } from "./arbiter.js";
 import { Vec3 } from "vec3";
-import { GOAL_HEARTBEAT_MS, broadcastDeathAlert, broadcastGoalState, goalHeartbeatTick, recordGoalOutcome } from "./fleet-coordination.js";
-import { ROUTINE_SKIP_REPORT_MS, routineSkips } from "./goal-proposal.js";
-import { runGoalTick } from "./goal-tick.js";
-import { drainIncoming, handleIncoming, watchFleetTopics } from "./incoming.js";
-import { MAYOR_DIRECTIVE_MS, MAYOR_LIVENESS_TIMEOUT_MS, heldCurriculumItems, loadCurriculumStage, proposeDirectiveForOthers, proposeFallbackDirective } from "./mayor.js";
-import { DEATH_THREAT_ATTRIBUTION_MS, DUSK_CHECK_MS, SLEEPING_THREAT_CHECK_MS, SLEEP_CHECK_MS, checkDusk, checkSleep, checkSleepingThreat, onEmergencyHealth, onLowBreath } from "./night-survival.js";
-import { HOME_LIGHTING_CHECK_MS, LIGHTING_CHECK_MS, SAPLING_CHECK_MS, TRASH_CHECK_MS, checkHomeLighting, checkInventoryFull, checkInventoryInsurance, checkLighting, checkSaplings, checkTrash } from "./upkeep-home.js";
-import { CHEST_CONSOLIDATION_CHECK_MS, GIVE_CHECK_MS, HUNGER_CHECK_MS, INVENTORY_CHECK_MS, LOCATION_SHARING_CHECK_MS, RIPE_CHECK_MS, SURPLUS_SHARING_CHECK_MS, checkChestConsolidation, checkDeferredSurplusCleanup, checkHunger, checkLocationSharing, checkPendingGiveRequests, checkRipeCrops, checkSurplusSharing } from "./upkeep-inventory.js";
-import { ACCESS_CHECK_MS, LIVING_SPACE_REFRESH_MS, LIVING_SPACE_REPORT_MS, RESTART_STUCK_RADIUS, RESTART_STUCK_THRESHOLD, SHELTER_INTEGRITY_CHECK_MS, STUCK_CHECK_MS, TERRAIN_REPAIR_CHECK_MS, TORCH_SUPPLY_CHECK_MS, checkAccessObstructions, checkShelterIntegrity, checkStuck, checkTerrainDamage, checkTorchSupply, teleportToSpawn } from "./upkeep-world.js";
-export { GOAL_LEASE_MS, broadcastThreatAlert, otherBotGoalSeenAt, otherBotGoals, otherGoalsNote } from "./fleet-coordination.js";
-export { hasPickaxe, toolStep } from "./gear-goals.js";
-export { proposeOwnGoal } from "./goal-proposal.js";
-export { activeDirectSpeaker, setActiveDirectSpeaker } from "./incoming.js";
-export { TOOL_TIERS } from "./mayor.js";
-export { EMERGENCY_HEALTH_THRESHOLD } from "./night-survival.js";
-export { HUNGER_THRESHOLD, SURPLUS_CLEANUP_QUIET_MS, foodFetchBlockedUntil, hasFood, hasRod, setSurplusCleanupDueAt } from "./upkeep-inventory.js";
-export const { pathfinder, goals } = pathfinderPkg;
+
+export const { pathfinder } = pathfinderPkg;
 
 const HOST = process.env.MC_HOST || "192.168.1.221";
 const PORT = parseInt(process.env.MC_PORT || "25580", 10);
@@ -49,111 +52,95 @@ installFatalHandlers(USERNAME); // faults.js: log an uncaught error with where i
 export const PERSONA_NAME = process.env.MC_BOT_PERSONA || USERNAME.toLowerCase();
 export const MAX_CHAT_LEN = 200;
 
-// "The Boss" is a role a persona file can reference (see agents/minecraft-babs/PROMPT.md's
-// Behavioral Modifiers) without the persona file itself needing to know a real username --
-// identity resolution belongs to the orchestrator, not the persona. Registered here rather
-// than in a config file since no config system exists yet; comma-separated for more than one
-// in-game account later.
+// "The Boss" is a role a persona file can reference without the persona file itself needing to
+// know a real username -- identity resolution belongs to the orchestrator, not the persona.
 const BOSS_USERNAMES = (process.env.MC_BOSS_USERNAMES || "CanisLupisM,@phone1:spark")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+  .split(",").map((s) => s.trim()).filter(Boolean);
+export function isBoss(speaker) { return BOSS_USERNAMES.includes(speaker); }
 
-export function isBoss(speaker) {
-  return BOSS_USERNAMES.includes(speaker);
-}
-
-// Every bot is also just another player in mineflayer's eyes -- without this, Babs relaying a
-// Buzz message into public chat (see the watchTopic handler below) would fire Amy's own `chat`
-// listener and send her down the normal human-reply pipeline, and vice versa: an endless
-// bot-reacts-to-bot loop. Known bot identities are excluded from that pipeline entirely;
-// coordination between them happens over Buzz, not the in-game chat relevance/reply loop.
-// "Bob" added to the default list 2026-09-11 (§15.3/§15.12) alongside his own persona/role
-// entries -- harmless for the 5 bots actually running today (an unset MC_BOT_USERNAMES env var
-// on a live unit still won't spawn a 6th process; this only changes what a FRESH deploy defaults
-// to), but keeps this list in sync with roles.js's own BOT_ROLES rather than silently drifting.
-// "Nell,Wade,Dale" added 2026-09-13 (§22, "rebalance the bots so they each have exactly one
-// role... create [more] so every role has at least one bot") -- same "harmless for bots not
-// actually running yet, keeps this list in sync with roles.js's own BOT_ROLES rather than
-// silently drifting" reasoning as Bob's own addition to this list.
+// Every bot is also just another player in mineflayer's eyes -- without this, Babs relaying
+// something into public chat would fire Amy's own `chat` listener, an endless bot-reacts-to-bot
+// loop. Known bot identities are excluded from the human-reply pipeline entirely.
 export const BOT_USERNAMES = new Set(
   (process.env.MC_BOT_USERNAMES || "Babs_Miner,Amy_Builder,Mark_Soldier,Luke_Soldier,Mayor_Leader,Bob_Farmer,Nell_Artist,Wade_Explorer,Dale_Herder")
     .split(",").map((s) => s.trim()).filter(Boolean),
 );
-
 export function isAnotherBot(speaker) {
-  return BOT_USERNAMES.has(speaker) || speaker.startsWith("@mc-"); // Matrix bot identities
+  return BOT_USERNAMES.has(speaker) || speaker.startsWith("@mc-");
 }
 
-// 2026-11-26 rename (direct request, "rename the bots to be name-<role>"): every bot's in-game
-// display username became Name_Role (Mayor -> Mayor_Leader) while its persona key -- and so its
-// AGENT_ID, Matrix identity, and /mnt/hermes-data/minecraft-memory/ paths -- stayed exactly what
-// it was (MC_BOT_PERSONA is now pinned explicitly in each systemd unit, see
-// infra/minecraft-bots/*.service). Before this, every caller elsewhere in this codebase that
-// needed a BOT_USERNAMES member's persona key just did `name.toLowerCase()`, since persona WAS
-// username.toLowerCase() for every bot that ever existed. That shortcut is wrong now -- this is
-// the one place the real mapping lives, so isMayor/isActingCoordinator (below) and mayor.js/
-// priorities.js/self-defense.js's own role/goal/Buzz lookups all go through it instead.
+// 2026-11-26 rename: every bot's in-game display username is Name_Role (Mayor -> Mayor_Leader);
+// its persona key (and so its Buzz/Matrix identity) stays the short lowercase name.
 const USERNAME_TO_PERSONA = Object.freeze({
   Mayor_Leader: "mayor", Mark_Soldier: "mark", Luke_Soldier: "luke", Babs_Miner: "babs",
   Amy_Builder: "amy", Bob_Farmer: "bob", Nell_Artist: "nell", Wade_Explorer: "wade", Dale_Herder: "dale",
 });
 export function personaOf(name) { return USERNAME_TO_PERSONA[name] || name.toLowerCase(); }
 
-// Direct request, 2026-09-08 ("add another bot, Mayor, whose personality is to be a leader and
-// set goals for the others. The others can defer to him when his instructions are not in
-// conflict"). Every other bot's own chat stays coordinate-over-Buzz-not-chat (isAnotherBot's own
-// original reasoning, unchanged) -- Mayor is the one deliberate exception, since his whole
-// purpose requires a directive to actually reach the other bots' real decision loop
-// (classifyIntent -> ACTION GOAL), the same path a player's own instruction already takes.
-// Matches on both the plain in-game name and his Matrix identity (@mc-mayor:spark), the two
-// forms isAnotherBot() itself already recognizes.
 export const MAYOR_USERNAME = process.env.MC_MAYOR_USERNAME || "Mayor_Leader";
 export function isMayor(speaker) {
   return speaker === MAYOR_USERNAME || speaker === `@mc-${personaOf(MAYOR_USERNAME)}:spark`;
 }
 
-// Autonomy (standing goals): a whole-bot kill switch, an idle-before-self-proposing-a-goal
-// window (real chat/whisper/Matrix/goal-setting all count as "not idle" -- see lastActivityAt),
-// and a tick interval for actually working a goal. Since everything here runs on local compute
-// with no per-call cost (direct instruction, 2026-09-06), 45s errs toward checking in often and
-// reasoning carefully each time rather than stretching the interval to save calls.
-export const AUTONOMY_ENABLED = (process.env.MC_AUTONOMY_ENABLED ?? "true") !== "false";
-export const SELF_PROPOSE_GOALS = (process.env.MC_SELF_PROPOSE_GOALS ?? "true") !== "false";
-const GOAL_TICK_MS = parseInt(process.env.MC_GOAL_TICK_MS || "45000", 10);
-export const IDLE_BEFORE_SELF_GOAL_MS = parseInt(process.env.MC_IDLE_SELF_GOAL_MS || "600000", 10); // 10 min
-export const MAX_CONSECUTIVE_FAILURES = 3;
+export const myRole = BOT_ROLES[PERSONA_NAME] || null;
+export const AGENT_ID = `mc-${PERSONA_NAME}`; // matches MINECRAFT_BOTS_DESIGN.md's old Buzz-identity convention; buzz.js itself isn't wired into this file yet, see header
 
-// Matrix (design doc §10): a single shared room, operator + all bots -- the operator's own
-// decision, a deliberate deviation from the retired Sintra/Amy per-agent-room pattern. Talks
-// directly to Continuwuity's Client-Server API (matrix.js), not the old "hermes gateway" tool,
-// which was built around that different architecture. Optional: if MATRIX_ACCESS_TOKEN isn't
-// set, the bot simply doesn't join Matrix, same as every other best-effort integration here.
+// Matrix (design doc §10, archived -- the facts still hold): a single shared room, operator + all
+// bots. Optional -- no MATRIX_ACCESS_TOKEN, no watcher.
 const MATRIX_HOMESERVER = process.env.MATRIX_HOMESERVER || "http://10.129.1.15:6167";
 export const MATRIX_USER_ID = process.env.MATRIX_USER_ID || `@mc-${PERSONA_NAME}:spark`;
 const MATRIX_ACCESS_TOKEN = process.env.MATRIX_ACCESS_TOKEN || "";
 const MATRIX_ROOM_ID = process.env.MATRIX_ROOM_ID || "!2rXcMwykUS2yVNTLGw:spark";
 
-// mc-<persona> matches the design doc's own Buzz-identity convention (§9) -- reused here as
-// the hermes-memory agent id so the same name means the same thing everywhere this bot shows
-// up. One conv_id per speaker: a bot's memory of "the conversation with CanisLupisM" spans
-// both public chat and whispers, rather than splitting by channel for no real benefit.
-export const AGENT_ID = `mc-${PERSONA_NAME}`;
-export const TASK_ID = `${AGENT_ID}-chat`;
-export const HISTORY_TURNS = 8;
+// --- Persona profile loading (replaces archived persona.js's PROMPT.md prepend) ------------------
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const AGENTS_DIR = path.join(__dirname, "..", "..", "agents");
 
-export function convId(speaker) {
-  return `${AGENT_ID}:${speaker}`;
+function loadProfile(personaName) {
+  const common = JSON.parse(fs.readFileSync(path.join(AGENTS_DIR, "minecraft-common.json"), "utf8"));
+  const profile = JSON.parse(
+    fs.readFileSync(path.join(AGENTS_DIR, `minecraft-${personaName}`, "profile.json"), "utf8"));
+  return { common, profile };
 }
 
-export const persona = loadPersona(PERSONA_NAME);
-console.log(`[${USERNAME}] loaded persona '${PERSONA_NAME}' (${persona.length} chars)`);
+const { common: personaCommon, profile: persona } = loadProfile(PERSONA_NAME);
+console.log(`[${USERNAME}] loaded profile '${persona.name}' (${persona.role})`);
 
-// §15.4: this bot's own role entry, or null for a bot not yet in BOT_ROLES. Looked up once at
-// startup, matching persona's own load-once pattern -- a role reassignment means editing
-// roles.js and restarting, the same "edit the file, restart the process" model every other piece
-// of per-bot config here already uses.
-export const myRole = BOT_ROLES[PERSONA_NAME] || null;
+function renderModifiers(modifiers) {
+  return Object.entries(modifiers || {})
+    .map(([k, v]) => `- ${k.replace(/_/g, " ")}: ${v}`)
+    .join("\n");
+}
+
+// Builds the full system prompt for one callRole() turn by substituting
+// agents/minecraft-common.json's $PLACEHOLDER tokens with this persona's own profile.json content
+// plus live call-specific context (memory/stats/inventory/examples).
+function buildSystemPrompt({ memory = "(none yet)", stats = "", inventory = "", examples = "" } = {}) {
+  const coreDirective = persona.guardrail
+    ? `${persona.core_directive}\n\n**Guardrail:** ${persona.guardrail}`
+    : persona.core_directive;
+  const role = persona.pairing ? `${persona.role} (${persona.pairing})` : persona.role;
+  return personaCommon.conversing_template
+    .replaceAll("$NAME", persona.name)
+    .replace("$ROLE", role)
+    .replace("$IDENTITY", persona.identity)
+    .replace("$CORE_DIRECTIVE", coreDirective)
+    .replace("$VOICE", persona.voice)
+    .replace("$MODIFIERS", renderModifiers(persona.modifiers))
+    .replace("$MEMORY", memory)
+    .replace("$STATS", stats)
+    .replace("$INVENTORY", inventory)
+    .replace("$COMMAND_DOCS", getCommandDocs())
+    .replace("$EXAMPLES", examples);
+}
+
+// This persona's modes.js overrides, layered over agents/minecraft-common.json's defaults, layered
+// over whatever modes.js itself shipped as a hardcoded default (see modes.js's own MODES array).
+// Mutates the shared MODES array in place -- one process per bot, so this is safe.
+for (const mode of MODES) {
+  const override = persona.modes?.[mode.name] ?? personaCommon.default_modes?.[mode.name];
+  if (override !== undefined) mode.on = override;
+}
 
 export const bot = mineflayer.createBot({
   host: HOST,
@@ -163,40 +150,45 @@ export const bot = mineflayer.createBot({
 });
 
 bot.loadPlugin(pathfinder);
-loadActionPlugins(bot);
+bot.loadPlugin(collectBlockPkg.plugin);
+bot.loadPlugin(pvpPkg.plugin);
+
+// skills.js's execution-context contract (ported from Mindcraft's own Agent/initBot, not adopted
+// here -- see skills.js's own header). A minimal, working shim rather than Mindcraft's full
+// ModeController: pause/unpause toggle a real MODES entry's `on` flag (so collectBlock pausing
+// "cowardice" while mining genuinely stops it firing mid-task); pausing a mode this project never
+// ported (e.g. "unstuck", "cheat") is a harmless no-op since modesByName[name] is undefined.
+const modesByName = Object.fromEntries(MODES.map((m) => [m.name, m]));
+bot.modes = {
+  pause(name) {
+    const m = modesByName[name];
+    if (m && m._savedOn === undefined) { m._savedOn = m.on; m.on = false; }
+  },
+  unpause(name) {
+    const m = modesByName[name];
+    if (m && m._savedOn !== undefined) { m.on = m._savedOn; m._savedOn = undefined; }
+  },
+  isOn(name) { return !!modesByName[name]?.on; },
+};
+bot.interrupt_code = false;
+bot.output = "";
 
 bot.once("spawn", async () => {
   console.log(`[${USERNAME}] spawned at`, bot.entity.position);
-  // MC_HOME_POS="x,y,z" (test bots only, tests/live-bot.test.mjs): "home" is normally the world
-  // spawn; a test bot's home is pinned to its arena so go-home behavior never walks it to the base.
+  // MC_HOME_POS="x,y,z" (test bots only): "home" is normally the world spawn; a test bot's home is
+  // pinned to its arena so go-home behavior never walks it to the base.
   if (process.env.MC_HOME_POS) {
     const [hx, hy, hz] = process.env.MC_HOME_POS.split(",").map(Number);
     bot.spawnPoint = new Vec3(hx, hy, hz);
     console.log(`[${USERNAME}] home pinned to`, bot.spawnPoint);
   }
-  // Tech-tree curriculum (2026-09-08): only Mayor's own process ever reads curriculumStageIndex,
-  // but loading it is cheap and harmless for every other bot too -- one code path, not a
-  // separate Mayor-only startup branch.
-  if (USERNAME === MAYOR_USERNAME) await loadCurriculumStage();
-  await loadAchievements(bot);
-  // 2026-09-25: a new verified achievement (harvested:/penned:/bred:) reaches the Mayor right away,
-  // not only when a goal happens to finish -- the ripe-crop routine harvests outside any goal.
-  bot.on("achievement", () => {
-    buzzPublish(AGENT_ID, "minecraft-coordination", JSON.stringify({ type: "evidence", have: heldCurriculumItems() }))
-      .catch((err) => console.error(`[${USERNAME}] evidence publish failed:`, err.message));
-  });
   // Pathfinder setup -- movement costs, unbreakable blocks, search limits, path diagnostics --
-  // is in pathfinding.js (split out 2026-11-10).
+  // is in pathfinding.js.
   setupPathfinding(bot, { username: USERNAME });
-  // Direct report, 2026-11-27 ("they're still standing there seemingly stuck" -- confirmed live:
-  // not terrain, not lag, not a plugin, not the arbiter -- the path search succeeds but she never
-  // actually walks it). Temporary, env-gated live diagnostic: MC_DEBUG_PHYSICS=true logs
-  // physicsTick throughput, velocity, the path's own next waypoint, and whether
-  // bot.blockAt(her own position) is null, once every DEBUG_PHYSICS_LOG_MS. First live run (both
-  // bots, in water): ticks a normal ~40/2s, forward+jump held every tick, pathfinder reports
-  // isMoving -- yet position was frozen for 30+ real seconds. velocity/nextNode narrow down
-  // whether physics is genuinely producing zero displacement despite the held controls, or she's
-  // stuck re-targeting a waypoint she's already standing on.
+  // Live diagnostic (2026-11-27, default off): MC_DEBUG_PHYSICS=true logs physicsTick throughput,
+  // velocity, the path's own next waypoint, and whether bot.blockAt(her own position) is null,
+  // once every DEBUG_PHYSICS_LOG_MS. Kept from 3.2.0 verbatim -- still useful for the next land/
+  // water stuck episode regardless of what decides goals.
   if (process.env.MC_DEBUG_PHYSICS === "true") {
     const DEBUG_PHYSICS_LOG_MS = 2000;
     let physicsTicks = 0;
@@ -215,14 +207,6 @@ bot.once("spawn", async () => {
       const vel = bot.entity?.velocity;
       const blockHere = pos ? bot.blockAt(pos) : null;
       const next = lastPathUpdate?.path?.[0];
-      // 2026-11-27 follow-up (direct report: water is a separate, already-long-standing issue --
-      // this is specifically to catch a LAND stuck episode): MINECRAFT_BOTS_DESIGN.md's own
-      // 2026-09-21 entry already root-caused one shape of this exact "success, then stuck every
-      // few seconds, forever" signature to another entity standing on/near the target square --
-      // the search's entityCost (8) discourages it but Minecraft's own real collision can still
-      // make it genuinely unreachable at execution time even though the plan said "success."
-      // Lists every entity within 2 blocks so a land freeze can be checked against that live,
-      // not re-guessed.
       const nearby = pos ? Object.values(bot.entities)
         .filter((e) => e !== bot.entity && e.position && e.position.distanceTo(pos) <= 2)
         .map((e) => `${e.username || e.name}@${e.position.distanceTo(pos).toFixed(1)}`) : [];
@@ -236,9 +220,8 @@ bot.once("spawn", async () => {
         `nearby=[${nearby.join(", ")}]`);
     });
   }
-  installTorchTrail(bot); // tunneling.js: a torch every TORCH_SPACING blocks while digging
-  // The shell SwimMovements.safeToBreak() reads has to exist before the first path search, not
-  // only after the first timer tick (LIVING_SPACE_REFRESH_MS below) -- a bot spawns inside the
+  // The shell SwimMovements.safeToBreak()/shelter.js's wouldBlockAccess read has to exist before
+  // the first path search, not only after the first timer tick below -- a bot spawns inside the
   // shared base and starts pathing immediately.
   try {
     refreshLivingSpace(bot, bot.spawnPoint);
@@ -246,51 +229,15 @@ bot.once("spawn", async () => {
     console.error(`[${USERNAME}] initial living-space scan failed:`, err.message);
   }
   installEnchantsFix(bot); // equipment.js: digging while holding enchanted gear threw
+  loadEquipmentPlugins(bot); // equipment.js: mineflayer-tool, for skills.js's useToolOn/equipForBlock
 
-  // Inventory persists across restarts (it's tied to the player's UUID in the world save, not
-  // this process) -- worth checking gear right away, not only after an action changes it.
+  // Inventory persists across restarts -- worth checking gear right away.
   equipBestArmor(bot).then(() => equipBestWeapon(bot)).catch((err) =>
     console.error(`[${USERNAME}] initial gear check failed:`, err.message));
-
-  // Direct request, 2026-09-07 ("if a bot gets stuck... teleport... rather than continually
-  // restart"). Real evidence: Babs reconnected at the EXACT SAME coordinate across seven
-  // consecutive restarts over 9 minutes -- Minecraft persists player position across reconnects
-  // just like a real player logging back in, so a crash-and-restart cycle does nothing for a bot
-  // wedged in terrain; she just gets stuck again immediately. If something ELSE is also
-  // crash-looping her every minute or two, checkStuck's own multi-minute in-process threshold
-  // may never even complete one cycle before the next restart wipes its counters -- comparing
-  // THIS fresh spawn's position against wherever she was saved right before the process went
-  // down catches that compound case immediately, rather than needing to survive long enough in
-  // one continuous run to notice on its own.
-  try {
-    const prior = await loadStuckState(PERSONA_NAME);
-    const pos = bot.entity.position;
-    let closeToLast = false;
-    // 2026-09-25: a clean stop (deploy, systemctl restart) is not evidence of being wedged -- deploy
-    // restarts had been adding to the streak and triggering the (then lethal) rescue teleport.
-    if (prior && !prior.cleanShutdown) {
-      const dx = pos.x - prior.x, dy = pos.y - prior.y, dz = pos.z - prior.z;
-      closeToLast = Math.sqrt(dx * dx + dy * dy + dz * dz) < RESTART_STUCK_RADIUS;
-    }
-    currentSameSpotCount = closeToLast ? (prior.sameSpotCount || 0) + 1 : 0;
-    await saveStuckState(PERSONA_NAME, { x: pos.x, y: pos.y, z: pos.z, sameSpotCount: currentSameSpotCount });
-    if (currentSameSpotCount >= RESTART_STUCK_THRESHOLD) {
-      const streak = currentSameSpotCount + 1;
-      console.log(`[${USERNAME}] reconnected at essentially the same spot ${streak} times in a ` +
-        `row -- likely wedged across restarts`);
-      currentSameSpotCount = 0;
-      await saveStuckState(PERSONA_NAME, { x: pos.x, y: pos.y, z: pos.z, sameSpotCount: 0 });
-      await teleportToSpawn(`reconnected at the same spot ${streak} times in a row`);
-    }
-  } catch (err) {
-    console.error(`[${USERNAME}] cross-restart stuck check failed:`, err.message);
-  }
 });
 
-// TEMPORARY diagnostic (2026-09-06): both bots hit V8's heap limit and crashed twice in a row,
-// at a steady ~4-5 MB/s from very early in the process's life -- not obviously tied to any one
-// action. Logging memory + loaded-chunk-column count every 15s to find which subsystem is
-// actually leaking before changing anything else. Remove once root-caused.
+// TEMPORARY diagnostic (2026-09-06, carried forward): memory + loaded-chunk-column count every
+// 15s. Remove once genuinely root-caused as a non-issue across a full restart cycle.
 guardedInterval(() => {
   const mem = process.memoryUsage();
   const columns = bot.world?.getColumns ? bot.world.getColumns().length : "n/a";
@@ -300,317 +247,151 @@ guardedInterval(() => {
               `${(mem.arrayBuffers / 1048576).toFixed(1)}MB chunks=${columns}`);
 }, 15_000);
 
-// Guards LLM-call reentrancy only (classify/muse/planNextStep generating a reply or a plan) --
-// a genuinely separate concern from physical-action coherence, which is why it was never folded
-// into the arbiter migration below. See goalTick's own "busy deliberately not held" comments,
-// scattered across every idle-tick check, for why: an in-flight physical action must never block
-// handleIncoming from at least classifying a live chat message, only from acting on it twice at
-// once.
-export let busy = false;
-export function setBusy(value) { busy = value; return value; }
-// The old `acting` flag (true for the whole span of a directly-requested/routine physical
-// action, guarding the goal loop and every idle-tick check from starting a second one
-// concurrently) is gone as of the coherence arbiter's Phase 3/4 migration (2026-09-10, see
-// arbiter.js's own header) -- arbiter.isBusy()/requestControl()/release() is the one remaining
-// source of truth for "is something physically happening right now," replacing 20+ independent
-// reads of a bare boolean with a single, testable, priority-ordered module.
-export let currentGoal = null;
-export function setCurrentGoal(value) { currentGoal = value; return value; }
-// Updated on every real chat/whisper/Matrix line and every goal set by a player -- the goal
-// loop only ever proposes her own goal after this has been quiet a while (IDLE_BEFORE_SELF_GOAL_MS).
-export let lastActivityAt = Date.now();
-export function setLastActivityAt(value) { lastActivityAt = value; return value; }
-// §15.5(d): updated in handleIncoming() whenever Mayor's own chat reaches this process (the same
-// isMayor() exception to isAnotherBot() his directives already need to reach classifyIntent) --
-// the liveness signal proposeFallbackDirective() uses to decide whether a Leader-secondary bot
-// should step up. 0 means "never heard from Mayor this process," deliberately distinct from "he
-// went quiet a while ago" -- see proposeFallbackDirective's own comment on why a fresh process
-// with no baseline yet doesn't activate the fallback immediately.
-export let lastMayorSeenAt = 0;
-export function setLastMayorSeenAt(value) { lastMayorSeenAt = value; return value; }
-// Review MB-11, 2026-09-24: recipients rejected every bot but Mayor, so the fallback coordinator's
-// directives never reached anyone; and "never seen Mayor" (0) blocked the fallback forever for a
-// fleet that booted without him. Liveness is now measured from process start when Mayor has
-// never been heard, and every bot accepts the named fallback coordinator while Mayor is quiet.
-const PROCESS_STARTED_AT = Date.now();
-const FALLBACK_COORDINATOR_USERNAME = process.env.MC_FALLBACK_COORDINATOR_NAME || "Mark_Soldier";
-export function mayorUnreachable() {
-  return Date.now() - (lastMayorSeenAt || PROCESS_STARTED_AT) >= MAYOR_LIVENESS_TIMEOUT_MS;
-}
-export function isActingCoordinator(speaker) {
-  if (isMayor(speaker)) return true;
-  return speaker !== USERNAME && mayorUnreachable() &&
-    (speaker === FALLBACK_COORDINATOR_USERNAME ||
-     speaker === `@mc-${personaOf(FALLBACK_COORDINATOR_USERNAME)}:spark`);
-}
-guardedInterval(goalHeartbeatTick, GOAL_HEARTBEAT_MS);
+// --- Decision loop ---------------------------------------------------------------------------
+// Replaces the archived goal-tick.js/goal-proposal.js. On a cadence (MC_GOAL_TICK_MS), and on
+// every real chat/whisper/Matrix line, builds this persona's system prompt plus live game state
+// and asks the `muse` role (via router.js's callRole, kept) what to do next. The reply may contain
+// a `!command(args)` token (commands.js parses and dispatches it, arbiter-gated) and/or
+// conversational text (chatted directly). A bounded in-process rolling history stands in for the
+// archived long-term/RAG memory -- reset on every restart, a known, flagged scope reduction (see
+// file header).
+const GOAL_TICK_MS = parseInt(process.env.MC_GOAL_TICK_MS || "45000", 10);
+const MODES_TICK_MS = parseInt(process.env.MC_MODES_TICK_MS || "1000", 10);
+export const HISTORY_TURNS = 8;
 
-loadGoal(PERSONA_NAME).then((g) => {
-  currentGoal = g;
-  if (g) {
-    console.log(`[${USERNAME}] resumed goal: ${g.description} (${g.steps} steps so far)`);
-    broadcastGoalState("active", g.description); // MB-12: peers can't see a resume otherwise
+let conversationHistory = [];
+function pushHistory(role, content) {
+  conversationHistory.push({ role, content });
+  if (conversationHistory.length > HISTORY_TURNS * 2) {
+    conversationHistory = conversationHistory.slice(-HISTORY_TURNS * 2);
   }
-}).catch((err) => console.error(`[${USERNAME}] failed to load saved goal:`, err.message));
+}
 
-// Chat and intent: classifyIntent, the chat reply, narration and what gets remembered: in chat.js (split out 2026-11-10).
-installChat();
-guardedInterval(() => {
-  if (!Object.keys(routineSkips).length) return;
-  console.log(`[${USERNAME}] ROUTINE_SKIPS ${JSON.stringify(routineSkips)}`);
-  for (const k of Object.keys(routineSkips)) delete routineSkips[k];
-}, ROUTINE_SKIP_REPORT_MS);
+function describeStats() {
+  const pos = bot.entity?.position;
+  const health = bot.health ?? "?";
+  const food = bot.food ?? "?";
+  return `STATS\nPosition: ${pos ? `${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)}` : "unknown"}\n` +
+    `Health: ${health}/20, Food: ${food}/20\nTime: ${bot.time?.timeOfDay ?? "?"}`;
+}
 
-guardedInterval(runGoalTick, GOAL_TICK_MS);
+function describeInventory() {
+  const items = bot.inventory?.items?.() ?? [];
+  if (!items.length) return "INVENTORY\nEmpty";
+  return `INVENTORY\n${items.map((i) => `${i.name} x${i.count}`).join(", ")}`;
+}
 
-guardedInterval(() => {
-  proposeDirectiveForOthers().catch((err) => console.error(`[${USERNAME}] proposeDirectiveForOthers error:`, err.message));
-}, MAYOR_DIRECTIVE_MS);
-
-guardedInterval(() => {
-  proposeFallbackDirective().catch((err) => console.error(`[${USERNAME}] proposeFallbackDirective error:`, err.message));
-}, MAYOR_DIRECTIVE_MS);
-
-guardedInterval(() => {
-  checkSleep().catch((err) => console.error(`[${USERNAME}] checkSleep error:`, err.message));
-}, SLEEP_CHECK_MS);
-
-guardedInterval(() => {
-  checkDusk().catch((err) => console.error(`[${USERNAME}] checkDusk error:`, err.message));
-}, DUSK_CHECK_MS);
-
-// Self-defense, threat memory and squad response are in self-defense.js (split out 2026-11-10).
-installSelfDefense();
-
-guardedInterval(() => {
-  checkHunger().catch((err) => console.error(`[${USERNAME}] checkHunger error:`, err.message));
-}, HUNGER_CHECK_MS);
-
-guardedInterval(() => {
-  checkRipeCrops().catch((err) => console.error(`[${USERNAME}] checkRipeCrops error:`, err.message));
-}, RIPE_CHECK_MS);
-
-guardedInterval(() => {
-  checkPendingGiveRequests().catch((err) =>
-    console.error(`[${USERNAME}] checkPendingGiveRequests error:`, err.message));
-}, GIVE_CHECK_MS);
-
-guardedInterval(() => {
-  checkDeferredSurplusCleanup().catch((err) =>
-    console.error(`[${USERNAME}] post-craft cleanup failed:`, err.message));
-}, 30_000);
-guardedInterval(() => {
-  checkSurplusSharing().catch((err) =>
-    console.error(`[${USERNAME}] surplus sharing check failed:`, err.message));
-}, SURPLUS_SHARING_CHECK_MS);
-guardedInterval(() => {
-  checkLocationSharing().catch((err) =>
-    console.error(`[${USERNAME}] location sharing sweep failed:`, err.message));
-}, LOCATION_SHARING_CHECK_MS);
-guardedInterval(() => {
-  checkChestConsolidation().catch((err) =>
-    console.error(`[${USERNAME}] chest consolidation check failed:`, err.message));
-}, CHEST_CONSOLIDATION_CHECK_MS);
-
-guardedInterval(() => {
-  checkInventoryFull().catch((err) => console.error(`[${USERNAME}] checkInventoryFull error:`, err.message));
-}, INVENTORY_CHECK_MS);
-
-guardedInterval(() => {
-  checkTrash().catch((err) => console.error(`[${USERNAME}] checkTrash error:`, err.message));
-}, TRASH_CHECK_MS);
-
-guardedInterval(() => {
-  checkInventoryInsurance().catch((err) =>
-    console.error(`[${USERNAME}] checkInventoryInsurance error:`, err.message));
-}, INVENTORY_CHECK_MS);
-
-guardedInterval(() => {
-  checkSaplings().catch((err) => console.error(`[${USERNAME}] checkSaplings error:`, err.message));
-}, SAPLING_CHECK_MS);
-
-guardedInterval(() => {
-  checkLighting().catch((err) => console.error(`[${USERNAME}] checkLighting error:`, err.message));
-}, LIGHTING_CHECK_MS);
-
-// Efficiency pass, 2026-09-24 (measured: 6,195 home-lighting attempts/day across the fleet, 96
-// successful -- every bot tried every ~90s, most walking to a chest for torches that weren't
-// there). Now one maintainer (the Builder by default; MC_HOME_LIGHTING=true/false overrides per
-// bot), and every failed attempt doubles the wait (up to 30 min) until one succeeds. Each bot's
-// immediate local torch placement (checkLighting) is unchanged.
-export const HOME_LIGHTING_MAINTAINER = process.env.MC_HOME_LIGHTING
-  ? process.env.MC_HOME_LIGHTING === "true"
-  : myRole?.primary === ROLES.BUILDER;
-
-guardedInterval(() => {
-  checkHomeLighting().catch((err) => console.error(`[${USERNAME}] checkHomeLighting error:`, err.message));
-}, HOME_LIGHTING_CHECK_MS);
-let lastLivingSpaceReport = "";
-let lastLivingSpaceReportAt = 0;
-
-guardedInterval(() => {
-  if (!bot.entity) return;
+async function decisionTick() {
+  if (isBusy()) return; // something (a player command, an emergency mode) is already in control
+  let reply;
   try {
-    const space = refreshLivingSpace(bot, bot.spawnPoint);
-    // "anchor(s)", not "bed(s)": bedAnchors() always includes the spawn point, so a world with no
-    // beds in it at all still reports one anchor. Read as "bed(s)" that is simply wrong, which it
-    // looked like on the fresh world of 2026-10-08 ("1 bed(s)" with nine bots and no bed placed).
-    const summary = `${space.anchors.length} anchor(s), ${space.inside.size} interior cell(s), ` +
-      `${space.cells.size} wall block(s) protected, ${space.exits.size} way(s) out`;
-    if (summary === lastLivingSpaceReport && Date.now() - lastLivingSpaceReportAt < LIVING_SPACE_REPORT_MS) return;
-    lastLivingSpaceReport = summary;
-    lastLivingSpaceReportAt = Date.now();
-    console.log(`[${USERNAME}] living space: ${summary}`);
+    const prompt = buildSystemPrompt({ stats: describeStats(), inventory: describeInventory() });
+    const messages = [{ role: "system", content: prompt }, ...conversationHistory,
+      { role: "user", content: "What will you do next?" }];
+    reply = await callRole("muse", messages, { analysis: true, maxTokens: 300 });
   } catch (err) {
-    console.error(`[${USERNAME}] living-space scan failed:`, err.message);
+    console.error(`[${USERNAME}] decision tick callRole failed:`, err.message);
+    return;
   }
-}, LIVING_SPACE_REFRESH_MS);
-
-guardedInterval(() => {
-  checkAccessObstructions().catch((err) => console.error(`[${USERNAME}] checkAccessObstructions error:`, err.message));
-}, ACCESS_CHECK_MS);
-
-guardedInterval(() => {
-  checkTorchSupply().catch((err) => console.error(`[${USERNAME}] checkTorchSupply error:`, err.message));
-}, TORCH_SUPPLY_CHECK_MS);
-
-guardedInterval(() => {
-  checkTerrainDamage().catch((err) => console.error(`[${USERNAME}] checkTerrainDamage error:`, err.message));
-}, TERRAIN_REPAIR_CHECK_MS);
-
-guardedInterval(() => {
-  checkShelterIntegrity().catch((err) => console.error(`[${USERNAME}] checkShelterIntegrity error:`, err.message));
-}, SHELTER_INTEGRITY_CHECK_MS);
-// Set once at spawn (by the cross-restart check below) and carried forward as-is by every
-// periodic save in checkStuck -- NOT reset to 0 here, or the periodic saves would destroy the
-// cross-restart signal before the next crash ever got a chance to read it back.
-export let currentSameSpotCount = 0;
-
-// Any pathfinder activity counts as "trying to move" for checkStuck's stationary-vs-stuck test.
-export let lastMoveAttemptAt = 0;
-for (const ev of ["goal_updated", "path_update", "path_reset"]) {
-  bot.on(ev, () => { lastMoveAttemptAt = Date.now(); });
+  if (!reply || !reply.trim()) return;
+  const spoken = reply.replace(/!\w+(?:\([^)]*\))?/g, "").trim();
+  if (spoken) bot.chat(spoken.slice(0, MAX_CHAT_LEN));
+  pushHistory("assistant", reply);
+  if (containsCommand(reply)) {
+    bot.output = "";
+    const result = await executeCommand(bot, reply, { tier: OWNERS.GOAL_STEP });
+    console.log(`[${USERNAME}] goal-step command result: ${result}`);
+  }
 }
 
-guardedInterval(checkStuck, STUCK_CHECK_MS);
-// busy is also released by goalTick/proposeOwnGoal/etc., none of which know about the queue.
-guardedInterval(drainIncoming, 1000);
+guardedInterval(decisionTick, GOAL_TICK_MS);
+guardedInterval(() => {
+  runModes(bot).catch((err) => console.error(`[${USERNAME}] runModes failed:`, err.message));
+}, MODES_TICK_MS);
+
+// --- Chat / whisper / Matrix -------------------------------------------------------------------
+async function handleChatMessage(speaker, message, { send }) {
+  if (speaker === USERNAME) return;
+  if (isAnotherBot(speaker) && !isMayor(speaker)) return; // see isAnotherBot's own comment
+  pushHistory("user", `${speaker}: ${message}`);
+  let reply;
+  try {
+    const prompt = buildSystemPrompt({ stats: describeStats(), inventory: describeInventory() });
+    const messages = [{ role: "system", content: prompt }, ...conversationHistory];
+    reply = await callRole("muse", messages, { maxTokens: 300 });
+  } catch (err) {
+    console.error(`[${USERNAME}] chat reply callRole failed:`, err.message);
+    return;
+  }
+  if (!reply || !reply.trim()) return;
+  const spoken = reply.replace(/!\w+(?:\([^)]*\))?/g, "").trim();
+  if (spoken) send(spoken.slice(0, MAX_CHAT_LEN));
+  pushHistory("assistant", reply);
+  if (containsCommand(reply)) {
+    bot.output = "";
+    const tier = (speaker === MAYOR_USERNAME || isBoss(speaker)) ? OWNERS.DIRECT_COMMAND : OWNERS.DIRECT_COMMAND;
+    const result = await executeCommand(bot, reply, { tier });
+    console.log(`[${USERNAME}] chat-issued command result: ${result}`);
+  }
+}
 
 bot.on("chat", (speaker, message) => {
-  handleIncoming(speaker, message, { alreadyAddressed: false, send: (reply) => bot.chat(reply) });
+  handleChatMessage(speaker, message, { send: (reply) => bot.chat(reply) })
+    .catch((err) => console.error(`[${USERNAME}] chat handling failed:`, err.message));
 });
 
-// /msg, /tell, /w -- mineflayer fires these separately from public chat. Reply the same way
-// (a private whisper back), not into public chat.
 bot.on("whisper", (speaker, message) => {
-  handleIncoming(speaker, message, {
-    alreadyAddressed: true,
-    send: (reply) => bot.whisper(speaker, reply),
-  });
+  handleChatMessage(speaker, message, { send: (reply) => bot.whisper(speaker, reply) })
+    .catch((err) => console.error(`[${USERNAME}] whisper handling failed:`, err.message));
 });
 
-// Matrix (design doc §10): the shared room, same relevance-classification treatment as public
-// in-game chat (alreadyAddressed: false) since more than one bot reads this room and a message
-// may be meant for only one of them by name. Optional -- no MATRIX_ACCESS_TOKEN, no watcher.
+// Matrix (kept, optional -- no MATRIX_ACCESS_TOKEN, no watcher).
 if (MATRIX_ACCESS_TOKEN) {
   watchRoom({
     homeserver: MATRIX_HOMESERVER,
     accessToken: MATRIX_ACCESS_TOKEN,
     roomId: MATRIX_ROOM_ID,
     onMessage: ({ sender, body }) => {
-      handleIncoming(sender, body, {
-        alreadyAddressed: false,
+      handleChatMessage(sender, body, {
         send: (reply) =>
           matrixSend({ homeserver: MATRIX_HOMESERVER, accessToken: MATRIX_ACCESS_TOKEN,
                        roomId: MATRIX_ROOM_ID, body: reply }).catch((err) =>
             console.error(`[${USERNAME}] matrix send failed:`, err.message)),
-      });
+      }).catch((err) => console.error(`[${USERNAME}] matrix message handling failed:`, err.message));
     },
   });
   console.log(`[${USERNAME}] watching Matrix room ${MATRIX_ROOM_ID} as ${MATRIX_USER_ID}`);
 } else {
   console.log(`[${USERNAME}] MATRIX_ACCESS_TOKEN not set -- Matrix room disabled`);
 }
-bot.once("spawn", watchFleetTopics);
 
-// Direct request, 2026-09-07 ("do all" -> death/respawn handling), never addressed before now.
-// Confirmed against mineflayer's own health.js source: bot.respawn() fires automatically on
-// death (this fleet never passes `respawn: false`), and 'spawn' re-emits once she's actually
-// back -- the SAME event the very first bot.once("spawn", ...) above reacts to, so a second,
-// persistent bot.on("spawn", ...) listener is needed here rather than reusing that one (a
-// `.once` listener never fires again). hasSpawnedOnce distinguishes "the initial connection" (do
-// nothing extra) from "a real respawn after dying" (the only time this block should act).
+// --- Death / respawn / disconnect ---------------------------------------------------------------
 let hasSpawnedOnce = false;
 
 bot.on("death", () => {
-  const now = Date.now();
-  // bot.entity.position is still the death location at this point, before respawn repositions her.
-  const killerGuess = (lastKnownThreat && now - lastKnownThreat.at <= DEATH_THREAT_ATTRIBUTION_MS)
-    ? lastKnownThreat.name : "unknown";
-  broadcastDeathAlert(bot.entity.position, killerGuess);
-  console.log(`[${USERNAME}] died -- likely killed by ${killerGuess}`);
+  console.log(`[${USERNAME}] died`);
 });
 
 bot.on("spawn", () => {
-  if (!hasSpawnedOnce) {
-    hasSpawnedOnce = true;
-    return; // the initial connection's own spawn -- already handled by the once() listener above
-  }
+  if (!hasSpawnedOnce) { hasSpawnedOnce = true; return; } // the initial connection's own spawn
   (async () => {
     console.log(`[${USERNAME}] respawned after dying`);
     try {
-      bot.chat(await narrateAction("ouch, I died! let me get myself back together."));
+      bot.chat("ouch, I died! let me get myself back together.");
     } catch (err) {
       console.error(`[${USERNAME}] death narration failed:`, err.message);
     }
-    // Her standing goal's assumptions about where she is are now stale (death resets her position
-    // to spawn/bed) -- doesn't make sense to just keep going as if nothing happened. Direct
-    // request, 2026-10-28: with item drop on death turned off (keepInventory), gear is no longer
-    // lost on death, so there's nothing left to walk back for -- the old post-death "recover"
-    // march to the death position (and its rapid-death-streak cap) is gone.
-    if (currentGoal) {
-      await broadcastGoalState("abandoned", currentGoal.description);
-      recordGoalOutcome(currentGoal.description, "gave up", "died");
-      currentGoal = null;
-      await clearGoal(PERSONA_NAME);
-    }
   })().catch((err) => console.error(`[${USERNAME}] post-respawn handling failed:`, err.message));
 });
-bot.on("health", onEmergencyHealth);
-bot.on("breath", onLowBreath);
-
-guardedInterval(() => {
-  checkSleepingThreat().catch((err) => console.error(`[${USERNAME}] checkSleepingThreat error:`, err.message));
-}, SLEEPING_THREAT_CHECK_MS);
 
 bot.on("kicked", (reason) => console.log(`[${USERNAME}] kicked:`, reason));
 bot.on("error", (err) => console.log(`[${USERNAME}] error:`, err));
-// Direct report, 2026-09-16 ("the bots do not appear to be active in world"): a real, severe,
-// confirmed gap -- this handler only ever logged the disconnect, then did nothing else. Every
-// setInterval-driven check (checkSelfDefense, checkSleepingThreat, proposeOwnGoal, goalTick...)
-// kept firing on schedule against a `bot` object with no live connection, and several of them
-// don't hard-error on a dead connection -- they resolve with misleading "success" instead
-// ("squad response: arrived, nothing left to fight," "sleep: slept through the night. (ok=true)"
-// were both logged live, in a tight, suspiciously regular rhythm, for over two hours after a
-// real `keepAliveError` disconnect -- confirmed live: RCON's own `list` showed 0 of the 9 bots
-// actually connected while every one of their systemd units still reported "active" and kept
-// logging as if nothing had happened). A silently zombied process is worse than a crashed one --
-// it actively misleads anyone (including a status check like this one) into believing the fleet
-// is still operating. The fix is the same one already proven for OOM crashes: every bot service
-// already runs under `Restart=always` -- exiting non-zero on ANY disconnect (network blip,
-// keepalive timeout, a kick, the game server itself restarting) hands recovery to the exact same
-// systemd machinery already relied on, giving a fresh process a real, clean reconnect instead of
-// a stale one pretending to keep working.
-// Record a clean shutdown so the next start doesn't count this stop toward the cross-restart
-// wedge streak (see bot.once("spawn")).
+// Every bot runs under systemd's Restart=always -- exiting non-zero on ANY disconnect (network
+// blip, keepalive timeout, a kick, the game server restarting) hands recovery to that same
+// machinery, giving a fresh process a real, clean reconnect instead of a stale one pretending to
+// keep working (the alternative, confirmed live and root-caused in 3.x's own history).
 for (const signal of ["SIGTERM", "SIGINT"]) {
-  process.once(signal, () => {
-    const pos = bot.entity?.position;
-    const save = pos
-      ? saveStuckState(PERSONA_NAME, { x: pos.x, y: pos.y, z: pos.z, sameSpotCount: 0, cleanShutdown: true })
-      : Promise.resolve();
-    Promise.race([save, new Promise((r) => setTimeout(r, 2000))]).finally(() => process.exit(0));
-  });
+  process.once(signal, () => process.exit(0));
 }
 
 bot.on("end", (reason) => {

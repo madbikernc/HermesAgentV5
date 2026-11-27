@@ -1,4 +1,11 @@
-// Version: 1.4.0
+// Version: 1.4.1
+//
+// 1.4.1 (2026-11-27, Minecraft bots restart Phase 4): isProtectedBlockName's import moved from
+// ./actions.js to ./action-vocab.js -- actions.js was archived (MINECRAFT_BOTS_RESTART_PLAN.md),
+// but action-vocab.js, the file that actually defines isProtectedBlockName, turned out to be
+// general safety vocabulary (protected block names, hostile mob lists, gear tiers -- no
+// dependency on the archived goal engine), not goal content, and was pulled back out of the
+// archive as kept infra. No behavior change, just the real source instead of a dead re-export.
 //
 // 1.4.0 (2026-11-27, direct instruction: "tear out the teleport fix. it's too disruptive"): the
 // 1.3.0 teleport-nudge (kept as a demoted last resort alongside the new smooth jump assist) is
@@ -41,7 +48,7 @@
 
 import { Vec3 } from "vec3";
 import { SwimMovements, installDoorSupport, installSteppedGoto } from "./swim-movements.js";
-import { isProtectedBlockName } from "./actions.js";
+import { isProtectedBlockName } from "./action-vocab.js";
 import { wouldBlockAccess } from "./shelter.js";
 
 export function setupPathfinding(bot, { username: USERNAME }) {

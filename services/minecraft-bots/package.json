@@ -1,8 +1,8 @@
 {
   "name": "hermes-minecraft-bots",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
-  "description": "Firmament Minecraft bot orchestrator -- mineflayer-based bots with Firmament-routed decisions. See ../../MINECRAFT_BOTS_DESIGN.md.",
+  "description": "Firmament Minecraft bot orchestrator -- mineflayer-based bots with Firmament-routed decisions. See ../../MINECRAFT_BOTS_RESTART_PLAN.md.",
   "type": "module",
   "main": "index.js",
   "scripts": {
