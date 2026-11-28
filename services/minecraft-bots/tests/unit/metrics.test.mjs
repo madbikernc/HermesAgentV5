@@ -1,4 +1,9 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-28): checks for instrumentDig() (metrics.js 1.1.0) -- found live that
+// mineflayer's own diggingCompleted event fires with the post-dig block (air), not the one
+// destroyed, so every mined block was being recorded wrong. instrumentDig() wraps bot.dig()
+// itself instead, using a bare {dig} mock object -- no real mineflayer bot needed for this.
 //
 // 1.1.0 (2026-11-28): dropped the _harness.mjs import -- importing it currently throws at module
 // load (ENOENT on action-search.js/action-movement.js/...), a pre-existing break unrelated to this
@@ -94,4 +99,35 @@ test('Metrics: startMetricsServer serves real Prometheus text on /metrics and 40
 
 test('Metrics: startMetricsServer is a no-op when no port is configured (local dev/tests)', () => {
   assert.equal(metrics.startMetricsServer('Babs_Miner', {}), null);
+});
+
+test('Metrics: instrumentDig records the real pre-dig block name, not mineflayer\'s own post-dig one', async () => {
+  metrics._resetForTest();
+  const bot = { dig: async (block) => { /* real mineflayer would emit diggingCompleted(airBlock) here */ } };
+  metrics.instrumentDig(bot);
+  await bot.dig({ name: 'oak_leaves' });
+  await bot.dig({ name: 'oak_leaves' });
+  await bot.dig({ name: 'grass_block' });
+  const out = metrics.renderMetrics('Babs_Miner');
+  assert.match(out, /mc_bot_blocks_mined_total\{bot="Babs_Miner",block="oak_leaves"\} 2\n/);
+  assert.match(out, /mc_bot_blocks_mined_total\{bot="Babs_Miner",block="grass_block"\} 1\n/);
+  assert.doesNotMatch(out, /block="air"/);
+});
+
+test('Metrics: instrumentDig does not record an aborted/rejected dig', async () => {
+  metrics._resetForTest();
+  const bot = { dig: async () => { throw new Error('Digging aborted'); } };
+  metrics.instrumentDig(bot);
+  await assert.rejects(() => bot.dig({ name: 'stone' }));
+  const out = metrics.renderMetrics('Babs_Miner');
+  assert.doesNotMatch(out, /blocks_mined_total\{bot="Babs_Miner",block="stone"\}/);
+});
+
+test('Metrics: instrumentDig forwards extra arguments to the original bot.dig', async () => {
+  metrics._resetForTest();
+  let seenArgs = null;
+  const bot = { dig: async (block, ...args) => { seenArgs = args; } };
+  metrics.instrumentDig(bot);
+  await bot.dig({ name: 'stone' }, true, 'auto');
+  assert.deepEqual(seenArgs, [true, 'auto']);
 });

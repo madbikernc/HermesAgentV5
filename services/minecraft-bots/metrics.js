@@ -1,4 +1,13 @@
-// Version: 1.0.1
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-28): new instrumentDig() -- moved here from index.js so the wrap itself has a
+// direct unit test. Found live, the first time a bot actually mined anything under the 4.7.0
+// command-issuance fix: mineflayer's own `diggingCompleted` event fires with the block AFTER
+// digging (confirmed from its digging.js source: it emits the post-blockUpdate block, air by
+// definition), not the block destroyed -- every mined block was being recorded as block="air".
+// Wrapping bot.dig() itself instead captures the real name from what the caller passed in, before
+// the call; still the one chokepoint every dig path in skills.js funnels through, including
+// mineflayer-collectblock's own internal bot.dig() call (confirmed in its source).
 //
 // 1.0.1 (2026-11-28): startMetricsServer's "no port configured" check used `!port`, so `port: 0`
 // (a real, valid "let the OS pick one" request -- this file's own unit test uses it) was wrongly
@@ -38,6 +47,19 @@ export function recordBlockPlaced(blockType) {
 
 export function recordBlockMined(blockType) {
   bump(blocksMined, blockType, 1);
+}
+
+// Wraps bot.dig() in place so every dig this bot performs is recorded under the real block name
+// it was called with -- not mineflayer's own post-dig `diggingCompleted` block (see this file's
+// 1.1.0 changelog above for why that's always air). Recording happens only after the dig actually
+// resolves; an aborted/rejected dig throws through the await and is never recorded.
+export function instrumentDig(bot) {
+  const originalDig = bot.dig.bind(bot);
+  bot.dig = async (block, ...args) => {
+    const minedBlockName = block?.name;
+    await originalDig(block, ...args);
+    if (minedBlockName) recordBlockMined(minedBlockName);
+  };
 }
 
 // count is the real inventory delta (see skills.js's craftRecipe), not the number of craft

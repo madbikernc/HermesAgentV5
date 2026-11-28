@@ -1,4 +1,26 @@
-// Version: 4.6.0
+// Version: 4.8.0
+//
+// 4.8.0 (2026-11-28, found while verifying 4.7.0 live): 4.6.0's claim below that "diggingCompleted
+// ... covers every dig path" was wrong in a way that only showed up once a bot actually mined
+// something for the first time -- confirmed from mineflayer's own digging.js source, that event
+// fires with the block AFTER digging (`newBlock` from the blockUpdate it waits on, air by
+// definition), not the block destroyed. Every mined block was being recorded as block="air".
+// Fixed by wrapping bot.dig() itself instead, capturing the real name from what the caller passed
+// in before the call -- still the one chokepoint (collectBlock, breakBlockAt, digDown, and
+// mineflayer-collectblock's own internal bot.dig() call), so skills.js still needed no changes.
+//
+// 4.7.0 (2026-11-28, direct request -- "look into why the bots are not doing anything"): found,
+// across ~116 decision ticks on both running bots over roughly an hour, ZERO ever issued a real
+// !command -- confirmed via the new 4.6.0 metrics staying at zero, then via the journal itself.
+// Root cause, two compounding gaps: (1) $EXAMPLES was always substituted empty -- every persona's
+// own conversation_examples was `[]`, and buildSystemPrompt() never read it anyway, so the model
+// had no demonstrated narration+command pairing to imitate; (2) the decision tick's own prompt was
+// a bare "What will you do next?", which a chat-tuned model answers with prose by default. Fixed:
+// buildSystemPrompt() now renders a persona's own conversation_examples, falling back to
+// minecraft-common.json's new default_conversation_examples (new renderExamples(), exported and
+// unit-tested standalone); minecraft-common.json 1.1.0 adds that fallback plus a narration-vs-
+// command bullet; decisionTick's prompt (now DECISION_TICK_PROMPT) spells out that a command is
+// expected unless genuinely idle. New services/minecraft-bots/tests/unit/examples.test.mjs.
 //
 // 4.6.0 (2026-11-28, direct request): Prometheus action counters, metrics.js's new
 // recordBlockMined/addDistanceTraveled wired up here (recordMobKilled/recordBlockPlaced/
@@ -88,7 +110,7 @@ import { containsCommand, executeCommand, getCommandDocs } from "./commands.js";
 import { MODES, runModes } from "./modes.js";
 import { OWNERS, isBusy } from "./arbiter.js";
 import { findClosest } from "./world-memory.js";
-import { recordBlockMined, addDistanceTraveled, startMetricsServer } from "./metrics.js";
+import { instrumentDig, addDistanceTraveled, startMetricsServer } from "./metrics.js";
 import { Vec3 } from "vec3";
 
 export const { pathfinder } = pathfinderPkg;
@@ -160,14 +182,31 @@ function renderModifiers(modifiers) {
     .join("\n");
 }
 
+// Renders conversation_examples (this persona's own, or minecraft-common.json's
+// default_conversation_examples as a fallback) into the $EXAMPLES block -- the demonstrated
+// narration+command pairing that teaches the model what "take a real action" looks like. Exported
+// for its own unit test (tests/unit/examples.test.mjs); pure, no bot/mineflayer dependency.
+export function renderExamples(examples) {
+  if (!examples || !examples.length) return "";
+  return "EXAMPLES (how to pair narration with a real command; see COMMAND DOCS above for syntax)\n" +
+    examples.map((e) => `Example: ${e.context}\nYou: ${e.reply}`).join("\n\n") + "\n";
+}
+
 // Builds the full system prompt for one callRole() turn by substituting
 // agents/minecraft-common.json's $PLACEHOLDER tokens with this persona's own profile.json content
-// plus live call-specific context (memory/stats/inventory/examples).
-function buildSystemPrompt({ memory = "(none yet)", stats = "", inventory = "", examples = "" } = {}) {
+// plus live call-specific context (memory/stats/inventory). $EXAMPLES is this persona's own
+// conversation_examples, falling back to minecraft-common.json's default_conversation_examples --
+// found live 2026-11-28 that every persona's own array was empty and nothing ever read either one
+// anyway, so the model never saw a single example of narration actually paired with a !command;
+// both bots ran for roughly an hour issuing zero real commands as a result.
+function buildSystemPrompt({ memory = "(none yet)", stats = "", inventory = "" } = {}) {
   const coreDirective = persona.guardrail
     ? `${persona.core_directive}\n\n**Guardrail:** ${persona.guardrail}`
     : persona.core_directive;
   const role = persona.pairing ? `${persona.role} (${persona.pairing})` : persona.role;
+  const examples = persona.conversation_examples?.length
+    ? persona.conversation_examples
+    : personaCommon.default_conversation_examples;
   return personaCommon.conversing_template
     .replaceAll("$NAME", persona.name)
     .replace("$ROLE", role)
@@ -179,7 +218,7 @@ function buildSystemPrompt({ memory = "(none yet)", stats = "", inventory = "", 
     .replace("$STATS", stats)
     .replace("$INVENTORY", inventory)
     .replace("$COMMAND_DOCS", getCommandDocs())
-    .replace("$EXAMPLES", examples);
+    .replace("$EXAMPLES", renderExamples(examples));
 }
 
 // This persona's modes.js overrides, layered over agents/minecraft-common.json's defaults, layered
@@ -203,8 +242,6 @@ bot.loadPlugin(pvpPkg.plugin);
 
 // Prometheus action counters (metrics.js) -- see this file's own 4.6.0 changelog entry above.
 startMetricsServer(USERNAME, { port: process.env.MC_BOT_METRICS_PORT ? parseInt(process.env.MC_BOT_METRICS_PORT, 10) : null });
-
-bot.on("diggingCompleted", (block) => recordBlockMined(block.name));
 
 const TELEPORT_JUMP_BLOCKS = 10; // no normal single physics tick covers this; see changelog
 let lastMetricsPos = null;
@@ -240,6 +277,12 @@ bot.output = "";
 
 bot.once("spawn", async () => {
   console.log(`[${USERNAME}] spawned at`, bot.entity.position);
+  // Blocks mined: metrics.js's instrumentDig() wraps bot.dig() itself (see its own 1.1.0
+  // changelog for why mineflayer's own diggingCompleted event can't be used here). Crash-found
+  // live 2026-11-28: bot.dig doesn't exist right after createBot()/loadPlugin() -- mineflayer
+  // defers its internal plugins' injection (plugin_loader.js) until its own 'inject_allowed'
+  // event, well after this file's module-load-time code runs. 'spawn' guarantees it exists.
+  instrumentDig(bot);
   // MC_HOME_POS="x,y,z" (test bots only): "home" is normally the world spawn; a test bot's home is
   // pinned to its arena so go-home behavior never walks it to the base.
   if (process.env.MC_HOME_POS) {
@@ -351,6 +394,16 @@ function describeInventory() {
   return `INVENTORY\n${items.map((i) => `${i.name} x${i.count}`).join(", ")}`;
 }
 
+// Found live 2026-11-28: a bare "What will you do next?" got answered with pure narration every
+// single time across ~116 ticks on both running bots -- zero real !commands issued in roughly an
+// hour. Spelling out the expectation directly here, on top of the system prompt's own new
+// narration-vs-command bullet and EXAMPLES block (belt and suspenders, not redundant -- this is
+// the one turn actually asking for an autonomous next step, as opposed to a reply to something a
+// player said).
+const DECISION_TICK_PROMPT = "What will you do next? If there's anything useful to do, say a " +
+  "brief line then issue exactly one !command(args) for it right now -- a plan you only describe " +
+  "never happens. Skip the command only if you are genuinely idle with nothing worth doing.";
+
 async function decisionTick() {
   if (isBusy()) return; // something (a player command, an emergency mode) is already in control
   let reply;
@@ -358,7 +411,7 @@ async function decisionTick() {
     const prompt = buildSystemPrompt({ stats: describeStats(), inventory: describeInventory() });
     const messages = [{ role: "system", content: prompt },
       ...conversationHistory.map(({ role, content }) => ({ role, content })),
-      { role: "user", content: "What will you do next?" }];
+      { role: "user", content: DECISION_TICK_PROMPT }];
     // analysis:true only when nothing in the current history window came from an unverified
     // player -- the same "never a bare literal" rule the chat-reply call sites already follow.
     const allTrusted = conversationHistory.every((h) => h.trusted);
