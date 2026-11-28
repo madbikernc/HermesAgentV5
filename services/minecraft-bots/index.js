@@ -1,4 +1,12 @@
-// Version: 4.0.0
+// Version: 4.1.0
+//
+// 4.1.0 (2026-11-27, live verification against Babs/Amy): decision tick and chat/whisper replies
+// now push the real command result (success text or parse/control-acquisition error) back into
+// conversationHistory as the next turn's own context -- without this, a failed command (e.g. the
+// model trying named-arg syntax commands.js's positional-only parser rejects) was only ever
+// logged, never visible to the model again, so there was no way for it to notice and self-correct.
+// Also dropped a dead-code ternary in handleChatMessage (both branches picked the same
+// OWNERS.DIRECT_COMMAND tier).
 //
 // 4.0.0 (2026-11-27, MINECRAFT_BOTS_RESTART_PLAN.md Phase 5): the bot entrypoint, rewritten to
 // call the Mindcraft-ported skill/command/mode layer (skills.js, world.js, mcdata.js, commands.js,
@@ -293,6 +301,7 @@ async function decisionTick() {
     console.error(`[${USERNAME}] decision tick callRole failed:`, err.message);
     return;
   }
+  console.log(`[${USERNAME}] decision tick raw reply: ${JSON.stringify(reply).slice(0, 300)}`);
   if (!reply || !reply.trim()) return;
   const spoken = reply.replace(/!\w+(?:\([^)]*\))?/g, "").trim();
   if (spoken) bot.chat(spoken.slice(0, MAX_CHAT_LEN));
@@ -301,6 +310,10 @@ async function decisionTick() {
     bot.output = "";
     const result = await executeCommand(bot, reply, { tier: OWNERS.GOAL_STEP });
     console.log(`[${USERNAME}] goal-step command result: ${result}`);
+    // Feed the real outcome back as the next tick's context -- without this, a failed command
+    // (wrong arg syntax, bad arg count, "could not get control") is only ever logged, never seen
+    // by the model again, so it has no way to notice and correct its own mistake.
+    pushHistory("user", `Command result: ${result}`);
   }
 }
 
@@ -323,15 +336,19 @@ async function handleChatMessage(speaker, message, { send }) {
     console.error(`[${USERNAME}] chat reply callRole failed:`, err.message);
     return;
   }
+  console.log(`[${USERNAME}] chat reply raw: ${JSON.stringify(reply).slice(0, 300)}`);
   if (!reply || !reply.trim()) return;
   const spoken = reply.replace(/!\w+(?:\([^)]*\))?/g, "").trim();
   if (spoken) send(spoken.slice(0, MAX_CHAT_LEN));
   pushHistory("assistant", reply);
   if (containsCommand(reply)) {
     bot.output = "";
-    const tier = (speaker === MAYOR_USERNAME || isBoss(speaker)) ? OWNERS.DIRECT_COMMAND : OWNERS.DIRECT_COMMAND;
-    const result = await executeCommand(bot, reply, { tier });
+    // Every chat/whisper-issued command is DIRECT_COMMAND-tier -- a live speaker asked for this
+    // by name, whether or not they're the Mayor/Boss (no second tier exists above it for that
+    // distinction; see arbiter.js's own OWNERS comment).
+    const result = await executeCommand(bot, reply, { tier: OWNERS.DIRECT_COMMAND });
     console.log(`[${USERNAME}] chat-issued command result: ${result}`);
+    pushHistory("user", `Command result: ${result}`);
   }
 }
 

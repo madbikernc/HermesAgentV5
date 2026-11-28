@@ -1,6 +1,6 @@
 # index.js change history
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 
 The change history of `services/minecraft-bots/index.js`, newest first. Until 2026-11-13 it was the
 comment block at the top of `index.js` itself (149k characters, more than the self-repair pipeline's
@@ -9,6 +9,19 @@ into subject modules (`index.js` 3.0.0, direct operator request). `index.js` kee
 line; each new version's entry goes at the top of the list below.
 
 ## Versions
+
+### 4.1.0 (2026-11-27)
+
+Live verification against Babs/Amy on dgx-spark (first real deploy of 4.0.0) found a real gap:
+the model (muse, NVIDIA-Nemotron-3-Nano-Omni) tried `!placeHere(type="crafting_table")` --
+named-arg syntax `commands.js`'s positional-only parser rejects -- and the resulting error
+("Command !placeHere was given 0 args, but requires 1 args") was only ever logged, never fed back
+to the model, so it had no way to notice and self-correct. Both `decisionTick` and
+`handleChatMessage` now push the command's real result (success text or error) into
+`conversationHistory` as the next turn's own context. Also dropped a dead-code ternary in
+`handleChatMessage` (both branches picked the same `OWNERS.DIRECT_COMMAND` tier). Everything else
+confirmed working live: profile loading, Matrix connection, `callRole("muse", ...)`, in-character
+replies matching each persona's own sample lines, command parsing/dispatch.
 
 ### 4.0.0 (2026-11-27)
 
@@ -1872,3 +1885,4 @@ efficiency principle (§5): don't spend a model call faster than the previous on
 | 1.1.0 | 2026-11-26 | Added index.js's 3.1.0 entry (bot rename to Name_Role display usernames, personaOf() mapping). |
 | 1.2.0 | 2026-11-27 | Added index.js's 3.2.0 entry (MC_DEBUG_PHYSICS diagnostic). |
 | 1.3.0 | 2026-11-27 | Added index.js's 4.0.0 entry: full rewrite onto the Mindcraft-ported skill/command/mode layer, MINECRAFT_BOTS_RESTART_PLAN.md Phase 5. |
+| 1.4.0 | 2026-11-27 | Added index.js's 4.1.0 entry: command-result feedback loop fix, found during live verification. |
