@@ -1,4 +1,7 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-28): diagnosability follow-up -- a check that the death handler (index.js 4.5.0)
+// logs position and last-damage context instead of a bare "died".
 //
 // 1.1.0 (2026-11-27): diagnosability audit -- a source-position check that a fired mode
 // (index.js's runModes() call site) is now logged to the console/journal, not just left as a
@@ -110,4 +113,17 @@ test("[legacy:services] diagnosability fix: a mode firing is logged, not just it
   assert(runModesAt >= 0, "expected to find the runModes(bot) call site");
   const nearby = indexSrc.slice(runModesAt, runModesAt + 300);
   assert.match(nearby, /mode fired/, "expected the runModes() result to be logged when a mode acts");
+});
+
+test("[legacy:services] diagnosability fix: the death handler logs position and last damage, not just \"died\"", () => {
+  // Direct finding, 2026-11-28: bot.on("death", () => console.log(`[${USERNAME}] died`)) carried
+  // zero context -- not even position. lastDamageTaken/lastDamageTime are mineflayer's own fields
+  // (modes.js's self_preservation check already reads them); they don't name an attacker, but the
+  // amount and recency usually tell a fall/lava/mob hit apart from drowning.
+  const deathAt = indexSrc.indexOf('bot.on("death"');
+  assert(deathAt >= 0, "expected to find the death handler");
+  const body = indexSrc.slice(deathAt, indexSrc.indexOf("});", deathAt) + 3);
+  assert.match(body, /lastDamageTaken/, "expected the death handler to read bot.lastDamageTaken");
+  assert.match(body, /lastDamageTime/, "expected the death handler to read bot.lastDamageTime");
+  assert.match(body, /entity\?\.position|entity\.position/, "expected the death handler to log position");
 });

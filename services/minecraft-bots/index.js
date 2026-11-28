@@ -1,4 +1,9 @@
-// Version: 4.4.0
+// Version: 4.5.0
+//
+// 4.5.0 (2026-11-28, diagnosability follow-up): the death handler logged just "died" -- no
+// position, no sense of what killed it. Now logs position plus bot.lastDamageTaken/lastDamageTime
+// (mineflayer's own fields, already read by modes.js's self_preservation check) -- doesn't name an
+// attacker, but the amount and recency usually tell a fall/lava/mob hit apart from drowning.
 //
 // 4.4.0 (2026-11-27, diagnosability audit): three fixes, none of them visible in Minecraft chat --
 // a fired reactive mode (runModes()) is now logged to the console/journal (previously only visible
@@ -442,7 +447,15 @@ if (MATRIX_ACCESS_TOKEN) {
 let hasSpawnedOnce = false;
 
 bot.on("death", () => {
-  console.log(`[${USERNAME}] died`);
+  // Direct finding, 2026-11-28 (diagnosability follow-up): "died" alone carried no context --
+  // not even the one thing an operator reading the journal would want first, what actually
+  // killed it. bot.lastDamageTaken/lastDamageTime are mineflayer's own fields (modes.js's
+  // self_preservation check already reads them); logged here even though they don't name an
+  // attacker -- the amount and how recently it landed is usually enough to tell a fall/lava/mob
+  // hit apart from, say, drowning (lastDamageTaken near 0, health just ran out).
+  const pos = bot.entity?.position;
+  console.log(`[${USERNAME}] died at ${pos ? `${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)}` : "unknown position"} -- ` +
+    `last damage ${bot.lastDamageTaken ?? "?"} taken ${bot.lastDamageTime ? Date.now() - bot.lastDamageTime : "?"}ms before death`);
 });
 
 bot.on("spawn", () => {

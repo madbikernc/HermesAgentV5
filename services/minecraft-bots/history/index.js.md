@@ -1,6 +1,6 @@
 # index.js change history
 
-**Version:** 1.6.0
+**Version:** 1.7.0
 
 The change history of `services/minecraft-bots/index.js`, newest first. Until 2026-11-13 it was the
 comment block at the top of `index.js` itself (149k characters, more than the self-repair pipeline's
@@ -9,6 +9,16 @@ into subject modules (`index.js` 3.0.0, direct operator request). `index.js` kee
 line; each new version's entry goes at the top of the list below.
 
 ## Versions
+
+### 4.5.0 (2026-11-28)
+
+Diagnosability follow-up (direct request: "look for mods to enable, other telemetry that will
+help diagnose bot misbehaving"). The death handler logged a bare `"died"` with no context at all
+-- not even position. Now logs `bot.entity.position` plus `bot.lastDamageTaken`/`lastDamageTime`
+(mineflayer's own fields; `modes.js`'s `self_preservation` check already reads them). These don't
+name an attacker -- mineflayer doesn't track damage source on these simple fields -- but the
+amount and how recently it landed before death is usually enough to tell a fall, lava, or a mob
+hit apart from drowning (`lastDamageTaken` near 0, health just ran out from suffocation).
 
 ### 4.4.0 (2026-11-27)
 
