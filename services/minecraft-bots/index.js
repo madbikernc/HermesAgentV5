@@ -1,4 +1,13 @@
-// Version: 4.1.0
+// Version: 4.2.0
+//
+// 4.2.0 (2026-11-27, security finding during the legacy-baseline test port): decisionTick()'s
+// callRole() carried a bare `analysis: true` even though its messages include conversationHistory,
+// which can hold a raw, untrusted player/whisper/Matrix line pushed by handleChatMessage -- the
+// exact "a player can type anything reaches an unscreened call" hole the S34 fix (see
+// tests/unit/services.test.mjs's history) closed for the old architecture's call sites, reopened
+// here on a new one. pushHistory() now tags each entry `trusted` (false only for handleChatMessage's
+// raw speaker line when !isAnotherBot(speaker)); decisionTick's analysis flag is now
+// `conversationHistory.every((h) => h.trusted)`, never a literal.
 //
 // 4.1.0 (2026-11-27, live verification against Babs/Amy): decision tick and chat/whisper replies
 // now push the real command result (success text or parse/control-acquisition error) back into
@@ -268,8 +277,13 @@ const MODES_TICK_MS = parseInt(process.env.MC_MODES_TICK_MS || "1000", 10);
 export const HISTORY_TURNS = 8;
 
 let conversationHistory = [];
-function pushHistory(role, content) {
-  conversationHistory.push({ role, content });
+// trusted: false for a raw line from an unverified player (handleChatMessage tags it); true
+// (default) for the bot's own output and command-result text. decisionTick's analysis:true -- the
+// S34 exemption that skips full injection screening -- must never cover a call whose history
+// carries even one untrusted entry, or a player's chat text reaches the model unscreened by riding
+// along in history instead of through the (correctly screened) chat-reply call itself.
+function pushHistory(role, content, { trusted = true } = {}) {
+  conversationHistory.push({ role, content, trusted });
   if (conversationHistory.length > HISTORY_TURNS * 2) {
     conversationHistory = conversationHistory.slice(-HISTORY_TURNS * 2);
   }
@@ -294,9 +308,13 @@ async function decisionTick() {
   let reply;
   try {
     const prompt = buildSystemPrompt({ stats: describeStats(), inventory: describeInventory() });
-    const messages = [{ role: "system", content: prompt }, ...conversationHistory,
+    const messages = [{ role: "system", content: prompt },
+      ...conversationHistory.map(({ role, content }) => ({ role, content })),
       { role: "user", content: "What will you do next?" }];
-    reply = await callRole("muse", messages, { analysis: true, maxTokens: 300 });
+    // analysis:true only when nothing in the current history window came from an unverified
+    // player -- the same "never a bare literal" rule the chat-reply call sites already follow.
+    const allTrusted = conversationHistory.every((h) => h.trusted);
+    reply = await callRole("muse", messages, { analysis: allTrusted, maxTokens: 300 });
   } catch (err) {
     console.error(`[${USERNAME}] decision tick callRole failed:`, err.message);
     return;
@@ -326,11 +344,12 @@ guardedInterval(() => {
 async function handleChatMessage(speaker, message, { send }) {
   if (speaker === USERNAME) return;
   if (isAnotherBot(speaker) && !isMayor(speaker)) return; // see isAnotherBot's own comment
-  pushHistory("user", `${speaker}: ${message}`);
+  pushHistory("user", `${speaker}: ${message}`, { trusted: isAnotherBot(speaker) });
   let reply;
   try {
     const prompt = buildSystemPrompt({ stats: describeStats(), inventory: describeInventory() });
-    const messages = [{ role: "system", content: prompt }, ...conversationHistory];
+    const messages = [{ role: "system", content: prompt },
+      ...conversationHistory.map(({ role, content }) => ({ role, content }))];
     reply = await callRole("muse", messages, { maxTokens: 300 });
   } catch (err) {
     console.error(`[${USERNAME}] chat reply callRole failed:`, err.message);

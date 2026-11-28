@@ -1,6 +1,6 @@
 # Minecraft bot tests
 
-**Version:** 1.7.0
+**Version:** 1.8.0
 
 Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.json`).
 
@@ -11,6 +11,7 @@ Layers, one runner (`tests/run.sh`, or the `npm run test*` scripts in `package.j
 | `livebot` — `live-bot.test.mjs` | A whole bot process (`index.js` as `MBProbe`) driven by whispers, restarts and injected coordination messages: STOP, goal identity, resume, night pause, storing during a goal, Mayor curriculum persistence | Spark nodes |
 | `multibot` — `multibot.test.mjs` | Real Buzz item handoff and a server-verified two- and six-bot planner comparison | Opt-in, starts disposable Java worlds on the test host |
 | `baseline` — `baseline.mjs` + `monitoring.mjs` | What the deployed fleet on this host actually did over the last 24h vs the committed baseline; every bot unit mirrored into the activity log and visible to triage | Each Spark node, over its own `minecraft-bot-*` journals |
+| `legacy-baseline` — `legacy-baseline/*.test.mjs` | A scorecard, not a pass/fail gate: the archived "best past implementation" (`services/minecraft-bots-archive-11-2026/`, via its own old `tests/unit/*.test.mjs`)'s 254 behavioral checks, ported one-for-one onto the real current Mindcraft-based modules -- a real `node:test` where a current equivalent exists, `test.todo(name)` naming the specific archived mechanism where none does. As the current code gains capability the pass count should rise toward (or past) the old score; it is never folded into `all`'s exit status, since its own known-and-accepted failures would otherwise mask a real regression elsewhere | `node_modules` (dgx-spark/spark2) |
 
 The unit checks live in per-area files under `unit/` (`chests-1.test.mjs`, `pathfinding.test.mjs`,
 ...), each kept under 40000 characters so the self-repair pipeline, which rewrites a whole file,
@@ -40,6 +41,7 @@ tests/run.sh live [filter]   # e.g. tests/run.sh live combat
 tests/run.sh livebot [filter]
 tests/run.sh multibot [all|handoff|planner]
 tests/run.sh baseline        # add --hours 6, --update, --save <file>
+tests/run.sh legacy-baseline # scorecard against the archived implementation; not in `all`
 tests/run.sh all             # everything this host can run
 ```
 
@@ -102,6 +104,19 @@ The daily `minecraft-bots-tests-fast.timer` on spark (`minecraft-bots-tests-base
 spark2) runs the suites as a chain of per-phase units with their own timeouts (see
 `infra/minecraft-bots-tests/`) and keeps reports in `/mnt/hermes-data/minecraft-memory/test-reports/`.
 
+## Legacy baseline
+
+`legacy-baseline/*.test.mjs` (2026-11-27) measures the Mindcraft-ported code against
+`services/minecraft-bots-archive-11-2026/`'s old hand-built goal/priority/action engine -- the
+"best past implementation" -- via that engine's own old `tests/unit/*.test.mjs` checks (254 of
+them), ported one-for-one. Each becomes either a real test (a current module does the equivalent
+thing) or `test.todo(name)` naming the specific archived mechanism with no current equivalent --
+never a silent drop. Run `tests/run.sh legacy-baseline` (or `node --test tests/legacy-baseline/
+*.test.mjs` directly) for the current score; it is not part of `all` and never changes `run.sh`'s
+own exit status, since its own known, accepted failures are the point, not a regression to chase
+away. A rising pass count over time is the measure of the new architecture catching up to (or
+past) the old one; the shared mock-bot primitives live in `legacy-baseline/_mockbot.mjs`.
+
 ## Rule: every behavior fix adds a test
 
 When a change fixes or adds bot behavior:
@@ -127,3 +142,4 @@ When a change fixes or adds bot behavior:
 | 1.5.0 | 2026-11-10 | Unit checks split into per-area files under `unit/`, each under 40000 characters, with shared stubs in `unit/_harness.mjs`; `unit.test.mjs` only runs them. |
 | 1.6.0 | 2026-11-10 | The harness's view of the split modules (`index`, `indexOnly`, `actionFn`, `actionCases`), and the link check. |
 | 1.7.0 | 2026-11-11 | Add the isolated multiplayer suite and the second-shelter goal regression. |
+| 1.8.0 | 2026-11-27 | Add `legacy-baseline` -- the archived implementation's 254 behavioral checks ported onto the real current Mindcraft-based modules as a progress scorecard, not a pass/fail gate; never folded into `all`. |

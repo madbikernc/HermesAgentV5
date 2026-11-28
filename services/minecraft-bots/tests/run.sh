@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.5.0
+# Version: 1.6.0
+# 1.6.0 (2026-11-27): legacy-baseline suite (tests/legacy-baseline/*.test.mjs) -- the archived
+# "best past implementation"'s 254 behavioral checks, ported onto the real current Mindcraft-based
+# code, real tests where a current equivalent exists, test.todo where the old mechanism was
+# deliberately removed. A scorecard to track progress against, not a pass/fail gate: run
+# standalone, never folded into `all`'s exit status, since its own known-and-accepted failures
+# would otherwise mask real regressions elsewhere in `all`.
+#
 # 1.5.0 (2026-11-11): disposable-world multibot suite in all and as a standalone phase.
 #
 # 1.4.0 (2026-11-10): unit and all also run tests/link-check.mjs where node_modules exists -- every
@@ -12,6 +19,8 @@
 #   tests/run.sh multibot    isolated handoff and planner trials (requires MB_MULTI_SERVER_JAR)
 #   tests/run.sh baseline    this host's last-24h behavior vs tests/baselines/<host>.json, plus
 #                            monitoring coverage (every bot unit mirrored and triaged)
+#   tests/run.sh legacy-baseline  archived-code-vs-current-code scorecard (not a pass/fail gate;
+#                            needs node_modules; never folded into `all`)
 #   tests/run.sh all         unit, then live + livebot (if the server is reachable), then baseline
 # Extra arguments after the suite name are passed to it (e.g. `run.sh live combat`).
 #
@@ -59,6 +68,14 @@ case "$suite" in
   livebot)  if server_up; then run livebot node tests/live-bot.test.mjs "$@"; else echo "=== livebot: skipped (no node_modules or bot server unreachable from $host)"; fi ;;
   multibot) run multibot node tests/multibot.test.mjs "$@" ;;
   baseline) run baseline node tests/baseline.mjs "$@"; run monitoring node tests/monitoring.mjs ;;
+  legacy-baseline)
+    if [ -d node_modules ]; then
+      echo "=== legacy-baseline ($(date -Is), $host) -- scorecard, not a pass/fail gate"
+      node --test tests/legacy-baseline/*.test.mjs "$@"
+    else
+      echo "=== legacy-baseline: skipped (no node_modules)"
+    fi
+    ;;
   all)
     run unit node tests/unit.test.mjs
     linkcheck
@@ -78,6 +95,6 @@ case "$suite" in
       echo "=== baseline: skipped (no journal or no tests/baselines/$host.json)"
     fi
     ;;
-  *) echo "usage: $0 {unit|live|livebot|multibot|baseline|all} [args]"; exit 2 ;;
+  *) echo "usage: $0 {unit|live|livebot|multibot|baseline|legacy-baseline|all} [args]"; exit 2 ;;
 esac
 exit $status

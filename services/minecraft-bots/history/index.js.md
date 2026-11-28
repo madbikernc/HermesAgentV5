@@ -10,6 +10,24 @@ line; each new version's entry goes at the top of the list below.
 
 ## Versions
 
+### 4.2.0 (2026-11-27)
+
+Security finding from the legacy-baseline test-porting work (direct request to fix immediately,
+independent of that suite): `decisionTick()`'s `callRole("muse", messages, { analysis: true, ... })`
+skips full Layer-2 injection screening unconditionally, but `messages` includes
+`conversationHistory`, which `handleChatMessage` can have filled with a raw, untrusted player/
+whisper/Matrix line (`${speaker}: ${message}`, pushed before any screening happens on that path).
+A player's chat text could therefore reach the model unscreened by riding along in history on the
+next decision tick, even though `handleChatMessage`'s own `callRole` call is correctly unflagged
+(always screened) -- exactly the class of hole the archived architecture's S34 fix closed for its
+own call sites (see `tests/unit/services.test.mjs`'s "S27f analysis mode..." check), reopened here
+on a call site that didn't exist in the old code. Fix: `pushHistory()` now tags every entry
+`trusted` (`true` by default -- the bot's own output and command-result text; `false` only for
+`handleChatMessage`'s raw speaker line when `!isAnotherBot(speaker)`); `decisionTick`'s `analysis`
+flag is now `conversationHistory.every((h) => h.trusted)`, computed fresh each call, never a bare
+literal. `handleChatMessage`'s own messages are built the same way (stripping `trusted` before
+sending) but its `callRole` call keeps no `analysis` flag at all, unchanged.
+
 ### 4.1.0 (2026-11-27)
 
 Live verification against Babs/Amy on dgx-spark (first real deploy of 4.0.0) found a real gap:
