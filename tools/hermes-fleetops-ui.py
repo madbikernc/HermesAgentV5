@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 2.28.0
+# Version: 2.29.0
+#
+# 2.29.0 (2026-11-28) — links to the new Firmament observability stack
+# (FIRMAMENT_OBSERVABILITY_PLAN.md), Prometheus/Grafana/Alertmanager on HomeD13: a new "Observability
+# (Grafana)" home card, plus a one-line pointer on /status ("live, minute-by-minute... between
+# runs") and /minecraft ("the server's own live TPS, tick duration... not this snapshot") to the
+# same Grafana instance. Same house rule as RAG_PORTAL_URL -- linked plainly, its own auth realm,
+# never iframed or proxied -- and the same reason: embedding buys nothing but a mixed-content/
+# X-Frame-Options problem for zero benefit. New GRAFANA_URL env var, default the tailnet address
+# (100.69.3.100:3000), since that's how this page itself is reached. No new read path, no sandbox
+# or unit change -- these are plain links, not a fetch.
 #
 # 2.28.0 (2026-11-24) — direct operator request, found live right after 2.27.0 shipped: once a
 # fetch actually lands, mc_history_section() now renders the fetched table inside a nested
@@ -488,6 +498,11 @@ MEMORY_DB = os.environ.get("MEMORY_DB", "/mnt/hermes-data/memory/memory.db")
 RAG_DB = os.environ.get("HERMES_RAG_DB", "/mnt/hermes-data/rag/vectors.db")
 USAGE_DB = os.environ.get("HERMES_USAGE_DB", str(Path.home() / ".hermes" / "state" / "usage.db"))
 RAG_PORTAL_URL = os.environ.get("RAG_PORTAL_URL", "http://100.96.59.79:8093/")
+# Prometheus/Grafana/Alertmanager (FIRMAMENT_OBSERVABILITY_PLAN.md), HomeD13, its own auth realm --
+# linked plainly like RAG_PORTAL_URL above, never iframed or proxied, for the same reason: embedding
+# buys nothing but a mixed-content/X-Frame-Options problem for zero benefit. Tailnet address, since
+# that's how this page itself is reached.
+GRAFANA_URL = os.environ.get("GRAFANA_URL", "http://100.69.3.100:3000/")
 MARKET_DB = os.environ.get("MARKET_DB", "/mnt/hermes-data/market/market.db")
 FLEET_HEALTH_PATH = os.environ.get(
     "FLEET_HEALTH_PATH", str(Path.home() / ".hermes" / "state" / "fleet-health" / "last-report.json"))
@@ -1035,6 +1050,11 @@ def page_home():
          "Which bots are running on spark and spark-2, what each one's current goal is, and its "
          "last 20 actions with success or failure, from a snapshot refreshed every minute. "
          "Read-only."),
+        ("Observability (Grafana)", GRAFANA_URL,
+         "Live Prometheus-backed dashboards on HomeD13 — fleet host CPU/mem/disk, hermes-router "
+         "request rates and latency per role, and Minecraft server TPS/tick time/players/entities. "
+         "A separate service with its own auth realm, linked plainly rather than iframed or "
+         "proxied, same as the RAG approval UI above. Live, not a daily snapshot."),
     ]
     body = ['<p class="note">Read-only views over data this fleet already produces. '
             'Nothing here starts, stops or approves anything.</p><div class="cards">']
@@ -3205,7 +3225,8 @@ def page_system_status(query):
         "injection-guard, and inter-node-comms status (S45) — read straight from "
         "<span class=\"mono\">hermes-fleet-health.py</span>'s own daily JSON snapshot, the same "
         "data its email already carries. This page is never fresher than that snapshot's last "
-        "run. Read-only.",
+        "run. Read-only. For live, minute-by-minute host CPU/memory/disk and hermes-router "
+        f"request rate/latency between runs, see <a href=\"{esc(GRAFANA_URL)}\">Grafana</a>.",
         render_system_status)
     return shell("System status and health", body)
 
@@ -3536,7 +3557,9 @@ def page_minecraft(query):
         f"not immediately. Each bot's history section also has a \"Show last {MC_HISTORY_LIMIT}\" "
         "button (2.27.0), fetched the same asynchronous way by "
         "<span class=\"mono\">hermes-minecraft-bots-history.py</span> — more than the snapshot "
-        "itself keeps, so it is never instant either.",
+        "itself keeps, so it is never instant either. For the server's own live TPS, tick "
+        f"duration, player count and entity count, see <a href=\"{esc(GRAFANA_URL)}\">Grafana</a> "
+        "— TickScope's own metrics, not this snapshot.",
         render_minecraft)
     return shell("Minecraft bots", body)
 

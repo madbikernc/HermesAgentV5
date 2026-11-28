@@ -37,11 +37,15 @@ scrape_configs:
       - targets: ["10.129.1.17:9101"]
         labels: { host: "dgx-spark2" }
 
-  # Minecraft bot-sandbox server (192.168.1.221), TickScope plugin. That box has no firewall
-  # capability at all (no sudo, no ufw/iptables/firewalld -- confirmed live, a different
-  # administrative domain from the three Hermes fleet hosts) -- its /metrics is reachable from
-  # the whole 192.168.1.0/24 subnet with no network-level restriction, so TickScope's own
-  # bearer-token auth is the only control available. The token lives in
+  # Minecraft bot-sandbox server (192.168.1.221), TickScope plugin -- a different administrative
+  # domain from the three Hermes fleet hosts. Earlier draft of this comment claimed the box had
+  # "no firewall capability at all"; that was wrong, found live 2026-11-28 while debugging this
+  # exact scrape target: it runs ufw, default-deny-incoming, and simply had no rule for 9101
+  # (a silent drop, not a refusal -- the actual cause of the "unreachable" symptom, not pfSense).
+  # Fixed with a scoped `ufw allow` for 192.168.1.215 (the fleet-LAN source gets NAT-hairpinned to
+  # that address on this path -- see FIRMAMENT_OBSERVABILITY_PLAN.md 1.3.0 / Phase 4). TickScope's
+  # own bearer-token auth stays the control that actually matters for anything already inside
+  # 192.168.1.0/24, which ufw does not scope by design. The token lives in
   # /opt/prometheus-secrets/tickscope-token on HomeD13 (NOT in this repo -- see README.md's own
   # note on why), referenced here rather than inlined.
   # TickScope's own metrics already carry a server="paper" label (its config.yml's own

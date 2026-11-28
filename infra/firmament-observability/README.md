@@ -1,6 +1,6 @@
 # Firmament observability (Prometheus + Grafana + Alertmanager) — recreate checklist
 
-**Version:** 1.0.0
+**Version:** 1.1.0
 
 Ordered steps to stand up the fleet's Prometheus/Grafana/Alertmanager stack. See
 `FIRMAMENT_OBSERVABILITY_PLAN.md` in the repo root for the full narrative — why HomeD13, what's
@@ -120,6 +120,24 @@ Deployed on `192.168.1.221` (the bot-sandbox Minecraft server, reached via
 installs this session). See the plan doc for its confirmed-compatible version and exact metrics
 endpoint.
 
+**The box runs its own `ufw`, separate from the three Hermes fleet hosts — add a rule for 9101
+there too**, or Prometheus's scrape will time out with no answer (a silent drop, not a refusal).
+Found live 2026-11-28 debugging exactly that symptom: an earlier draft of this checklist assumed
+the box had no firewall capability at all, which was wrong. The rule must target the **NAT-
+hairpinned source address**, not HomeD13's real fleet-LAN IP — pfSense rewrites the fleet-LAN
+source to `192.168.1.215` crossing into `192.168.1.0/24` on this path, the same address the box's
+own pre-existing `22/tcp`/`25580/tcp` rules already use:
+
+```bash
+# on 192.168.1.221 itself
+sudo ufw allow from 192.168.1.215 to any port 9101 proto tcp comment 'FIRMAMENT_OBSERVABILITY: HomeD13 Prometheus -> TickScope (fleet NAT hairpin)'
+```
+
+Also needs a pfSense rule passing TCP 9101 across the `10.129.1.0/24` ↔ `192.168.1.0/24` boundary
+(an operator-only step, no CLI/API access available to automate it) — see
+`FIRMAMENT_OBSERVABILITY_PLAN.md`'s Phase 4 notes for how that was confirmed and what the pfSense
+side looked like once this ufw rule was also in place.
+
 ## 6. `hermes-router.py` metrics
 
 `hermes-router.py` 2.23.0 added a **second**, metrics-only HTTP listener
@@ -137,3 +155,4 @@ sudo ufw allow from 10.129.1.16 to any port 9101 proto tcp comment 'FIRMAMENT_OB
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-11-28 | Initial recreate checklist, written while standing up the stack for the first time. |
+| 1.1.0 | 2026-11-28 | §5 extended with the real TickScope `ufw` rule, found live while resolving Phase 4's blocked scrape: the box runs its own `ufw` (an earlier draft here assumed no firewall capability at all — wrong), and the rule must target the NAT-hairpinned source `192.168.1.215` pfSense uses on this path, not HomeD13's real IP. |
