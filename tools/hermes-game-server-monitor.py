@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-# Version: 1.6.0
+# Version: 1.6.1
+#
+# 1.6.1 — direct operator request: the human server was cut over from vanilla (minecraft.service,
+# :25565) to NeoForge 1.21.1 (minecraft-neoforge.service, same :25565/:25575) with Farmer's
+# Delight/Immersive Engineering/Jade installed -- the old unit is deliberately stopped and
+# disabled now. check_minecraft()'s service-active and MainPID checks were still hardcoded to
+# minecraft.service, which would have reported the (correctly retired) old unit as down/critical
+# forever. Repointed both to minecraft-neoforge.service. Disk and backup checks still read
+# /opt/minecraft (same filesystem, so disk % is unaffected; backups are a known, unaddressed gap
+# -- see MINECRAFT_NEOFORGE_EVALUATION.md's status table).
 #
 # 1.6.0 — added check_minecraft_bots(): the dedicated offline-mode instance the Firmament's
 # Minecraft bots play on (MINECRAFT_BOTS_DESIGN.md), separate from the human-facing server this
@@ -285,7 +294,7 @@ def run(client, cmd, timeout=EXEC_TIMEOUT):
 def check_minecraft(client):
     checks = []
 
-    active, _ = run(client, "systemctl is-active minecraft.service minecraft-monitor.service "
+    active, _ = run(client, "systemctl is-active minecraft-neoforge.service minecraft-monitor.service "
                              "minecraft-backup.service")
     states = active.splitlines()
     mc_state = states[0] if len(states) > 0 else "unknown"
@@ -299,7 +308,7 @@ def check_minecraft(client):
     # processes' lines concatenated, corrupting this check's own output ("up
     # 28-00:41:18\n1663672 20.5  01:25:23"). Reads minecraft.service's own MainPID instead,
     # same fix check_minecraft_bots() uses for exactly the same reason.
-    pid_out, _ = run(client, "systemctl show -p MainPID --value minecraft.service")
+    pid_out, _ = run(client, "systemctl show -p MainPID --value minecraft-neoforge.service")
     ps_out = ""
     if pid_out and pid_out != "0":
         ps_out, _ = run(client, f"ps -o rss,%cpu,etime --no-headers -p {pid_out}")
