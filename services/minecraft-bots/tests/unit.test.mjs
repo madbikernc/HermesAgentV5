@@ -1,4 +1,13 @@
-// Version: 2.4.0
+// Version: 2.6.0
+// 2.6.0 (2026-11-28): runs unit/chat-truthfulness.test.mjs (index.js 4.11.0 -- the real command
+// result is now also spoken/sent, not just the model's own pre-action narration, so chat never
+// shows only a fictitious-sounding claim when the two disagree). Standalone node:test, same
+// reasons as 2.4.0/2.5.0's additions.
+//
+// 2.5.0 (2026-11-28): runs unit/decision-stall.test.mjs (index.js 4.10.0's decision-stall
+// detector -- stops the model re-issuing the same already-failed command forever). Standalone
+// node:test, not through tests/unit/_harness.mjs, same reasons as 2.4.0's additions.
+//
 // 2.4.0 (2026-11-28): runs unit/stuck-burst.test.mjs (pathfinding.js 1.5.0's generic "stuck"
 // burst detector) and unit/decision-tick-guard.test.mjs (index.js 4.9.0's decisionTick
 // analysis-flag deadlock fix) -- both standalone node:test files, neither importing
@@ -192,5 +201,7 @@ await import('./unit/metrics.test.mjs');
 await import('./unit/examples.test.mjs');
 await import('./unit/stuck-burst.test.mjs');
 await import('./unit/decision-tick-guard.test.mjs');
+await import('./unit/decision-stall.test.mjs');
+await import('./unit/chat-truthfulness.test.mjs');
 
 console.log(`${passedCount()} unit checks passed.`);

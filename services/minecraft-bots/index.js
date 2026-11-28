@@ -1,4 +1,47 @@
-// Version: 4.9.0
+// Version: 4.11.0
+//
+// 4.11.0 (2026-11-28, direct report: "they seem to be reporting successful actions that are
+// entirely fictitious"): a real, distinct bug from 4.10.0's -- both decisionTick() and
+// handleChatMessage() speak the model's own pre-action narration (`spoken`) IMMEDIATELY, before
+// the command behind it has even run, then execute the real command and push its real `result`
+// only into conversationHistory -- never into chat. A human (or a player who asked for the
+// action) only ever sees the model's own claim ("Got the iron, now crafting stone pickaxe.")
+// and never the correction when the real result disagrees ("You do not have the resources to
+// craft a stone_pickaxe. It requires: cobblestone: 3, stick: 2."), confirmed live, repeatedly.
+// Fixed in both places: the real result is now ALSO spoken/sent (truncated to MAX_CHAT_LEN,
+// same as the narration), right after it's known, as its own follow-up chat line rather than
+// folded into the narration's own message (which already went out before the result existed, and
+// combining them into one later message risks the result -- the one part that matters most here
+// -- being the part MAX_CHAT_LEN's truncation cuts if the narration ran long). Deliberately speaks
+// the raw result text verbatim rather than trying to classify it as success/failure first: the
+// same reason the 4.10.0 stall detector uses a real inventory delta instead of pattern-matching
+// skills.js's own heterogeneous, independently-worded result strings -- speaking the ground truth
+// unconditionally needs no classification to get right, and never mis-hides a real failure behind
+// a guessed-wrong "that looked like success" check.
+//
+// 4.10.0 (2026-11-28, direct instruction "fix that", following up on the muse planning/retry gap
+// flagged -- not fixed -- by 4.9.0/router.js 1.3.0's own changelog): neither bot was BLOCKED or
+// STUCK anymore by that point, but both kept re-issuing the exact same already-failed command
+// forever. Confirmed live: Babs alternated `craftRecipe("stone_pickaxe", ...)` (needs cobblestone
+// she had none of) and `collectBlocks("cobblestone", ...)` (needs a pickaxe she had none of -- a
+// real Minecraft tech-tree dead end the model never worked around by making a WOOD pickaxe
+// first); Amy retried `craftRecipe("bed", 1)` after "Invalid item type: bed" every single tick.
+// decisionTick() already feeds the real command result back into conversationHistory (4.1.0), but
+// a chat model reliably ignoring "this already failed, don't repeat it" buried in its own history
+// is exactly the shape pathfinding.js's own stuck-burst detector (1.5.0) exists to break
+// mechanically rather than trust the model to self-correct from context alone -- same idea here.
+// Tracks the real command signature (name+args, not the narration wrapped around it, via the
+// already-exported parseCommandMessage()) and a genuine inventory snapshot (describeInventory(),
+// already computed every tick) before and after execution -- inventory rather than result text,
+// because result text is not a reliable success/failure signal across this many independently-
+// worded skill functions (ported one at a time from Mindcraft), while "did my inventory actually
+// change" is unambiguous, the same rigor metrics.js's own craftRecipe fix already uses. After
+// STALL_REPEAT_THRESHOLD identical (command, zero-inventory-change) ticks in a row -- 3, matching
+// the stuck-burst detector's own threshold, generous enough that an ordinary multi-tick action
+// (e.g. a drawn-out fight) isn't flagged after one unlucky tick -- the next command result carries
+// an explicit NOTICE telling the model to stop repeating it. Deliberately does NOT auto-pick a
+// replacement action: only the model has the context for what else is worth trying; this only
+// breaks the loop, it doesn't plan the way out of it.
 //
 // 4.9.0 (2026-11-28, direct report: "the bots are still not moving or doing anything useful"):
 // Babs was permanently deadlocked -- every single decisionTick() call blocked by the Hermes Guard
@@ -149,7 +192,7 @@ import { guardedInterval, installFatalHandlers } from "./faults.js";
 import { refreshLivingSpace } from "./shelter.js";
 import { BOT_ROLES, ROLES } from "./roles.js";
 import { callRole } from "./router.js";
-import { containsCommand, executeCommand, getCommandDocs } from "./commands.js";
+import { containsCommand, executeCommand, getCommandDocs, parseCommandMessage } from "./commands.js";
 import { MODES, runModes } from "./modes.js";
 import { OWNERS, isBusy } from "./arbiter.js";
 import { findClosest } from "./world-memory.js";
@@ -448,6 +491,18 @@ const DECISION_TICK_PROMPT = "What will you do next? If there's anything useful 
   "brief line then issue exactly one !command(args) for it right now -- a plan you only describe " +
   "never happens. Skip the command only if you are genuinely idle with nothing worth doing.";
 
+// 4.10.0: see this file's own header. A pure signature (command name + parsed args), never the
+// narration wrapped around it, so two different sentences that both issue the same command still
+// count as the same attempt.
+function commandSignature(reply) {
+  const parsed = parseCommandMessage(reply);
+  return typeof parsed === "string" ? reply : `${parsed.commandName}(${JSON.stringify(parsed.args)})`;
+}
+
+const STALL_REPEAT_THRESHOLD = 3;
+let lastCommandSignature = null;
+let stalledRepeats = 0;
+
 async function decisionTick() {
   if (isBusy()) return; // something (a player command, an emergency mode) is already in control
   let reply;
@@ -472,13 +527,28 @@ async function decisionTick() {
   if (spoken) bot.chat(spoken.slice(0, MAX_CHAT_LEN));
   pushHistory("assistant", reply);
   if (containsCommand(reply)) {
+    const signature = commandSignature(reply);
+    const beforeInventory = describeInventory();
     bot.output = "";
     const result = await executeCommand(bot, reply, { tier: OWNERS.GOAL_STEP });
     console.log(`[${USERNAME}] goal-step command result: ${result}`);
+    // 4.11.0: the narration above was spoken BEFORE this ran -- it's a claim of intent, not a
+    // report. Speak the real outcome too, so chat never shows only the claim when the two disagree.
+    bot.chat(result.slice(0, MAX_CHAT_LEN));
+    const matches = signature === lastCommandSignature && beforeInventory === describeInventory();
+    stalledRepeats = matches ? stalledRepeats + 1 : 1; // this attempt itself always counts as one
+    lastCommandSignature = signature;
     // Feed the real outcome back as the next tick's context -- without this, a failed command
     // (wrong arg syntax, bad arg count, "could not get control") is only ever logged, never seen
     // by the model again, so it has no way to notice and correct its own mistake.
-    pushHistory("user", `Command result: ${result}`);
+    let resultText = `Command result: ${result}`;
+    if (stalledRepeats >= STALL_REPEAT_THRESHOLD) {
+      console.log(`[${USERNAME}] decision stall -- ${signature} repeated ${stalledRepeats}x with no inventory change`);
+      resultText += `\nNOTICE: this exact command has now produced this exact result ${stalledRepeats} ` +
+        "times in a row with zero inventory change -- stop repeating it, the approach is not " +
+        "working. Try something genuinely different.";
+    }
+    pushHistory("user", resultText);
   }
 }
 
@@ -540,6 +610,10 @@ async function handleChatMessage(speaker, message, { send }) {
     // command -- couldn't tell from the journal alone whether it came from the Mayor, a random
     // player, or a verified bot.
     console.log(`[${USERNAME}] chat-issued command result (from ${speaker}): ${result}`);
+    // 4.11.0: the narration above was spoken BEFORE this ran -- it's a claim of intent, not a
+    // report. Send the real outcome too, so the speaker who asked never sees only the claim when
+    // the two disagree (see this file's own 4.11.0 header for the live incident this fixes).
+    send(result.slice(0, MAX_CHAT_LEN));
     pushHistory("user", `Command result: ${result}`);
   }
 }
