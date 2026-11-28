@@ -17,6 +17,10 @@ Environment=MC_BOT_PERSONA=luke
 # decideFightType() (Soldiers fight always, regardless of any per-bot health threshold).
 Environment=MC_SELF_DEFENSE_RANGE=20
 Environment=MC_SQUAD_RESPONDER=true
+# Firmament observability (FIRMAMENT_OBSERVABILITY_PLAN.md): this bot's own Prometheus /metrics
+# listener (metrics.js) -- see infra/minecraft-bots/README.md §7 for the port roster and
+# the ufw rule it needs on this host.
+Environment=MC_BOT_METRICS_PORT=9113
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

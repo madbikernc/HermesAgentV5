@@ -18,6 +18,10 @@ Environment=MC_BOT_PERSONA=mark
 Environment=MC_SELF_DEFENSE_RANGE=20
 Environment=MC_SQUAD_RESPONDER=true
 Environment=MC_FALLBACK_COORDINATOR=true
+# Firmament observability (FIRMAMENT_OBSERVABILITY_PLAN.md): this bot's own Prometheus /metrics
+# listener (metrics.js) -- see infra/minecraft-bots/README.md §7 for the port roster and
+# the ufw rule it needs on this host.
+Environment=MC_BOT_METRICS_PORT=9112
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

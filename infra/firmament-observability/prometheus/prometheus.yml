@@ -57,3 +57,22 @@ scrape_configs:
       credentials_file: /opt/prometheus-secrets/tickscope-token
     static_configs:
       - targets: ["192.168.1.221:9101"]
+
+  # Each Minecraft bot's own action counters (services/minecraft-bots/metrics.js, direct request
+  # 2026-11-28) -- mobs killed/blocks placed/blocks mined/items crafted/distance traveled, by bot.
+  # A different metric namespace (mc_bot_*) from TickScope's own mc_* above on purpose: TickScope
+  # observes the server; this is each bot reporting its own actions. One port per bot (roster and
+  # ufw rule in infra/minecraft-bots/README.md §7) -- only the two personas actually running
+  # (services/minecraft-bots/README.md's own status line) are listed here; the other seven's ports
+  # are reserved and firewalled but not scraped, so a deliberately-stopped bot doesn't show up as
+  # a permanently-down target. Add its target here when it's relaunched.
+  # No `bot` label added here -- metrics.js's own samples already carry one (same reasoning as the
+  # TickScope job above skipping a Prometheus-side `server` label): a same-named static_configs
+  # label would collide and get silently renamed to exported_bot instead of actually overriding it
+  # (confirmed live 2026-11-28 -- caught by checking the scraped series, not assumed).
+  - job_name: "minecraft_bots"
+    static_configs:
+      - targets: ["10.129.1.15:9110"]
+        labels: { host: "dgx-spark" }
+      - targets: ["10.129.1.15:9111"]
+        labels: { host: "dgx-spark" }

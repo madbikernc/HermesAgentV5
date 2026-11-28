@@ -15,6 +15,10 @@ Environment=MC_BOT_USERNAME=Bob_Farmer
 Environment=MC_BOT_PERSONA=bob
 # spark2 has no RAG index or embedder: search/notes/skills go to spark's hermes-minecraft-rag (8105)
 Environment=MC_RAG_URL=http://10.129.1.15:8105
+# Firmament observability (FIRMAMENT_OBSERVABILITY_PLAN.md): this bot's own Prometheus /metrics
+# listener (metrics.js) -- see infra/minecraft-bots/README.md §7 for the port roster and
+# the ufw rule it needs on this host.
+Environment=MC_BOT_METRICS_PORT=9115
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

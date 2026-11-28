@@ -1,4 +1,18 @@
-// Version: 4.5.0
+// Version: 4.6.0
+//
+// 4.6.0 (2026-11-28, direct request): Prometheus action counters, metrics.js's new
+// recordBlockMined/addDistanceTraveled wired up here (recordMobKilled/recordBlockPlaced/
+// recordItemsCrafted are wired in skills.js itself, at their own existing success points).
+// Blocks mined: mineflayer's own `diggingCompleted` event fires once per completed dig
+// regardless of call site (collectBlock, breakBlockAt, digDown, ...), so one listener here covers
+// every dig path in skills.js without touching any of them. Distance traveled: accumulated from
+// `physicsTick` position deltas (already used by the DEBUG_PHYSICS block above); a single-tick
+// delta over TELEPORT_JUMP_BLOCKS is skipped as a teleport/respawn, not real travel -- no sprint-
+// jump can cover that distance in one 50ms tick under normal physics, so this isn't a hypothetical
+// guard, pathfinding.js's own TELEPORT_HOME rescue and death/respawn both produce exactly this.
+// Starts a dedicated HTTP listener only when MC_BOT_METRICS_PORT is set (systemd units only, per
+// infra/minecraft-bots/README.md) -- unset in local dev/tests, same optionality as
+// MATRIX_ACCESS_TOKEN below.
 //
 // 4.5.0 (2026-11-28, diagnosability follow-up): the death handler logged just "died" -- no
 // position, no sense of what killed it. Now logs position plus bot.lastDamageTaken/lastDamageTime
@@ -74,6 +88,7 @@ import { containsCommand, executeCommand, getCommandDocs } from "./commands.js";
 import { MODES, runModes } from "./modes.js";
 import { OWNERS, isBusy } from "./arbiter.js";
 import { findClosest } from "./world-memory.js";
+import { recordBlockMined, addDistanceTraveled, startMetricsServer } from "./metrics.js";
 import { Vec3 } from "vec3";
 
 export const { pathfinder } = pathfinderPkg;
@@ -185,6 +200,23 @@ export const bot = mineflayer.createBot({
 bot.loadPlugin(pathfinder);
 bot.loadPlugin(collectBlockPkg.plugin);
 bot.loadPlugin(pvpPkg.plugin);
+
+// Prometheus action counters (metrics.js) -- see this file's own 4.6.0 changelog entry above.
+startMetricsServer(USERNAME, { port: process.env.MC_BOT_METRICS_PORT ? parseInt(process.env.MC_BOT_METRICS_PORT, 10) : null });
+
+bot.on("diggingCompleted", (block) => recordBlockMined(block.name));
+
+const TELEPORT_JUMP_BLOCKS = 10; // no normal single physics tick covers this; see changelog
+let lastMetricsPos = null;
+bot.on("physicsTick", () => {
+  const pos = bot.entity?.position;
+  if (!pos) return;
+  if (lastMetricsPos) {
+    const delta = pos.distanceTo(lastMetricsPos);
+    if (delta < TELEPORT_JUMP_BLOCKS) addDistanceTraveled(delta);
+  }
+  lastMetricsPos = new Vec3(pos.x, pos.y, pos.z);
+});
 
 // skills.js's execution-context contract (ported from Mindcraft's own Agent/initBot, not adopted
 // here -- see skills.js's own header). A minimal, working shim rather than Mindcraft's full

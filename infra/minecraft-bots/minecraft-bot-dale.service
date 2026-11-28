@@ -20,6 +20,10 @@ Environment=MC_RAG_URL=http://10.129.1.15:8105
 # override checkHomeLighting() never runs on this host (confirmed live: 0 attempts/bot-day).
 # Dale is as reasonable a pick as any of the four -- this isn't a load-bearing choice.
 Environment=MC_HOME_LIGHTING=true
+# Firmament observability (FIRMAMENT_OBSERVABILITY_PLAN.md): this bot's own Prometheus /metrics
+# listener (metrics.js) -- see infra/minecraft-bots/README.md §7 for the port roster and
+# the ufw rule it needs on this host.
+Environment=MC_BOT_METRICS_PORT=9118
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

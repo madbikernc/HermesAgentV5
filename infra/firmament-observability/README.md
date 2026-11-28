@@ -1,6 +1,6 @@
 # Firmament observability (Prometheus + Grafana + Alertmanager) — recreate checklist
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 
 Ordered steps to stand up the fleet's Prometheus/Grafana/Alertmanager stack. See
 `FIRMAMENT_OBSERVABILITY_PLAN.md` in the repo root for the full narrative — why HomeD13, what's
@@ -160,6 +160,18 @@ rule on each host running the router (dgx-spark, dgx-spark2):
 sudo ufw allow from 10.129.1.16 to any port 9101 proto tcp comment 'FIRMAMENT_OBSERVABILITY: HomeD13 Prometheus -> hermes-router metrics'
 ```
 
+## 7. Minecraft bot action metrics
+
+Direct request 2026-11-28 ("have prometheus record... mobs killed/blocks placed/blocks destroyed/
+steps traveled/items created... by bot"). Each bot process (`services/minecraft-bots/index.js`)
+now exposes its own counters via a new `metrics.js` module, on its own port — the full per-bot
+port roster, the `ufw` rule each bot host needs, and which personas are actually wired into
+Prometheus's scrape config (only the ones currently running) live in
+`infra/minecraft-bots/README.md` §7, not duplicated here. Scrape job: `minecraft_bots` in
+`prometheus.yml`, metric prefix `mc_bot_*` (deliberately distinct from TickScope's own `mc_*`
+above — §5 is the server observing the world, this is each bot reporting its own actions).
+Dashboard: `grafana/dashboards/minecraft-bots.json`.
+
 ## Revision History
 
 | Version | Date | Change |
@@ -167,3 +179,4 @@ sudo ufw allow from 10.129.1.16 to any port 9101 proto tcp comment 'FIRMAMENT_OB
 | 1.0.0 | 2026-11-28 | Initial recreate checklist, written while standing up the stack for the first time. |
 | 1.1.0 | 2026-11-28 | §5 extended with the real TickScope `ufw` rule, found live while resolving Phase 4's blocked scrape: the box runs its own `ufw` (an earlier draft here assumed no firewall capability at all — wrong), and the rule must target the NAT-hairpinned source `192.168.1.215` pfSense uses on this path, not HomeD13's real IP. |
 | 1.2.0 | 2026-11-28 | Grafana's default `admin`/`admin` login changed, direct operator request. New `grafana-admin` Vaultwarden item (one item per service, same convention as `fleetops-ui`), created via the same sealed-credential `bw` flow `vault-set-secret.sh` already uses for HomeD13; the generated password was then set as the real admin password through Grafana's own `PUT /api/admin/users/:id/password`, verified live. |
+| 1.3.0 | 2026-11-28 | Direct request: new §7 pointing at the new per-bot action-metrics exporter (`services/minecraft-bots/metrics.js`), its `minecraft_bots` scrape job, and its new dashboard — detail kept in `infra/minecraft-bots/README.md` §7 rather than duplicated here. |

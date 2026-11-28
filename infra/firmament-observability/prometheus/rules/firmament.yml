@@ -37,12 +37,12 @@ groups:
       # nothing paging anyone, because FirmamentHostDown above only ever checked job="node_exporter".
       # Any scrape target going dark deserves the same page, not just the three node_exporter ones.
       - alert: FirmamentTargetDown
-        expr: up{job=~"hermes_router|minecraft_tickscope"} == 0
+        expr: up{job=~"hermes_router|minecraft_tickscope|minecraft_bots"} == 0
         for: 5m
         labels: { severity: critical }
         annotations:
           summary: "Prometheus target {{ $labels.job }} ({{ $labels.host }}{{ $labels.instance }}) is down"
-          description: "Unreachable for 5+ minutes. For minecraft_tickscope specifically, check the pfSense rule and the box's own ufw first -- both have silently dropped this exact scrape before (2026-11-28)."
+          description: "Unreachable for 5+ minutes. For minecraft_tickscope specifically, check the pfSense rule and the box's own ufw first -- both have silently dropped this exact scrape before (2026-11-28). minecraft_bots only lists bots that are supposed to be running (infra/minecraft-bots/README.md §7) -- a stopped persona was never added as a target, so this firing means a bot that should be up isn't."
 
   - name: firmament-minecraft
     rules:

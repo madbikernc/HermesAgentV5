@@ -1,4 +1,14 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-28): direct request ("have prometheus record... mobs killed/blocks placed/
+// blocks destroyed/items created... by bot") -- three one-line additions at each function's own
+// existing success point, metrics.js's new recordMobKilled/recordBlockPlaced/recordItemsCrafted.
+// Blocks mined are NOT instrumented here: every dig path in this file (collectBlock, breakBlockAt,
+// digDown, ...) already funnels through bot.dig(), and mineflayer's own diggingCompleted event
+// fires once per completed dig regardless of call site -- index.js hooks that single event
+// instead, so no skills.js dig path needed touching. craftRecipe records the real inventory delta
+// (recipe yield varies, and a short-on-resources craft produces fewer than requested), not the
+// craft-operation count.
 //
 // 1.1.0 (2026-11-27): direct request, following the legacy-baseline test suite's two confirmed
 // chest regressions -- chest lookups widened from mineflayer-pathfinder's 32-block default to the
@@ -37,6 +47,7 @@ import pf from "mineflayer-pathfinder";
 import Vec3 from "vec3";
 import { SwimMovements as Movements } from "./swim-movements.js";
 import { equipBestArmor } from "./equipment.js";
+import { recordMobKilled, recordBlockPlaced, recordItemsCrafted } from "./metrics.js";
 
 export function log(bot, message) {
   bot.output += message + "\n";
@@ -114,7 +125,10 @@ export async function craftRecipe(bot, itemName, num = 1) {
   const requiredIngredients = mc.ingredientsFromPrismarineRecipe(bot, recipe);
   const craftLimit = mc.calculateLimitingResource(inventory, requiredIngredients);
 
+  const beforeCount = world.getInventoryCounts(bot)[itemName] ?? 0;
   await bot.craft(recipe, Math.min(craftLimit.num, num), craftingTable);
+  const afterCount = world.getInventoryCounts(bot)[itemName] ?? 0;
+  recordItemsCrafted(itemName, afterCount - beforeCount);
   if (craftLimit.num < num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftLimit.num}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
   else log(bot, `Successfully crafted ${itemName}, you now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
   if (placedTable) await collectBlock(bot, "crafting_table", 1);
@@ -282,6 +296,7 @@ export async function attackEntity(bot, entity, kill = true) {
     }
   }
   log(bot, `Successfully killed ${entity.name}.`);
+  recordMobKilled(entity.name);
   await pickupNearbyItems(bot);
   return true;
 }
@@ -457,6 +472,7 @@ export async function breakBlockAt(bot, x, y, z) {
 
 export async function placeBlock(bot, blockType, x, y, z, placeOn = "bottom", dontCheat = false) {
   /** Place the given block type at the given position, building off an adjacent block. */
+  const placedBlockType = blockType; // the cheat branch below mutates blockType (facing suffixes); keep the clean name for the metric
   const target_dest = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
 
   if (blockType === "air") {
@@ -486,6 +502,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = "bottom", do
     if (blockType.includes("door")) bot.chat("/setblock " + Math.floor(x) + " " + Math.floor(y + 1) + " " + Math.floor(z) + " " + blockType + "[half=upper]");
     if (blockType.includes("bed")) bot.chat("/setblock " + Math.floor(x) + " " + Math.floor(y) + " " + Math.floor(z - 1) + " " + blockType + "[part=head]");
     log(bot, `Used /setblock to place ${blockType} at ${target_dest}.`);
+    recordBlockPlaced(placedBlockType);
     return true;
   }
 
@@ -572,6 +589,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn = "bottom", do
       await bot.lookAt(buildOffBlock.position.offset(0.5, 0.5, 0.5));
       await bot.placeBlock(buildOffBlock, faceVec);
       log(bot, `Placed ${blockType} at ${target_dest}.`);
+      recordBlockPlaced(placedBlockType);
       await new Promise((resolve) => setTimeout(resolve, 200));
       return true;
     }

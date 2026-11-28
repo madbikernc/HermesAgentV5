@@ -1,4 +1,6 @@
-// Version: 2.1.0
+// Version: 2.2.0
+// 2.2.0 (2026-11-28): runs unit/metrics.test.mjs (metrics.js 1.0.0, the new per-bot Prometheus
+// action counters).
 // 2.1.0 (2026-11-10): runs unit/faults.test.mjs (faults.js 1.0.0).
 // 2.0.0 (2026-11-10): split into per-area files under tests/unit/ (shared stubs in
 // tests/unit/_harness.mjs), each under 40000 chars so the self-repair pipeline -- which rewrites a
@@ -178,5 +180,6 @@ await import('./unit/doors-1.test.mjs');
 await import('./unit/doors-2.test.mjs');
 await import('./unit/pathfinding.test.mjs');
 await import('./unit/faults.test.mjs');
+await import('./unit/metrics.test.mjs');
 
 console.log(`${passedCount()} unit checks passed.`);

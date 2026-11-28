@@ -22,6 +22,10 @@ Environment=MC_RAG_URL=http://10.129.1.15:8105
 # pathfinder-search-radius risk.
 Environment=MC_EXPLORE_SEARCH_RADIUS=40
 Environment=MC_EXTENDED_SEARCH_DISTANCE=260
+# Firmament observability (FIRMAMENT_OBSERVABILITY_PLAN.md): this bot's own Prometheus /metrics
+# listener (metrics.js) -- see infra/minecraft-bots/README.md §7 for the port roster and
+# the ufw rule it needs on this host.
+Environment=MC_BOT_METRICS_PORT=9117
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10

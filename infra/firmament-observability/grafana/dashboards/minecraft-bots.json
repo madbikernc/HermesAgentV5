@@ -1,0 +1,71 @@
+{
+  "title": "Firmament — Minecraft bot activity",
+  "uid": "firmament-minecraft-bots",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "title": "Mobs killed (selected range)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum by (bot) (increase(mc_bot_mobs_killed_total[$__range]))", "legendFormat": "{{bot}}" }]
+    },
+    {
+      "title": "Blocks placed (selected range)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "expr": "sum by (bot) (increase(mc_bot_blocks_placed_total[$__range]))", "legendFormat": "{{bot}}" }]
+    },
+    {
+      "title": "Blocks mined (selected range)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "sum by (bot) (increase(mc_bot_blocks_mined_total[$__range]))", "legendFormat": "{{bot}}" }]
+    },
+    {
+      "title": "Items crafted (selected range)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "expr": "sum by (bot) (increase(mc_bot_items_crafted_total[$__range]))", "legendFormat": "{{bot}}" }]
+    },
+    {
+      "title": "Mobs killed by type",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [{ "expr": "sum by (bot, mob) (increase(mc_bot_mobs_killed_total[$__range]))", "instant": true, "format": "table" }]
+    },
+    {
+      "title": "Blocks placed by type",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [{ "expr": "sum by (bot, block) (increase(mc_bot_blocks_placed_total[$__range]))", "instant": true, "format": "table" }]
+    },
+    {
+      "title": "Blocks mined by type",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [{ "expr": "sum by (bot, block) (increase(mc_bot_blocks_mined_total[$__range]))", "instant": true, "format": "table" }]
+    },
+    {
+      "title": "Items crafted by type",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [{ "expr": "sum by (bot, item) (increase(mc_bot_items_crafted_total[$__range]))", "instant": true, "format": "table" }]
+    },
+    {
+      "title": "Distance traveled (total, blocks)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "targets": [{ "expr": "mc_bot_distance_traveled_blocks_total", "legendFormat": "{{bot}}" }]
+    },
+    {
+      "title": "Movement rate (blocks/min)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "targets": [{ "expr": "rate(mc_bot_distance_traveled_blocks_total[5m]) * 60", "legendFormat": "{{bot}}" }]
+    }
+  ]
+}

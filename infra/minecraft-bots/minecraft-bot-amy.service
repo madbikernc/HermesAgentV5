@@ -13,6 +13,10 @@ Environment=MC_BOT_USERNAME=Amy_Builder
 # (persona, Matrix account, memory paths -- see index.js 3.1.0) while MC_BOT_USERNAME above
 # becomes the new in-game display name other players and bots actually see.
 Environment=MC_BOT_PERSONA=amy
+# Firmament observability (FIRMAMENT_OBSERVABILITY_PLAN.md): this bot's own Prometheus /metrics
+# listener (metrics.js) -- see infra/minecraft-bots/README.md §7 for the port roster and
+# the ufw rule it needs on this host.
+Environment=MC_BOT_METRICS_PORT=9111
 ExecStart=/home/pmoney/HermesAgentV5/services/minecraft-bots/run-bot.sh
 Restart=always
 RestartSec=10
