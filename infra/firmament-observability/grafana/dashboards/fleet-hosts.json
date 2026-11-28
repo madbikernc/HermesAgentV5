@@ -44,7 +44,7 @@
       ]
     },
     {
-      "title": "Host up",
+      "title": "Fleet targets up",
       "type": "stat",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "fieldConfig": {
@@ -56,7 +56,42 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "up{job=\"node_exporter\"}", "legendFormat": "{{host}}" }
+        { "expr": "up{job=\"node_exporter\"}", "legendFormat": "node_exporter/{{host}}" },
+        { "expr": "up{job=\"hermes_router\"}", "legendFormat": "hermes_router/{{host}}" },
+        { "expr": "up{job=\"minecraft_tickscope\"}", "legendFormat": "minecraft_tickscope" }
+      ]
+    },
+    {
+      "title": "Data volume free (/mnt/hermes-data, NAS mounts)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "100 * (node_filesystem_avail_bytes{mountpoint=~\"/mnt/hermes-data|/mnt/nas2-hermes-images|/mnt/nas2-hermes-backup\"} / node_filesystem_size_bytes{mountpoint=~\"/mnt/hermes-data|/mnt/nas2-hermes-images|/mnt/nas2-hermes-backup\"})",
+          "legendFormat": "{{host}} {{mountpoint}}"
+        }
+      ]
+    },
+    {
+      "title": "Load average (1m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "targets": [
+        { "expr": "node_load1", "legendFormat": "{{host}}" }
+      ]
+    },
+    {
+      "title": "Swap used",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "100 * (1 - (node_memory_SwapFree_bytes / node_memory_SwapTotal_bytes)) and node_memory_SwapTotal_bytes > 0",
+          "legendFormat": "{{host}}"
+        }
       ]
     }
   ]

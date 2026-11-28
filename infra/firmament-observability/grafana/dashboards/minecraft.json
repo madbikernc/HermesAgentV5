@@ -42,9 +42,69 @@
     {
       "title": "JVM heap used",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
-      "targets": [{ "expr": "mc_jvm_memory_used_bytes{server=\"paper\",area=\"heap\"}" }]
+      "targets": [{ "expr": "mc_jvm_memory_used_bytes{server=\"paper\",area=\"heap\"}", "legendFormat": "heap" }]
+    },
+    {
+      "title": "Tile entities",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [{ "expr": "mc_world_tile_entities{server=\"paper\"}", "legendFormat": "{{world}}" }]
+    },
+    {
+      "title": "Tick time percentiles (from mc_tick_time_seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, rate(mc_tick_time_seconds_bucket{server=\"paper\"}[5m]))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, rate(mc_tick_time_seconds_bucket{server=\"paper\"}[5m]))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, rate(mc_tick_time_seconds_bucket{server=\"paper\"}[5m]))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "title": "GC time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [
+        { "expr": "rate(mc_jvm_gc_seconds_total{server=\"paper\"}[5m])", "legendFormat": "{{collector}}" }
+      ]
+    },
+    {
+      "title": "CPU load",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "expr": "mc_process_cpu_load_ratio{server=\"paper\"}", "legendFormat": "server process" },
+        { "expr": "mc_system_cpu_load_ratio{server=\"paper\"}", "legendFormat": "whole host" }
+      ]
+    },
+    {
+      "title": "Player ping",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [{ "expr": "mc_player_ping_seconds{server=\"paper\"}", "legendFormat": "{{player}}" }]
+    },
+    {
+      "title": "TickScope collection health",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 38 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "no failures", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "increase(mc_collection_failures_total{server=\"paper\"}[1h])", "legendFormat": "collection failures (last 1h)" }
+      ]
     }
   ]
 }

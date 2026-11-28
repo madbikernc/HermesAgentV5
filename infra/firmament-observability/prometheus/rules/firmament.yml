@@ -20,6 +20,43 @@ groups:
           summary: "{{ $labels.host }}'s root filesystem is below 10% free"
           description: "Checked live 2026-11-28: spark was at 62% used, spark2 74%, homed13 11% — this fires well before any of them would have been near the edge then."
 
+      # /mnt/hermes-data (spark/spark2) holds the fleet's actual working data (memory/vectors/RAG
+      # store) -- a different, bigger-consequence volume than root, confirmed 57-71% used live
+      # 2026-11-28 (FIRMAMENT_OBSERVABILITY_PLAN.md §2). Same 10% threshold as root; this volume
+      # fills from normal fleet operation, not logs, so it deserves its own page rather than
+      # sharing root's alert and being invisible until root itself is also low.
+      - alert: FirmamentDataVolumeLow
+        expr: (node_filesystem_avail_bytes{mountpoint=~"/mnt/hermes-data|/mnt/nas2-hermes-images|/mnt/nas2-hermes-backup"} / node_filesystem_size_bytes{mountpoint=~"/mnt/hermes-data|/mnt/nas2-hermes-images|/mnt/nas2-hermes-backup"}) < 0.10
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.host }}'s {{ $labels.mountpoint }} is below 10% free"
+          description: "This volume holds live fleet data (memory/vectors/RAG store, or the NAS image archive), not just logs -- filling it stops real work, not just housekeeping."
+
+      # Found the hard way this session: minecraft_tickscope sat unreachable for hours with
+      # nothing paging anyone, because FirmamentHostDown above only ever checked job="node_exporter".
+      # Any scrape target going dark deserves the same page, not just the three node_exporter ones.
+      - alert: FirmamentTargetDown
+        expr: up{job=~"hermes_router|minecraft_tickscope"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Prometheus target {{ $labels.job }} ({{ $labels.host }}{{ $labels.instance }}) is down"
+          description: "Unreachable for 5+ minutes. For minecraft_tickscope specifically, check the pfSense rule and the box's own ufw first -- both have silently dropped this exact scrape before (2026-11-28)."
+
+  - name: firmament-minecraft
+    rules:
+      # TickScope's own collection can fail (or silently stop) without the HTTP endpoint itself
+      # going down -- FirmamentTargetDown above would stay green while every Minecraft panel on
+      # the dashboard quietly goes stale. This catches that case specifically.
+      - alert: FirmamentMinecraftCollectionStale
+        expr: (time() - mc_collection_last_success_timestamp_seconds{server="paper"}) > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "TickScope's own metrics collection hasn't succeeded in 5+ minutes"
+          description: "The /metrics endpoint may still answer (see FirmamentTargetDown), but TickScope itself isn't producing fresh data -- every Minecraft Grafana panel is showing stale numbers."
+
   - name: firmament-router
     rules:
       - alert: FirmamentRouterErrorRateHigh
