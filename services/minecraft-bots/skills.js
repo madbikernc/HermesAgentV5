@@ -1,4 +1,12 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-27): direct request, following the legacy-baseline test suite's two confirmed
+// chest regressions -- chest lookups widened from mineflayer-pathfinder's 32-block default to the
+// archived fleet's own tuned CHEST_SEARCH_RADIUS (128), plus a short-lived in-process miss cache
+// (findNearestChest()) so an immediate retry from the same spot doesn't re-scan for nothing.
+// goToBed()'s own direct bot.findBlocks() call now goes through world.getNearestBlocksWhere()
+// instead, closing the one gap in that module's shared discovery-recording chokepoint (see
+// world-memory.js) -- a found bed is now recorded there too, same as chests/furnaces/ore.
 //
 // Bot action library, ported from Mindcraft's src/agent/library/skills.js
 // (https://github.com/kolbytn/mindcraft) -- every exported function kept at its original name and
@@ -619,9 +627,31 @@ export async function discard(bot, itemName, num = -1) {
   return true;
 }
 
+// Direct request, 2026-11-27: chest lookups now reach CHEST_SEARCH_RADIUS (the archived fleet's
+// own tuned value, actions.js 1.106.0 -- its header: "bots gave up on chests well within walking
+// distance" at the old 32-block default), and a search that just came up empty is remembered
+// briefly so an immediate retry from the same spot doesn't re-scan for nothing -- same spirit as
+// the archived fleet's own short-lived CHEST_MISS_RADIUS cache (action-crafting.js), rebuilt here
+// in-process (no persistent file -- this project's own "bounded, reset on restart" memory
+// philosophy, see index.js's header) since a stale chest-miss is cheap to recover from on the next
+// decision tick regardless.
+const CHEST_SEARCH_RADIUS = 128;
+const CHEST_MISS_TTL_MS = 60_000;
+const chestMissCache = new Map(); // "x,y,z" (rounded searcher position) -> expiry timestamp
+function chestMissKey(pos) { return `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}`; }
+function findNearestChest(bot) {
+  const key = chestMissKey(bot.entity.position);
+  const missUntil = chestMissCache.get(key);
+  if (missUntil !== undefined && Date.now() < missUntil) return null;
+  const chest = world.getNearestBlock(bot, "chest", CHEST_SEARCH_RADIUS);
+  if (!chest) chestMissCache.set(key, Date.now() + CHEST_MISS_TTL_MS);
+  else chestMissCache.delete(key);
+  return chest;
+}
+
 export async function putInChest(bot, itemName, num = -1) {
   /** Put the given item in the nearest chest. */
-  const chest = world.getNearestBlock(bot, "chest", 32);
+  const chest = findNearestChest(bot);
   if (!chest) {
     log(bot, `Could not find a chest nearby.`);
     return false;
@@ -642,7 +672,7 @@ export async function putInChest(bot, itemName, num = -1) {
 
 export async function takeFromChest(bot, itemName, num = -1) {
   /** Take the given item from the nearest chest, potentially from multiple slots. */
-  const chest = world.getNearestBlock(bot, "chest", 32);
+  const chest = findNearestChest(bot);
   if (!chest) {
     log(bot, `Could not find a chest nearby.`);
     return false;
@@ -672,7 +702,7 @@ export async function takeFromChest(bot, itemName, num = -1) {
 
 export async function viewChest(bot) {
   /** View the contents of the nearest chest. */
-  const chest = world.getNearestBlock(bot, "chest", 32);
+  const chest = findNearestChest(bot);
   if (!chest) {
     log(bot, `Could not find a chest nearby.`);
     return false;
@@ -1098,14 +1128,15 @@ export async function useDoor(bot, door_pos = null) {
 
 export async function goToBed(bot) {
   /** Sleep in the nearest bed. */
-  const beds = bot.findBlocks({ matching: (block) => block.name.includes("bed"), maxDistance: 32, count: 1 });
+  // Routed through world.getNearestBlocksWhere() (previously a direct bot-level search) so a
+  // found bed is recorded in world memory too, the same as every other block search in this file.
+  const beds = world.getNearestBlocksWhere(bot, (block) => block.name.includes("bed"), 32, 1);
   if (beds.length === 0) {
     log(bot, `Could not find a bed to sleep in.`);
     return false;
   }
-  const loc = beds[0];
-  await goToPosition(bot, loc.x, loc.y, loc.z);
-  const bed = bot.blockAt(loc);
+  const bed = beds[0];
+  await goToPosition(bot, bed.position.x, bed.position.y, bed.position.z);
   await bot.sleep(bed);
   log(bot, `You are in bed.`);
   bot.modes.pause("unstuck");

@@ -1,4 +1,9 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-27): direct request, "verify that all discovered objects get an entry in the
+// world memory" -- getNearestBlocksWhere() now records every notable result (world-memory.js's
+// own allowlist) as a sighting, fire-and-forget, so any search through this file's shared
+// chokepoint leaves a world-memory entry without its caller needing to do anything extra.
 //
 // World-query helpers, ported from Mindcraft's src/agent/library/world.js
 // (https://github.com/kolbytn/mindcraft) -- the read-only lookups skills.js and the modes system
@@ -9,6 +14,7 @@
 
 import pf from "mineflayer-pathfinder";
 import * as mc from "./mcdata.js";
+import { recordSightingIfNotable } from "./world-memory.js";
 
 export function getNearestFreeSpace(bot, size = 1, distance = 8) {
   /**
@@ -75,9 +81,19 @@ export function getFirstBlockAboveHead(bot, ignore_types = null, distance = 32) 
   return `${block_above.name} (${height} blocks up)`;
 }
 
+// The one chokepoint every block search in this project funnels through (getNearestBlocks()/
+// getNearestBlock() below call it; skills.js's own direct bot.findBlocks() calls were swept to go
+// through it too) -- every notable result (world-memory.js's own allowlist: chests, furnaces,
+// crafting/utility blocks, ore, beds) gets recorded there, fire-and-forget, so "a search found
+// this" always leaves an entry without each caller needing its own write.
 export function getNearestBlocksWhere(bot, predicate, distance = 8, count = 10000) {
   const positions = bot.findBlocks({ matching: predicate, maxDistance: distance, count });
-  return positions.map((position) => bot.blockAt(position));
+  const blocks = positions.map((position) => {
+    const block = bot.blockAt(position);
+    if (block?.name) recordSightingIfNotable(block.name, position);
+    return block;
+  });
+  return blocks;
 }
 
 export function getNearestBlocks(bot, block_types = null, distance = 8, count = 10000) {

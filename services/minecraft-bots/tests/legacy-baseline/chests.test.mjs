@@ -1,4 +1,10 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-27): direct request -- the two confirmed chest regressions below (radius, miss
+// cache) are now fixed (skills.js 1.1.0); their checks updated to match the real shape of the fix
+// instead of the exact old-code pattern they used to regex for. Added: a real test for the new
+// world-memory.js module (every notable block any search finds gets a world-memory entry) and a
+// source check that goToBed() was swept onto the same shared recording chokepoint.
 //
 // Legacy baseline: ported from tests/unit/chests-1.test.mjs and tests/unit/chests-2.test.mjs
 // against the Mindcraft-ported architecture (skills.js/world.js/shelter.js). See
@@ -26,6 +32,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as shelter from "../../shelter.js";
 import * as world from "../../world.js";
+import * as worldMemory from "../../world-memory.js";
 import { V3, makeBot } from "./_mockbot.mjs";
 import minecraftData from "minecraft-data";
 
@@ -94,24 +101,80 @@ test('[legacy:chests] takeFromChest withdraws from multiple matching slots to re
 
 test('[legacy:chests] chest lookups reach 128 blocks like the old fleet, not 32', () => {
   // 2026-11-07 (actions.js 1.106.0): chest searches were widened to CHEST_SEARCH_RADIUS=128 after
-  // a real fleet regression (bots gave up on chests well within walking distance). skills.js's
-  // putInChest/takeFromChest/viewChest all call world.getNearestBlock(bot, "chest", 32) --
-  // unchanged from mineflayer-pathfinder's own 16-32 block default-of-convenience, not the fleet's
-  // own tuned 128. Expected to fail now: this is a real, trackable capability regression, not a
-  // removed mechanism -- a wider search is still exactly what you'd want here.
-  const calls = [...skillsSrc.matchAll(/getNearestBlock\(bot, ["']chest["'], *(\d+)\)/g)].map((m) => Number(m[1]));
-  assert(calls.length >= 3, "expected putInChest/takeFromChest/viewChest to each call getNearestBlock for \"chest\"");
-  assert(calls.every((d) => d >= 128), `expected every chest lookup to reach at least 128 blocks, found: ${calls.join(", ")}`);
+  // a real fleet regression (bots gave up on chests well within walking distance). Fixed
+  // 2026-11-27 (skills.js 1.1.0, direct request): putInChest/takeFromChest/viewChest were
+  // consolidated onto one findNearestChest() helper (previously three separately-written
+  // `getNearestBlock(bot, "chest", 32)` calls -- the old regex here matched that literal shape
+  // directly; now checks the actual constant/helper instead) that searches CHEST_SEARCH_RADIUS.
+  assert.match(skillsSrc, /CHEST_SEARCH_RADIUS\s*=\s*(\d+)/, "expected a named chest-search-radius constant");
+  const radius = Number(skillsSrc.match(/CHEST_SEARCH_RADIUS\s*=\s*(\d+)/)[1]);
+  assert(radius >= 128, `expected the chest search radius to reach at least 128 blocks, found ${radius}`);
+  for (const fn of ["putInChest", "takeFromChest", "viewChest"]) {
+    const start = skillsSrc.indexOf(`export async function ${fn}(`);
+    assert(start >= 0, `expected to find ${fn}`);
+    const body = skillsSrc.slice(start, skillsSrc.indexOf("\n}", start));
+    assert.match(body, /findNearestChest\(bot\)/, `expected ${fn} to call findNearestChest(bot)`);
+  }
 });
 
 test('[legacy:chests] a chest search that just came up empty is not repeated from the same spot', () => {
   // The old actions.js kept a short-lived per-position miss cache (CHEST_MISS_TTL_MS) so a failed
-  // chest search wasn't immediately retried from the same spot for the same item. No such cache
-  // exists in skills.js today -- every call to putInChest/takeFromChest/viewChest searches fresh.
-  // Expected to fail now, for the same reason as the radius check above: a real, worth-fixing gap,
-  // not a deliberately dropped mechanism.
+  // chest search wasn't immediately retried from the same spot for the same item. Fixed 2026-11-27
+  // (skills.js 1.1.0): findNearestChest() now keeps the same shape of cache, in-process (this
+  // project's own "bounded, reset on restart" memory philosophy -- see index.js's header -- rather
+  // than a persistent file).
   assert.match(skillsSrc, /MISS_TTL|missCache|lastMiss/i,
     "expected some form of chest-search-miss cache in skills.js; found none");
+  assert.match(skillsSrc, /chestMissCache/, "expected the specific miss-cache findNearestChest() reads/writes");
+});
+
+test('[legacy:chests] world memory: a notable block any search finds gets recorded, not just chests', async () => {
+  // Direct request, 2026-11-27 ("verify that all discovered objects get an entry in the world
+  // memory"): world.getNearestBlocksWhere() -- the one chokepoint every block search in this
+  // project funnels through -- now records every notable result via world-memory.js, fire-and-
+  // forget. Exercised against the REAL module with an isolated MC_MEMORY_ROOT (never the fleet's
+  // own /mnt/hermes-data/minecraft-memory).
+  const fsp = await import("node:fs/promises");
+  const os = await import("node:os");
+  const pathMod = await import("node:path");
+  const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), "mbtest-world-memory-"));
+  const realRoot = process.env.MC_MEMORY_ROOT;
+  process.env.MC_MEMORY_ROOT = dir; // world-memory.js reads this fresh on every call, not just at import
+  try {
+    assert.equal(worldMemory.isNotableDiscovery("chest"), true);
+    assert.equal(worldMemory.isNotableDiscovery("diamond_ore"), true);
+    assert.equal(worldMemory.isNotableDiscovery("white_bed"), true, "any *_bed suffix counts, not just white_bed");
+    assert.equal(worldMemory.isNotableDiscovery("stone"), false, "plain terrain is never recorded");
+
+    const bot = makeBot({
+      entity: { position: new V3(0, 64, 0) },
+      findBlocks: () => [new V3(5, 64, 0), new V3(10, 64, 0)],
+      blockAt: (p) => (p.x === 5 ? { name: "chest", position: p } : { name: "stone", position: p }),
+    });
+    world.getNearestBlocksWhere(bot, () => true, 32, 10);
+    await new Promise((r) => setTimeout(r, 20)); // the write is fire-and-forget; let it land
+    const known = await worldMemory.getKnownSightings("chest");
+    assert.equal(known.length, 1, "the chest was recorded");
+    assert.deepEqual([known[0].x, known[0].y, known[0].z], [5, 64, 0]);
+    assert.equal((await worldMemory.getKnownSightings("stone")).length, 0, "plain stone was never recorded");
+  } finally {
+    if (realRoot === undefined) delete process.env.MC_MEMORY_ROOT; else process.env.MC_MEMORY_ROOT = realRoot;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('[legacy:beds] world memory: goToBed\'s own search is routed through the shared recording chokepoint', () => {
+  // goToBed() used to call bot.findBlocks() directly, bypassing world.getNearestBlocksWhere() (and
+  // so bypassing world-memory.js's recording) -- the one gap found while auditing every block
+  // search in skills.js for this. Fixed 2026-11-27 (skills.js 1.1.0): routed through
+  // world.getNearestBlocksWhere() like every other block search in this file.
+  const start = skillsSrc.indexOf("export async function goToBed(");
+  assert(start >= 0, "expected to find goToBed");
+  const body = skillsSrc.slice(start, skillsSrc.indexOf("\n}", start));
+  assert.doesNotMatch(body, /bot\.findBlocks\(/,
+    "goToBed must not call bot.findBlocks() directly -- it bypasses world-memory.js's recording");
+  assert.match(body, /world\.getNearestBlocksWhere\(/,
+    "goToBed must search through world.getNearestBlocksWhere() instead");
 });
 
 test('[legacy:chests] shelter.wouldBlockAccess refuses a chest lid, a doorway, and the last way up to a bed', () => {
