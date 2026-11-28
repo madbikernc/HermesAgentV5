@@ -1,6 +1,6 @@
 # Firmament observability (Prometheus + Grafana + Alertmanager) — recreate checklist
 
-**Version:** 1.1.0
+**Version:** 1.2.0
 
 Ordered steps to stand up the fleet's Prometheus/Grafana/Alertmanager stack. See
 `FIRMAMENT_OBSERVABILITY_PLAN.md` in the repo root for the full narrative — why HomeD13, what's
@@ -102,7 +102,17 @@ sudo ufw allow from 100.64.0.0/10 to any port 3000 proto tcp comment 'FIRMAMENT_
 ```
 
 First login is `admin`/`admin` (Grafana forces a password change on first login) — set a real
-password immediately, it's reachable from the whole fleet LAN and Tailscale.
+password immediately, it's reachable from the whole fleet LAN and Tailscale. **Done 2026-11-28**:
+its own Vaultwarden item, `grafana-admin` (one item per service, same convention as
+`fleetops-ui`/`memory-token`/`buzz-token`), created on HomeD13 using the same sealed
+apikey/masterpw credentials `vault-set-secret.sh` already uses for that host (`VAULT_NODE=homed13`)
+— `bw create item` with a freshly generated password, then that same password set via Grafana's own
+`PUT /api/admin/users/:id/password` as the real admin user, verified live (`admin:admin` → 401,
+new credential → 200):
+
+```bash
+VAULT_NODE=homed13 /home/pmoney/HermesAgentV5/tools/vault-get-secret.sh grafana-admin password
+```
 
 ## 4. node_exporter (every host: dgx-spark, dgx-spark2, HomeD13)
 
@@ -156,3 +166,4 @@ sudo ufw allow from 10.129.1.16 to any port 9101 proto tcp comment 'FIRMAMENT_OB
 |---|---|---|
 | 1.0.0 | 2026-11-28 | Initial recreate checklist, written while standing up the stack for the first time. |
 | 1.1.0 | 2026-11-28 | §5 extended with the real TickScope `ufw` rule, found live while resolving Phase 4's blocked scrape: the box runs its own `ufw` (an earlier draft here assumed no firewall capability at all — wrong), and the rule must target the NAT-hairpinned source `192.168.1.215` pfSense uses on this path, not HomeD13's real IP. |
+| 1.2.0 | 2026-11-28 | Grafana's default `admin`/`admin` login changed, direct operator request. New `grafana-admin` Vaultwarden item (one item per service, same convention as `fleetops-ui`), created via the same sealed-credential `bw` flow `vault-set-secret.sh` already uses for HomeD13; the generated password was then set as the real admin password through Grafana's own `PUT /api/admin/users/:id/password`, verified live. |
