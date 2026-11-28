@@ -1,4 +1,47 @@
-// Version: 4.8.0
+// Version: 4.9.0
+//
+// 4.9.0 (2026-11-28, direct report: "the bots are still not moving or doing anything useful"):
+// Babs was permanently deadlocked -- every single decisionTick() call blocked by the Hermes Guard
+// Layer 2 classifier (label=MALICIOUS score=1.000), confirmed live via hermes-router's own
+// journal. The flagged text was DECISION_TICK_PROMPT itself (4.7.0's fix), not anything a player
+// said. Root cause was 4.2.0's own analysis-flag gate, `analysis: allTrusted` -- reasonable-
+// sounding, but built on a premise hermes-router.py's Layer 2 stopped matching back in its own
+// 2.11.0 (2026-09-11): Layer 2 only ever classifies `newest["content"]`, the single newest
+// message, never the full history. decisionTick()'s own messages array always ends with `{ role:
+// "user", content: DECISION_TICK_PROMPT }` -- a fixed, self-authored string, never
+// conversationHistory's last entry -- so "newest" here is NEVER the player's text regardless of
+// what sits earlier in conversationHistory. Gating analysis on allTrusted protected nothing (the
+// player's untrusted line is never the thing Layer 2 inspects on this call) while creating a real
+// deadlock: once any bot ever received one untrusted chat/whisper line, every future decisionTick
+// scored MALICIOUS on its own prompt and threw, and the catch block returns WITHOUT calling
+// pushHistory() -- so the untrusted entry could never age out of the HISTORY_TURNS window either.
+// Permanent from the first real player interaction onward, confirmed live (Babs blocked on every
+// tick for over an hour straight). Fixed: analysis is now an unconditional `true` here, matching
+// what Layer 2 actually screens on this call site -- the S27f exemption doctrine's own "payloads
+// that are data by construction" language describes DECISION_TICK_PROMPT exactly. This does not
+// reopen the 4.2.0 finding: a player's raw chat/whisper/Matrix line is screened for real
+// (analysis never true) at the call site that answers it directly (handleChatMessage), which is
+// the point at which it IS the newest message -- by the time it's just background context in
+// conversationHistory for a LATER decisionTick, it already passed screening once, which is
+// hermes-router.py's own stated doctrine ("every prior turn already passed screening the request
+// it first arrived in").
+//
+// Amy's symptom looked different (isMoving=true, actively pathing) but was the same underlying
+// shape: DEBUG_PHYSICS showed her frozen at the same position for 12+ minutes straight, a
+// path_update status=success (nodes=6, cost=8.7) immediately followed by path_reset: stuck, over
+// and over, recomputing the IDENTICAL path every ~3.5s forever -- jump was never held (not the
+// land 1-block-rise case pathfinding.js already fixes) and she was never in water (not the swim
+// case either), so neither existing physicsTick assist could apply. This is pathfinding.js's own
+// documented dig_error shape ("a 'success' path immediately followed by getting stuck again...
+// recomputing trivial routes that never actually complete") but for plain "stuck", which had no
+// equivalent burst-detector. Worse than cosmetic: the stuck goto() never settles, so the
+// performAction() call that started it never returns and never releases arbiter control --
+// confirmed live, a player's Rcon command to Amy was refused ("DIRECT_COMMAND (priority 10) still
+// holds it") while she was deadlocked like this. Fixed in pathfinding.js (1.5.0): a burst
+// detector, same shape as the existing dig_error one, abandons the goal (setGoal(null), confirmed
+// by this file's own arbiter.js history to reject the in-flight goto() promise rather than just
+// log something) after 3 consecutive "stuck" resets with under a block of real position progress
+// between them.
 //
 // 4.8.0 (2026-11-28, found while verifying 4.7.0 live): 4.6.0's claim below that "diggingCompleted
 // ... covers every dig path" was wrong in a way that only showed up once a bot actually mined
@@ -369,10 +412,11 @@ export const HISTORY_TURNS = 8;
 
 let conversationHistory = [];
 // trusted: false for a raw line from an unverified player (handleChatMessage tags it); true
-// (default) for the bot's own output and command-result text. decisionTick's analysis:true -- the
-// S34 exemption that skips full injection screening -- must never cover a call whose history
-// carries even one untrusted entry, or a player's chat text reaches the model unscreened by riding
-// along in history instead of through the (correctly screened) chat-reply call itself.
+// (default) for the bot's own output and command-result text. Provenance only, kept for whatever
+// future call site actually sends history as its OWN newest message -- decisionTick() is not that
+// (see its own 4.9.0 comment): its newest message is always the fixed DECISION_TICK_PROMPT below,
+// never conversationHistory's last entry, so gating ITS analysis flag on this tag protected
+// nothing and is gone.
 function pushHistory(role, content, { trusted = true } = {}) {
   conversationHistory.push({ role, content, trusted });
   if (conversationHistory.length > HISTORY_TURNS * 2) {
@@ -412,10 +456,12 @@ async function decisionTick() {
     const messages = [{ role: "system", content: prompt },
       ...conversationHistory.map(({ role, content }) => ({ role, content })),
       { role: "user", content: DECISION_TICK_PROMPT }];
-    // analysis:true only when nothing in the current history window came from an unverified
-    // player -- the same "never a bare literal" rule the chat-reply call sites already follow.
-    const allTrusted = conversationHistory.every((h) => h.trusted);
-    reply = await callRole("muse", messages, { analysis: allTrusted, maxTokens: 300 });
+    // analysis:true unconditionally -- see 4.9.0 above. Layer 2 only ever classifies the newest
+    // message, which here is ALWAYS the fixed DECISION_TICK_PROMPT just below, never
+    // conversationHistory's own last entry -- gating this on history trust (the 4.2.0 attempt)
+    // protected nothing real and permanently deadlocked any bot that ever received one untrusted
+    // chat line, confirmed live (Babs, blocked on every tick for over an hour).
+    reply = await callRole("muse", messages, { analysis: true, maxTokens: 300 });
   } catch (err) {
     console.error(`[${USERNAME}] decision tick callRole failed:`, err.message);
     return;

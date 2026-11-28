@@ -1,4 +1,10 @@
-// Version: 2.3.0
+// Version: 2.4.0
+// 2.4.0 (2026-11-28): runs unit/stuck-burst.test.mjs (pathfinding.js 1.5.0's generic "stuck"
+// burst detector) and unit/decision-tick-guard.test.mjs (index.js 4.9.0's decisionTick
+// analysis-flag deadlock fix) -- both standalone node:test files, neither importing
+// tests/unit/_harness.mjs (confirmed broken at module load for every file that does -- see
+// stuck-burst.test.mjs's own header for the full accounting).
+//
 // 2.3.0 (2026-11-28): runs unit/examples.test.mjs (index.js 4.7.0's renderExamples(), the
 // narration+command EXAMPLES block fix).
 // 2.2.0 (2026-11-28): runs unit/metrics.test.mjs (metrics.js 1.0.0, the new per-bot Prometheus
@@ -184,5 +190,7 @@ await import('./unit/pathfinding.test.mjs');
 await import('./unit/faults.test.mjs');
 await import('./unit/metrics.test.mjs');
 await import('./unit/examples.test.mjs');
+await import('./unit/stuck-burst.test.mjs');
+await import('./unit/decision-tick-guard.test.mjs');
 
 console.log(`${passedCount()} unit checks passed.`);

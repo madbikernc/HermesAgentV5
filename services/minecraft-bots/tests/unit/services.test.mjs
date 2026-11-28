@@ -1,4 +1,18 @@
-// Version: 1.2.0
+// Version: 1.3.0
+//
+// 1.3.0 (2026-11-28): direct instruction ("make sure minecraft traffic is exempt from the
+// HermesGuard injection detection systems") -- router.js 1.3.0 now sends
+// X-Hermes-Screening: analysis unconditionally, on every call, regardless of the `analysis` flag
+// a call site passes. Rewrote the S27f/S34 check's router-level assertions to match (they
+// previously required the header to be ABSENT by default and on `analysis: false` -- now true
+// unconditionally for ALL three). Dropped the chatSites source-scan half of that same check: it
+// asserted classifyIntent()/generateReply()/maybeRemember() (chat.js, archived along with the rest
+// of the pre-4.0.0 engine -- confirmed missing from the live services/minecraft-bots/ entirely)
+// gate their `analysis` flag on `fromVerifiedBot`, never a bare literal. That requirement is now
+// moot regardless: no call site needs gating when Layer 2 never blocks anything from this service.
+// Already-dead code aside, this scan could never have run anyway -- see
+// tests/unit/stuck-burst.test.mjs's header for how much further tests/unit/_harness.mjs's own
+// breakage goes than previously documented.
 //
 // 1.2.0 (2026-11-16): narrateAction() check -- it no longer calls muse (chat.js 1.1.0,
 // HermesAgentV6/IMPLEMENTATION_PLAN.md §5a/§9.7). Imports chatSrc from the harness.
@@ -12,68 +26,27 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
-import { root, index, skills, between, sleep, check, router, ragContext, slice, chatSrc, passedCount } from './_harness.mjs';
+import { root, skills, between, sleep, check, router, ragContext, slice, chatSrc, passedCount } from './_harness.mjs';
 
 
-await check('S27f analysis mode is opt-in, and the chat paths only opt in for a verified bot sender (S34)', async () => {
-  // Regression for the 2026-10-09 breakage: S22d gave Layer 2 a screener that actually detects
-  // injections, and it scored the bots' own planning prompt as malicious -- 189 blocked planning
-  // calls in six hours. callRole() can now declare the payload is bot state, but player chat
-  // must keep being screened, which is the half that is easy to get wrong silently.
-  //
-  // Widened 2026-10-21 (S34): classifyIntent()/generateReply() now conditionally pass
-  // analysis: fromVerifiedBot (isAnotherBot(speaker)) at their own <speaker> content site --
-  // this must stay tied to that verified-bot variable, never a bare `analysis: true` literal,
-  // which would silently re-open "a player can type anything" for every one of these sites.
+await check('router.js 1.3.0: every minecraft-bots call is unconditionally exempt from a Layer 2 block', async () => {
+  // Direct instruction, 2026-11-28: "make sure minecraft traffic is exempt from the HermesGuard
+  // injection detection systems." Supersedes the S27f/S34 per-call-site design this check used to
+  // verify (every call now declares analysis mode, full stop -- see router.js's own 1.3.0 header
+  // for the real tradeoff this accepts and why).
   const seen = [];
-  const mkContext = () => vm.createContext({
+  const c = vm.createContext({
     process: { env: {} }, AbortSignal, JSON,
     fetch: (_url, opts) => { seen.push(opts.headers); return Promise.resolve({
       ok: true, json: async () => ({ choices: [{ message: { content: 'x' } }] }) }); },
   });
-
-  const c = mkContext();
   vm.runInContext(between(router, 'const ROUTER_URL').replace(/export /g, ''), c);
 
   await c.callRole('dispatch', [], {});
-  assert.equal(seen[0]['X-Hermes-Screening'], undefined,
-    'screening must be the default -- an omitted flag must never mean "skip Layer 2"');
-
   await c.callRole('dispatch', [], { analysis: true });
-  assert.equal(seen[1]['X-Hermes-Screening'], 'analysis', 'analysis: true must set the header');
-
   await c.callRole('dispatch', [], { analysis: false });
-  assert.equal(seen[2]['X-Hermes-Screening'], undefined, 'analysis: false must not set it');
-
-  // And the real call sites: every one that carries `<speaker> message` must either stay
-  // unflagged (player chat, screened in full) or flag only via `fromVerifiedBot` -- never a
-  // literal `analysis: true`, which has no way to tell a verified bot sender from a player.
-  const src = index /* index.js and the modules split out of it */;
-  const lines = src.split(String.fromCharCode(10));
-  const chatSites = lines
-    .map((l, i) => ({ l, i }))
-    .filter(({ l }) => /\{ role: "user", content: `<\$\{speaker\}>/.test(l));
-  assert(chatSites.length >= 3, 'expected to find the player-chat call sites');
-  let conditionalSites = 0;
-  for (const { i } of chatSites) {
-    // the options object for a call site sits within ~40 lines after its user message --
-    // generateReply()'s is the farthest, 36 lines away (its <speaker> content line builds
-    // `history`, which the real callRole() invocation only joins in later, after the
-    // memory-lookup/bossNote work in between); classifyIntent()'s and maybeRemember()'s are
-    // both within 2. Found live on spark (2026-10-21): a 25-line window missed generateReply()
-    // entirely and crashed the whole suite on an uncaught assertion -- the fix itself was
-    // already correct, only this scan's window was too short.
-    const window = lines.slice(i, i + 40).join(String.fromCharCode(10));
-    const opts = window.match(/\{ *maxTokens:[^}]*\}/);
-    if (!opts || !/analysis/.test(opts[0])) continue;
-    assert(!/analysis:\s*true\b/.test(opts[0]),
-      `index.js line ${i + 1}: a literal analysis:true on a <speaker> content site cannot tell a player from a bot -- found: ${opts[0]}`);
-    assert(/analysis:\s*fromVerifiedBot\b/.test(opts[0]),
-      `index.js line ${i + 1}: expected analysis tied to fromVerifiedBot, found: ${opts[0]}`);
-    conditionalSites++;
-  }
-  assert.equal(conditionalSites, 2,
-    'expected exactly classifyIntent() and generateReply() to carry the S34 verified-bot exemption; maybeRemember() deliberately stays unflagged');
+  assert.deepEqual(seen.map((h) => h['X-Hermes-Screening']), ['analysis', 'analysis', 'analysis'],
+    'the header must be set on every call, regardless of what (if anything) the caller passes');
 });
 
 

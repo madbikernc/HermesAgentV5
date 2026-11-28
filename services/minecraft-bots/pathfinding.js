@@ -1,4 +1,23 @@
-// Version: 1.4.1
+// Version: 1.5.0
+//
+// 1.5.0 (2026-11-28, direct report: "the bots are still not moving or doing anything useful"):
+// confirmed live on Amy -- path_update status=success (nodes=6, cost=8.7) immediately followed by
+// path_reset: stuck, over and over, every ~3.5s for 12+ minutes straight, real position frozen to
+// two decimal places the entire window. Not the land case just below (jump was never held) or the
+// swim case (never in water) -- a third, previously undiagnosed shape, but the exact same
+// "'success' path immediately followed by getting stuck again... recomputing trivial routes that
+// never actually complete" loop the dig_error burst-detector below already exists to break, just
+// triggered by plain "stuck" instead of "dig_error," which that detector never watches. Worse than
+// cosmetic: the stuck goto() never settles, so whatever performAction() call started it never
+// returns and never releases arbiter control -- confirmed live, a player's Rcon command to Amy was
+// refused ("DIRECT_COMMAND (priority 10) still holds it") the entire time she was deadlocked like
+// this. Same fix shape as the dig_error detector: after STUCK_BURST_THRESHOLD consecutive "stuck"
+// resets with under STUCK_PROGRESS_EPSILON blocks of real position change across the whole run,
+// abandon the goal outright. setGoal(null) is confirmed (arbiter.js's own history: recover()'s
+// retry loop used to text-match the literal "The goal was changed") to reject the in-flight
+// goto() promise, which is what actually lets the stuck performAction() call return and release
+// control, not just a log line. Any OTHER reset reason breaks the streak -- something genuinely
+// changed, so it gets a fresh chance rather than counting toward abandonment.
 //
 // 1.4.1 (2026-11-27, Minecraft bots restart Phase 4): isProtectedBlockName's import moved from
 // ./actions.js to ./action-vocab.js -- actions.js was archived (MINECRAFT_BOTS_RESTART_PLAN.md),
@@ -454,5 +473,33 @@ export function setupPathfinding(bot, { username: USERNAME }) {
   bot.on("physicsTick", () => {
     if (bot.entity?.isInWater && bot.pathfinder?.isMoving?.()) bot.setControlState("sprint", true);
   });
+
+  // Generic stuck-loop breaker (1.5.0) -- see this file's own header for the live incident. The
+  // dig_error burst-detector above only ever watches reason === "dig_error"; this is the same
+  // shape for plain "stuck", which had no equivalent. Each "stuck" reset already represents the
+  // library's own fixed ~3500ms no-progress timeout firing once, so unlike dig_error (which can
+  // refire many times per second) a handful of consecutive occurrences is already a strong signal
+  // -- no time window needed, just a run length.
+  const STUCK_BURST_THRESHOLD = 3;
+  const STUCK_PROGRESS_EPSILON = 1.0;
+  let stuckPositions = [];
+  bot.on("path_reset", (reason) => {
+    if (reason !== "stuck") {
+      stuckPositions = []; // something else changed -- give the new state a fresh chance
+      return;
+    }
+    const pos = bot.entity?.position;
+    if (!pos) return;
+    stuckPositions.push(new Vec3(pos.x, pos.y, pos.z)); // same copy-out pattern as dig_error's own lastPathToBreak use above
+    if (stuckPositions.length > STUCK_BURST_THRESHOLD) stuckPositions.shift();
+    if (stuckPositions.length < STUCK_BURST_THRESHOLD) return;
+    const moved = stuckPositions[0].distanceTo(stuckPositions[stuckPositions.length - 1]);
+    if (moved >= STUCK_PROGRESS_EPSILON) return; // genuinely inching forward, not deadlocked
+    console.log(`[${USERNAME}] stuck burst -- ${STUCK_BURST_THRESHOLD} consecutive "stuck" ` +
+      `resets with only ${moved.toFixed(2)} blocks of real progress, abandoning goal`);
+    stuckPositions = [];
+    bot.pathfinder.setGoal(null);
+  });
+
   return movements;
 }
