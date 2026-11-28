@@ -1,4 +1,8 @@
-// Version: 4.2.0
+// Version: 4.3.0
+//
+// 4.3.0 (2026-11-27): direct request -- a "/closest <item>" chat/whisper/Matrix command, answered
+// deterministically from world-memory.js's cross-host discovery registry (no LLM call, read-only,
+// so it answers even while the bot is busy). See history/index.js.md for the full account.
 //
 // 4.2.0 (2026-11-27, security finding during the legacy-baseline test port): decisionTick()'s
 // callRole() carried a bare `analysis: true` even though its messages include conversationHistory,
@@ -58,6 +62,7 @@ import { callRole } from "./router.js";
 import { containsCommand, executeCommand, getCommandDocs } from "./commands.js";
 import { MODES, runModes } from "./modes.js";
 import { OWNERS, isBusy } from "./arbiter.js";
+import { findClosest } from "./world-memory.js";
 import { Vec3 } from "vec3";
 
 export const { pathfinder } = pathfinderPkg;
@@ -341,9 +346,26 @@ guardedInterval(() => {
 }, MODES_TICK_MS);
 
 // --- Chat / whisper / Matrix -------------------------------------------------------------------
+const CLOSEST_COMMAND_RE = /^\/closest\s+(.+)$/i;
+
 async function handleChatMessage(speaker, message, { send }) {
   if (speaker === USERNAME) return;
   if (isAnotherBot(speaker) && !isMayor(speaker)) return; // see isAnotherBot's own comment
+  // Direct request, 2026-11-27: a deterministic world-memory query, not a conversational one --
+  // intercepted before any LLM call (no judgment needed, no reason to spend a turn or a token on
+  // "what is the nearest known chest"), and read-only, so it answers even while the bot is busy.
+  const closestMatch = message.trim().match(CLOSEST_COMMAND_RE);
+  if (closestMatch) {
+    const item = closestMatch[1].trim().toLowerCase().replace(/\s+/g, "_");
+    const found = await findClosest(item, bot.entity.position);
+    const reply = found
+      ? `closest known ${item}: (${Math.round(found.x)}, ${Math.round(found.y)}, ${Math.round(found.z)}), ` +
+        `${Math.round(found.distance)} blocks from ${USERNAME}`
+      : `no known sighting of "${item}" yet.`;
+    console.log(`[${USERNAME}] /closest ${item} (from ${speaker}): ${reply}`);
+    send(reply);
+    return;
+  }
   pushHistory("user", `${speaker}: ${message}`, { trusted: isAnotherBot(speaker) });
   let reply;
   try {

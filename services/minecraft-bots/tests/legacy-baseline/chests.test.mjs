@@ -1,4 +1,10 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-27): direct request, "make the world memory reachable from bots on both nodes"
+// -- world-memory.js 2.0.0 moved off a per-host local file onto the cross-host hermes-memory
+// service; its own test here now mocks fetch (hermes-memory's real {agent,key,value} contract)
+// instead of an isolated MC_MEMORY_ROOT temp directory. Added a findClosest() check for the new
+// "/closest <item>" command (index.js 4.3.0).
 //
 // 1.1.0 (2026-11-27): direct request -- the two confirmed chest regressions below (radius, miss
 // cache) are now fixed (skills.js 1.1.0); their checks updated to match the real shape of the fix
@@ -128,18 +134,39 @@ test('[legacy:chests] a chest search that just came up empty is not repeated fro
   assert.match(skillsSrc, /chestMissCache/, "expected the specific miss-cache findNearestChest() reads/writes");
 });
 
+// hermes-memory (tools/hermes-memory.py)'s real contract, mocked: POST /state upserts
+// {agent,key,value} by key; GET /state/<agent> lists every {key,value,updated_at} row for that
+// agent. world-memory.js 2.0.0 is the ONLY caller in this project -- mocking fetch here is the
+// same precedent tests/legacy-baseline/services.test.mjs's router.js/buzz.js checks already use.
+function fakeHermesMemory() {
+  const rows = new Map(); // "agent\x00key" -> value
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = new URL(url);
+    if (opts.method === "POST" && u.pathname === "/state") {
+      const { agent, key, value } = JSON.parse(opts.body);
+      rows.set(`${agent}\x00${key}`, value);
+      return { ok: true, status: 200, json: async () => ({ agent, key }) };
+    }
+    if (u.pathname.startsWith("/state/")) {
+      const agent = decodeURIComponent(u.pathname.slice("/state/".length));
+      const state = [...rows.entries()]
+        .filter(([k]) => k.startsWith(`${agent}\x00`))
+        .map(([k, value]) => ({ key: k.slice(agent.length + 1), value, updated_at: Date.now() / 1000 }));
+      return { ok: true, status: 200, json: async () => ({ agent, state }) };
+    }
+    return { ok: false, status: 404, json: async () => ({ error: "no such route" }) };
+  };
+  return { restore: () => { globalThis.fetch = realFetch; }, rows };
+}
+
 test('[legacy:chests] world memory: a notable block any search finds gets recorded, not just chests', async () => {
   // Direct request, 2026-11-27 ("verify that all discovered objects get an entry in the world
   // memory"): world.getNearestBlocksWhere() -- the one chokepoint every block search in this
   // project funnels through -- now records every notable result via world-memory.js, fire-and-
-  // forget. Exercised against the REAL module with an isolated MC_MEMORY_ROOT (never the fleet's
-  // own /mnt/hermes-data/minecraft-memory).
-  const fsp = await import("node:fs/promises");
-  const os = await import("node:os");
-  const pathMod = await import("node:path");
-  const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), "mbtest-world-memory-"));
-  const realRoot = process.env.MC_MEMORY_ROOT;
-  process.env.MC_MEMORY_ROOT = dir; // world-memory.js reads this fresh on every call, not just at import
+  // forget, into the cross-host hermes-memory registry (not a per-host local file -- see
+  // world-memory.js's own 2.0.0 header for why that was never actually cross-host).
+  const mem = fakeHermesMemory();
   try {
     assert.equal(worldMemory.isNotableDiscovery("chest"), true);
     assert.equal(worldMemory.isNotableDiscovery("diamond_ore"), true);
@@ -158,8 +185,24 @@ test('[legacy:chests] world memory: a notable block any search finds gets record
     assert.deepEqual([known[0].x, known[0].y, known[0].z], [5, 64, 0]);
     assert.equal((await worldMemory.getKnownSightings("stone")).length, 0, "plain stone was never recorded");
   } finally {
-    if (realRoot === undefined) delete process.env.MC_MEMORY_ROOT; else process.env.MC_MEMORY_ROOT = realRoot;
-    await fsp.rm(dir, { recursive: true, force: true });
+    mem.restore();
+  }
+});
+
+test('[legacy:chests] world memory: findClosest picks the nearest known sighting, across hosts', async () => {
+  // The "/closest <item>" command (index.js 4.3.0) is only meaningful once two bots on different
+  // hosts can see what the OTHER one found -- exercised here as two independent recordings (as if
+  // from two different bots) read back by a third, distant position.
+  const mem = fakeHermesMemory();
+  try {
+    await worldMemory.recordSightingIfNotable("furnace", new V3(0, 64, 0));
+    await worldMemory.recordSightingIfNotable("furnace", new V3(100, 64, 0));
+    const closest = await worldMemory.findClosest("furnace", new V3(5, 64, 0));
+    assert.deepEqual([closest.x, closest.y, closest.z], [0, 64, 0], "the nearer of the two sightings wins");
+    assert.equal(Math.round(closest.distance), 5);
+    assert.equal(await worldMemory.findClosest("beacon", new V3(0, 64, 0)), null, "nothing known yet is null, not a crash");
+  } finally {
+    mem.restore();
   }
 });
 

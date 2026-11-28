@@ -1,6 +1,6 @@
 # index.js change history
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 
 The change history of `services/minecraft-bots/index.js`, newest first. Until 2026-11-13 it was the
 comment block at the top of `index.js` itself (149k characters, more than the self-repair pipeline's
@@ -9,6 +9,18 @@ into subject modules (`index.js` 3.0.0, direct operator request). `index.js` kee
 line; each new version's entry goes at the top of the list below.
 
 ## Versions
+
+### 4.3.0 (2026-11-27)
+
+Direct request: a `/closest <item>` chat/whisper/Matrix command. Intercepted in
+`handleChatMessage()` before any LLM call -- a deterministic world-memory lookup needs no
+judgment and shouldn't cost a model turn -- and read-only, so it answers even while `isBusy()`
+would otherwise block the decision loop. Normalizes the item name (lowercase, spaces to
+underscores) and calls `world-memory.js`'s new `findClosest(name, fromPosition)`, which now reads
+from the cross-host `hermes-memory` registry (see that file's own 2.0.0 entry) rather than a
+per-host local file -- so the answer reflects what *any* bot on *either* node has ever found, not
+just this one. Replies with absolute coordinates and the distance from the answering bot; an
+unknown item gets a plain "no known sighting yet," not an error.
 
 ### 4.2.0 (2026-11-27)
 

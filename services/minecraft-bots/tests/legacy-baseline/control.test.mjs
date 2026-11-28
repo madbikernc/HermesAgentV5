@@ -1,4 +1,7 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-27): added a source-position check for the new "/closest <item>" chat command
+// (index.js 4.3.0) -- answered before any LLM call and never gated by isBusy().
 //
 // Legacy baseline: ported from tests/unit/control.test.mjs ("goals, arbitration, commands and
 // memory notes") against current services/minecraft-bots/arbiter.js and router.js. arbiter.js's
@@ -143,6 +146,26 @@ test("[legacy:control] MB-23/S34: an analysis-skipping callRole() call must neve
   assert.doesNotMatch(indexSrc, /analysis:\s*true\s*,/, "no callRole() site may hand a bare analysis:true literal to a call whose messages can include conversationHistory");
   assert.match(indexSrc, /trusted:\s*isAnotherBot\(speaker\)/, "the raw speaker-text push into history must be tagged by its real trust (isAnotherBot), not assumed trusted");
   assert.match(indexSrc, /analysis:\s*allTrusted/, "decisionTick's analysis flag must be computed from history's actual trust, not a literal");
+});
+
+test("[legacy:control] /closest <item> is answered deterministically, before any LLM call, and works while the bot is busy", async () => {
+  // Direct request, 2026-11-27: a data query needs no model judgment and shouldn't cost a token
+  // or wait on isBusy() -- checked against the real current index.js (4.3.0) by source position,
+  // the same precedent the MB-23/S34 check above and services.test.mjs's chat-site scan both use
+  // (index.js creates a real mineflayer bot on import, so it can never be imported and run here).
+  const indexSrc = await readFile(ROOT + "index.js", "utf8");
+  assert.match(indexSrc, /\/closest/i, "expected a /closest command pattern defined somewhere in index.js");
+  const fnStart = indexSrc.indexOf("async function handleChatMessage(");
+  assert(fnStart >= 0, "expected to find handleChatMessage");
+  const body = indexSrc.slice(fnStart, indexSrc.indexOf("\n}", fnStart));
+  const closestAt = body.search(/closestMatch/);
+  const callRoleAt = body.indexOf('callRole("muse"');
+  assert(closestAt >= 0, "expected handleChatMessage to check for a /closest match");
+  assert(callRoleAt >= 0, "expected handleChatMessage's own callRole(\"muse\", ...) call");
+  assert(closestAt < callRoleAt, "/closest must be handled before the LLM call, not after");
+  assert.match(body, /findClosest\(/, "expected /closest to read from world-memory.js's findClosest()");
+  assert.doesNotMatch(body.slice(closestAt, callRoleAt), /isBusy\(/,
+    "/closest must not be gated by isBusy() -- it's a read-only query, not an action");
 });
 
 test.todo("[legacy:control] Direct investigation 2026-11-22: ACTION BUILD becomes a standing goal, not a raw one-off build -- NOT PORTED: classifyIntent()/ACTION-grammar routing and the goal engine it fed were both archived; the model now emits !commands directly, with no typed ACTION/goal classification step in between");
