@@ -1,0 +1,50 @@
+{
+  "title": "Firmament — Minecraft bot sandbox",
+  "uid": "firmament-minecraft",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "title": "TPS",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "max": 20, "min": 0 }, "overrides": [] },
+      "targets": [{ "expr": "mc_tps{server=\"paper\"}", "legendFormat": "{{window}}" }]
+    },
+    {
+      "title": "Tick duration (MSPT)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [{ "expr": "mc_tick_duration_seconds{server=\"paper\"}" }]
+    },
+    {
+      "title": "Players online",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "targets": [{ "expr": "mc_players_online{server=\"paper\"}" }]
+    },
+    {
+      "title": "Loaded chunks",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 9, "x": 6, "y": 8 },
+      "targets": [{ "expr": "mc_world_chunks{server=\"paper\"}", "legendFormat": "{{world}}" }]
+    },
+    {
+      "title": "Entities",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 9, "x": 15, "y": 8 },
+      "targets": [{ "expr": "mc_world_entities{server=\"paper\"}", "legendFormat": "{{world}}" }]
+    },
+    {
+      "title": "JVM heap used",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [{ "expr": "mc_jvm_memory_used_bytes{server=\"paper\",area=\"heap\"}" }]
+    }
+  ]
+}

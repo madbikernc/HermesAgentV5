@@ -1,0 +1,44 @@
+{
+  "title": "Firmament — hermes-router",
+  "uid": "firmament-hermes-router",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "title": "Request rate by role",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "expr": "sum by (host, role) (rate(hermes_router_requests_total[5m]))", "legendFormat": "{{host}}/{{role}}" }
+      ]
+    },
+    {
+      "title": "Error rate by role",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (host, role) (rate(hermes_router_requests_total{status=\"error\"}[10m])) / sum by (host, role) (rate(hermes_router_requests_total[10m]))",
+          "legendFormat": "{{host}}/{{role}}"
+        }
+      ]
+    },
+    {
+      "title": "Average latency by role",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "rate(hermes_router_latency_ms_sum[5m]) / rate(hermes_router_latency_ms_count[5m])",
+          "legendFormat": "{{host}}/{{role}}"
+        }
+      ]
+    }
+  ]
+}

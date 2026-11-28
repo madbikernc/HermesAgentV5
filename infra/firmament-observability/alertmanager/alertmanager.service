@@ -1,0 +1,24 @@
+[Unit]
+Description=Alertmanager — Firmament fleet alert routing
+Documentation=file:///home/pmoney/HermesAgentV5/infra/firmament-observability/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alertmanager
+Group=alertmanager
+ExecStart=/opt/alertmanager-0.35.1/alertmanager \
+  --config.file=/opt/alertmanager-0.35.1/alertmanager.yml \
+  --storage.path=/opt/alertmanager-data \
+  --web.listen-address=127.0.0.1:9093 \
+  --cluster.listen-address=""
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/alertmanager-data
+
+[Install]
+WantedBy=multi-user.target

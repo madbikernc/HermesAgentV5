@@ -1,0 +1,24 @@
+[Unit]
+Description=Prometheus — Firmament fleet metrics server
+Documentation=file:///home/pmoney/HermesAgentV5/infra/firmament-observability/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prometheus
+Group=prometheus
+ExecStart=/opt/prometheus-3.16.0/prometheus \
+  --config.file=/opt/prometheus-3.16.0/prometheus.yml \
+  --storage.tsdb.path=/opt/prometheus-data \
+  --storage.tsdb.retention.time=30d \
+  --web.listen-address=127.0.0.1:9090
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/prometheus-data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes Alertmanager-to-Matrix bridge — Firmament fleet alerting
+Documentation=file:///home/pmoney/HermesAgentV5/infra/firmament-observability/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pmoney
+Group=pmoney
+WorkingDirectory=/home/pmoney/HermesAgentV5/tools
+# hermes_alert_common.py's own MATRIX_HOMESERVER default (127.0.0.1:6167) assumes it's running
+# on the same host as the Continuwuity Matrix server (dgx-spark) -- true for hermes-router.py's
+# own normal deployment, not true here (this bridge runs on HomeD13). Confirmed live 2026-11-28:
+# without this override, matrix_notice() fails with "Connection refused".
+Environment="MATRIX_HOMESERVER=http://10.129.1.15:6167"
+ExecStart=/usr/bin/python3 /home/pmoney/HermesAgentV5/tools/hermes-alertmanager-matrix-bridge.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

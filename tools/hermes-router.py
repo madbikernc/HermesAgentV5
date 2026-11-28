@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-# Version: 2.22.0
+# Version: 2.23.0
+#
+# 2.23.0 (2026-11-28) - FIRMAMENT_OBSERVABILITY: a Prometheus /metrics endpoint, on its OWN
+# second HTTP listener (METRICS_BIND/METRICS_PORT, default 0.0.0.0:9101) -- deliberately not a
+# new path on Handler's own server, which keeps its existing 127.0.0.1-only bind and its existing
+# request-routing logic completely untouched. _log_usage() (every real request, success or
+# failure) now also updates in-memory counters (_record_metric()); MetricsHandler's do_GET()
+# renders them in Prometheus text format on each scrape. Hand-rolled rather than adding a
+# `prometheus_client` dependency, matching this file's own existing stdlib-only style. Exposure is
+# via ufw (HomeD13's IP only), the same pattern every other cross-host-reachable port in this
+# fleet already uses -- see infra/network-planes.md.
 #
 # 2.22.0 (2026-11-19) - `omni` demoted resident -> on-demand on both branches, same pattern as
 # muse's own 2.20.0 entry: spark-2 has no room to keep every backend pinned resident once a
@@ -356,10 +366,11 @@
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -370,6 +381,16 @@ import hermes_usage_log  # noqa: E402
 
 BIND = os.environ.get("ROUTER_BIND", "127.0.0.1")
 PORT = int(os.environ.get("ROUTER_PORT", "8080"))
+
+# FIRMAMENT_OBSERVABILITY (2026-11-28): a SEPARATE listener, deliberately not a new path on the
+# main Handler above -- that one stays 127.0.0.1-only exactly as it's always been, no change to
+# its bind address or its request-routing logic at all. This one exists only to serve /metrics,
+# bound broadly (like every other cross-host-reachable service in this fleet, e.g. hermes-broker)
+# and restricted by ufw to HomeD13's own IP, the same pattern already used everywhere else here --
+# see infra/network-planes.md's own account of why firewall, not bind address, is this fleet's
+# actual access-control layer.
+METRICS_BIND = os.environ.get("ROUTER_METRICS_BIND", "0.0.0.0")
+METRICS_PORT = int(os.environ.get("ROUTER_METRICS_PORT", "9101"))
 
 # EMAIL_PASSWORD/FLEETOPS_TOKEN/FLEETOPS_ROOM are owned by hermes_alert_common now (S32 item
 # b) -- re-exported here only because main()'s startup banner below reads them directly.
@@ -705,6 +726,69 @@ def check_tool_calls(body):
     return None
 
 
+# FIRMAMENT_OBSERVABILITY (2026-11-28): in-process counters, hand-rolled rather than adding a
+# `prometheus_client` dependency -- every other tool in this fleet (hermes-memory.py,
+# hermes_alert_common.py, this file) is already stdlib-only, and the format is simple enough not
+# to need a library. Updated from _log_usage() below (every real request, success or failure);
+# read from MetricsHandler.do_GET() on each Prometheus scrape. _metrics_lock guards both sides --
+# ThreadingHTTPServer serves requests concurrently.
+_metrics_lock = threading.Lock()
+_request_count = {}       # (role, status) -> int
+_latency_ms_sum = {}      # role -> float
+_latency_ms_count = {}    # role -> int
+
+
+def _record_metric(role, status, latency_ms):
+    with _metrics_lock:
+        key = (role, status)
+        _request_count[key] = _request_count.get(key, 0) + 1
+        _latency_ms_sum[role] = _latency_ms_sum.get(role, 0.0) + latency_ms
+        _latency_ms_count[role] = _latency_ms_count.get(role, 0) + 1
+
+
+def _render_metrics():
+    lines = [
+        "# HELP hermes_router_requests_total Total requests handled, by role and status.",
+        "# TYPE hermes_router_requests_total counter",
+    ]
+    with _metrics_lock:
+        for (role, status), count in sorted(_request_count.items()):
+            lines.append(f'hermes_router_requests_total{{node="{NODE}",role="{role}",status="{status}"}} {count}')
+        lines += [
+            "# HELP hermes_router_latency_ms_sum Sum of request latency in milliseconds, by role.",
+            "# TYPE hermes_router_latency_ms_sum counter",
+        ]
+        for role, total in sorted(_latency_ms_sum.items()):
+            lines.append(f'hermes_router_latency_ms_sum{{node="{NODE}",role="{role}"}} {total}')
+        lines += [
+            "# HELP hermes_router_latency_ms_count Count of requests contributing to the latency sum, by role.",
+            "# TYPE hermes_router_latency_ms_count counter",
+        ]
+        for role, count in sorted(_latency_ms_count.items()):
+            lines.append(f'hermes_router_latency_ms_count{{node="{NODE}",role="{role}"}} {count}')
+    return "\n".join(lines) + "\n"
+
+
+class MetricsHandler(BaseHTTPRequestHandler):
+    """Serves only GET /metrics, nothing else -- a deliberately minimal second listener (see
+    METRICS_BIND/METRICS_PORT above), entirely separate from Handler's own request-routing path."""
+
+    def log_message(self, fmt, *args):
+        pass  # a scrape every 15-30s would otherwise spam this process's own log forever
+
+    def do_GET(self):
+        if self.path != "/metrics":
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = _render_metrics().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log(f"{self.address_string()} - {fmt % args}")
@@ -984,13 +1068,15 @@ class Handler(BaseHTTPRequestHandler):
             self._log_usage(role, "error", start, ttfb_ms, prompt_chars, b"", error_message=str(exc))
 
     def _log_usage(self, role, status, start, ttfb_ms, prompt_chars, body, error_message=None):
+        latency_ms = int((time.monotonic() - start) * 1000)
         usage = extract_usage(body) or {}
         hermes_usage_log.log_request(
-            role=role, status=status, latency_ms=int((time.monotonic() - start) * 1000),
+            role=role, status=status, latency_ms=latency_ms,
             ttfb_ms=ttfb_ms, prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"), total_tokens=usage.get("total_tokens"),
             prompt_chars=prompt_chars, response_chars=len(body), error_message=error_message,
         )
+        _record_metric(role, status, latency_ms)  # FIRMAMENT_OBSERVABILITY (2026-11-28)
 
 
 def main():
@@ -1004,6 +1090,12 @@ def main():
         f"(real-time notices: {notice_state}, guard block email: {email_state}, "
         f"Layer 2 guard: {guard2_state}, guard->memory logging: {memory_log_state}, "
         f"usage log: {hermes_usage_log.DB_PATH}, guard log: {hermes_injection_guard.DB_PATH})")
+    # FIRMAMENT_OBSERVABILITY (2026-11-28): a second, metrics-only listener on its own port --
+    # see METRICS_BIND/METRICS_PORT's own comment above for why this is separate from Handler's
+    # server rather than a new path on it. Daemon thread: never blocks process exit.
+    metrics_server = HTTPServer((METRICS_BIND, METRICS_PORT), MetricsHandler)
+    threading.Thread(target=metrics_server.serve_forever, daemon=True).start()
+    log(f"metrics (Prometheus text format) on {METRICS_BIND}:{METRICS_PORT}/metrics")
     server = ThreadingHTTPServer((BIND, PORT), Handler)
     server.serve_forever()
 

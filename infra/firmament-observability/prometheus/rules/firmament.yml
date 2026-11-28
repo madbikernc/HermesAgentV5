@@ -1,0 +1,35 @@
+# Starting alert rules — intentionally small. Add more only when a specific incident shows a gap,
+# matching this project's own "don't add a metric/check speculatively" rule (see tests/README.md's
+# baseline-metric guidance, applied here to alerting too).
+groups:
+  - name: firmament-host
+    rules:
+      - alert: FirmamentHostDown
+        expr: up{job="node_exporter"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.host }} is not reporting host metrics"
+          description: "node_exporter on {{ $labels.host }} has been unreachable for 5+ minutes."
+
+      - alert: FirmamentHostDiskLow
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.10
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.host }}'s root filesystem is below 10% free"
+          description: "Checked live 2026-11-28: spark was at 62% used, spark2 74%, homed13 11% — this fires well before any of them would have been near the edge then."
+
+  - name: firmament-router
+    rules:
+      - alert: FirmamentRouterErrorRateHigh
+        expr: |
+          sum by (host, role) (rate(hermes_router_requests_total{status="error"}[10m]))
+          /
+          sum by (host, role) (rate(hermes_router_requests_total[10m]))
+          > 0.25
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "hermes-router role {{ $labels.role }} on {{ $labels.host }} has a >25% error rate"
+          description: "Over the last 10 minutes. Check that role's backend (llama-server process) and hermes-router's own log."

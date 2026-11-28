@@ -1,0 +1,55 @@
+# Firmament fleet Prometheus scrape config. See ../README.md for install steps and
+# ../../../FIRMAMENT_OBSERVABILITY_PLAN.md for the full reasoning.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    fleet: firmament
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+
+rule_files:
+  - "rules/*.yml"
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  - job_name: "node_exporter"
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+        labels: { host: "homed13" }
+      - targets: ["10.129.1.15:9100"]
+        labels: { host: "dgx-spark" }
+      - targets: ["10.129.1.17:9100"]
+        labels: { host: "dgx-spark2" }
+
+  # hermes-router.py 2.23.0's own, separate metrics-only listener (see that file's own
+  # changelog) -- never the main router port (127.0.0.1-only, unchanged).
+  - job_name: "hermes_router"
+    static_configs:
+      - targets: ["10.129.1.15:9101"]
+        labels: { host: "dgx-spark" }
+      - targets: ["10.129.1.17:9101"]
+        labels: { host: "dgx-spark2" }
+
+  # Minecraft bot-sandbox server (192.168.1.221), TickScope plugin. That box has no firewall
+  # capability at all (no sudo, no ufw/iptables/firewalld -- confirmed live, a different
+  # administrative domain from the three Hermes fleet hosts) -- its /metrics is reachable from
+  # the whole 192.168.1.0/24 subnet with no network-level restriction, so TickScope's own
+  # bearer-token auth is the only control available. The token lives in
+  # /opt/prometheus-secrets/tickscope-token on HomeD13 (NOT in this repo -- see README.md's own
+  # note on why), referenced here rather than inlined.
+  # TickScope's own metrics already carry a server="paper" label (its config.yml's own
+  # server-id) -- deliberately NOT adding a same-named Prometheus-side label here, which would
+  # either collide or require relying on honor_labels semantics for no real benefit. Dashboards
+  # query server="paper" directly.
+  - job_name: "minecraft_tickscope"
+    authorization:
+      credentials_file: /opt/prometheus-secrets/tickscope-token
+    static_configs:
+      - targets: ["192.168.1.221:9101"]
