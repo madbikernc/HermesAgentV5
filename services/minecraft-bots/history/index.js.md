@@ -1,6 +1,6 @@
 # index.js change history
 
-**Version:** 1.5.0
+**Version:** 1.6.0
 
 The change history of `services/minecraft-bots/index.js`, newest first. Until 2026-11-13 it was the
 comment block at the top of `index.js` itself (149k characters, more than the self-repair pipeline's
@@ -9,6 +9,29 @@ into subject modules (`index.js` 3.0.0, direct operator request). `index.js` kee
 line; each new version's entry goes at the top of the list below.
 
 ## Versions
+
+### 4.4.0 (2026-11-27)
+
+Diagnosability audit (direct request: "see what you can or should do to increase the
+diagnosability of their actions and reactions"). Three fixes, each closing a case where an
+operator reading `journalctl` alone couldn't tell what actually happened:
+1. `runModes()`'s own return value (which mode acted, if any) was discarded by its only caller --
+   a fired mode's only externally-visible trace was its own `bot.chat()` line, which lands in
+   Minecraft chat, not the Node console. A reflex pre-empting the current decision-tick action
+   looked identical in the journal to the model simply deciding to do the same thing. Now logged:
+   `mode fired: <name>`.
+2. The `chat-issued command result` log line never named who sent the command -- couldn't tell
+   the Mayor's command from a random player's from a verified bot's. Now `(from ${speaker})`.
+3. `/closest`'s own reply (added in 4.3.0) had no log line at all. Now logged alongside the other
+   two command-result lines.
+
+Two related, more invasive fixes shipped in the same audit but credited to their own files:
+`commands.js` 1.1.0 (a real bug, not just a logging gap -- most skills.js functions narrate via
+`bot.output`, which `performCommand()` was discarding in favor of a bare `true`/`false`) and
+`arbiter.js` 1.6.0 (control denial/preemption logging). Not acted on: the audit also flagged
+pathfinding stuck-loops as invisible by default, which turned out to be wrong on inspection --
+`pathfinding.js`'s `path_update`/`path_reset` listeners already log unconditionally, confirmed
+live in this fleet's own journals throughout this session.
 
 ### 4.3.0 (2026-11-27)
 

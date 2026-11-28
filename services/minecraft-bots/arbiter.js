@@ -1,4 +1,11 @@
-// Version: 1.5.0
+// Version: 1.6.0
+//
+// 1.6.0 (2026-11-27) -- direct finding (diagnosability audit): control denial and preemption were
+// entirely unlogged, so "why did my command get refused" or "why was my skill interrupted" had no
+// answer in the journal. requestControl()'s denial and preemption branches, and
+// cancelAndClear()'s own preemption, now log who/what/at-what-priority. Deliberately NOT logging
+// every uncontested acquisition -- that fires on nearly every command and would be noise, not
+// signal.
 //
 // 1.5.0 (2026-09-24) -- review MB-02 follow-up: cancelPhysical() closes the interrupted
 // action's open window (chest/furnace/crafting/enchanting). OWNERS comments corrected:
@@ -182,6 +189,7 @@ export function cancelAndRotate(bot) {
 export function cancelAndClear(bot, preemptedBy = OWNERS.TELEPORT_HOME.name) {
   cancelPhysical(bot);
   if (current) {
+    console.log(`[${bot.username}] arbiter: ${preemptedBy} cancelled ${current.owner.name} (cancelAndClear, no owner left)`);
     current.token.cancelled = true;
     current.token.preempted = true;
     current.token.preemptedBy = preemptedBy;
@@ -237,9 +245,19 @@ export async function requestControl(bot, ownerDescriptor, opts = {}) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
   // still held by something equally or more urgent
-  if (blocks()) return null;
+  if (blocks()) {
+    // Direct finding, 2026-11-27 (diagnosability audit): control denial/preemption was entirely
+    // unlogged -- "why did my command get refused" or "why was my skill interrupted" had no
+    // answer in the journal at all. Logged here, once, rather than on every uncontested
+    // acquisition (which would fire on nearly every command and add noise, not signal).
+    console.log(`[${bot.username}] arbiter: ${ownerDescriptor.name} denied control -- ` +
+      `${current.owner.name} (priority ${current.owner.priority}) still holds it`);
+    return null;
+  }
 
   if (current) {
+    console.log(`[${bot.username}] arbiter: ${ownerDescriptor.name} preempted ${current.owner.name} ` +
+      `(priority ${current.owner.priority} < ${ownerDescriptor.priority})`);
     current.token.cancelled = true;
     current.token.preempted = true;
     current.token.preemptedBy = ownerDescriptor.name;

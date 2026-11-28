@@ -1,4 +1,10 @@
-// Version: 4.3.0
+// Version: 4.4.0
+//
+// 4.4.0 (2026-11-27, diagnosability audit): three fixes, none of them visible in Minecraft chat --
+// a fired reactive mode (runModes()) is now logged to the console/journal (previously only visible
+// as its own bot.chat() side effect, indistinguishable in the journal from a deliberate decisionTick
+// action); the chat-issued command result log line now names the speaker; /closest's own reply is
+// now logged too. See history/index.js.md for the full account.
 //
 // 4.3.0 (2026-11-27): direct request -- a "/closest <item>" chat/whisper/Matrix command, answered
 // deterministically from world-memory.js's cross-host discovery registry (no LLM call, read-only,
@@ -342,7 +348,13 @@ async function decisionTick() {
 
 guardedInterval(decisionTick, GOAL_TICK_MS);
 guardedInterval(() => {
-  runModes(bot).catch((err) => console.error(`[${USERNAME}] runModes failed:`, err.message));
+  // Direct finding, 2026-11-27 (diagnosability audit): runModes() already returns which mode
+  // acted, but nothing logged it -- a mode firing (e.g. self_defense taking over mid-task) looked
+  // identical in the journal to a deliberate decisionTick action, so there was no way to tell
+  // "the model decided to fight" from "a reflex pre-empted it" from logs alone.
+  runModes(bot)
+    .then((acted) => { if (acted) console.log(`[${USERNAME}] mode fired: ${acted}`); })
+    .catch((err) => console.error(`[${USERNAME}] runModes failed:`, err.message));
 }, MODES_TICK_MS);
 
 // --- Chat / whisper / Matrix -------------------------------------------------------------------
@@ -388,7 +400,10 @@ async function handleChatMessage(speaker, message, { send }) {
     // by name, whether or not they're the Mayor/Boss (no second tier exists above it for that
     // distinction; see arbiter.js's own OWNERS comment).
     const result = await executeCommand(bot, reply, { tier: OWNERS.DIRECT_COMMAND });
-    console.log(`[${USERNAME}] chat-issued command result: ${result}`);
+    // Direct finding, 2026-11-27 (diagnosability audit): this line never named who issued the
+    // command -- couldn't tell from the journal alone whether it came from the Mayor, a random
+    // player, or a verified bot.
+    console.log(`[${USERNAME}] chat-issued command result (from ${speaker}): ${result}`);
     pushHistory("user", `Command result: ${result}`);
   }
 }

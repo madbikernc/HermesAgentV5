@@ -1,4 +1,11 @@
-// Version: 1.0.1
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-27, diagnosability audit): real bug fix, not just a logging improvement --
+// performCommand() returned a bare true/false/undefined from most skills.js functions, which
+// narrate what actually happened via log(bot, ...) into bot.output instead of their return value
+// (e.g. viewChest's own item listing). That narration reached neither the model nor an operator
+// reading the journal. New describeOutcome(bot, result) (exported for direct testing) prefers
+// bot.output.trim() when the command's own call left anything there.
 //
 // 1.0.1 (2026-11-27, Phase 4 integration fix): !stop now sets bot.interrupt_code and calls
 // arbiter.cancelAndClear() -- skills.js's own long-running loops (digDown, tillAndSow, goToGoal's
@@ -518,13 +525,25 @@ export function parseCommandMessage(message) {
  * Returns the command's result text, or an error string if control couldn't be acquired or the
  * command threw.
  */
+// Direct finding, 2026-11-27 (diagnosability audit): most skills.js functions narrate what
+// actually happened via log(bot, ...) into bot.output (e.g. viewChest's own item listing,
+// craftRecipe's chain-crafting steps) and then return a bare true/false success flag -- that
+// narration, not the boolean, is the result worth seeing. Every caller here reset bot.output to
+// "" immediately before calling performCommand/executeCommand (index.js), so by the time a
+// command's own perform() runs it starts clean; whatever landed there during this one call is
+// this command's own real result text.
+export function describeOutcome(bot, result) {
+  const narrated = bot.output?.trim();
+  return narrated || (result ?? "Done.");
+}
+
 export async function performCommand(bot, commandName, args = [], opts = {}) {
   const command = getCommand(commandName);
   if (!command) return `${commandName} is not a command.`;
 
   if (!isAction(commandName)) {
     try {
-      return (await command.perform(bot, ...args)) ?? "Done.";
+      return describeOutcome(bot, await command.perform(bot, ...args));
     } catch (err) {
       return `Error running ${commandName}: ${err.message}`;
     }
@@ -534,8 +553,7 @@ export async function performCommand(bot, commandName, args = [], opts = {}) {
   const handle = await requestControl(bot, tier, opts);
   if (!handle) return `${commandName} could not get control of the bot (something higher-priority is active).`;
   try {
-    const result = await command.perform(bot, ...args);
-    return result ?? "Done.";
+    return describeOutcome(bot, await command.perform(bot, ...args));
   } catch (err) {
     return `Error running ${commandName}: ${err.message}`;
   } finally {

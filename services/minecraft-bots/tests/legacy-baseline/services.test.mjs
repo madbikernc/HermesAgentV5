@@ -1,4 +1,8 @@
-// Version: 1.0.0
+// Version: 1.1.0
+//
+// 1.1.0 (2026-11-27): diagnosability audit -- a source-position check that a fired mode
+// (index.js's runModes() call site) is now logged to the console/journal, not just left as a
+// bot.chat() side effect only visible in Minecraft chat itself.
 //
 // Legacy baseline: ported from tests/unit/services.test.mjs against the Mindcraft-ported
 // architecture. router.js and buzz.js are kept, real imports here (no vm-slicing); rag-backend.js
@@ -96,3 +100,14 @@ test("[legacy:services] Buzz: a (re)started bot starts reading at the newest mes
 test("[legacy:services] narrateAction is a deterministic pass-through, capped at MAX_CHAT_LEN, no router call",
   { todo: "NOT PORTED: chat.js (narrateAction) is archived (services/minecraft-bots-archive-11-2026/chat.js). index.js 4.0.0 chats the model's own reply text directly (stripped of !command tokens) -- there is no separate narration-rephrasing call left to test." },
   () => {});
+
+test("[legacy:services] diagnosability fix: a mode firing is logged, not just its bot.chat() side effect", () => {
+  // Direct finding, 2026-11-27: runModes() already returned which mode acted, but nothing logged
+  // it -- a mode firing (e.g. self_defense taking over mid-task) looked identical in the journal
+  // to a deliberate decisionTick action. The only prior externally-visible signal was a
+  // bot.chat() line INTO MINECRAFT CHAT, not the Node console/journal an operator actually reads.
+  const runModesAt = indexSrc.indexOf("runModes(bot)");
+  assert(runModesAt >= 0, "expected to find the runModes(bot) call site");
+  const nearby = indexSrc.slice(runModesAt, runModesAt + 300);
+  assert.match(nearby, /mode fired/, "expected the runModes() result to be logged when a mode acts");
+});

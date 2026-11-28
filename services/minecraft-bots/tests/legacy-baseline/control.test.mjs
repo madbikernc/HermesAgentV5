@@ -1,4 +1,9 @@
-// Version: 1.1.0
+// Version: 1.2.0
+//
+// 1.2.0 (2026-11-27): diagnosability audit -- real tests for commands.js 1.1.0's describeOutcome()
+// bug fix (bot.output narration no longer discarded in favor of a bare true/false), arbiter.js
+// 1.6.0's new denial/preemption logging, and index.js 4.3.0's speaker-naming fix on the
+// chat-issued command result log line.
 //
 // 1.1.0 (2026-11-27): added a source-position check for the new "/closest <item>" chat command
 // (index.js 4.3.0) -- answered before any LLM call and never gated by isBusy().
@@ -166,6 +171,61 @@ test("[legacy:control] /closest <item> is answered deterministically, before any
   assert.match(body, /findClosest\(/, "expected /closest to read from world-memory.js's findClosest()");
   assert.doesNotMatch(body.slice(closestAt, callRoleAt), /isBusy\(/,
     "/closest must not be gated by isBusy() -- it's a read-only query, not an action");
+});
+
+test("[legacy:control] diagnosability fix: a command's own bot.output narration is returned, not its bare true/false", async () => {
+  // Direct finding, 2026-11-27: most skills.js functions narrate what actually happened via
+  // log(bot, ...) into bot.output (e.g. viewChest's own item listing) and return a bare
+  // true/false/undefined -- performCommand() used to return THAT boolean, discarding the one
+  // thing worth telling the model or an operator. commands.js 1.1.0's describeOutcome() fixes
+  // this; exported for direct testing since every real command either moves the bot
+  // (goToPosition, not safely mockable here -- see this file's own header) or needs a live
+  // server window.
+  const { describeOutcome } = await import("../../commands.js");
+  const bot = { output: "The chest contains:\n5 oak_log\n" };
+  assert.equal(describeOutcome(bot, true), "The chest contains:\n5 oak_log",
+    "narration in bot.output wins over a bare true");
+  assert.equal(describeOutcome({ output: "" }, true), true,
+    "no narration -- the bare return value passes through unchanged");
+  assert.equal(describeOutcome({ output: "" }, undefined), "Done.",
+    "no narration and no return value -- falls back to the old generic \"Done.\"");
+});
+
+test("[legacy:control] diagnosability fix: control denial and preemption are logged, uncontested acquisition is not", async () => {
+  // Direct finding, 2026-11-27: requestControl()/cancelAndClear() had zero logging of
+  // acquisition, denial, or preemption -- "why did my command get refused" or "why was my skill
+  // interrupted" had no answer in the journal. arbiter.js 1.6.0 logs the denied/preempted cases
+  // only, deliberately not every uncontested acquisition (which fires on nearly every command).
+  const logs = [];
+  const realLog = console.log;
+  console.log = (...args) => logs.push(args.join(" "));
+  let high;
+  try {
+    const bot = makeBot({ username: "TestBot" });
+    const low = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE);
+    assert(low, "the first, uncontested request succeeds");
+    assert.equal(logs.length, 0, "an uncontested acquisition logs nothing -- not noise-worthy");
+
+    high = await arbiter.requestControl(bot, arbiter.OWNERS.SELF_DEFENSE);
+    assert(high, "a higher-priority request preempts the lower one");
+    assert.equal(logs.length, 1, "the preemption itself is logged");
+    assert.match(logs[0], /SELF_DEFENSE preempted ROUTINE/);
+
+    const denied = await arbiter.requestControl(bot, arbiter.OWNERS.ROUTINE, { waitMs: 10 });
+    assert.equal(denied, null, "a same-or-lower request is refused while SELF_DEFENSE holds control");
+    assert.equal(logs.length, 2, "the denial itself is logged");
+    assert.match(logs[1], /ROUTINE denied control.*SELF_DEFENSE/);
+  } finally {
+    console.log = realLog;
+    if (high) arbiter.releaseControl(high); // leave the module-level `current` clean for later tests
+  }
+});
+
+test("[legacy:control] diagnosability fix: a chat-issued command's log line names who sent it", async () => {
+  // Direct finding, 2026-11-27: the old log line never named the speaker -- couldn't tell from
+  // the journal alone whether a command came from the Mayor, a random player, or a verified bot.
+  const indexSrc = await readFile(ROOT + "index.js", "utf8");
+  assert.match(indexSrc, /chat-issued command result \(from \$\{speaker\}\)/);
 });
 
 test.todo("[legacy:control] Direct investigation 2026-11-22: ACTION BUILD becomes a standing goal, not a raw one-off build -- NOT PORTED: classifyIntent()/ACTION-grammar routing and the goal engine it fed were both archived; the model now emits !commands directly, with no typed ACTION/goal classification step in between");
